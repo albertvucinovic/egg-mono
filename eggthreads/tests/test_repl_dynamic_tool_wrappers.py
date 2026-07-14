@@ -235,7 +235,7 @@ def test_docker_python_eval_refreshes_runtime_before_user_code(tmp_path, monkeyp
     monkeypatch.setattr(
         session,
         "_run_docker_python_eval_request",
-        lambda _db, _thread, _bridge, payload, _timeout: calls.append(payload) or "--- The Python REPL executed successfully and produced no output ---",
+        lambda _db, _thread, _bridge, payload, _timeout, _cancel=None: calls.append(payload) or "--- The Python REPL executed successfully and produced no output ---",
     )
 
     result = session._execute_python_docker(

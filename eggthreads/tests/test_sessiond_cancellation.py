@@ -1,0 +1,321 @@
+from __future__ import annotations
+
+import json
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from eggthreads.session_runtime import sessiond
+
+
+def _reset_sessiond_state() -> None:
+    deadline = time.monotonic() + 2.0
+    while sessiond.ACTIVE_EVALS and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert not sessiond.ACTIVE_EVALS
+    for channel in list(sessiond.PY_WORKERS):
+        sessiond._kill_python_worker(channel)
+    for channel, proc in list(sessiond.BASH_REPLS.items()):
+        if proc.poll() is None:
+            try:
+                sessiond.os.killpg(sessiond.os.getpgid(proc.pid), sessiond.signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        sessiond.BASH_REPLS.pop(channel, None)
+    sessiond.CHANNEL_QUEUES.clear()
+    sessiond.CHANNEL_CONDITIONS.clear()
+
+
+@pytest.fixture(autouse=True)
+def reset_sessiond_state():
+    _reset_sessiond_state()
+    yield
+    _reset_sessiond_state()
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition not reached")
+        time.sleep(0.005)
+
+
+def _request(bridge: Path, request_id: str, *, language: str, channel: str, code: str = "") -> Path:
+    path = bridge / f"eval_{request_id}.req.json"
+    path.write_text(json.dumps({
+        "protocol_version": 2,
+        "request_id": request_id,
+        "language": language,
+        "channel": channel,
+        "repl_name": channel,
+        "code": code,
+        "script": code,
+        "host_owner_id": "host-a",
+    }))
+    return path
+
+
+def test_python_cancel_resets_only_requested_channel(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    releases = {"python:a": threading.Event(), "python:b": threading.Event()}
+    killed: list[str] = []
+
+    def fake_python(code, repl_name, *_args, cancel_check=None, **_kwargs):
+        key = f"python:{repl_name}"
+        while not releases[key].is_set():
+            if cancel_check and cancel_check():
+                killed.append(repl_name)
+                return "--- INTERRUPTED ---\nreset"
+            time.sleep(0.005)
+        return f"done-{repl_name}"
+
+    monkeypatch.setattr(sessiond, "execute_python", fake_python)
+    sessiond.process_eval_request(_request(bridge, "a1", language="python", channel="a"), bridge, runtime)
+    sessiond.process_eval_request(_request(bridge, "b1", language="python", channel="b"), bridge, runtime)
+    _wait_until(lambda: len(sessiond.ACTIVE_EVALS) == 2 and all(item["running"] for item in sessiond.ACTIVE_EVALS.values()))
+    (bridge / "eval_a1.cancel.json").write_text(json.dumps({"host_owner_id": "host-a", "reason": "interrupted"}))
+    sessiond.service_cancel_requests(bridge)
+    _wait_until(lambda: (bridge / "eval_a1.res.json").exists())
+    _wait_until(lambda: killed == ["a"])
+    assert not (bridge / "eval_b1.res.json").exists()
+    releases["python:b"].set()
+    _wait_until(lambda: (bridge / "eval_b1.res.json").exists())
+    assert json.loads((bridge / "eval_b1.res.json").read_text())["output"] == "done-b"
+
+
+def test_bash_cancel_and_result_race_is_exact_once(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    release = threading.Event()
+
+    def fake_bash(*_args, cancel_check=None, **_kwargs):
+        while not release.is_set():
+            if cancel_check and cancel_check():
+                return "--- INTERRUPTED ---\nBash reset"
+            time.sleep(0.005)
+        return "success"
+
+    monkeypatch.setattr(sessiond, "execute_bash", fake_bash)
+    sessiond.process_eval_request(_request(bridge, "bash1", language="bash", channel="shell"), bridge, runtime)
+    _wait_until(lambda: "bash1" in sessiond.ACTIVE_EVALS)
+    (bridge / "eval_bash1.cancel.json").write_text(json.dumps({"host_owner_id": "host-a", "reason": "interrupted"}))
+    sessiond.service_cancel_requests(bridge)
+    release.set()
+    _wait_until(lambda: (bridge / "eval_bash1.res.json").exists())
+    response = json.loads((bridge / "eval_bash1.res.json").read_text())
+    assert response["request_id"] == "bash1"
+    assert response["reason"] == "cancelled"
+    assert len(list(bridge.glob("eval_bash1.res.json"))) == 1
+
+
+def test_same_channel_serializes_while_independent_channel_runs(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    release_first = threading.Event()
+    order: list[str] = []
+
+    def fake_python(code, repl_name, *_args, **_kwargs):
+        order.append(code)
+        if code == "first":
+            release_first.wait()
+        return code
+
+    monkeypatch.setattr(sessiond, "execute_python", fake_python)
+    sessiond.process_eval_request(_request(bridge, "one", language="python", channel="same", code="first"), bridge, runtime)
+    sessiond.process_eval_request(_request(bridge, "two", language="python", channel="same", code="second"), bridge, runtime)
+    sessiond.process_eval_request(_request(bridge, "other", language="python", channel="other", code="other"), bridge, runtime)
+    _wait_until(lambda: (bridge / "eval_other.res.json").exists())
+    assert order[0] == "first"
+    assert "other" in order
+    assert "second" not in order
+    release_first.set()
+    _wait_until(lambda: (bridge / "eval_two.res.json").exists())
+    assert order.index("second") > order.index("first")
+
+
+def test_channel_condition_shares_eval_state_lock(monkeypatch, tmp_path):
+    """Queue admission and head promotion use one re-entrant lock order."""
+
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    release = threading.Event()
+
+    monkeypatch.setattr(
+        sessiond,
+        "execute_python",
+        lambda *_args, **_kwargs: release.wait() or "done",
+    )
+    sessiond.process_eval_request(
+        _request(bridge, "shared-lock", language="python", channel="same"),
+        bridge,
+        runtime,
+    )
+    _wait_until(lambda: "python:same" in sessiond.CHANNEL_CONDITIONS)
+    condition = sessiond.CHANNEL_CONDITIONS["python:same"]
+    assert condition._lock is sessiond.ACTIVE_EVALS_LOCK
+    release.set()
+    _wait_until(lambda: (bridge / "eval_shared-lock.res.json").exists())
+
+
+def test_cancel_queued_request_never_executes(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    release_first = threading.Event()
+    calls: list[str] = []
+
+    def fake_python(code, *_args, **_kwargs):
+        calls.append(code)
+        if code == "first":
+            release_first.wait()
+        return code
+
+    monkeypatch.setattr(sessiond, "execute_python", fake_python)
+    sessiond.process_eval_request(_request(bridge, "one", language="python", channel="same", code="first"), bridge, runtime)
+    sessiond.process_eval_request(_request(bridge, "two", language="python", channel="same", code="side_effect"), bridge, runtime)
+    _wait_until(lambda: "two" in sessiond.ACTIVE_EVALS)
+    (bridge / "eval_two.cancel.json").write_text(json.dumps({"host_owner_id": "host-a", "reason": "timeout"}))
+    sessiond.service_cancel_requests(bridge)
+    _wait_until(lambda: (bridge / "eval_two.res.json").exists())
+    response = json.loads((bridge / "eval_two.res.json").read_text())
+    assert response["reason"] == "timeout"
+    assert response["output"].startswith("--- TIMEOUT ---")
+    assert calls == ["first"]
+    release_first.set()
+    _wait_until(lambda: (bridge / "eval_one.res.json").exists())
+
+
+def test_cancel_kill_completes_before_same_channel_successor_starts(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    first_release = threading.Event()
+    successor_started = threading.Event()
+    kill_entered = threading.Event()
+    allow_kill = threading.Event()
+
+    def fake_python(code, *_args, cancel_check=None, **_kwargs):
+        if code == "first":
+            while not first_release.is_set():
+                if cancel_check and cancel_check():
+                    first_release.set()
+                time.sleep(0.005)
+            return "--- INTERRUPTED ---\nreset"
+        successor_started.set()
+        return "second"
+
+    def blocking_kill(active):
+        kill_entered.set()
+        assert allow_kill.wait(2)
+        first_release.set()
+
+    monkeypatch.setattr(sessiond, "execute_python", fake_python)
+    monkeypatch.setattr(sessiond, "_cancel_active_channel", blocking_kill)
+    sessiond.process_eval_request(
+        _request(bridge, "first", language="python", channel="same", code="first"),
+        bridge, runtime,
+    )
+    sessiond.process_eval_request(
+        _request(bridge, "second", language="python", channel="same", code="second"),
+        bridge, runtime,
+    )
+    _wait_until(lambda: sessiond.ACTIVE_EVALS.get("first", {}).get("running") is True)
+    (bridge / "eval_first.cancel.json").write_text(json.dumps({
+        "host_owner_id": "host-a", "reason": "interrupted",
+    }))
+    cancel_thread = threading.Thread(target=sessiond.service_cancel_requests, args=(bridge,))
+    cancel_thread.start()
+    assert kill_entered.wait(2)
+    assert not successor_started.wait(0.05)
+    allow_kill.set()
+    cancel_thread.join(2)
+    assert not cancel_thread.is_alive()
+    _wait_until(successor_started.is_set)
+    _wait_until(lambda: (bridge / "eval_second.res.json").exists())
+
+
+def test_finished_result_wins_late_cancel_without_channel_reset(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    req_id = "done"
+    (bridge / f"eval_{req_id}.res.json").write_text(json.dumps({"request_id": req_id, "reason": "success"}))
+    (bridge / f"eval_{req_id}.cancel.json").write_text(json.dumps({"host_owner_id": "host-a", "reason": "timeout"}))
+    killed: list[str] = []
+    monkeypatch.setattr(sessiond, "_cancel_active_channel", lambda _active: killed.append("called"))
+
+    sessiond.service_cancel_requests(bridge)
+
+    ack = json.loads((bridge / f"eval_{req_id}.cancel.ack.json").read_text())
+    assert ack["state"] == "already_finished"
+    assert killed == []
+    assert json.loads((bridge / f"eval_{req_id}.res.json").read_text())["reason"] == "success"
+
+
+def test_cancel_owner_mismatch_is_rejected(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    release = threading.Event()
+
+    def fake_python(*_args, **_kwargs):
+        release.wait()
+        return "done"
+
+    monkeypatch.setattr(sessiond, "execute_python", fake_python)
+    sessiond.process_eval_request(_request(bridge, "owned", language="python", channel="chan"), bridge, runtime)
+    _wait_until(lambda: sessiond.ACTIVE_EVALS.get("owned", {}).get("running") is True)
+    (bridge / "eval_owned.cancel.json").write_text(json.dumps({"host_owner_id": "foreign", "reason": "interrupted"}))
+    sessiond.service_cancel_requests(bridge)
+    ack = json.loads((bridge / "eval_owned.cancel.ack.json").read_text())
+    assert ack["state"] == "owner_mismatch"
+    assert not sessiond.ACTIVE_EVALS["owned"]["cancel"].is_set()
+    release.set()
+    _wait_until(lambda: (bridge / "eval_owned.res.json").exists())
+
+
+def test_request_for_replaced_daemon_generation_is_not_executed(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    request = _request(bridge, "old-generation", language="python", channel="chan", code="side_effect")
+    payload = json.loads(request.read_text())
+    payload["daemon_generation"] = "replaced-generation"
+    request.write_text(json.dumps(payload))
+    calls: list[str] = []
+    monkeypatch.setattr(sessiond, "execute_python", lambda code, *_a, **_k: calls.append(code) or code)
+
+    sessiond.process_eval_request(request, bridge, runtime)
+
+    response = json.loads((bridge / "eval_old-generation.res.json").read_text())
+    assert response["reason"] == "daemon_restarted"
+    assert calls == []
+    assert not request.with_suffix(request.suffix + ".processing").exists()
+
+
+def test_stale_processing_is_terminalized_not_replayed(tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    claimed = bridge / "eval_stale.req.json.processing"
+    claimed.write_text('{"code":"side_effect()"}')
+    sessiond.recover_stale_claims(bridge)
+    response = json.loads((bridge / "eval_stale.res.json").read_text())
+    assert response["reason"] == "daemon_restarted"
+    assert "not replayed" in response["output"]
+    assert not claimed.exists()
+
+
+def test_bash_timeout_resets_to_reusable_channel(tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = Path(sessiond.__file__).resolve().parent
+
+    timed = sessiond.execute_bash(
+        "sleep 99", "shell", bridge, "token", runtime, timeout_sec=0.05,
+    )
+    assert timed.startswith("--- TIMEOUT ---")
+    assert "shell" not in sessiond.BASH_REPLS
+
+    after = sessiond.execute_bash(
+        "echo after", "shell", bridge, "token", runtime, timeout_sec=1,
+    )
+    assert "after" in after

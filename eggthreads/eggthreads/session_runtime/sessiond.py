@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 import traceback
 import uuid
 from pathlib import Path
@@ -23,6 +24,15 @@ from typing import Any, Dict, List, Optional
 PY_REPLS: Dict[str, Dict[str, Any]] = {}
 PY_WORKERS: Dict[str, tuple[mp.Process, Any]] = {}
 BASH_REPLS: Dict[str, subprocess.Popen] = {}
+ACTIVE_EVALS: Dict[str, Dict[str, Any]] = {}
+# Eval membership, per-channel queue membership, and the running handoff form
+# one state machine.  Channel conditions deliberately share this re-entrant
+# lock so claiming a same-channel request cannot deadlock against the worker
+# that is promoting or removing the current queue head.
+ACTIVE_EVALS_LOCK = threading.RLock()
+CHANNEL_CONDITIONS: Dict[str, threading.Condition] = {}
+CHANNEL_QUEUES: Dict[str, List[str]] = {}
+DAEMON_GENERATION = uuid.uuid4().hex
 
 
 def _python_worker_loop(conn) -> None:
@@ -58,6 +68,12 @@ def _python_worker_loop(conn) -> None:
         token = str(req.get("token") or "")
         runtime_dir = Path(str(req.get("runtime_dir") or "/egg-runtime"))
         thread_context_json = req.get("thread_context_json") if isinstance(req.get("thread_context_json"), str) else None
+        host_owner_id = str(req.get("host_owner_id") or "")
+        eval_request_id = str(req.get("eval_request_id") or "")
+        old_owner = os.environ.get("EGG_HOST_OWNER_ID")
+        old_eval_request = os.environ.get("EGG_EVAL_REQUEST_ID")
+        os.environ["EGG_HOST_OWNER_ID"] = host_owner_id
+        os.environ["EGG_EVAL_REQUEST_ID"] = eval_request_id
         try:
             output = _execute_python_inline(code, globs, bridge_dir, token, runtime_dir, thread_context_json)
             conn.send({"ok": True, "output": output})
@@ -68,6 +84,15 @@ def _python_worker_loop(conn) -> None:
                 conn.send({"ok": False, "output": format_output("", stderr.getvalue() or f"{type(e).__name__}: {e}")})
             except Exception:
                 break
+        finally:
+            if old_owner is None:
+                os.environ.pop("EGG_HOST_OWNER_ID", None)
+            else:
+                os.environ["EGG_HOST_OWNER_ID"] = old_owner
+            if old_eval_request is None:
+                os.environ.pop("EGG_EVAL_REQUEST_ID", None)
+            else:
+                os.environ["EGG_EVAL_REQUEST_ID"] = old_eval_request
 
 
 def _get_python_worker(repl_name: str) -> tuple[mp.Process, Any]:
@@ -325,6 +350,9 @@ def execute_python(
     runtime_dir: Path,
     thread_context_json: str | None = None,
     timeout_sec: float | None = None,
+    cancel_check: Any = None,
+    host_owner_id: str = "",
+    eval_request_id: str = "",
 ) -> str:
     repl_key = repl_name or "default"
     try:
@@ -346,13 +374,18 @@ def execute_python(
             "token": token,
             "runtime_dir": str(runtime_dir),
             "thread_context_json": thread_context_json,
+            "host_owner_id": host_owner_id,
+            "eval_request_id": eval_request_id,
         })
     except Exception as e:
         _kill_python_worker(repl_key)
         return f"Error: Python worker failed: {type(e).__name__}: {e}"
 
-    start = time.time()
+    start = time.monotonic()
     while True:
+        if cancel_check is not None and cancel_check():
+            _kill_python_worker(repl_key)
+            return "--- INTERRUPTED ---\nPython REPL eval was cancelled; this Python channel was reset."
         if conn.poll(0.05):
             try:
                 payload = conn.recv()
@@ -367,7 +400,7 @@ def execute_python(
         if not proc.is_alive():
             _kill_python_worker(repl_key)
             return "Error: Python worker exited before returning a result."
-        if timeout is not None and (time.time() - start) >= timeout:
+        if timeout is not None and (time.monotonic() - start) >= timeout:
             _kill_python_worker(repl_key)
             return f"--- TIMEOUT ---\nPython REPL timed out after {timeout} seconds"
 
@@ -394,7 +427,17 @@ def _bash_proc(repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) 
     return proc
 
 
-def execute_bash(script: str, repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path, timeout_sec: float | None = None) -> str:
+def execute_bash(
+    script: str,
+    repl_name: str,
+    bridge_dir: Path,
+    token: str,
+    runtime_dir: Path,
+    timeout_sec: float | None = None,
+    cancel_check: Any = None,
+    host_owner_id: str = "",
+    eval_request_id: str = "",
+) -> str:
     repl_name = repl_name or "default"
     proc = _bash_proc(repl_name, bridge_dir, token, runtime_dir)
     if proc.stdin is None or proc.stdout is None:
@@ -404,6 +447,8 @@ def execute_bash(script: str, repl_name: str, bridge_dir: Path, token: str, runt
     prelude = (
         f"export EGG_BRIDGE_DIR={json.dumps(str(bridge_dir))}\n"
         f"export EGG_EVAL_TOKEN={json.dumps(token)}\n"
+        f"export EGG_HOST_OWNER_ID={json.dumps(host_owner_id)}\n"
+        f"export EGG_EVAL_REQUEST_ID={json.dumps(eval_request_id)}\n"
         f"export PATH={json.dumps(str(runtime_dir) + ':' + os.environ.get('PATH', ''))}\n"
     )
     proc.stdin.write(prelude)
@@ -411,10 +456,17 @@ def execute_bash(script: str, repl_name: str, bridge_dir: Path, token: str, runt
     proc.stdin.write(f"\n__egg_status=$?; printf '\\n{sentinel}:%s\\n' \"$__egg_status\"\n")
     proc.stdin.flush()
 
-    start = time.time()
-    lines: list[str] = []
+    start = time.monotonic()
+    output = ""
     while True:
-        if timeout_sec is not None and (time.time() - start) >= timeout_sec:
+        if cancel_check is not None and cancel_check():
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            BASH_REPLS.pop(repl_name, None)
+            return "--- INTERRUPTED ---\nBash REPL eval was cancelled; this Bash channel was reset."
+        if timeout_sec is not None and (time.monotonic() - start) >= timeout_sec:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except Exception:
@@ -424,13 +476,23 @@ def execute_bash(script: str, repl_name: str, bridge_dir: Path, token: str, runt
         ready, _, _ = select.select([proc.stdout], [], [], 0.05)
         if not ready:
             continue
-        line = proc.stdout.readline()
-        if line == "" and proc.poll() is not None:
+        # TextIOWrapper.readline() may prefetch several pipe lines into its own
+        # buffer. Reading only one line after select can then wait forever
+        # because the sentinel is buffered in Python while the OS fd is empty.
+        # Drain the available pipe bytes directly and parse the sentinel from
+        # the accumulated text instead.
+        try:
+            chunk = os.read(proc.stdout.fileno(), 65536).decode(errors="replace")
+        except Exception:
+            chunk = ""
+        if not chunk and proc.poll() is not None:
             BASH_REPLS.pop(repl_name, None)
-            return format_bash_output("".join(lines))
-        if line.startswith(sentinel + ":"):
-            return format_bash_output("".join(lines))
-        lines.append(line)
+            return format_bash_output(output)
+        output += chunk
+        marker = f"\n{sentinel}:"
+        marker_at = output.find(marker)
+        if marker_at >= 0:
+            return format_bash_output(output[:marker_at])
 
 
 def claim(path: Path) -> Path | None:
@@ -444,40 +506,292 @@ def claim(path: Path) -> Path | None:
         return None
 
 
+def _response_path(bridge_dir: Path, req_id: str) -> Path:
+    return bridge_dir / f"eval_{req_id}.res.json"
+
+
+def _cancel_path(bridge_dir: Path, req_id: str) -> Path:
+    return bridge_dir / f"eval_{req_id}.cancel.json"
+
+
+def _cancel_ack_path(bridge_dir: Path, req_id: str) -> Path:
+    return bridge_dir / f"eval_{req_id}.cancel.ack.json"
+
+
+def _write_terminal_response(bridge_dir: Path, req_id: str, payload: Dict[str, Any]) -> bool:
+    res_path = _response_path(bridge_dir, req_id)
+    with ACTIVE_EVALS_LOCK:
+        active = ACTIVE_EVALS.get(req_id)
+        if (active is not None and active.get("terminal_written")) or res_path.exists():
+            return False
+        if active is not None and active["cancel"].is_set():
+            request = active.get("payload") if isinstance(active.get("payload"), dict) else {}
+            language = str(request.get("language") or payload.get("language") or "python")
+            channel = str(request.get("channel") or request.get("repl_name") or payload.get("channel") or "default")
+            cancel_reason = str(active.get("cancel_reason") or "interrupted")
+            running = bool(active.get("running"))
+            if cancel_reason == "timeout":
+                reason = "timeout"
+                message = f"{language.title()} REPL eval timed out"
+            else:
+                reason = "cancelled"
+                message = f"{language.title()} REPL eval was cancelled"
+            if running:
+                message += f"; this {language.title()} channel was reset."
+            else:
+                message += " before execution."
+            payload = {
+                "ok": True,
+                "reason": reason,
+                "output": f"--- {reason.upper()} ---\n{message}",
+                "channel": channel,
+                "language": language,
+                "host_owner_id": str(request.get("host_owner_id") or ""),
+            }
+        atomic_write_json(res_path, {
+            "protocol_version": 2,
+            "request_id": req_id,
+            "daemon_generation": DAEMON_GENERATION,
+            "completed_at": time.time(),
+            **payload,
+        })
+        if active is not None:
+            active["terminal_written"] = True
+        return True
+
+
+def _request_cancelled(req_id: str) -> bool:
+    with ACTIVE_EVALS_LOCK:
+        active = ACTIVE_EVALS.get(req_id)
+        return bool(active and active["cancel"].is_set())
+
+
+def _run_claimed_eval(
+    claimed: Path,
+    req_id: str,
+    payload: Dict[str, Any],
+    bridge_dir: Path,
+    runtime_dir: Path,
+) -> None:
+    language = str(payload.get("language") or "python")
+    channel = str(payload.get("channel") or payload.get("repl_name") or "default")
+    channel_key = f"{language}:{channel}"
+    with ACTIVE_EVALS_LOCK:
+        active = ACTIVE_EVALS[req_id]
+        channel_condition = CHANNEL_CONDITIONS[channel_key]
+    try:
+        with channel_condition:
+            while CHANNEL_QUEUES[channel_key][0] != req_id and not active["cancel"].is_set():
+                channel_condition.wait(0.05)
+            # Mark the head request running before releasing the same condition
+            # used for queue handoff.  Cancellation can now either see queued
+            # state and avoid a kill, or running state and target this request;
+            # it cannot race through the gap before execute_* starts.
+            with ACTIVE_EVALS_LOCK:
+                active["running"] = not active["cancel"].is_set()
+        if active["cancel"].is_set():
+            output = f"--- INTERRUPTED ---\n{language.title()} REPL eval was cancelled before execution."
+            reason = "cancelled"
+        elif language == "python":
+            output = execute_python(
+                str(payload.get("code") or ""), channel, bridge_dir,
+                str(payload.get("token") or ""), runtime_dir,
+                str(payload.get("thread_context_json") or "") or None,
+                payload.get("timeout_sec"),
+                cancel_check=active["cancel"].is_set,
+                host_owner_id=str(payload.get("host_owner_id") or ""),
+                eval_request_id=req_id,
+            )
+            reason = "cancelled" if output.startswith("--- INTERRUPTED ---") else ("timeout" if output.startswith("--- TIMEOUT ---") else "success")
+        elif language == "bash":
+            output = execute_bash(
+                str(payload.get("code") or payload.get("script") or ""), channel,
+                bridge_dir, str(payload.get("token") or ""), runtime_dir,
+                payload.get("timeout_sec"),
+                cancel_check=active["cancel"].is_set,
+                host_owner_id=str(payload.get("host_owner_id") or ""),
+                eval_request_id=req_id,
+            )
+            reason = "cancelled" if output.startswith("--- INTERRUPTED ---") else ("timeout" if output.startswith("--- TIMEOUT ---") else "success")
+        else:
+            raise ValueError(f"Unsupported language: {language}")
+        _write_terminal_response(bridge_dir, req_id, {
+            "ok": True, "output": output, "reason": reason,
+            "channel": channel, "language": language,
+            "host_owner_id": str(payload.get("host_owner_id") or ""),
+        })
+    except Exception as e:
+        _write_terminal_response(bridge_dir, req_id, {
+            "ok": False, "reason": "error", "error": f"{type(e).__name__}: {e}",
+            "channel": channel, "language": language,
+        })
+    finally:
+        with ACTIVE_EVALS_LOCK:
+            ACTIVE_EVALS.pop(req_id, None)
+            with channel_condition:
+                queue = CHANNEL_QUEUES.get(channel_key, [])
+                if req_id in queue:
+                    queue.remove(req_id)
+                channel_condition.notify_all()
+                if not queue:
+                    CHANNEL_QUEUES.pop(channel_key, None)
+                    CHANNEL_CONDITIONS.pop(channel_key, None)
+        try:
+            claimed.unlink()
+        except Exception:
+            pass
+
+
 def process_eval_request(req_path: Path, bridge_dir: Path, runtime_dir: Path) -> None:
     claimed = claim(req_path)
     if claimed is None:
         return
     req_id = req_path.name[len("eval_"):-len(".req.json")]
-    res_path = bridge_dir / f"eval_{req_id}.res.json"
     try:
         payload = json.loads(claimed.read_text(encoding="utf-8"))
-        language = str(payload.get("language") or "python")
-        if language == "python":
-            output = execute_python(
-                str(payload.get("code") or ""),
-                str(payload.get("repl_name") or "default"),
-                bridge_dir,
-                str(payload.get("token") or ""),
-                runtime_dir,
-                str(payload.get("thread_context_json") or "") or None,
-                payload.get("timeout_sec"),
-            )
-        elif language == "bash":
-            output = execute_bash(
-                str(payload.get("code") or payload.get("script") or ""),
-                str(payload.get("repl_name") or "default"),
-                bridge_dir,
-                str(payload.get("token") or ""),
-                runtime_dir,
-                payload.get("timeout_sec"),
-            )
-        else:
-            raise ValueError(f"Unsupported language: {payload.get('language')}")
-        atomic_write_json(res_path, {"ok": True, "output": output})
+        if not isinstance(payload, dict):
+            raise ValueError("Docker eval request must be a JSON object")
+        protocol_version = int(payload.get("protocol_version") or 1)
+        payload_request_id = str(payload.get("request_id") or payload.get("id") or req_id)
+        if protocol_version >= 2 and payload_request_id != req_id:
+            raise ValueError("Docker eval request ID does not match its bridge filename")
+        requested_generation = str(payload.get("daemon_generation") or "")
+        if protocol_version >= 2 and requested_generation and requested_generation != DAEMON_GENERATION:
+            _write_terminal_response(bridge_dir, req_id, {
+                "ok": True,
+                "reason": "daemon_restarted",
+                "output": (
+                    "--- INTERRUPTED ---\nDocker session daemon generation changed "
+                    "before this eval was claimed; it was not executed."
+                ),
+            })
+            try:
+                claimed.unlink()
+            except Exception:
+                pass
+            return
     except Exception as e:
-        atomic_write_json(res_path, {"ok": False, "error": f"{type(e).__name__}: {e}"})
-    finally:
+        _write_terminal_response(bridge_dir, req_id, {"ok": False, "reason": "error", "error": f"{type(e).__name__}: {e}"})
+        try:
+            claimed.unlink()
+        except Exception:
+            pass
+        return
+    cancel_event = threading.Event()
+    language = str(payload.get("language") or "python")
+    channel = str(payload.get("channel") or payload.get("repl_name") or "default")
+    channel_key = f"{language}:{channel}"
+    with ACTIVE_EVALS_LOCK:
+        ACTIVE_EVALS[req_id] = {
+            "cancel": cancel_event,
+            "cancel_reason": None,
+            "payload": payload,
+            "running": False,
+            "terminal_written": False,
+        }
+        channel_condition = CHANNEL_CONDITIONS.setdefault(
+            channel_key,
+            threading.Condition(ACTIVE_EVALS_LOCK),
+        )
+        # Queue creation/removal is serialized by ACTIVE_EVALS_LOCK.  Mutations
+        # also take the channel condition so a finishing request cannot remove
+        # an apparently empty queue while a newly claimed request is appended.
+        with channel_condition:
+            CHANNEL_QUEUES.setdefault(channel_key, []).append(req_id)
+    if _cancel_path(bridge_dir, req_id).exists():
+        service_cancel_requests(bridge_dir)
+    thread = threading.Thread(
+        target=_run_claimed_eval,
+        args=(claimed, req_id, payload, bridge_dir, runtime_dir),
+        name=f"egg-eval-{req_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _cancel_active_channel(active: Dict[str, Any]) -> None:
+    if not active.get("running"):
+        return
+    payload = active.get("payload") if isinstance(active.get("payload"), dict) else {}
+    language = str(payload.get("language") or "python")
+    channel = str(payload.get("channel") or payload.get("repl_name") or "default")
+    if language == "python":
+        _kill_python_worker(channel)
+        return
+    if language == "bash":
+        proc = BASH_REPLS.pop(channel, None)
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+
+def service_cancel_requests(bridge_dir: Path) -> None:
+    for cancel_path in sorted(bridge_dir.glob("eval_*.cancel.json")):
+        req_id = cancel_path.name[len("eval_"):-len(".cancel.json")]
+        try:
+            cancel_payload = json.loads(cancel_path.read_text(encoding="utf-8"))
+            if not isinstance(cancel_payload, dict):
+                cancel_payload = {}
+        except Exception:
+            cancel_payload = {}
+        active_to_cancel: Optional[Dict[str, Any]] = None
+        with ACTIVE_EVALS_LOCK:
+            # Durable completion wins a cancellation race. Once the response
+            # exists, never reset a channel whose result is already terminal.
+            if _response_path(bridge_dir, req_id).exists():
+                state = "already_finished"
+            else:
+                active = ACTIVE_EVALS.get(req_id)
+                if active is None:
+                    # The cancel file can arrive before sessiond has claimed
+                    # the request. Keep it for the next control-loop pass so
+                    # side-effectful code is never started after cancellation.
+                    continue
+                request = active.get("payload") if isinstance(active.get("payload"), dict) else {}
+                request_owner = str(request.get("host_owner_id") or "")
+                cancel_owner = str(cancel_payload.get("host_owner_id") or "")
+                protocol_version = int(request.get("protocol_version") or 1)
+                if protocol_version >= 2 and request_owner and cancel_owner != request_owner:
+                    state = "owner_mismatch"
+                else:
+                    active["cancel_reason"] = str(cancel_payload.get("reason") or "interrupted")
+                    active["cancel"].set()
+                    active_to_cancel = active
+                    state = "accepted"
+                    # Keep this request registered until its current process has
+                    # been targeted.  Otherwise completion can dequeue it and a
+                    # successor can reuse the persistent channel before this
+                    # kill runs, causing cancellation to reset the wrong eval.
+                    _cancel_active_channel(active_to_cancel)
+        if active_to_cancel is not None:
+            _write_terminal_response(bridge_dir, req_id, {})
+        atomic_write_json(_cancel_ack_path(bridge_dir, req_id), {
+            "protocol_version": 2,
+            "request_id": req_id,
+            "daemon_generation": DAEMON_GENERATION,
+            "state": state,
+            "reason": str(cancel_payload.get("reason") or "interrupted"),
+            "acknowledged_at": time.time(),
+        })
+        try:
+            cancel_path.unlink()
+        except Exception:
+            pass
+
+
+def recover_stale_claims(bridge_dir: Path) -> None:
+    for claimed in sorted(bridge_dir.glob("eval_*.req.json.processing")):
+        name = claimed.name
+        req_id = name[len("eval_"):-len(".req.json.processing")]
+        _write_terminal_response(bridge_dir, req_id, {
+            "ok": True, "reason": "daemon_restarted",
+            "output": "--- INTERRUPTED ---\nDocker session daemon restarted while this eval was in progress; it was not replayed.",
+        })
         try:
             claimed.unlink()
         except Exception:
@@ -493,7 +807,13 @@ def main() -> int:
     bridge_dir = Path(args.bridge_dir)
     runtime_dir = Path(args.runtime_dir)
     bridge_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(bridge_dir / "sessiond_generation.json", {
+        "protocol_version": 2, "daemon_generation": DAEMON_GENERATION,
+        "started_at": time.time(),
+    })
+    recover_stale_claims(bridge_dir)
     while True:
+        service_cancel_requests(bridge_dir)
         for req in sorted(bridge_dir.glob("eval_*.req.json")):
             process_eval_request(req, bridge_dir, runtime_dir)
         time.sleep(args.poll_sec)

@@ -64,8 +64,11 @@ def tool(tool_name: str, /, timeout: Optional[float] = None, timeout_sec: Option
     if timeout_sec is not None:
         arguments["_egg_tool_timeout_sec"] = timeout_sec
     _atomic_write_json(req_path, {
+        "protocol_version": 2,
         "id": req_id,
         "token": _eval_token(),
+        "host_owner_id": os.environ.get("EGG_HOST_OWNER_ID", ""),
+        "eval_request_id": os.environ.get("EGG_EVAL_REQUEST_ID", ""),
         "name": tool_name,
         "arguments": arguments,
         "timeout_sec": timeout_sec,

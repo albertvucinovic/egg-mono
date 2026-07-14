@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import tempfile
+import uuid
 import time
 import hashlib
 from dataclasses import dataclass
@@ -99,6 +100,7 @@ class SessionProvider(Protocol):
         repl_channel: str,
         eval_token: Optional[str],
         timeout_sec: Optional[float],
+        cancel_check: Any = None,
     ) -> str:
         ...
 
@@ -1260,7 +1262,12 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def _service_tool_requests(bridge_dir: Path) -> None:
+def _service_tool_requests(
+    bridge_dir: Path,
+    *,
+    host_owner_id: str = "",
+    eval_request_id: str = "",
+) -> None:
     from .repl_bridge import call_tool
 
     for req_path in sorted(bridge_dir.glob("tool_*.req.json")):
@@ -1273,6 +1280,24 @@ def _service_tool_requests(bridge_dir: Path) -> None:
         res_path = bridge_dir / f"tool_{req_id}.res.json"
         try:
             payload = json.loads(claimed.read_text(encoding="utf-8"))
+            request_owner = str(payload.get("host_owner_id") or "")
+            request_eval = str(payload.get("eval_request_id") or "")
+            protocol_version = int(payload.get("protocol_version") or 1)
+            if protocol_version >= 2:
+                owned = bool(
+                    host_owner_id
+                    and eval_request_id
+                    and request_owner == host_owner_id
+                    and request_eval == eval_request_id
+                )
+            else:
+                owned = not (
+                    (request_owner and request_owner != host_owner_id)
+                    or (request_eval and request_eval != eval_request_id)
+                )
+            if not owned:
+                os.replace(claimed, req_path)
+                continue
             result = call_tool(
                 str(payload.get("token") or ""),
                 str(payload.get("name") or ""),
@@ -1290,6 +1315,139 @@ def _service_tool_requests(bridge_dir: Path) -> None:
 
 
 _DOCKER_EVAL_POLL_SEC = 0.05
+_DOCKER_CANCEL_ACK_SEC = 2.0
+_DOCKER_EVAL_PROTOCOL_VERSION = 2
+_DOCKER_HOST_OWNER_ID = f"{os.getpid()}-{uuid.uuid4().hex}"
+
+
+def _docker_daemon_generation(bridge_dir: Path) -> Optional[str]:
+    try:
+        payload = json.loads((bridge_dir / "sessiond_generation.json").read_text(encoding="utf-8"))
+        value = str(payload.get("daemon_generation") or "").strip()
+        return value or None
+    except Exception:
+        return None
+
+
+def _docker_eval_cleanup(bridge_dir: Path, req_id: str) -> None:
+    for suffix in ("req.json", "req.json.processing", "cancel.json", "cancel.ack.json", "res.json"):
+        try:
+            (bridge_dir / f"eval_{req_id}.{suffix}").unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+
+def _docker_cancel_eval(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    bridge_dir: Path,
+    req_id: str,
+    *,
+    reason: str,
+) -> bool:
+    cancel_path = bridge_dir / f"eval_{req_id}.cancel.json"
+    ack_path = bridge_dir / f"eval_{req_id}.cancel.ack.json"
+    _atomic_write_json(cancel_path, {
+        "protocol_version": _DOCKER_EVAL_PROTOCOL_VERSION,
+        "request_id": req_id,
+        "host_owner_id": _DOCKER_HOST_OWNER_ID,
+        "reason": reason,
+        "requested_at": time.time(),
+    })
+    deadline = time.monotonic() + _DOCKER_CANCEL_ACK_SEC
+    res_path = bridge_dir / f"eval_{req_id}.res.json"
+    while time.monotonic() < deadline:
+        # A terminal response can win the host timeout/cancellation race before
+        # sessiond observes the cancel file.  Treat that as a responsive daemon
+        # and let the caller consume the exact result instead of needlessly
+        # restarting the whole session for a missing cancellation ack.
+        if res_path.exists():
+            return True
+        if ack_path.exists():
+            try:
+                ack = json.loads(ack_path.read_text(encoding="utf-8"))
+                if (
+                    str(ack.get("request_id") or "") == req_id
+                    and str(ack.get("state") or "") in {"accepted", "already_finished"}
+                ):
+                    return True
+            except Exception:
+                pass
+            finally:
+                try:
+                    ack_path.unlink()
+                except Exception:
+                    pass
+        time.sleep(_DOCKER_EVAL_POLL_SEC)
+    try:
+        stop_thread_session(db, runtime_thread_id, reason=f"docker_eval_cancel_unresponsive:{reason}")
+    except Exception:
+        pass
+    return False
+
+
+def _run_docker_eval_request(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    bridge_dir: Path,
+    payload: Dict[str, Any],
+    timeout_sec: Optional[float],
+    cancel_check: Any = None,
+) -> str:
+    req_id = uuid.uuid4().hex
+    req_path = bridge_dir / f"eval_{req_id}.req.json"
+    res_path = bridge_dir / f"eval_{req_id}.res.json"
+    payload = {
+        **dict(payload),
+        "protocol_version": _DOCKER_EVAL_PROTOCOL_VERSION,
+        "id": req_id,
+        "request_id": req_id,
+        "channel": str(payload.get("channel") or payload.get("repl_name") or "default"),
+        "host_owner_id": _DOCKER_HOST_OWNER_ID,
+        "daemon_generation": _docker_daemon_generation(bridge_dir),
+        "created_at": time.time(),
+        "timeout_sec": timeout_sec,
+        "deadline_duration_sec": timeout_sec,
+    }
+    _atomic_write_json(req_path, payload)
+    started = time.monotonic()
+    cancel_reason: Optional[str] = None
+    try:
+        while True:
+            _service_tool_requests(
+                bridge_dir,
+                host_owner_id=_DOCKER_HOST_OWNER_ID,
+                eval_request_id=req_id,
+            )
+            if res_path.exists():
+                response = json.loads(res_path.read_text(encoding="utf-8"))
+                if str(response.get("request_id") or req_id) != req_id:
+                    continue
+                if response.get("ok"):
+                    return str(response.get("output") or "")
+                return f"Error: Docker REPL failed: {response.get('error') or 'unknown error'}"
+            if cancel_check is not None and cancel_check():
+                cancel_reason = "interrupted"
+            elif timeout_sec is not None and (time.monotonic() - started) >= float(timeout_sec):
+                cancel_reason = "timeout"
+            if cancel_reason is not None:
+                acknowledged = _docker_cancel_eval(
+                    db, runtime_thread_id, bridge_dir, req_id, reason=cancel_reason,
+                )
+                terminal_deadline = time.monotonic() + _DOCKER_CANCEL_ACK_SEC
+                while acknowledged and time.monotonic() < terminal_deadline:
+                    if res_path.exists():
+                        response = json.loads(res_path.read_text(encoding="utf-8"))
+                        return str(response.get("output") or "--- INTERRUPTED ---\nDocker REPL eval cancelled.")
+                    time.sleep(_DOCKER_EVAL_POLL_SEC)
+                if cancel_reason == "timeout":
+                    return "--- TIMEOUT ---\nDocker REPL eval timed out and its channel was reset."
+                return "--- INTERRUPTED ---\nDocker REPL eval was cancelled and its channel was reset."
+            time.sleep(_DOCKER_EVAL_POLL_SEC)
+    finally:
+        _docker_eval_cleanup(bridge_dir, req_id)
 
 
 def _run_docker_python_eval_request(
@@ -1298,41 +1456,11 @@ def _run_docker_python_eval_request(
     bridge_dir: Path,
     payload: Dict[str, Any],
     timeout_sec: Optional[float],
+    cancel_check: Any = None,
 ) -> str:
-    req_id = os.urandom(8).hex()
-    req_path = bridge_dir / f"eval_{req_id}.req.json"
-    res_path = bridge_dir / f"eval_{req_id}.res.json"
-    payload = dict(payload)
-    payload["id"] = req_id
-    _atomic_write_json(req_path, payload)
-    start = time.time()
-    while True:
-        _service_tool_requests(bridge_dir)
-        if res_path.exists():
-            try:
-                response = json.loads(res_path.read_text(encoding="utf-8"))
-            finally:
-                try:
-                    res_path.unlink()
-                except Exception:
-                    pass
-            if response.get("ok"):
-                output = str(response.get("output") or "")
-                if output.startswith("--- TIMEOUT ---"):
-                    try:
-                        stop_thread_session(db, runtime_thread_id, reason="python_repl_timeout")
-                    except Exception:
-                        pass
-                    output += "\n\n[Egg stopped the Docker REPL session after timeout cleanup.]"
-                return output
-            return f"Error: Docker Python REPL failed: {response.get('error') or 'unknown error'}"
-        if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
-            try:
-                stop_thread_session(db, runtime_thread_id, reason="python_repl_timeout")
-            except Exception:
-                pass
-            return "Error: Docker Python REPL timed out. The session container was stopped/reset for cleanup."
-        time.sleep(_DOCKER_EVAL_POLL_SEC)
+    return _run_docker_eval_request(
+        db, runtime_thread_id, bridge_dir, payload, timeout_sec, cancel_check,
+    )
 
 
 def _execute_python_docker(
@@ -1343,6 +1471,7 @@ def _execute_python_docker(
     repl_name: str,
     eval_token: str,
     timeout_sec: Optional[float],
+    cancel_check: Any = None,
 ) -> str:
     handle = get_or_start_docker_session_handle(db, runtime_thread_id)
     runtime_hash = _python_repl_runtime_code_hash(Path(handle.runtime_dir))
@@ -1361,6 +1490,7 @@ def _execute_python_docker(
                 "timeout_sec": timeout_sec,
             },
             timeout_sec,
+            cancel_check,
         )
         refresh_failed = (
             "Traceback (most recent call last):" in refresh_output
@@ -1402,6 +1532,7 @@ def _execute_python_docker(
         bridge_dir,
         payload,
         timeout_sec,
+        cancel_check,
     )
 
 
@@ -1413,48 +1544,23 @@ def _execute_bash_docker(
     repl_name: str,
     eval_token: str,
     timeout_sec: Optional[float],
+    cancel_check: Any = None,
 ) -> str:
     handle = get_or_start_docker_session_handle(db, runtime_thread_id)
-    bridge_dir = Path(handle.bridge_dir)
-    req_id = os.urandom(8).hex()
-    req_path = bridge_dir / f"eval_{req_id}.req.json"
-    res_path = bridge_dir / f"eval_{req_id}.res.json"
-    _atomic_write_json(req_path, {
-        "id": req_id,
-        "language": "bash",
-        "script": script,
-        "repl_name": repl_name,
-        "token": eval_token,
-        "timeout_sec": timeout_sec,
-    })
-    start = time.time()
-    while True:
-        _service_tool_requests(bridge_dir)
-        if res_path.exists():
-            try:
-                payload = json.loads(res_path.read_text(encoding="utf-8"))
-            finally:
-                try:
-                    res_path.unlink()
-                except Exception:
-                    pass
-            if payload.get("ok"):
-                output = str(payload.get("output") or "")
-                if output.startswith("--- TIMEOUT ---"):
-                    try:
-                        stop_thread_session(db, runtime_thread_id, reason="bash_repl_timeout")
-                    except Exception:
-                        pass
-                    output += "\n\n[Egg stopped the Docker REPL session after timeout cleanup.]"
-                return output
-            return f"Error: Docker Bash REPL failed: {payload.get('error') or 'unknown error'}"
-        if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
-            try:
-                stop_thread_session(db, runtime_thread_id, reason="bash_repl_timeout")
-            except Exception:
-                pass
-            return "Error: Docker Bash REPL timed out. The session container was stopped/reset for cleanup."
-        time.sleep(_DOCKER_EVAL_POLL_SEC)
+    return _run_docker_eval_request(
+        db,
+        runtime_thread_id,
+        Path(handle.bridge_dir),
+        {
+            "language": "bash",
+            "script": script,
+            "repl_name": repl_name,
+            "channel": repl_name,
+            "token": eval_token,
+        },
+        timeout_sec,
+        cancel_check,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2233,6 +2339,7 @@ class MemorySessionProvider:
         repl_channel: str,
         eval_token: Optional[str],
         timeout_sec: Optional[float],
+        cancel_check: Any = None,
     ) -> str:
         allowed, reason = _memory_provider_allowed_under_sandbox(db, runtime_thread_id)
         if not allowed:
@@ -2297,11 +2404,12 @@ class DockerSessionProvider:
         repl_channel: str,
         eval_token: Optional[str],
         timeout_sec: Optional[float],
+        cancel_check: Any = None,
     ) -> str:
         if language == "python":
-            return _execute_python_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec)
+            return _execute_python_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec, cancel_check=cancel_check)
         if language == "bash":
-            return _execute_bash_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec)
+            return _execute_bash_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec, cancel_check=cancel_check)
         return f"Error: unknown session language: {language}"
 
     def stop(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> SessionStatus:
@@ -2392,6 +2500,7 @@ def execute_python_repl(
     runtime_name: str = "default",
     timeout_sec: Optional[float] = 30.0,
     drive_runtime_tools: bool = False,
+    cancel_check: Any = None,
 ) -> str:
     """Execute Python code in the caller's persistent runtime session.
 
@@ -2496,6 +2605,7 @@ def execute_python_repl(
             repl_channel=channel,
             eval_token=ctx.token,
             timeout_sec=effective_timeout_sec,
+            cancel_check=cancel_check,
         )
     finally:
         dispose_eval_context(ctx.token)
@@ -2522,6 +2632,7 @@ def execute_bash_repl(
     runtime_name: str = "default",
     timeout_sec: Optional[float] = 30.0,
     drive_runtime_tools: bool = False,
+    cancel_check: Any = None,
 ) -> str:
     """Execute Bash in the caller's persistent runtime session."""
 
@@ -2613,6 +2724,7 @@ def execute_bash_repl(
             repl_channel=channel,
             eval_token=ctx.token,
             timeout_sec=effective_timeout_sec,
+            cancel_check=cancel_check,
         )
         _append_runtime_repl_message(
             db,
