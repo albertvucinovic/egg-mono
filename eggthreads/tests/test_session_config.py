@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import eggthreads as ts
+import pytest
 
 
 def _make_db(tmp_path: Path) -> ts.ThreadsDB:
@@ -170,6 +171,250 @@ def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
     payload = json.loads(row[0])
     assert payload["action"] == "docker_started"
     assert payload["container_name"] == status.container_name
+
+
+def test_docker_session_identity_uses_sqlites_canonical_database_path(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    relative_db = ts.ThreadsDB(Path("same.sqlite"))
+    relative_db.init_schema()
+    absolute_db = ts.ThreadsDB((tmp_path / "same.sqlite").resolve())
+    symlink = tmp_path / "same-link.sqlite"
+    symlink.symlink_to(tmp_path / "same.sqlite")
+    symlink_db = ts.ThreadsDB(symlink)
+
+    session_id = "sess_same"
+    expected_hash = ts.docker_session_db_hash(relative_db)
+    expected_name = ts.docker_session_container_name(relative_db, session_id)
+
+    other_cwd = tmp_path / "other"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+
+    assert ts.docker_session_db_hash(relative_db) == expected_hash
+    assert ts.docker_session_db_hash(absolute_db) == expected_hash
+    assert ts.docker_session_db_hash(symlink_db) == expected_hash
+    assert ts.docker_session_container_name(absolute_db, session_id) == expected_name
+    assert ts.docker_session_container_name(symlink_db, session_id) == expected_name
+
+
+def test_reconcile_docker_session_removes_duplicate_sharing_bridge_and_runtime(monkeypatch, tmp_path):
+    session = ts.eggthreads.session
+    canonical = "egg-rlm-canonical-sess-test"
+    legacy = "egg-rlm-legacy-sess-test"
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+    calls = []
+
+    monkeypatch.setattr(session, "_docker_session_container_names", lambda _sid: [legacy, canonical])
+    monkeypatch.setattr(
+        session,
+        "_docker_bind_mount_source",
+        lambda _name, destination: str(bridge.resolve()) if destination == "/egg-bridge" else str(runtime.resolve()),
+    )
+    monkeypatch.setattr(session, "_docker_inspect_running", lambda name: True if name in {legacy, canonical} else None)
+    monkeypatch.setattr(session, "_docker_container_created_at", lambda _name: 1.0)
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return P()
+
+    monkeypatch.setattr(session.subprocess, "run", fake_run)
+
+    session._reconcile_docker_session_containers(canonical, "sess_test", bridge, runtime)
+
+    assert calls == [["docker", "rm", "-f", legacy]]
+
+
+def test_reconcile_docker_session_ignores_same_session_with_other_runtime(monkeypatch, tmp_path):
+    session = ts.eggthreads.session
+    canonical = "egg-rlm-canonical-sess-test"
+    unrelated = "egg-rlm-other-db-sess-test"
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    other_runtime = tmp_path / "other-runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+    other_runtime.mkdir()
+
+    monkeypatch.setattr(session, "_docker_session_container_names", lambda _sid: [unrelated])
+    monkeypatch.setattr(
+        session,
+        "_docker_bind_mount_source",
+        lambda _name, destination: (
+            str(bridge.resolve()) if destination == "/egg-bridge" else str(other_runtime.resolve())
+        ),
+    )
+    monkeypatch.setattr(session, "_docker_inspect_running", lambda name: True if name == unrelated else None)
+    calls = []
+    monkeypatch.setattr(session.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    session._reconcile_docker_session_containers(canonical, "sess_test", bridge, runtime)
+
+    assert calls == []
+
+
+def test_reconcile_docker_session_reports_duplicate_removal_failure(monkeypatch, tmp_path):
+    session = ts.eggthreads.session
+    canonical = "egg-rlm-canonical-sess-test"
+    legacy = "egg-rlm-legacy-sess-test"
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+
+    monkeypatch.setattr(session, "_docker_session_container_names", lambda _sid: [canonical, legacy])
+    monkeypatch.setattr(
+        session,
+        "_docker_bind_mount_source",
+        lambda _name, destination: str(bridge.resolve()) if destination == "/egg-bridge" else str(runtime.resolve()),
+    )
+    monkeypatch.setattr(session, "_docker_inspect_running", lambda _name: True)
+
+    class FailedRemoval:
+        returncode = 1
+        stdout = ""
+        stderr = "container busy"
+
+    monkeypatch.setattr(session.subprocess, "run", lambda *_args, **_kwargs: FailedRemoval())
+
+    with pytest.raises(RuntimeError, match="container busy"):
+        session._reconcile_docker_session_containers(canonical, "sess_test", bridge, runtime)
+
+
+def test_reconcile_docker_session_renames_sole_legacy_container(monkeypatch, tmp_path):
+    session = ts.eggthreads.session
+    canonical = "egg-rlm-canonical-sess-test"
+    legacy = "egg-rlm-legacy-sess-test"
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+    calls = []
+
+    monkeypatch.setattr(session, "_docker_session_container_names", lambda _sid: [legacy])
+    monkeypatch.setattr(
+        session,
+        "_docker_bind_mount_source",
+        lambda _name, destination: str(bridge.resolve()) if destination == "/egg-bridge" else str(runtime.resolve()),
+    )
+    monkeypatch.setattr(session, "_docker_inspect_running", lambda name: True if name == legacy else None)
+    monkeypatch.setattr(session, "_docker_container_created_at", lambda _name: 1.0)
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return P()
+
+    monkeypatch.setattr(session.subprocess, "run", fake_run)
+
+    session._reconcile_docker_session_containers(canonical, "sess_test", bridge, runtime)
+
+    assert calls == [["docker", "rename", legacy, canonical]]
+
+
+def test_start_docker_container_reconciles_even_when_target_is_already_running(monkeypatch, tmp_path):
+    session = ts.eggthreads.session
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="reconcile-running")
+    ts.enable_thread_session(db, thread_id, provider="docker", image="python:3.12-slim")
+    cfg = ts.get_thread_session_config(db, thread_id)
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+    calls = []
+
+    monkeypatch.setattr(
+        session,
+        "_reconcile_docker_session_containers",
+        lambda *args: calls.append(args),
+    )
+    monkeypatch.setattr(session, "_docker_inspect_running", lambda _name: True)
+    monkeypatch.setattr(session, "_docker_existing_mount_policy", lambda _name: session._DOCKER_MOUNT_POLICY)
+    monkeypatch.setattr(
+        session,
+        "_docker_existing_sandbox_policy_hash",
+        lambda _name: session._docker_session_policy_hash(db, thread_id, cfg),
+    )
+
+    restarted = session._start_docker_container(
+        db,
+        thread_id,
+        cfg,
+        "egg-rlm-canonical-sess-test",
+        bridge,
+        runtime,
+    )
+
+    assert restarted is False
+    assert calls == [("egg-rlm-canonical-sess-test", cfg.session_id, bridge, runtime)]
+
+
+def test_reconcile_docker_session_rejects_unowned_canonical_name(monkeypatch, tmp_path):
+    session = ts.eggthreads.session
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+    monkeypatch.setattr(session, "_docker_session_container_names", lambda _sid: [])
+    monkeypatch.setattr(session, "_docker_inspect_running", lambda _name: True)
+
+    with pytest.raises(RuntimeError, match="does not own this Egg session"):
+        session._reconcile_docker_session_containers(
+            "egg-rlm-canonical-sess-test",
+            "sess_test",
+            bridge,
+            runtime,
+        )
+
+
+def _docker_refresh_cache_test_setup(db):
+    thread_id = ts.create_root_thread(db, name="refresh-cache")
+    ts.enable_thread_session(db, thread_id, provider="docker", image="python:3.12-slim")
+    cfg = ts.get_thread_session_config(db, thread_id)
+    runtime_dir = ts.eggthreads.session._session_runtime_dir(cfg.session_id)
+    cache_key = (str(runtime_dir), "default", "runtime-hash")
+    ts.eggthreads.session._DOCKER_REFRESHED_PYTHON_RUNTIMES.add(cache_key)
+    return thread_id, runtime_dir, cache_key
+
+
+def test_running_docker_session_does_not_invalidate_python_refresh_cache(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id, _runtime_dir, cache_key = _docker_refresh_cache_test_setup(db)
+    monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+    monkeypatch.setattr(ts.eggthreads.session, "_write_runtime_files", lambda _path: None)
+    monkeypatch.setattr(ts.eggthreads.session, "_start_docker_container", lambda *_args: False)
+
+    ts.get_or_start_docker_session(db, thread_id)
+
+    assert cache_key in ts.eggthreads.session._DOCKER_REFRESHED_PYTHON_RUNTIMES
+
+
+def test_restarted_docker_session_invalidates_python_refresh_cache(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id, _runtime_dir, cache_key = _docker_refresh_cache_test_setup(db)
+    monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+    monkeypatch.setattr(ts.eggthreads.session, "_write_runtime_files", lambda _path: None)
+    monkeypatch.setattr(ts.eggthreads.session, "_start_docker_container", lambda *_args: True)
+
+    ts.get_or_start_docker_session(db, thread_id)
+
+    assert cache_key not in ts.eggthreads.session._DOCKER_REFRESHED_PYTHON_RUNTIMES
 
 
 def test_docker_session_mount_dir_uses_thread_working_directory(tmp_path, monkeypatch):

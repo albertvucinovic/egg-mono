@@ -88,8 +88,40 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
         "notes": [
             "Use the short artifact id shown in the preview, not arbitrary paths.",
             "Read only the chunks needed for the task.",
+            "Pass `line_numbers: true` to number only chunk-body lines with absolute original-output coordinates; metadata headers remain unnumbered.",
         ],
-        "examples": ['{"artifact_id": "abc123", "chunk_number": 1}'],
+        "examples": [
+            '{"artifact_id": "abc123", "chunk_number": 1}',
+            '{"artifact_id": "abc123", "chunk_number": 2, "line_numbers": true}',
+        ],
+    },
+    "extract_tool_output": {
+        "details": "Extract an exact 1-based half-open canonical line range from an approved, published prior tool output into a thread-owned provider-output file artifact.",
+        "use_when": [
+            "You need exact source lines without copying a long preview into context.",
+            "A long `skill` or ordinary tool result was artifact-routed, but its full canonical finished output should be sliced directly.",
+        ],
+        "notes": [
+            "`start_line` is inclusive and `end_line` is exclusive: `[17, 38)` stores canonical lines 17 through 37.",
+            "Normal case—use no source selector. An omitted, empty, or whitespace-only `source_tool_call_id` selects the latest eligible prior output: completed, approved, visible, published, and publication-approved. Ineligible newer outputs are skipped.",
+            "For a recent non-last result, use `source_tool_call_index` (zero-based declaration order) within a prior assistant tool-call group. `source_tool_call_group_offset` is also zero-based in reverse chronology: 0 is the immediately preceding group, 1 is the group before it, and it defaults to 0 when an index is supplied.",
+            "Positional selection follows the assistant's original tool-call declaration groups and indices—not parallel completion or publication order. Calls are never renumbered when a sibling fails, is denied, or is otherwise ineligible; selecting that position returns a validation error.",
+            "The current parallel tool-call group cannot be a source because a sibling may not have completed or published. Issue `extract_tool_output` in a later assistant tool-call group.",
+            "`source_tool_call_id` is an advanced exact selector for arbitrary older results. The LLM is not expected to invent an opaque ID: use one only when it is already available from a receipt or hydrated-history discovery. Use hydrated `python_repl` only as a fallback for content-based historical discovery that cannot be expressed reliably by group offset and index.",
+            "A non-empty exact ID and positional selectors are mutually exclusive. A group offset without a call index is invalid.",
+            "Extraction reads full sanitized canonical `tool_call.finished.output`, not the published preview or long-output artifact, so partial publication does not lose lines.",
+            "Line-number prefixes are presentation only. `skill(line_numbers=true)` followed by extraction returns unnumbered canonical text.",
+            "A `read_long_tool_output` call has its own canonical coordinate space (unnumbered metadata header plus chunk body), not the artifact's displayed absolute labels. Select the original producer—positionally when recent, or by an already-known exact ID—when you need its coordinates.",
+            "Denied, pending, omitted, hidden, future/current, cross-thread, non-text, empty, and out-of-range sources/selections are rejected. Extracted content is stored, never executed.",
+            "The short success receipt identifies the source tool/call, both human and half-open ranges, safe filename, artifact id, byte size, and SHA-256 for immediate discovery.",
+            "The result is a provider-output artifact compatible with `save_provider_artifact_to_file` and `add_provider_artifact_to_model_context`.",
+        ],
+        "examples": [
+            '{"start_line": 17, "end_line": 38}',
+            '{"start_line": 1, "end_line": 6, "source_tool_call_index": 2, "filename": "third-call.txt"}',
+            '{"start_line": 1, "end_line": 6, "source_tool_call_group_offset": 1, "source_tool_call_index": 0}',
+            '{"start_line": 1, "end_line": 6, "source_tool_call_id": "call_abc", "filename": "excerpt.txt"}',
+        ],
     },
     "bash": {
         "details": "Execute a non-interactive bash script in the project working directory and return combined stdout/stderr.",

@@ -111,6 +111,7 @@ class ToolContext:
     timeout_sec: float | None = None
     cancel_check: Callable[[], bool] | None = None
     working_dir: Any = None
+    tool_call_id: str | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
     stream: "ToolStreamContext | None" = None
 
@@ -146,6 +147,12 @@ class ToolExecutionResult:
     output: str
     reason: str = "success"
     streamed: bool = False
+    publication_presentation: Mapping[str, Any] = field(default_factory=dict)
+
+    def presented_output(self) -> str:
+        from .tool_output_presentation import apply_output_presentation
+
+        return apply_output_presentation(self.output, self.publication_presentation)
 
 
 @dataclass(frozen=True)
@@ -316,6 +323,7 @@ class ToolRegistry:
             timeout_sec=resolve_tool_timeout_arg(timeout_args),
             cancel_check=cancel_check,
             working_dir=context.get("working_dir"),
+            tool_call_id=context.get("tool_call_id"),
             raw=raw_context,
             stream=context.get("stream"),
         )
@@ -348,7 +356,7 @@ class ToolRegistry:
         if inspect.isawaitable(result):
             result = self._run_awaitable_sync(result)
         if isinstance(result, ToolExecutionResult) and not context.get("preserve_tool_result"):
-            return result.output
+            return result.presented_output()
         return result
 
     async def execute_async(self, name: str, arguments: Any, **context: Any) -> Any:
@@ -364,14 +372,14 @@ class ToolRegistry:
         if inspect.isawaitable(result):
             result = await result
         if isinstance(result, ToolExecutionResult) and not context.get("preserve_tool_result"):
-            return result.output
+            return result.presented_output()
         return result
 
 
 def create_tool_registry() -> ToolRegistry:
     """Create a plugin-populated ToolRegistry with Egg's built-in tools."""
 
-    from .builtin_plugins import AnswerUserPlugin, AttachmentToolsPlugin, CompactionPlugin, ExecutionPlugin, ImageGenerationPlugin, LongOutputPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ToolHelpPlugin, WebPlugin
+    from .builtin_plugins import AnswerUserPlugin, AttachmentToolsPlugin, CompactionPlugin, ExecutionPlugin, ImageGenerationPlugin, LongOutputPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ToolHelpPlugin, ToolOutputExtractionPlugin, WebPlugin
     from .plugins import ToolPluginContext, register_plugins
 
     reg = ToolRegistry()
@@ -382,6 +390,7 @@ def create_tool_registry() -> ToolRegistry:
             SkillsPlugin(),
             CompactionPlugin(),
             LongOutputPlugin(),
+            ToolOutputExtractionPlugin(),
             ExecutionPlugin(),
             ImageGenerationPlugin(),
             AttachmentToolsPlugin(),

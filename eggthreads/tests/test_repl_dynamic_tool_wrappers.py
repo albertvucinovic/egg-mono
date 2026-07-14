@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
 
@@ -64,6 +65,203 @@ def test_docker_runtime_eggtools_generated_wrapper_supports_from_import(tmp_path
         sys.modules.pop("eggtools", None)
         if old_module is not None:
             sys.modules["eggtools"] = old_module
+
+
+def test_docker_runtime_handwritten_skill_wrapper_can_forward_name(tmp_path, monkeypatch):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    session._write_runtime_files(runtime_dir)
+    eggtools_path = runtime_dir / "eggtools.py"
+
+    old_module = sys.modules.pop("eggtools", None)
+    try:
+        spec = importlib.util.spec_from_file_location("eggtools", eggtools_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["eggtools"] = module
+        spec.loader.exec_module(module)
+
+        seen: dict = {}
+        monkeypatch.setattr(module, "_eval_token", lambda: "test-token")
+        monkeypatch.setattr(module, "_atomic_write_json", lambda _path, payload: seen.update(payload))
+
+        class ResponsePath:
+            def exists(self):
+                return True
+
+            def read_text(self, *, encoding):
+                assert encoding == "utf-8"
+                return '{"ok": true, "result": "loaded"}'
+
+            def unlink(self):
+                return None
+
+        class RequestPath:
+            def with_suffix(self, _suffix):
+                return self
+
+        class BridgePath:
+            def __truediv__(self, value):
+                return ResponsePath() if value.endswith(".res.json") else RequestPath()
+
+        monkeypatch.setattr(module, "_bridge_dir", BridgePath)
+
+        assert module.skill("compaction-checkpoint") == "loaded"
+        assert seen["name"] == "skill"
+        assert seen["arguments"]["name"] == "compaction-checkpoint"
+
+        assert module.tool("skill", name="rlm") == "loaded"
+        assert seen["name"] == "skill"
+        assert seen["arguments"]["name"] == "rlm"
+    finally:
+        sys.modules.pop("eggtools", None)
+        if old_module is not None:
+            sys.modules["eggtools"] = old_module
+
+
+def test_docker_runtime_refreshes_eggtools_without_losing_repl_state(tmp_path, monkeypatch):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    session._write_runtime_files(runtime_dir)
+    eggtools_path = runtime_dir / "eggtools.py"
+
+    old_module = sys.modules.pop("eggtools", None)
+    try:
+        spec = importlib.util.spec_from_file_location("eggtools", eggtools_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["eggtools"] = module
+        spec.loader.exec_module(module)
+
+        imported_skill = module.skill
+        nested_generated_wrapper = {"wrapper": module.compact_thread}
+
+        def stale_tool(name, **kwargs):
+            return name, kwargs
+
+        monkeypatch.setattr(module, "tool", stale_tool)
+        try:
+            imported_skill("compaction-checkpoint")
+        except TypeError as error:
+            assert "multiple values" in str(error)
+        else:
+            raise AssertionError("stale dispatcher should reproduce the name collision")
+
+        repl_globals = {
+            "__name__": "__egg_repl__",
+            "imported_skill": imported_skill,
+            "nested_generated_wrapper": nested_generated_wrapper,
+            "user_state": {"preserve": True},
+        }
+        refresh_path = runtime_dir / "repl_refresh.py"
+        refresh_globals = {
+            "__name__": "__egg_runtime_refresh__",
+            "repl_globals": repl_globals,
+            "runtime_dir": str(runtime_dir),
+            "expected_hash": "new-runtime-hash",
+        }
+        exec(
+            compile(refresh_path.read_text(encoding="utf-8"), str(refresh_path), "exec"),
+            refresh_globals,
+            refresh_globals,
+        )
+
+        assert repl_globals["user_state"] == {"preserve": True}
+        assert repl_globals["imported_skill"] is module.skill
+        assert repl_globals["nested_generated_wrapper"]["wrapper"] is module.compact_thread
+        assert module.extract_tool_output.__globals__["_MISSING"] is module.extract_tool_output.__kwdefaults__["source_tool_call_id"]
+        assert repl_globals["__egg_runtime_code_hash__"] == "new-runtime-hash"
+        assert next(iter(inspect.signature(module.tool).parameters.values())).kind is inspect.Parameter.POSITIONAL_ONLY
+
+        calls = []
+
+        def recording_tool(tool_name, /, **kwargs):
+            calls.append((tool_name, kwargs))
+            return "loaded"
+
+        monkeypatch.setattr(module, "tool", recording_tool)
+        assert repl_globals["imported_skill"]("compaction-checkpoint") == "loaded"
+        assert calls == [("skill", {"timeout_sec": None, "name": "compaction-checkpoint"})]
+    finally:
+        sys.modules.pop("eggtools", None)
+        if old_module is not None:
+            sys.modules["eggtools"] = old_module
+
+
+def test_python_repl_runtime_code_hash_tracks_staged_helpers(tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    session._write_runtime_files(runtime_dir)
+
+    baseline = session._python_repl_runtime_code_hash(runtime_dir)
+    assert baseline == session._python_repl_runtime_code_hash(runtime_dir)
+
+    for name in session._PYTHON_REPL_RUNTIME_FILES:
+        path = runtime_dir / name
+        original = path.read_bytes()
+        path.write_bytes(original + b"\n# changed\n")
+        try:
+            assert session._python_repl_runtime_code_hash(runtime_dir) != baseline
+        finally:
+            path.write_bytes(original)
+
+
+def test_runtime_refresh_eval_is_separate_from_user_code():
+    refresh_code = session._python_repl_runtime_refresh_code("new-runtime-hash")
+
+    compile(refresh_code, "<runtime-refresh>", "exec")
+    assert "new-runtime-hash" in refresh_code
+    assert "repl_refresh.py" in refresh_code
+
+
+def test_docker_python_eval_refreshes_runtime_before_user_code(tmp_path, monkeypatch):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    session._write_runtime_files(runtime_dir)
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    calls = []
+
+    handle = session.DockerSessionHandle(
+        session_id="session",
+        container_name="container",
+        bridge_dir=str(bridge_dir),
+        runtime_dir=str(runtime_dir),
+        mount_dir=str(tmp_path),
+        workspace="/workspace",
+    )
+    monkeypatch.setattr(session, "get_or_start_docker_session_handle", lambda *_args: handle)
+    session._DOCKER_REFRESHED_PYTHON_RUNTIMES.clear()
+    monkeypatch.setattr(
+        session,
+        "_run_docker_python_eval_request",
+        lambda _db, _thread, _bridge, payload, _timeout: calls.append(payload) or "--- The Python REPL executed successfully and produced no output ---",
+    )
+
+    result = session._execute_python_docker(
+        object(),
+        "runtime-thread",
+        "this is invalid syntax !",
+        repl_name="default",
+        eval_token="token",
+        timeout_sec=5,
+    )
+
+    assert "successfully" in result
+    assert len(calls) == 2
+    assert "repl_refresh.py" in calls[0]["code"]
+    assert calls[1]["code"] == "this is invalid syntax !"
+
+    session._execute_python_docker(
+        object(),
+        "runtime-thread",
+        "42",
+        repl_name="default",
+        eval_token="token",
+        timeout_sec=5,
+    )
+    assert len(calls) == 3
+    assert calls[2]["code"] == "42"
 
 
 def test_generated_eggtools_wrappers_include_compact_thread_but_not_removed_compaction_helpers():

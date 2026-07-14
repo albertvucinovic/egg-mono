@@ -18,13 +18,51 @@ class DefaultOutputPolicy:
 
     def decide(self, request: OutputPolicyRequest) -> OutputPublicationDecision:
         from ..runner import LONG_OUTPUT_CHAR_THRESHOLD, LONG_OUTPUT_LINE_THRESHOLD, stash_tool_output_and_build_preview
-        from ..terminal_safety import sanitize_terminal_text
+        from ..tool_output_contract import (
+            bounded_bypass_publication,
+            canonical_terminal_safe_output,
+            tool_output_contract,
+        )
+        from ..tool_output_presentation import (
+            apply_output_presentation,
+            normalize_publication_presentation,
+        )
 
         output = request.output if isinstance(request.output, str) else str(request.output or "")
-        safe_output = sanitize_terminal_text(output)
+        safe_output = canonical_terminal_safe_output(output)
         line_count = len(safe_output.splitlines())
         char_count = len(safe_output)
         metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+        presentation = normalize_publication_presentation(
+            metadata.get("publication_presentation")
+        )
+        presented_output = apply_output_presentation(safe_output, presentation)
+        contract = tool_output_contract(request.tool_name)
+        if contract.bypass_long_output_routing:
+            presented_output, violated = bounded_bypass_publication(
+                request.tool_name,
+                safe_output,
+                presented_output,
+            )
+            return OutputPublicationDecision(
+                "whole",
+                presented_output,
+                reason=(
+                    "Auto: bounded recovery output contract violated"
+                    if violated
+                    else "Auto: bounded recovery output bypasses optimizer and artifact routing"
+                ),
+                channels={
+                    OUTPUT_CHANNELS.raw: {"stored_in_finished_event": True},
+                    OUTPUT_CHANNELS.audit: {
+                        "line_count": len(safe_output.splitlines()),
+                        "char_count": len(safe_output),
+                        "bounded_contract_violation": violated,
+                    },
+                    OUTPUT_CHANNELS.ui_preview: presented_output,
+                    OUTPUT_CHANNELS.llm_message: presented_output,
+                },
+            )
 
         def _count(name: str, fallback: int) -> int:
             try:
@@ -43,6 +81,7 @@ class DefaultOutputPolicy:
             or char_count > LONG_OUTPUT_CHAR_THRESHOLD
             or original_line_count > LONG_OUTPUT_LINE_THRESHOLD
             or original_char_count > LONG_OUTPUT_CHAR_THRESHOLD
+            or len(presented_output) > LONG_OUTPUT_CHAR_THRESHOLD
         )
         if is_long:
             preview, saved = stash_tool_output_and_build_preview(
@@ -52,6 +91,7 @@ class DefaultOutputPolicy:
                 safe_output,
                 original_char_count=original_char_count,
                 output_capped=bool(metadata.get("output_capped")),
+                publication_presentation=presentation,
             )
             reason = (
                 f"Auto: output too long ({original_line_count} lines, {original_char_count} chars) — stored as artifact"
@@ -67,9 +107,9 @@ class DefaultOutputPolicy:
             )
         return OutputPublicationDecision(
             "whole",
-            safe_output,
+            presented_output,
             reason="Auto: output below size thresholds",
-            channels={**channels, OUTPUT_CHANNELS.ui_preview: safe_output, OUTPUT_CHANNELS.llm_message: safe_output},
+            channels={**channels, OUTPUT_CHANNELS.ui_preview: presented_output, OUTPUT_CHANNELS.llm_message: presented_output},
         )
 
 
@@ -96,6 +136,18 @@ class NativeOptimizerOutputPolicy:
             output_optimizer_rtk_privacy_opt_in,
             output_optimizer_rtk_timeout_seconds,
         )
+        from ..tool_output_contract import tool_output_contract
+        from ..tool_output_presentation import presentation_requires_exact_text
+
+        metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+        if tool_output_contract(request.tool_name).bypass_optimizer:
+            return OutputPublicationDecision(
+                "abstain", "", reason="Native output optimizer bypassed by tool output contract"
+            )
+        if presentation_requires_exact_text(metadata.get("publication_presentation")):
+            return OutputPublicationDecision(
+                "abstain", "", reason="Native output optimizer skipped for exact line-number presentation"
+            )
 
         if request.user_tool_call and self._is_hidden_user_command(request):
             return OutputPublicationDecision(

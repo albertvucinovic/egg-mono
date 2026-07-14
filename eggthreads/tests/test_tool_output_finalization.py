@@ -590,3 +590,319 @@ def test_automatic_policy_failure_is_detectable_and_retriable(tmp_path, monkeypa
 
     assert _decision_rows(db, thread_id) == []
     assert ts.build_tool_call_states(db, thread_id)[tool_call_id].state == "TC4"
+
+
+@pytest.mark.parametrize("tool_name", ["read_long_tool_output", "extract_tool_output"])
+def test_user_omit_can_finalize_bounded_bypass_tools_without_artifact(
+    tmp_path, monkeypatch, tool_name
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id = f"thread-omit-{tool_name}"
+    tool_call_id = f"call-omit-{tool_name}"
+    db.create_thread(thread_id=thread_id, name="omit bypass")
+    db.append_event(
+        event_id=f"declare-{tool_call_id}",
+        thread_id=thread_id,
+        type_="msg.create",
+        msg_id=f"msg-{tool_call_id}",
+        payload={
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }
+            ],
+        },
+    )
+    db.append_event(
+        event_id=f"approve-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.approval",
+        payload={"tool_call_id": tool_call_id, "decision": "granted"},
+    )
+    db.append_event(
+        event_id=f"started-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.execution_started",
+        payload={"tool_call_id": tool_call_id},
+    )
+    finish_seq = db.append_event(
+        event_id=f"finished-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.finished",
+        payload={
+            "tool_call_id": tool_call_id,
+            "reason": "success",
+            "output": "x" * 120_000,
+        },
+    )
+
+    automatic = ts.finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision="whole",
+        source="automatic_policy",
+        reason="Automatic bounded publication",
+        expected_event_seq=finish_seq,
+    )
+    assert automatic.committed is True
+    assert automatic.decision == "whole"
+    assert automatic.payload["artifact_path"] == ""
+    assert automatic.payload["bounded_contract_violation"] is True
+
+    result = ts.finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision="omit",
+        source="user_cancel",
+        reason="Explicit user cancellation",
+        expected_event_seq=automatic.state_event_seq,
+    )
+
+    assert result.committed is True
+    assert result.decision == "omit"
+    assert result.payload["artifact_path"] == ""
+    assert result.payload["preview"] == "Output omitted."
+    assert result.payload["supersedes_event_seq"] == automatic.event_seq
+    state = ts.build_tool_call_states(db, thread_id)[tool_call_id]
+    assert state.output_decision == "omit"
+    assert state.last_output_approval_payload["decision_source"] == "user_cancel"
+    output_root = tmp_path / ".egg" / "egg_outputs"
+    assert not output_root.exists() or list(output_root.rglob("metadata.json")) == []
+
+
+def _make_presented_tc4(
+    db: ts.ThreadsDB,
+    *,
+    thread_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    output: str,
+    presentation: dict | None,
+):
+    db.create_thread(thread_id=thread_id, name="presented recovery")
+    db.append_event(
+        event_id=f"declare-{tool_call_id}",
+        thread_id=thread_id,
+        type_="msg.create",
+        msg_id=f"msg-{tool_call_id}",
+        payload={
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }
+            ],
+        },
+    )
+    db.append_event(
+        event_id=f"approve-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.approval",
+        payload={"tool_call_id": tool_call_id, "decision": "granted"},
+    )
+    db.append_event(
+        event_id=f"started-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.execution_started",
+        payload={"tool_call_id": tool_call_id},
+    )
+    payload = {"tool_call_id": tool_call_id, "reason": "success", "output": output}
+    if presentation is not None:
+        payload["publication_presentation"] = presentation
+    finish_seq = db.append_event(
+        event_id=f"finished-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.finished",
+        payload=payload,
+    )
+    return finish_seq
+
+
+def test_manual_whole_recovery_preserves_numbered_skill_presentation(tmp_path) -> None:
+    db = _make_db(tmp_path)
+    thread_id = "thread-recovered-skill"
+    tool_call_id = "call-recovered-skill"
+    canonical = "# Skill: demo\n\nfirst\nsecond\n"
+
+    # Seed the incremental reducer before finish, then prove its tail replay
+    # carries normalized presentation alongside canonical output.
+    db.create_thread(thread_id=thread_id, name="presented recovery")
+    db.append_event(
+        "declare-recovered-skill",
+        thread_id,
+        "msg.create",
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": "skill", "arguments": "{}"},
+                }
+            ],
+        },
+        msg_id="msg-recovered-skill",
+    )
+    db.append_event(
+        "approve-recovered-skill",
+        thread_id,
+        "tool_call.approval",
+        {"tool_call_id": tool_call_id, "decision": "granted"},
+    )
+    db.append_event(
+        "started-recovered-skill",
+        thread_id,
+        "tool_call.execution_started",
+        {"tool_call_id": tool_call_id},
+    )
+    assert ts.build_tool_call_states(db, thread_id)[tool_call_id].state == "TC3"
+    finish_seq = db.append_event(
+        "finished-recovered-skill",
+        thread_id,
+        "tool_call.finished",
+        {
+            "tool_call_id": tool_call_id,
+            "reason": "success",
+            "output": canonical,
+            "publication_presentation": {
+                "kind": "line_numbers",
+                "start_line": "1",
+                "body_offset": "0",
+                "ignored": "not durable",
+            },
+        },
+    )
+
+    recovered = ts.build_tool_call_states(db, thread_id)[tool_call_id]
+    assert recovered.finished_output == canonical
+    assert recovered.publication_presentation == ts.line_number_presentation()
+    result = ts.finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision="whole",
+        source="user",
+        reason="Manual recovery approval",
+        expected_event_seq=finish_seq,
+    )
+
+    assert result.decision == "whole"
+    assert result.payload["preview"] == (
+        "1: # Skill: demo\n2: \n3: first\n4: second\n"
+    )
+    assert ts.build_tool_call_states(db, thread_id)[tool_call_id].finished_output == canonical
+
+
+def test_manual_whole_recovery_numbers_only_reader_body_without_artifact(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id = "thread-recovered-reader"
+    tool_call_id = "call-recovered-reader"
+    header = "artifact_id: abc12345\nchunk_number: 2\n\n"
+    canonical = header + "continued\nnext\n"
+    finish_seq = _make_presented_tc4(
+        db,
+        thread_id=thread_id,
+        tool_call_id=tool_call_id,
+        tool_name="read_long_tool_output",
+        output=canonical,
+        presentation=ts.line_number_presentation(start_line=41, body_offset=len(header)),
+    )
+
+    result = ts.finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision="whole",
+        source="user",
+        reason="Manual recovery approval",
+        expected_event_seq=finish_seq,
+    )
+
+    assert result.decision == "whole"
+    assert result.payload["preview"] == header + "41: continued\n42: next\n"
+    assert result.payload["artifact_path"] == ""
+    assert result.payload["publication_presentation"] == ts.line_number_presentation(
+        start_line=41, body_offset=len(header)
+    )
+    assert not (tmp_path / ".egg" / "egg_outputs").exists()
+
+
+def test_manual_whole_long_numbered_skill_routes_raw_artifact_and_presented_body(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("eggthreads.runner.LONG_OUTPUT_LINE_THRESHOLD", 5)
+    monkeypatch.setattr("eggthreads.runner.LONG_OUTPUT_CHUNK_LINES", 3)
+    db = _make_db(tmp_path)
+    thread_id = "thread-recovered-long-skill"
+    tool_call_id = "call-recovered-long-skill"
+    canonical = "".join(f"line-{number}\n" for number in range(1, 12))
+    finish_seq = _make_presented_tc4(
+        db,
+        thread_id=thread_id,
+        tool_call_id=tool_call_id,
+        tool_name="skill",
+        output=canonical,
+        presentation=ts.line_number_presentation(),
+    )
+
+    result = ts.finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision="whole",
+        source="user",
+        reason="Manual recovery approval",
+        expected_event_seq=finish_seq,
+    )
+
+    assert result.decision == "partial"
+    preview_body, recovery_note = result.payload["preview"].rsplit("\n\n[", 1)
+    assert preview_body.startswith("1: line-1\n2: line-2\n")
+    assert recovery_note.startswith("Preview only")
+    assert not recovery_note.startswith("1: ")
+    artifact_dir = Path(result.payload["artifact_path"])
+    stored = "".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(artifact_dir.glob("chunk-*.txt"))
+    )
+    assert stored == canonical
+    assert not stored.startswith("1: ")
+
+
+def test_imported_finished_event_without_presentation_remains_unchanged(tmp_path) -> None:
+    db = _make_db(tmp_path)
+    thread_id = "thread-legacy-presentation"
+    tool_call_id = "call-legacy-presentation"
+    canonical = "legacy\noutput\n"
+    finish_seq = _make_presented_tc4(
+        db,
+        thread_id=thread_id,
+        tool_call_id=tool_call_id,
+        tool_name="skill",
+        output=canonical,
+        presentation=None,
+    )
+
+    state = ts.build_tool_call_states(db, thread_id)[tool_call_id]
+    assert state.publication_presentation == {}
+    result = ts.finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision="whole",
+        source="user",
+        expected_event_seq=finish_seq,
+    )
+    assert result.payload["preview"] == canonical

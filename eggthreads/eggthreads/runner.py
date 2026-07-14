@@ -370,11 +370,17 @@ def _stash_tool_output_artifact(
                 os.chmod(chunk_path, 0o600)
             except Exception:
                 pass
+        chunk_start_lines: list[int] = []
+        next_source_line = 1
+        for chunk in chunks:
+            chunk_start_lines.append(next_source_line)
+            next_source_line += chunk.count("\n")
         metadata = {
             "artifact_id": artifact_id,
             "thread_id": str(thread_id or ""),
             "tool_call_id": str(tool_call_id or ""),
             "chunk_count": chunk_count,
+            "chunk_start_lines": chunk_start_lines,
             "chunk_size_chars": _tool_output_chunk_size_chars(),
             "chunk_size_lines": _tool_output_chunk_size_lines(),
             "stored_char_count": stored_char_count,
@@ -454,7 +460,7 @@ def format_tool_output_artifact_recovery_note(*, artifact_id: str, chunk_count: 
         f"Stored output: {stored_char_count} chars. "
         "Read chunks with read_long_tool_output("
         f"'{artifact_id}', chunk_number) where chunk_number is 1-{chunk_count}"
-        "; use descendant_thread_id only when reading a descendant thread's artifact.]"
+        "; pass line_numbers=true for absolute source lines; use descendant_thread_id only when reading a descendant thread's artifact.]"
     )
 
 
@@ -495,6 +501,7 @@ def stash_tool_output_and_build_preview(
     max_chars: int = PREVIEW_MAX_CHARS,
     original_char_count: Optional[int] = None,
     output_capped: bool = False,
+    publication_presentation: Any = None,
 ) -> tuple:
     """Persist tool output as a thread-owned artifact and return ``(preview, saved_path)``.
 
@@ -522,6 +529,10 @@ def stash_tool_output_and_build_preview(
     preview_body = _tool_output_preview_text(stored_output, max_lines=max_lines, max_chars=max_chars)
     if preview_body != stored_output:
         preview_body = preview_body.rstrip()
+    if publication_presentation:
+        from .tool_output_presentation import apply_output_presentation
+
+        preview_body = apply_output_presentation(preview_body, publication_presentation)
 
     if artifact_id:
         note = (
@@ -538,7 +549,7 @@ def stash_tool_output_and_build_preview(
         note += (
             "Read chunks with read_long_tool_output("
             f"'{artifact_id}', chunk_number) where chunk_number is 1-{chunk_count}"
-            "; use descendant_thread_id only when reading a descendant thread's artifact.]"
+            "; pass line_numbers=true for absolute source lines; use descendant_thread_id only when reading a descendant thread's artifact.]"
         )
     else:
         note = (
@@ -566,6 +577,7 @@ def _finalize_auto_tool_output(
     tool_metadata: Optional[Dict[str, Any]] = None,
     original_char_count: Optional[int] = None,
     output_capped: bool = False,
+    publication_presentation: Any = None,
     expected_event_seq: int,
     writer: InvocationEventWriter,
 ):
@@ -624,6 +636,7 @@ def _finalize_auto_tool_output(
                     "output_capped": output_capped,
                     "stored_char_count": stored_char_count,
                     "stored_line_count": stored_line_count,
+                    "publication_presentation": dict(publication_presentation or {}),
                 },
             ),
         )
@@ -644,6 +657,7 @@ def _finalize_auto_tool_output(
             "char_count": stored_char_count,
             "original_char_count": original_count,
             "output_capped": bool(output_capped),
+            "publication_presentation": dict(publication_presentation or {}),
         },
     )
     return finalize_tool_output(
@@ -3091,6 +3105,7 @@ class ThreadRunner:
                         tc.arguments,
                         thread_id=self.thread_id,
                         invoke_id=invoke_id,
+                        tool_call_id=tc.tool_call_id,
                         origin='runner',
                         initial_model_key=current_model,
                         tool_timeout_sec=tool_timeout_sec,
@@ -3106,10 +3121,12 @@ class ThreadRunner:
                         full_result = tool_result.output
                         finish_reason = tool_result.reason or 'success'
                         already_streamed = tool_result.streamed
+                        publication_presentation = dict(tool_result.publication_presentation or {})
                     else:
                         full_result = tool_result
                         finish_reason = 'success'
                         already_streamed = False
+                        publication_presentation = {}
                 except asyncio.CancelledError:
                     full_result = (
                         "--- INTERRUPTED ---\n"
@@ -3147,6 +3164,7 @@ class ThreadRunner:
                     full_result = f"ERROR: {e}"
                     finish_reason = 'error'
                     already_streamed = False
+                    publication_presentation = {}
                 if not isinstance(full_result, str):
                     full_result = str(full_result)
 
@@ -3218,6 +3236,7 @@ class ThreadRunner:
                         'tool_call_id': tc.tool_call_id,
                         'reason': finish_reason,
                         'output': full_result,
+                        'publication_presentation': publication_presentation,
                     },
                 )
                 # Auto output-approval: small outputs get decision='whole'
@@ -3245,6 +3264,7 @@ class ThreadRunner:
                     },
                     original_char_count=original_output_char_count,
                     output_capped=output_was_capped,
+                    publication_presentation=publication_presentation,
                     expected_event_seq=finished_seq,
                     writer=self._owned_writer(invoke_id),
                 )
@@ -3257,9 +3277,14 @@ class ThreadRunner:
                 preview = payload.get('preview') or ''
                 finished_output = tc.finished_output or ''
                 finished_reason = (tc.finished_reason or '').lower()
+                from .tool_output_contract import requires_legacy_long_output_routing
+
                 long_finished_output = bool(
-                    len(finished_output) > LONG_OUTPUT_CHAR_THRESHOLD
-                    or _line_count(finished_output) > LONG_OUTPUT_LINE_THRESHOLD
+                    requires_legacy_long_output_routing(tc.name)
+                    and (
+                        len(finished_output) > LONG_OUTPUT_CHAR_THRESHOLD
+                        or _line_count(finished_output) > LONG_OUTPUT_LINE_THRESHOLD
+                    )
                 )
                 has_artifact_recovery = bool(
                     _artifact_is_ready(str(payload.get('artifact_path') or ''))

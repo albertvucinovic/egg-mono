@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from typing import Any, Dict
 
 from ..plugins import PluginContext
-from ..tools import ToolRegistry
+from ..tool_output_presentation import line_number_presentation
+from ..tools import ToolExecutionResult, ToolRegistry
 
 
-def render_skill_request(args: Dict[str, Any]) -> str:
+def render_skill_request(args: Dict[str, Any]) -> str | ToolExecutionResult:
     """Render the requested skill listing/search/document."""
 
     from ..skills import render_skill_tool_output
@@ -24,10 +25,22 @@ def render_skill_request(args: Dict[str, Any]) -> str:
         # Accept a raw positional argument for local/tool bridge callers.
         name = args.get("_arg")
     query = args.get("query")
-    return render_skill_tool_output(
+    output = render_skill_tool_output(
         str(name) if name is not None else None,
         query=str(query) if query is not None else None,
     )
+    if args.get("line_numbers") is True:
+        return ToolExecutionResult(
+            output,
+            publication_presentation=line_number_presentation(),
+        )
+    return output
+
+
+def _skill_rendered_text(value: str | ToolExecutionResult) -> str:
+    """Return command/UI text even if the shared renderer adds presentation."""
+
+    return value.presented_output() if isinstance(value, ToolExecutionResult) else value
 
 
 def _log(context: Any, message: str) -> None:
@@ -40,7 +53,9 @@ def skills_command(context: Any, arg: str):
 
     try:
         query = (arg or "").strip()
-        text = render_skill_request({"query": query} if query else {})
+        text = _skill_rendered_text(
+            render_skill_request({"query": query} if query else {})
+        )
         _log(context, "Skills list (see console for full).")
         if context.console_print_block is not None:
             context.console_print_block("Skills", text, border_style="cyan")
@@ -62,7 +77,9 @@ def skill_command(context: Any, arg: str):
         return CommandResult(clear_input=False)
     try:
         skill = get_skill(name)
-        text = render_skill_request({"name": skill.name})
+        text = _skill_rendered_text(
+            render_skill_request({"name": skill.name})
+        )
         marker = f"<!-- egg-skill:{skill.name} -->"
         context_text = f"{marker}\n{text}"
         loaded = False
@@ -137,6 +154,11 @@ def register_skill_tool(registry: ToolRegistry) -> None:
                 "query": {
                     "type": "string",
                     "description": "Optional plain substring search over skill names, descriptions, and documents.",
+                },
+                "line_numbers": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Prefix canonical output lines with 1-based line numbers for presentation only.",
                 },
             },
         },

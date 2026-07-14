@@ -45,7 +45,7 @@ def _coerce_positive_timeout(value: Any) -> Optional[float]:
     return timeout if timeout > 0 else None
 
 
-def tool(name: str, timeout: Optional[float] = None, timeout_sec: Optional[float] = None, **kwargs: Any) -> str:
+def tool(tool_name: str, /, timeout: Optional[float] = None, timeout_sec: Optional[float] = None, **kwargs: Any) -> str:
     """Call an Egg tool through the host bridge and return its string result."""
 
     bridge = _bridge_dir()
@@ -66,7 +66,7 @@ def tool(name: str, timeout: Optional[float] = None, timeout_sec: Optional[float
     _atomic_write_json(req_path, {
         "id": req_id,
         "token": _eval_token(),
-        "name": name,
+        "name": tool_name,
         "arguments": arguments,
         "timeout_sec": timeout_sec,
     })
@@ -84,7 +84,7 @@ def tool(name: str, timeout: Optional[float] = None, timeout_sec: Optional[float
                 return str(payload.get("result") or "")
             raise RuntimeError(str(payload.get("error") or "Egg tool call failed"))
         if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
-            raise TimeoutError(f"Egg tool call timed out: {name}")
+            raise TimeoutError(f"Egg tool call timed out: {tool_name}")
         time.sleep(0.05)
 
 
