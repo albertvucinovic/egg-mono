@@ -112,7 +112,9 @@ def test_docker_repl_cancellation_resets_only_affected_channels(tmp_path, monkey
         status = ts.get_thread_session_status(db, runtime.runtime_thread_id)
         bridge = Path(ts.get_or_start_docker_session_handle(db, runtime.runtime_thread_id).bridge_dir)
         assert not list(bridge.glob("eval_*.processing"))
-        assert status.status == "available"
+        assert status.status == "ready"
+        assert status.daemon_generation
+        assert status.active_requests == ()
     finally:
         runtime = ts.find_runtime_thread(db, parent, language="python")
         if runtime is not None:

@@ -33,6 +33,10 @@ ACTIVE_EVALS_LOCK = threading.RLock()
 CHANNEL_CONDITIONS: Dict[str, threading.Condition] = {}
 CHANNEL_QUEUES: Dict[str, List[str]] = {}
 DAEMON_GENERATION = uuid.uuid4().hex
+DAEMON_STARTED_AT = time.time()
+LAST_ACTIVITY_AT = DAEMON_STARTED_AT
+STATUS_PATH: Optional[Path] = None
+STATUS_WRITE_LOCK = threading.Lock()
 
 
 def _python_worker_loop(conn) -> None:
@@ -160,6 +164,65 @@ def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _daemon_status_payload(now: Optional[float] = None) -> Dict[str, Any]:
+    """Snapshot daemon/eval/channel health under the shared state lock."""
+
+    heartbeat_at = float(now if now is not None else time.time())
+    with ACTIVE_EVALS_LOCK:
+        active_requests: List[Dict[str, Any]] = []
+        active_snapshot = list(sorted(ACTIVE_EVALS.items()))
+        queue_snapshot = {key: list(value) for key, value in CHANNEL_QUEUES.items()}
+        python_channels = list(PY_WORKERS)
+        bash_channels = [channel for channel, proc in BASH_REPLS.items() if proc.poll() is None]
+        for req_id, active in active_snapshot:
+            request = active.get("payload") if isinstance(active.get("payload"), dict) else {}
+            active_requests.append({
+                "request_id": req_id,
+                "language": str(request.get("language") or "python"),
+                "channel": str(request.get("channel") or request.get("repl_name") or "default"),
+                "state": "running" if active.get("running") else "queued",
+                "created_at": request.get("created_at"),
+                "cancel_reason": active.get("cancel_reason"),
+            })
+        channel_state: Dict[str, Any] = {}
+        for channel_key, queue in sorted(queue_snapshot.items()):
+            running_id = next(
+                (req_id for req_id in queue if ACTIVE_EVALS.get(req_id, {}).get("running")),
+                None,
+            )
+            channel_state[channel_key] = {
+                "state": "busy",
+                "running_request_id": running_id,
+                "queued_request_ids": [req_id for req_id in queue if req_id != running_id],
+            }
+        for channel in sorted(python_channels):
+            channel_state.setdefault(f"python:{channel}", {"state": "ready"})
+        for channel in sorted(bash_channels):
+            channel_state.setdefault(f"bash:{channel}", {"state": "ready"})
+    return {
+        "protocol_version": 2,
+        "daemon_generation": DAEMON_GENERATION,
+        "started_at": DAEMON_STARTED_AT,
+        "heartbeat_at": heartbeat_at,
+        "last_activity_at": LAST_ACTIVITY_AT,
+        "active_requests": active_requests,
+        "channel_state": channel_state,
+    }
+
+
+def write_daemon_status(path: Optional[Path] = None, *, activity: bool = False) -> None:
+    """Atomically publish a heartbeat and the current request/channel snapshot."""
+
+    global LAST_ACTIVITY_AT
+    if activity:
+        LAST_ACTIVITY_AT = time.time()
+    target = path or STATUS_PATH
+    if target is None:
+        return
+    with STATUS_WRITE_LOCK:
+        atomic_write_json(target, _daemon_status_payload())
 
 
 def format_output(stdout_text: str, stderr_text: str) -> str:
@@ -589,6 +652,7 @@ def _run_claimed_eval(
             # it cannot race through the gap before execute_* starts.
             with ACTIVE_EVALS_LOCK:
                 active["running"] = not active["cancel"].is_set()
+        write_daemon_status(activity=True)
         if active["cancel"].is_set():
             output = f"--- INTERRUPTED ---\n{language.title()} REPL eval was cancelled before execution."
             reason = "cancelled"
@@ -640,6 +704,7 @@ def _run_claimed_eval(
             claimed.unlink()
         except Exception:
             pass
+        write_daemon_status(activity=True)
 
 
 def process_eval_request(req_path: Path, bridge_dir: Path, runtime_dir: Path) -> None:
@@ -698,6 +763,7 @@ def process_eval_request(req_path: Path, bridge_dir: Path, runtime_dir: Path) ->
         # an apparently empty queue while a newly claimed request is appended.
         with channel_condition:
             CHANNEL_QUEUES.setdefault(channel_key, []).append(req_id)
+    write_daemon_status(activity=True)
     if _cancel_path(bridge_dir, req_id).exists():
         service_cancel_requests(bridge_dir)
     thread = threading.Thread(
@@ -782,6 +848,7 @@ def service_cancel_requests(bridge_dir: Path) -> None:
             cancel_path.unlink()
         except Exception:
             pass
+        write_daemon_status(activity=True)
 
 
 def recover_stale_claims(bridge_dir: Path) -> None:
@@ -807,15 +874,23 @@ def main() -> int:
     bridge_dir = Path(args.bridge_dir)
     runtime_dir = Path(args.runtime_dir)
     bridge_dir.mkdir(parents=True, exist_ok=True)
+    global STATUS_PATH
+    STATUS_PATH = bridge_dir / "sessiond_status.json"
     atomic_write_json(bridge_dir / "sessiond_generation.json", {
         "protocol_version": 2, "daemon_generation": DAEMON_GENERATION,
-        "started_at": time.time(),
+        "started_at": DAEMON_STARTED_AT,
     })
     recover_stale_claims(bridge_dir)
+    write_daemon_status(activity=True)
+    heartbeat_interval = max(0.1, min(1.0, args.poll_sec * 10.0))
+    next_heartbeat = time.monotonic() + heartbeat_interval
     while True:
         service_cancel_requests(bridge_dir)
         for req in sorted(bridge_dir.glob("eval_*.req.json")):
             process_eval_request(req, bridge_dir, runtime_dir)
+        if time.monotonic() >= next_heartbeat:
+            write_daemon_status()
+            next_heartbeat = time.monotonic() + heartbeat_interval
         time.sleep(args.poll_sec)
 
 

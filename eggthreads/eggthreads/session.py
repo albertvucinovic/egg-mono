@@ -14,7 +14,7 @@ import tempfile
 import uuid
 import time
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
@@ -62,6 +62,22 @@ class SessionStatus:
     message: str = ""
     container_name: Optional[str] = None
     share_repl: bool = False
+    daemon_generation: Optional[str] = None
+    active_requests: tuple[Dict[str, Any], ...] = ()
+    channel_state: Dict[str, Any] = field(default_factory=dict)
+    last_activity: Optional[float] = None
+    heartbeat_at: Optional[float] = None
+    reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _DockerContainerState:
+    """Observed Docker state; ``exists=None`` means inspection failed."""
+
+    exists: Optional[bool]
+    running: Optional[bool]
+    status: str = "unknown"
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -160,8 +176,12 @@ def _nearest_session_payload(db: ThreadsDB, thread_id: str) -> Optional[tuple[st
     return None
 
 
-def _latest_session_lifecycle_action(db: ThreadsDB, thread_id: str, session_id: Optional[str]) -> Optional[str]:
-    """Return latest lifecycle action for a specific session id on a thread."""
+def _latest_session_lifecycle(
+    db: ThreadsDB,
+    thread_id: str,
+    session_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Return the latest lifecycle payload for one session on a thread."""
 
     if not session_id:
         return None
@@ -178,13 +198,17 @@ def _latest_session_lifecycle_action(db: ThreadsDB, thread_id: str, session_id: 
             payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
         except Exception:
             payload = {}
-        if not isinstance(payload, dict):
-            continue
-        if payload.get("session_id") != session_id:
-            continue
-        action = payload.get("action")
-        return str(action) if action is not None else None
+        if isinstance(payload, dict) and payload.get("session_id") == session_id:
+            return payload
     return None
+
+
+def _latest_session_lifecycle_action(db: ThreadsDB, thread_id: str, session_id: Optional[str]) -> Optional[str]:
+    """Return latest lifecycle action for a specific session id on a thread."""
+
+    payload = _latest_session_lifecycle(db, thread_id, session_id)
+    action = payload.get("action") if payload is not None else None
+    return str(action) if action is not None else None
 
 
 def _is_runtime_thread(db: ThreadsDB, thread_id: str) -> bool:
@@ -707,19 +731,40 @@ def _write_runtime_files(runtime_dir: Path) -> None:
         pass
 
 
-def _docker_inspect_running(container_name: str) -> Optional[bool]:
+def _docker_container_state(container_name: str) -> _DockerContainerState:
+    """Inspect existence/running state without conflating missing with errors."""
+
     try:
         proc = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
+            [
+                "docker", "inspect", "-f",
+                "{{.State.Status}}\t{{.State.Running}}",
+                container_name,
+            ],
             capture_output=True,
             text=True,
             timeout=5,
         )
-    except Exception:
-        return None
+    except Exception as e:
+        return _DockerContainerState(None, None, error=f"{type(e).__name__}: {e}")
     if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "Docker inspect failed").strip()
+        lowered = detail.lower()
+        if "no such object" in lowered or "no such container" in lowered:
+            return _DockerContainerState(False, False, status="missing")
+        return _DockerContainerState(None, None, error=detail)
+    parts = (proc.stdout or "").strip().split("\t", 1)
+    status = (parts[0] if parts else "unknown").strip().lower() or "unknown"
+    running_text = (parts[1] if len(parts) > 1 else "").strip().lower()
+    running = running_text == "true" if running_text in {"true", "false"} else None
+    return _DockerContainerState(True, running, status=status)
+
+
+def _docker_inspect_running(container_name: str) -> Optional[bool]:
+    state = _docker_container_state(container_name)
+    if state.exists is False:
         return None
-    return proc.stdout.strip().lower() == "true"
+    return state.running
 
 
 def _docker_session_container_names(session_id: str) -> List[str]:
@@ -859,6 +904,16 @@ def _reconcile_docker_session_containers(
         )
 
 
+def _clear_docker_daemon_status(bridge_dir: Path) -> None:
+    """Remove old generation/heartbeat records before a container process starts."""
+
+    for name in ("sessiond_generation.json", "sessiond_status.json"):
+        try:
+            (bridge_dir / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _start_docker_container(
     db: ThreadsDB,
     runtime_thread_id: str,
@@ -866,6 +921,7 @@ def _start_docker_container(
     container_name: str,
     bridge_dir: Path,
     runtime_dir: Path,
+    force_restart: bool = False,
 ) -> bool:
     """Ensure the session container runs; return whether its process restarted."""
     expected_policy_hash = _docker_session_policy_hash(db, runtime_thread_id, cfg)
@@ -886,12 +942,22 @@ def _start_docker_container(
         policy = _docker_existing_mount_policy(container_name)
         policy_hash = _docker_existing_sandbox_policy_hash(container_name)
         if policy == _DOCKER_MOUNT_POLICY and policy_hash == expected_policy_hash:
-            return False
+            if not force_restart:
+                return False
+            _clear_docker_daemon_status(bridge_dir)
+            subprocess.run(
+                ["docker", "restart", container_name],
+                capture_output=True,
+                check=True,
+                timeout=30,
+            )
+            return True
         _remove_existing_container()
     if existing_running is False:
         policy = _docker_existing_mount_policy(container_name)
         policy_hash = _docker_existing_sandbox_policy_hash(container_name)
         if policy == _DOCKER_MOUNT_POLICY and policy_hash == expected_policy_hash:
+            _clear_docker_daemon_status(bridge_dir)
             subprocess.run(["docker", "start", container_name], capture_output=True, check=True, timeout=20)
             return True
         _remove_existing_container()
@@ -953,6 +1019,7 @@ def _start_docker_container(
         cfg.image,
         "python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime",
     ]
+    _clear_docker_daemon_status(bridge_dir)
     subprocess.run(cmd, capture_output=True, check=True, timeout=60)
     return True
 
@@ -1165,11 +1232,7 @@ def append_session_lifecycle_event(
 
 
 def get_thread_session_status(db: ThreadsDB, thread_id: str) -> SessionStatus:
-    """Return lightweight status for the effective session config.
-
-    The real Docker lifecycle lands later; this status helper already gives
-    callers a stable API and supports the in-memory test provider.
-    """
+    """Return provider and runtime health for the effective session config."""
 
     cfg = get_thread_session_config(db, thread_id)
     if not cfg.enabled:
@@ -1181,24 +1244,28 @@ def get_thread_session_status(db: ThreadsDB, thread_id: str) -> SessionStatus:
 
 
 def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
-    """Skeleton for persistent Docker session start/reattach.
-
-    This establishes deterministic naming/status/lifecycle events without yet
-    implementing the full `egg-sessiond` protocol.  It is deliberately safe:
-    if Docker is unavailable, no container command is attempted.
-    """
+    """Start, reattach, or repair the configured Docker session."""
 
     cfg = get_thread_session_config(db, thread_id)
     if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
         return get_thread_session_status(db, thread_id)
     status = get_thread_session_status(db, thread_id)
-    if status.status not in ("available", "stopped") or not status.container_name:
+    if status.status == "unhealthy" and status.reason == "docker_unavailable":
         append_session_lifecycle_event(
             db,
             thread_id,
             action="docker_unavailable",
             session_id=cfg.session_id,
-            payload={"message": status.message},
+            payload={"message": status.message, "reason": status.reason},
+        )
+        return status
+    if status.status not in {"missing", "stopped", "ready", "busy", "unhealthy"} or not status.container_name:
+        append_session_lifecycle_event(
+            db,
+            thread_id,
+            action="docker_error",
+            session_id=cfg.session_id,
+            payload={"message": status.message, "reason": status.reason or status.status},
         )
         return status
 
@@ -1207,19 +1274,36 @@ def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
     mount_dir = docker_session_mount_dir(db, thread_id, cfg)
     _write_runtime_files(runtime_dir)
     try:
-        restarted = _start_docker_container(db, thread_id, cfg, status.container_name, bridge_dir, runtime_dir)
+        restarted = _start_docker_container(
+            db, thread_id, cfg, status.container_name, bridge_dir, runtime_dir,
+            status.status == "unhealthy",
+        )
         if restarted:
             _invalidate_python_runtime_refresh_cache(runtime_dir)
-        action = "reattached" if status.status == "stopped" else "docker_started"
+            _daemon, health_error = _wait_for_docker_daemon(bridge_dir)
+            if health_error:
+                raise RuntimeError(health_error)
+        action = "reattached" if status.status == "stopped" else ("docker_restarted" if status.status == "unhealthy" else "docker_started")
+        if not restarted:
+            return get_thread_session_status(db, thread_id)
     except Exception as e:
         append_session_lifecycle_event(
             db,
             thread_id,
             action="docker_error",
             session_id=cfg.session_id,
-            payload={"container_name": status.container_name, "error": str(e)},
+            payload={
+                "container_name": status.container_name,
+                "error": str(e),
+                "reason": status.reason or "start_failed",
+                "previous_status": status.status,
+            },
         )
-        return SessionStatus(True, cfg.provider, cfg.session_id, "error", str(e), status.container_name, cfg.share_repl)
+        return SessionStatus(
+            True, cfg.provider, cfg.session_id, "unhealthy", str(e),
+            status.container_name, cfg.share_repl,
+            reason=status.reason or "start_failed",
+        )
 
     append_session_lifecycle_event(
         db,
@@ -1234,9 +1318,19 @@ def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
             "mount_policy": _DOCKER_MOUNT_POLICY,
             "bridge_dir": str(bridge_dir),
             "runtime_dir": str(runtime_dir),
+            "reason": (status.reason if status.status == "unhealthy" else ("reattach" if status.status == "stopped" else "start")),
+            "previous_status": status.status,
+            "previous_reason": status.reason,
         },
     )
-    return status
+    if restarted and _daemon is not None:
+        return _session_status_from_daemon(
+            cfg,
+            status.container_name,
+            _daemon,
+            reason=(status.reason if status.status == "unhealthy" else ("reattach" if status.status == "stopped" else "start")),
+        )
+    return get_thread_session_status(db, thread_id)
 
 
 def get_or_start_docker_session_handle(db: ThreadsDB, thread_id: str) -> DockerSessionHandle:
@@ -1244,7 +1338,7 @@ def get_or_start_docker_session_handle(db: ThreadsDB, thread_id: str) -> DockerS
     if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
         raise RuntimeError("Docker session is not enabled for this thread")
     status = get_or_start_docker_session(db, thread_id)
-    if status.status not in ("available",) or not status.container_name:
+    if status.status not in ("ready", "busy") or not status.container_name:
         raise RuntimeError(status.message or f"Docker session not available: {status.status}")
     return DockerSessionHandle(
         session_id=cfg.session_id,
@@ -1318,6 +1412,10 @@ _DOCKER_EVAL_POLL_SEC = 0.05
 _DOCKER_CANCEL_ACK_SEC = 2.0
 _DOCKER_EVAL_PROTOCOL_VERSION = 2
 _DOCKER_HOST_OWNER_ID = f"{os.getpid()}-{uuid.uuid4().hex}"
+_DOCKER_HEARTBEAT_STALE_SEC = 5.0
+_DOCKER_STOP_TIMEOUT_SEC = 20.0
+_DOCKER_KILL_TIMEOUT_SEC = 10.0
+_DOCKER_STOP_VERIFY_SEC = 2.0
 
 
 def _docker_daemon_generation(bridge_dir: Path) -> Optional[str]:
@@ -1327,6 +1425,44 @@ def _docker_daemon_generation(bridge_dir: Path) -> Optional[str]:
         return value or None
     except Exception:
         return None
+
+
+def _docker_daemon_status(bridge_dir: Path) -> tuple[Optional[Dict[str, Any]], str]:
+    """Read and validate the daemon heartbeat/status record."""
+
+    path = bridge_dir / "sessiond_status.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "Docker session daemon heartbeat is missing"
+    except Exception as e:
+        return None, f"Docker session daemon status is unreadable: {type(e).__name__}: {e}"
+    if not isinstance(payload, dict):
+        return None, "Docker session daemon status is not a JSON object"
+    generation = str(payload.get("daemon_generation") or "").strip()
+    heartbeat = payload.get("heartbeat_at")
+    if not generation or not isinstance(heartbeat, (int, float)):
+        return None, "Docker session daemon status is incomplete"
+    announced_generation = _docker_daemon_generation(bridge_dir)
+    if announced_generation and generation != announced_generation:
+        return payload, "Docker session daemon generation does not match its heartbeat"
+    if not isinstance(payload.get("active_requests", []), list):
+        return payload, "Docker session daemon active request status is invalid"
+    if not isinstance(payload.get("channel_state", {}), dict):
+        return payload, "Docker session daemon channel status is invalid"
+    age = max(0.0, time.time() - float(heartbeat))
+    if age > _DOCKER_HEARTBEAT_STALE_SEC:
+        return payload, f"Docker session daemon heartbeat is stale ({age:.1f}s old)"
+    return payload, ""
+
+
+def _wait_for_docker_daemon(bridge_dir: Path, timeout_sec: float = 5.0) -> tuple[Optional[Dict[str, Any]], str]:
+    deadline = time.monotonic() + timeout_sec
+    status, error = _docker_daemon_status(bridge_dir)
+    while error and time.monotonic() < deadline:
+        time.sleep(_DOCKER_EVAL_POLL_SEC)
+        status, error = _docker_daemon_status(bridge_dir)
+    return status, error
 
 
 def _docker_eval_cleanup(bridge_dir: Path, req_id: str) -> None:
@@ -1340,13 +1476,13 @@ def _docker_eval_cleanup(bridge_dir: Path, req_id: str) -> None:
 
 
 def _docker_cancel_eval(
-    db: ThreadsDB,
-    runtime_thread_id: str,
     bridge_dir: Path,
     req_id: str,
     *,
     reason: str,
 ) -> bool:
+    """Request channel cancellation and report whether sessiond acknowledged."""
+
     cancel_path = bridge_dir / f"eval_{req_id}.cancel.json"
     ack_path = bridge_dir / f"eval_{req_id}.cancel.ack.json"
     _atomic_write_json(cancel_path, {
@@ -1360,9 +1496,7 @@ def _docker_cancel_eval(
     res_path = bridge_dir / f"eval_{req_id}.res.json"
     while time.monotonic() < deadline:
         # A terminal response can win the host timeout/cancellation race before
-        # sessiond observes the cancel file.  Treat that as a responsive daemon
-        # and let the caller consume the exact result instead of needlessly
-        # restarting the whole session for a missing cancellation ack.
+        # sessiond observes the cancel file. Treat it as responsive.
         if res_path.exists():
             return True
         if ack_path.exists():
@@ -1381,11 +1515,40 @@ def _docker_cancel_eval(
                 except Exception:
                     pass
         time.sleep(_DOCKER_EVAL_POLL_SEC)
-    try:
-        stop_thread_session(db, runtime_thread_id, reason=f"docker_eval_cancel_unresponsive:{reason}")
-    except Exception:
-        pass
     return False
+
+
+def _record_docker_eval_lifecycle(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    *,
+    action: str,
+    reason: str,
+    req_id: str,
+    payload: Dict[str, Any],
+    daemon_generation: Optional[str],
+    container_stopped: bool = False,
+) -> None:
+    try:
+        cfg = get_thread_session_config(db, runtime_thread_id)
+        append_session_lifecycle_event(
+            db,
+            runtime_thread_id,
+            action=action,
+            session_id=cfg.session_id,
+            payload={
+                "provider": "docker",
+                "reason": reason,
+                "request_id": req_id,
+                "language": str(payload.get("language") or ""),
+                "channel": str(payload.get("channel") or payload.get("repl_name") or "default"),
+                "daemon_generation": daemon_generation,
+                "container_stopped": container_stopped,
+            },
+        )
+    except Exception:
+        # Lifecycle diagnostics must never mask the eval's terminal result.
+        pass
 
 
 def _run_docker_eval_request(
@@ -1399,6 +1562,7 @@ def _run_docker_eval_request(
     req_id = uuid.uuid4().hex
     req_path = bridge_dir / f"eval_{req_id}.req.json"
     res_path = bridge_dir / f"eval_{req_id}.res.json"
+    daemon_generation = _docker_daemon_generation(bridge_dir)
     payload = {
         **dict(payload),
         "protocol_version": _DOCKER_EVAL_PROTOCOL_VERSION,
@@ -1406,7 +1570,7 @@ def _run_docker_eval_request(
         "request_id": req_id,
         "channel": str(payload.get("channel") or payload.get("repl_name") or "default"),
         "host_owner_id": _DOCKER_HOST_OWNER_ID,
-        "daemon_generation": _docker_daemon_generation(bridge_dir),
+        "daemon_generation": daemon_generation,
         "created_at": time.time(),
         "timeout_sec": timeout_sec,
         "deadline_duration_sec": timeout_sec,
@@ -1425,26 +1589,63 @@ def _run_docker_eval_request(
                 response = json.loads(res_path.read_text(encoding="utf-8"))
                 if str(response.get("request_id") or req_id) != req_id:
                     continue
+                response_reason = str(response.get("reason") or "")
+                if response_reason in {"timeout", "cancelled", "daemon_restarted"}:
+                    _record_docker_eval_lifecycle(
+                        db, runtime_thread_id,
+                        action="docker_eval_terminal",
+                        reason=("interrupted" if response_reason == "cancelled" else response_reason),
+                        req_id=req_id,
+                        payload=payload,
+                        daemon_generation=str(response.get("daemon_generation") or daemon_generation or "") or None,
+                    )
                 if response.get("ok"):
                     return str(response.get("output") or "")
                 return f"Error: Docker REPL failed: {response.get('error') or 'unknown error'}"
             if cancel_check is not None and cancel_check():
-                cancel_reason = "interrupted"
+                cancel_reason = "cancelled"
             elif timeout_sec is not None and (time.monotonic() - started) >= float(timeout_sec):
                 cancel_reason = "timeout"
             if cancel_reason is not None:
-                acknowledged = _docker_cancel_eval(
-                    db, runtime_thread_id, bridge_dir, req_id, reason=cancel_reason,
-                )
+                lifecycle_reason = "interrupted" if cancel_reason == "cancelled" else cancel_reason
+                acknowledged = _docker_cancel_eval(bridge_dir, req_id, reason=lifecycle_reason)
                 terminal_deadline = time.monotonic() + _DOCKER_CANCEL_ACK_SEC
                 while acknowledged and time.monotonic() < terminal_deadline:
                     if res_path.exists():
                         response = json.loads(res_path.read_text(encoding="utf-8"))
+                        response_reason = str(response.get("reason") or cancel_reason)
+                        _record_docker_eval_lifecycle(
+                            db, runtime_thread_id,
+                            action="docker_eval_terminal",
+                            reason=("interrupted" if response_reason == "cancelled" else response_reason),
+                            req_id=req_id,
+                            payload=payload,
+                            daemon_generation=str(response.get("daemon_generation") or daemon_generation or "") or None,
+                        )
                         return str(response.get("output") or "--- INTERRUPTED ---\nDocker REPL eval cancelled.")
                     time.sleep(_DOCKER_EVAL_POLL_SEC)
+                container_stopped = False
+                if not acknowledged:
+                    status = stop_thread_session(
+                        db,
+                        runtime_thread_id,
+                        reason=f"docker_eval_cancel_unresponsive:{lifecycle_reason}",
+                    )
+                    container_stopped = getattr(status, "status", None) == "stopped"
+                _record_docker_eval_lifecycle(
+                    db, runtime_thread_id,
+                    action="docker_eval_terminal",
+                    reason=(f"{lifecycle_reason}_session_stopped" if container_stopped else lifecycle_reason),
+                    req_id=req_id,
+                    payload=payload,
+                    daemon_generation=daemon_generation,
+                    container_stopped=container_stopped,
+                )
                 if cancel_reason == "timeout":
-                    return "--- TIMEOUT ---\nDocker REPL eval timed out and its channel was reset."
-                return "--- INTERRUPTED ---\nDocker REPL eval was cancelled and its channel was reset."
+                    suffix = " The unresponsive session container was stopped." if container_stopped else ""
+                    return f"--- TIMEOUT ---\nDocker REPL eval timed out and its channel was reset.{suffix}"
+                suffix = " The unresponsive session container was stopped." if container_stopped else ""
+                return f"--- INTERRUPTED ---\nDocker REPL eval was cancelled and its channel was reset.{suffix}"
             time.sleep(_DOCKER_EVAL_POLL_SEC)
     finally:
         _docker_eval_cleanup(bridge_dir, req_id)
@@ -2373,6 +2574,40 @@ class MemorySessionProvider:
         return []
 
 
+def _docker_wait_until_not_running(container_name: str, timeout_sec: float) -> _DockerContainerState:
+    deadline = time.monotonic() + max(0.0, timeout_sec)
+    state = _docker_container_state(container_name)
+    while state.exists is True and state.running is True and time.monotonic() < deadline:
+        time.sleep(0.05)
+        state = _docker_container_state(container_name)
+    return state
+
+
+def _docker_command_error(proc: Any, fallback: str) -> str:
+    return str(getattr(proc, "stderr", "") or getattr(proc, "stdout", "") or fallback).strip()
+
+
+def _session_status_from_daemon(
+    cfg: SessionConfig,
+    container_name: str,
+    daemon: Dict[str, Any],
+    *,
+    reason: Optional[str],
+) -> SessionStatus:
+    active = tuple(item for item in (daemon.get("active_requests") or ()) if isinstance(item, dict))
+    state = "busy" if active else "ready"
+    return SessionStatus(
+        True, cfg.provider, cfg.session_id, state,
+        f"Docker session daemon is {state}", container_name, cfg.share_repl,
+        daemon_generation=str(daemon.get("daemon_generation") or "") or None,
+        active_requests=active,
+        channel_state=dict(daemon.get("channel_state") or {}),
+        last_activity=daemon.get("last_activity_at"),
+        heartbeat_at=daemon.get("heartbeat_at"),
+        reason=reason,
+    )
+
+
 class DockerSessionProvider:
     """Docker-backed persistent session provider."""
 
@@ -2384,11 +2619,52 @@ class DockerSessionProvider:
     def status(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
         name = docker_session_container_name(db, cfg.session_id or _session_id_for_thread(thread_id))
         if not self.available():
-            return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", "Docker is not available", name, cfg.share_repl)
-        action = _latest_session_lifecycle_action(db, thread_id, cfg.session_id)
-        if action == "stopped":
-            return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", "Docker session is stopped", name, cfg.share_repl)
-        return SessionStatus(True, cfg.provider, cfg.session_id, "available", "Docker session provider is available", name, cfg.share_repl)
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "unhealthy",
+                "Docker daemon is not available", name, cfg.share_repl,
+                reason="docker_unavailable",
+            )
+        container = _docker_container_state(name)
+        lifecycle = _latest_session_lifecycle(db, thread_id, cfg.session_id) or {}
+        lifecycle_reason = str(lifecycle.get("reason") or "").strip() or None
+        if container.exists is None:
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "unhealthy",
+                container.error or "Could not inspect Docker session container",
+                name, cfg.share_repl, reason=lifecycle_reason or "inspect_failed",
+            )
+        if container.exists is False:
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "missing",
+                "Docker session container has not been created",
+                name, cfg.share_repl, reason=lifecycle_reason,
+            )
+        if container.running is not True:
+            message = f"Docker session container is {container.status or 'stopped'}"
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "stopped", message,
+                name, cfg.share_repl, reason=lifecycle_reason,
+            )
+
+        daemon, health_error = _docker_daemon_status(_session_bridge_dir(cfg.session_id or ""))
+        if daemon is None or health_error:
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "unhealthy",
+                health_error or "Docker session daemon status is unavailable",
+                name, cfg.share_repl,
+                daemon_generation=str((daemon or {}).get("daemon_generation") or "") or None,
+                active_requests=tuple((daemon or {}).get("active_requests") or ()),
+                channel_state=dict((daemon or {}).get("channel_state") or {}),
+                last_activity=(daemon or {}).get("last_activity_at"),
+                heartbeat_at=(daemon or {}).get("heartbeat_at"),
+                reason="daemon_unhealthy",
+            )
+        return _session_status_from_daemon(
+            cfg,
+            name,
+            daemon,
+            reason=lifecycle_reason,
+        )
 
     def start(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
         return get_or_start_docker_session(db, thread_id)
@@ -2420,28 +2696,115 @@ class DockerSessionProvider:
                 thread_id,
                 action="stop_unavailable",
                 session_id=cfg.session_id,
-                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason},
+                payload={
+                    "provider": cfg.provider,
+                    "container_name": container_name,
+                    "reason": reason,
+                    "error": "Docker daemon is not available",
+                },
             )
-            return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", "Docker is not available", container_name, cfg.share_repl)
-        try:
-            subprocess.run(["docker", "stop", container_name], capture_output=True, check=False, timeout=20)
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "unhealthy",
+                "Docker daemon is not available", container_name, cfg.share_repl,
+                reason=reason,
+            )
+
+        initial = _docker_container_state(container_name)
+        if initial.exists is False:
             append_session_lifecycle_event(
-                db,
-                thread_id,
-                action="stopped",
-                session_id=cfg.session_id,
-                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason},
+                db, thread_id, action="stopped", session_id=cfg.session_id,
+                payload={
+                    "provider": cfg.provider,
+                    "container_name": container_name,
+                    "reason": reason,
+                    "resulting_state": "missing",
+                    "verified_stopped": True,
+                    "already_absent": True,
+                    "kill_fallback": False,
+                },
             )
-            return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", _session_provider_stop_message(cfg), container_name, cfg.share_repl)
-        except Exception as e:
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "stopped",
+                "Docker session container is already absent", container_name, cfg.share_repl,
+                reason=reason,
+            )
+        if initial.exists is None:
+            error = initial.error or "Could not inspect Docker session container"
             append_session_lifecycle_event(
-                db,
-                thread_id,
-                action="stop_error",
-                session_id=cfg.session_id,
-                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason, "error": str(e)},
+                db, thread_id, action="stop_error", session_id=cfg.session_id,
+                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason, "error": error},
             )
-            return SessionStatus(True, cfg.provider, cfg.session_id, "error", str(e), container_name, cfg.share_repl)
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "unhealthy", error,
+                container_name, cfg.share_repl, reason=reason,
+            )
+
+        stop_error = ""
+        kill_used = False
+        if initial.running is True:
+            try:
+                proc = subprocess.run(
+                    ["docker", "stop", container_name], capture_output=True, text=True,
+                    check=False, timeout=_DOCKER_STOP_TIMEOUT_SEC,
+                )
+                if proc.returncode != 0:
+                    stop_error = _docker_command_error(proc, f"docker stop exited {proc.returncode}")
+            except subprocess.TimeoutExpired:
+                stop_error = f"docker stop timed out after {_DOCKER_STOP_TIMEOUT_SEC:g}s"
+            except Exception as e:
+                stop_error = f"{type(e).__name__}: {e}"
+
+        observed = _docker_wait_until_not_running(container_name, _DOCKER_STOP_VERIFY_SEC)
+        if observed.exists is True and observed.running is True:
+            kill_used = True
+            try:
+                proc = subprocess.run(
+                    ["docker", "kill", container_name], capture_output=True, text=True,
+                    check=False, timeout=_DOCKER_KILL_TIMEOUT_SEC,
+                )
+                if proc.returncode != 0:
+                    kill_error = _docker_command_error(proc, f"docker kill exited {proc.returncode}")
+                    stop_error = "; ".join(part for part in (stop_error, kill_error) if part)
+            except subprocess.TimeoutExpired:
+                stop_error = "; ".join(part for part in (
+                    stop_error,
+                    f"docker kill timed out after {_DOCKER_KILL_TIMEOUT_SEC:g}s",
+                ) if part)
+            except Exception as e:
+                stop_error = "; ".join(part for part in (stop_error, f"{type(e).__name__}: {e}") if part)
+            observed = _docker_wait_until_not_running(container_name, _DOCKER_STOP_VERIFY_SEC)
+
+        verified = observed.exists is False or (observed.exists is True and observed.running is False)
+        payload = {
+            "provider": cfg.provider,
+            "container_name": container_name,
+            "reason": reason,
+            "stop_error": stop_error or None,
+            "kill_fallback": kill_used,
+            "resulting_state": observed.status,
+            "verified_stopped": verified,
+        }
+        if verified:
+            append_session_lifecycle_event(
+                db, thread_id, action="stopped", session_id=cfg.session_id, payload=payload,
+            )
+            message = _session_provider_stop_message(cfg)
+            if kill_used:
+                message += " Docker kill fallback was required."
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "stopped", message,
+                container_name, cfg.share_repl, reason=reason,
+            )
+
+        error = stop_error or observed.error or "Container is still running after docker stop/kill"
+        payload["error"] = error
+        append_session_lifecycle_event(
+            db, thread_id, action="stop_error", session_id=cfg.session_id, payload=payload,
+        )
+        return SessionStatus(
+            True, cfg.provider, cfg.session_id, "unhealthy", error,
+            container_name, cfg.share_repl, reason=reason,
+        )
 
     def reset(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> str:
         return _reset_thread_session_core(db, thread_id, cfg, reason=reason)

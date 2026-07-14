@@ -93,6 +93,27 @@ def execute_bash_repl_tool(args: Dict[str, Any], ctx: Any = None) -> str:
         return f"Error: bash_repl failed: {e}"
 
 
+def _append_session_health_details(lines: list[str], status: Any) -> None:
+    if status.container_name:
+        lines.append(f"  Container: {status.container_name}")
+    if getattr(status, "daemon_generation", None):
+        lines.append(f"  Daemon generation: {status.daemon_generation}")
+    if getattr(status, "active_requests", ()):
+        lines.append(f"  Active requests: {len(status.active_requests)}")
+    if getattr(status, "channel_state", {}):
+        channels = ", ".join(
+            f"{name}={details.get('state', 'unknown') if isinstance(details, dict) else details}"
+            for name, details in sorted(status.channel_state.items())
+        )
+        lines.append(f"  Channels: {channels}")
+    if getattr(status, "last_activity", None) is not None:
+        lines.append(f"  Last activity: {status.last_activity}")
+    if getattr(status, "reason", None):
+        lines.append(f"  Reason: {status.reason}")
+    if status.message:
+        lines.append(f"  Message: {status.message}")
+
+
 def format_session_status(thread_id: str, db: Any = None) -> str:
     import eggthreads as _eggthreads
 
@@ -105,10 +126,7 @@ def format_session_status(thread_id: str, db: Any = None) -> str:
     lines.append(f"  Session ID: {st.session_id or '(none)'}")
     lines.append(f"  Status: {st.status}")
     lines.append(f"  Share REPL channel: {getattr(st, 'share_repl', False)}")
-    if st.container_name:
-        lines.append(f"  Container: {st.container_name}")
-    if st.message:
-        lines.append(f"  Message: {st.message}")
+    _append_session_health_details(lines, st)
     for language in ("python", "bash"):
         rt = _eggthreads.find_runtime_thread(db, thread_id, language=language)
         if rt is None:
@@ -120,10 +138,7 @@ def format_session_status(thread_id: str, db: Any = None) -> str:
         lines.append(f"  Provider: {rst.provider}")
         lines.append(f"  Status: {rst.status}")
         lines.append(f"  Share REPL channel: {getattr(rst, 'share_repl', False)}")
-        if rst.container_name:
-            lines.append(f"  Container: {rst.container_name}")
-        if rst.message:
-            lines.append(f"  Message: {rst.message}")
+        _append_session_health_details(lines, rst)
     return "\n".join(lines)
 
 

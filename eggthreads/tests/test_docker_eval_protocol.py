@@ -145,3 +145,79 @@ def test_repl_tool_context_cancel_signal_reaches_public_session_api(monkeypatch)
     assert plugin.execute_python_repl_tool({"code": "pass"}, ctx) == "ok"
     assert seen["cancel_check"] is cancelled.is_set or seen["cancel_check"]() is False
     assert seen["timeout_sec"] == 9
+
+
+def test_host_interrupt_records_terminal_reason_in_lifecycle(monkeypatch, tmp_path):
+    import eggthreads as ts
+
+    bridge, _seen = _run_host(tmp_path, monkeypatch)
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, name="runtime")
+    ts.enable_thread_session(db, thread_id, provider="docker")
+    original_write = session._atomic_write_json
+
+    def write_with_response(path, payload):
+        original_write(path, payload)
+        if path.name.endswith(".cancel.json"):
+            req_id = payload["request_id"]
+            (bridge / f"eval_{req_id}.res.json").write_text(json.dumps({
+                "request_id": req_id,
+                "ok": True,
+                "reason": "cancelled",
+                "output": "--- INTERRUPTED ---\nreset",
+            }))
+
+    monkeypatch.setattr(session, "_atomic_write_json", write_with_response)
+
+    result = session._run_docker_eval_request(
+        db, thread_id, bridge,
+        {"language": "python", "code": "while True: pass", "repl_name": "chan"},
+        60,
+        lambda: True,
+    )
+
+    assert "INTERRUPTED" in result
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='session.lifecycle' "
+        "ORDER BY event_seq DESC LIMIT 1",
+        (thread_id,),
+    ).fetchone()
+    payload = json.loads(row[0])
+    assert payload["action"] == "docker_eval_terminal"
+    assert payload["reason"] == "interrupted"
+    assert payload["daemon_generation"] == "generation-a"
+
+
+def test_host_timeout_records_restart_reason_in_lifecycle(monkeypatch, tmp_path):
+    import eggthreads as ts
+
+    bridge, _seen = _run_host(tmp_path, monkeypatch)
+    monkeypatch.setattr(session, "_DOCKER_CANCEL_ACK_SEC", 0.01)
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, name="runtime")
+    ts.enable_thread_session(db, thread_id, provider="docker")
+    monkeypatch.setattr(
+        session,
+        "stop_thread_session",
+        lambda *_a, **_k: session.SessionStatus(True, "docker", "session", "stopped"),
+    )
+
+    result = session._run_docker_eval_request(
+        db, thread_id, bridge,
+        {"language": "python", "code": "while True: pass", "repl_name": "chan"},
+        0.001,
+    )
+
+    assert "TIMEOUT" in result
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='session.lifecycle' "
+        "ORDER BY event_seq DESC LIMIT 1",
+        (thread_id,),
+    ).fetchone()
+    payload = json.loads(row[0])
+    assert payload["action"] == "docker_eval_terminal"
+    assert payload["reason"] == "timeout_session_stopped"
+    assert payload["container_stopped"] is True
+    assert payload["daemon_generation"] == "generation-a"

@@ -144,25 +144,51 @@ def test_session_lifecycle_event(tmp_path):
     assert payload["container_name"] == "egg-rlm-test"
 
 
-def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
+def test_docker_session_start_returns_verified_daemon_health(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
     sid = ts.enable_thread_session(db, tid, provider="docker", image="egg-rlm-session")
     monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+    monkeypatch.setattr(
+        ts.eggthreads.session,
+        "_docker_container_state",
+        lambda _name: ts.eggthreads.session._DockerContainerState(False, False, "missing"),
+    )
     start_calls = []
-    monkeypatch.setattr(ts.eggthreads.session, "_start_docker_container", lambda *a, **k: start_calls.append((a, k)))
+    monkeypatch.setattr(
+        ts.eggthreads.session,
+        "_start_docker_container",
+        lambda *a, **k: start_calls.append((a, k)) or True,
+    )
+    health = {
+        "daemon_generation": "generation-a",
+        "heartbeat_at": 2.0,
+        "last_activity_at": 1.0,
+        "active_requests": [],
+        "channel_state": {},
+    }
+    monkeypatch.setattr(ts.eggthreads.session, "_wait_for_docker_daemon", lambda _bridge: (health, ""))
+    monkeypatch.setattr(ts.eggthreads.session, "_docker_daemon_status", lambda _bridge: (health, ""))
+    states = iter([
+        ts.eggthreads.session._DockerContainerState(False, False, "missing"),
+        ts.eggthreads.session._DockerContainerState(False, False, "missing"),
+        ts.eggthreads.session._DockerContainerState(True, True, "running"),
+    ])
+    monkeypatch.setattr(ts.eggthreads.session, "_docker_container_state", lambda _name: next(states))
 
     status = ts.get_thread_session_status(db, tid)
     assert status.enabled is True
     assert status.provider == "docker"
-    assert status.status == "available"
+    assert status.status == "missing"
     assert status.session_id == sid
     assert status.container_name is not None
     assert status.container_name.startswith("egg-rlm-")
 
     status2 = ts.get_or_start_docker_session(db, tid)
     assert status2.container_name == status.container_name
+    assert status2.status == "ready"
+    assert status2.daemon_generation == "generation-a"
     assert start_calls
     row = db.conn.execute(
         "SELECT payload_json FROM events WHERE thread_id=? AND type='session.lifecycle' ORDER BY event_seq DESC LIMIT 1",
@@ -171,6 +197,7 @@ def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
     payload = json.loads(row[0])
     assert payload["action"] == "docker_started"
     assert payload["container_name"] == status.container_name
+    assert payload["previous_status"] == "missing"
 
 
 def test_docker_session_identity_uses_sqlites_canonical_database_path(monkeypatch, tmp_path):
@@ -655,7 +682,8 @@ def test_docker_session_status_unavailable(monkeypatch, tmp_path):
     monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: False)
 
     status = ts.get_thread_session_status(db, tid)
-    assert status.status == "unavailable"
+    assert status.status == "unhealthy"
+    assert status.reason == "docker_unavailable"
     assert status.container_name is not None
 
     ts.get_or_start_docker_session(db, tid)
