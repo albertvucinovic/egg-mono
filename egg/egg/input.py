@@ -45,6 +45,32 @@ _MOUSE_BODY_PARTIAL_RE = _re.compile(r"^-?\d*(?:;-?\d*){0,2}$")
 # fall through to the editor as before.
 _ORPHAN_MOUSE_WINDOW_SEC = 0.30
 
+# Ctrl+Alt+A / Ctrl+Alt+X are mnemonic, pass through stock tmux, and are
+# unbound in default Readline emacs mode. They also avoid common terminal menu
+# mnemonics and the audited Sway configuration. Terminals encode these as ESC
+# plus the corresponding control byte.
+_TOGGLE_AUTO_APPROVAL_KEY = "\x1b\x01"
+_TOGGLE_SANDBOXING_KEY = "\x1b\x18"
+
+KEYBOARD_SHORTCUTS_HELP = """Keyboard shortcuts:
+  Actions:
+    Ctrl+Alt+A — Toggle tool auto-approval (/toggleAutoApproval).
+    Ctrl+Alt+X — Toggle sandboxing (/toggleSandboxing; X for sandboX).
+    Enter or Ctrl+D — Send (Enter follows /enterMode).
+    Shift+Enter or Alt+Enter — Insert a newline.
+    Ctrl+E — Clear the input draft.
+    Ctrl+P — Replace the draft with clipboard text.
+    Ctrl+C — Interrupt active work; otherwise clear a draft; on idle empty input, quit.
+  Input and completion:
+    Tab — Accept the selected autocomplete suggestion.
+    Up/Down — Move between input lines or autocomplete suggestions.
+    Left/Right — Move the cursor; Home/End — move to the line boundary.
+    Esc — Dismiss autocomplete.
+    Backspace/Delete — Delete before/at the cursor.
+  Transcript:
+    PageUp or Shift+PageUp — Scroll up half a page.
+    PageDown or Shift+PageDown — Scroll down half a page."""
+
 
 def _strip_mouse_prefix(s: str) -> tuple:
     """Return (prefix, body) where prefix is one of the recognised mouse
@@ -89,6 +115,9 @@ del _re
 
 class InputMixin:
     """Mixin providing keyboard input handling: handle_key."""
+
+    # The command help renderer discovers this optional client-specific text.
+    keyboard_shortcuts_help = KEYBOARD_SHORTCUTS_HELP
 
     def handle_key(self, key: str) -> bool:
         """Handle a single key press from the input panel.
@@ -173,6 +202,16 @@ class InputMixin:
         if isinstance(key, str) and key == '\x1b':
             self._pending_esc = True
             self._pending_esc_time = now
+            return True
+
+        # App actions use Ctrl+Alt sequences that do not collide with default
+        # Readline editing keys, terminal menus, or tmux's prefix table. Handle
+        # them before ordinary editor input and leave the current draft untouched.
+        if key == _TOGGLE_AUTO_APPROVAL_KEY:
+            self.handle_command('/toggleAutoApproval')
+            return True
+        if key == _TOGGLE_SANDBOXING_KEY:
+            self.handle_command('/toggleSandboxing')
             return True
 
         # Ctrl+D sends, Ctrl+E clears input, Ctrl+C exits

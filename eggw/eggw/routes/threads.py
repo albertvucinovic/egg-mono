@@ -1,7 +1,10 @@
 """Thread API routes for eggw backend."""
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import os
+import shlex
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -16,14 +19,16 @@ from eggthreads import (
     duplicate_thread,
     current_thread_model,
     thread_state,
+    parse_quick_start_args,
     get_active_get_user_message_waiting_note,
     ThreadEventFeed,
     ThreadsDB,
 )
 
-from ..models import ThreadInfo, CreateThreadRequest
+from ..models import CreateThreadRequest, CreateThreadResponse, ThreadInfo
 from .. import core
 from ..core import ensure_scheduler_for, get_thread_root_id
+from ..commands.attachments import cmd_attach
 from ..core.scheduler import scheduler_running
 from ..system_prompt import append_root_system_prompt
 
@@ -144,7 +149,7 @@ async def get_thread(thread_id: str):
     )
 
 
-@router.post("", response_model=ThreadInfo)
+@router.post("", response_model=CreateThreadResponse)
 async def create_thread(request: CreateThreadRequest):
     """Create a new thread."""
     if not core.db:
@@ -184,14 +189,38 @@ async def create_thread(request: CreateThreadRequest):
 
     ensure_scheduler_for(thread_id)
 
+    initial_draft: str | None = None
+    initial_attachment: dict[str, Any] | None = None
+    initial_error: str | None = None
+    if request.claim_quick_start:
+        if (os.environ.get("EGGW_RELOAD_THREAD_ID") or "").strip():
+            # Consume any accidentally configured launch payload so it cannot be
+            # applied by a later create-thread request after the reload env is gone.
+            core.claim_quick_start_args()
+        else:
+            quick_start = parse_quick_start_args(core.claim_quick_start_args(), cwd=Path.cwd())
+            if quick_start is not None and quick_start.kind == "draft":
+                initial_draft = quick_start.draft
+            elif quick_start is not None and quick_start.source_path is not None:
+                staged = await cmd_attach(thread_id, shlex.quote(str(quick_start.source_path)))
+                if staged.success and isinstance(staged.data, dict):
+                    part = staged.data.get("content_part")
+                    if isinstance(part, dict):
+                        initial_attachment = part
+                if initial_attachment is None:
+                    initial_error = staged.message or "Quick-start file could not be staged."
+
     t = core.db.get_thread(thread_id)
-    return ThreadInfo(
+    return CreateThreadResponse(
         id=t.thread_id,
         name=t.name,
         parent_id=get_parent(core.db, t.thread_id),
         model_key=current_thread_model(core.db, t.thread_id),
         created_at=t.created_at,
         has_children=False,
+        initial_draft=initial_draft,
+        initial_attachment=initial_attachment,
+        initial_error=initial_error,
     )
 
 

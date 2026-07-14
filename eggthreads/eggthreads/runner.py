@@ -2986,6 +2986,7 @@ class ThreadRunner:
                     'role': 'tool',
                     'content': f"Tool call execution denied! Reason: {reason}",
                     'tool_call_id': tc.tool_call_id,
+                    'name': tc.name,
                     'user_tool_call': bool(ra.kind == 'RA3_tools_user'),
                 }
                 if current_model:
@@ -3391,6 +3392,7 @@ class ThreadRunner:
                     'role': 'tool',
                     'content': content,
                     'tool_call_id': tc.tool_call_id,
+                    'name': tc.name,
                     'user_tool_call': bool(ra.kind == 'RA3_tools_user'),
                 }
                 try:

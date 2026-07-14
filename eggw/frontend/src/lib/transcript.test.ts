@@ -9,6 +9,7 @@ import {
   removeClientTranscriptMessage,
   replaceClientTranscriptMessage,
   transcriptQueryKey,
+  patchTranscriptMessage,
   upsertTranscriptTailMessage,
   type TranscriptData,
   type TranscriptPage,
@@ -260,6 +261,20 @@ describe("thread-keyed transcript cache", () => {
     expect(updated.pageParams).toBe(previous.pageParams);
   });
 
+  it("keeps no-timestamp optimistic entries at the local tail on reconciliation", () => {
+    const previous = page(["before"], 5);
+    previous.items.push({
+      id: "optimistic",
+      role: "user",
+      client_only: "optimistic",
+      client_operation_id: "send-op",
+    });
+
+    const reconciled = reconcileTranscriptTail(page(["before", "after"], 6), previous);
+
+    expect(reconciled.items.map((message) => message.id)).toEqual(["before", "after", "optimistic"]);
+  });
+
   it("upserts a canonical live message into the authoritative tail without disturbing pagination", () => {
     const client = new QueryClient();
     const transcript = data([
@@ -332,4 +347,52 @@ describe("thread-keyed transcript cache", () => {
     expect(reconciled.items.map((message) => message.id)).toEqual(["before", "event-message"]);
     expect(reconciled.items[1].content).toBe("normalized server value");
   });
+  it("applies consumed get-user edit metadata in place across transcript pages", () => {
+    const client = new QueryClient();
+    const previous = page(["before", "answer", "after"], 20, "older-cursor");
+    previous.items[0].timestamp = "2026-07-14T00:00:00Z";
+    previous.items[1].timestamp = "2026-07-14T00:00:01Z";
+    previous.items[2].timestamp = "2026-07-14T00:00:02Z";
+    client.setQueryData(transcriptQueryKey("thread-a"), data([
+      previous,
+      page(["oldest"], 10),
+    ]));
+
+    patchTranscriptMessage(client, "thread-a", "answer", {
+      content: "Continue",
+      consumed_by_tool_name: "get_user_message_while_preserving_llm_turn",
+      consumed_by_tool_call_id: "call-get-user",
+    }, 21);
+
+    const updated = client.getQueryData<TranscriptData>(transcriptQueryKey("thread-a"))!;
+    expect(updated.pages[0].items.map((message) => message.id)).toEqual(["before", "answer", "after"]);
+    expect(updated.pages[0].items[1]).toMatchObject({
+      role: "user",
+      content: "Continue",
+      consumed_by_tool_call_id: "call-get-user",
+      event_seq: 21,
+    });
+    expect(updated.pages[1].items.map((message) => message.id)).toEqual(["oldest"]);
+
+    const staleFetched = page(["before", "answer", "after"], 20, "older-cursor");
+    staleFetched.items[0].timestamp = "2026-07-14T00:00:00Z";
+    staleFetched.items[1].timestamp = "2026-07-14T00:00:01Z";
+    staleFetched.items[1].content = "stale create-only answer";
+    staleFetched.items[2].timestamp = "2026-07-14T00:00:02Z";
+    const stale = reconcileTranscriptTail(staleFetched, updated.pages[0]);
+    expect(stale.items.map((message) => message.id)).toEqual(["before", "answer", "after"]);
+    expect(stale.items[1]).toMatchObject({
+      content: "Continue",
+      consumed_by_tool_call_id: "call-get-user",
+      event_seq: 21,
+    });
+
+    const coveredFetched = page(["before", "answer", "after"], 21, "older-cursor");
+    coveredFetched.items[1].content = "canonical covered answer";
+    const covered = reconcileTranscriptTail(coveredFetched, stale);
+    expect(covered.items[1].content).toBe("canonical covered answer");
+    expect(covered.items[1].event_seq).toBeUndefined();
+    expect(covered.items[1].consumed_by_tool_call_id).toBeUndefined();
+  });
+
 });

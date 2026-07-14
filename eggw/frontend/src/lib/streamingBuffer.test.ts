@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AnimationFrameCoalescer, IntervalCoalescer, StreamingBuffer } from "./streamingBuffer";
+import { useAppStore } from "./store";
 
 describe("StreamingBuffer tool arguments", () => {
   it("retains argument chunks without growing-string concatenation", () => {
@@ -13,6 +14,25 @@ describe("StreamingBuffer tool arguments", () => {
     expect(call?.argumentLength).toBe(chunks.reduce((total, chunk) => total + chunk.length, 0));
     expect(buffer.getToolCallArguments("call-a")).toBe(chunks.join(""));
     expect(buffer.getToolCallArgumentPrefix("call-a", 40)).toBe(chunks.join("").slice(0, 40));
+  });
+
+  it("marks one live tool terminal without removing sibling tools", () => {
+    useAppStore.setState({ streamingByThread: {} });
+    const store = useAppStore.getState();
+    store.upsertThreadStreamingToolCall("thread-a", "call-get-user", "get_user_message_while_preserving_llm_turn");
+    store.upsertThreadStreamingToolCall("thread-a", "call-bash", "bash");
+    store.markThreadStreamingToolStarted("thread-a", "call-get-user", "get_user_message_while_preserving_llm_turn", 1000, 30);
+    store.markThreadStreamingToolStarted("thread-a", "call-bash", "bash", 1000, 30);
+
+    store.markThreadStreamingToolFinished("thread-a", "call-get-user");
+
+    const outputs = useAppStore.getState().streamingByThread["thread-a"].streamingToolOutputs;
+    expect(useAppStore.getState().streamingByThread["thread-a"].streamingToolCalls["call-get-user"].finished).toBe(true);
+    expect(outputs["call-get-user"]).toMatchObject({ finished: true });
+    expect(outputs["call-get-user"].startedAtMs).toBeUndefined();
+    expect(outputs["call-get-user"].timeout).toBeUndefined();
+    expect(outputs["call-bash"]).toMatchObject({ name: "bash", startedAtMs: 1000 });
+    expect(outputs["call-bash"].finished).toBeUndefined();
   });
 
 

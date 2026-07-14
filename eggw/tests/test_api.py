@@ -136,6 +136,56 @@ class TestThreadOperations:
         assert len(data["id"]) > 0
         return data["id"]
 
+    def test_quick_start_env_is_scrubbed_after_process_local_capture(self, monkeypatch):
+        monkeypatch.setenv("EGGW_QUICK_START_ARGS_JSON", '["private launch prompt"]')
+
+        core_state.configure_quick_start_from_env()
+
+        assert "EGGW_QUICK_START_ARGS_JSON" not in os.environ
+        assert core_state.claim_quick_start_args() == ["private launch prompt"]
+
+    def test_landing_create_claims_quick_start_draft_once(self, client):
+        core_state.configure_quick_start_args(["Tell", "me a story"])
+
+        first = client.post("/api/threads", json={"claim_quick_start": True})
+        second = client.post("/api/threads", json={"claim_quick_start": True})
+
+        assert first.status_code == 200
+        assert first.json()["initial_draft"] == "Tell me a story"
+        assert first.json()["initial_attachment"] is None
+        assert second.status_code == 200
+        assert second.json()["initial_draft"] is None
+
+    def test_landing_create_stages_sole_existing_file_without_message(
+        self, client, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        source = tmp_path / "launch file.txt"
+        source.write_text("attachment bytes only", encoding="utf-8")
+        core_state.configure_quick_start_args([source.name])
+
+        response = client.post("/api/threads", json={"claim_quick_start": True})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["initial_draft"] is None
+        assert payload["initial_attachment"]["type"] == "attachment"
+        assert payload["initial_attachment"]["filename"] == source.name
+        messages = client.get(f"/api/threads/{payload['id']}/messages").json()
+        assert all(message["role"] != "user" for message in messages)
+
+    def test_reload_create_does_not_claim_quick_start(self, client, monkeypatch):
+        core_state.configure_quick_start_args(["must not reapply"])
+        monkeypatch.setenv("EGGW_RELOAD_THREAD_ID", "existing-thread")
+
+        response = client.post("/api/threads", json={"claim_quick_start": True})
+
+        assert response.status_code == 200
+        assert response.json()["initial_draft"] is None
+        monkeypatch.delenv("EGGW_RELOAD_THREAD_ID")
+        later = client.post("/api/threads", json={"claim_quick_start": True})
+        assert later.json()["initial_draft"] is None
+
     def test_thread_lists_use_latest_model_switch(self, client):
         """Thread list APIs should report the event-log model source of truth."""
         from eggthreads import set_thread_model
@@ -545,6 +595,31 @@ class TestThreadOperations:
         assert payload["content"] == "Continue with the next slice."
         assert payload.get("keep_user_turn") is not True
         assert payload.get("no_api") is not True
+
+        # The async get-user tool later edits this same durable User message.
+        # EggW's transcript projection must retain the display-only lifecycle
+        # metadata even though provider semantics hide/consume the answer.
+        from eggthreads import edit_message
+        edit_message(
+            core_state.db,
+            thread_id,
+            answer_msg_id,
+            "Continue with the next slice.",
+            extra={
+                "no_api": True,
+                "keep_user_turn": True,
+                "consumed_by_tool_call_id": tool_call_id,
+                "consumed_by_tool_name": get_user_tool_name,
+            },
+        )
+        projected_answer = next(
+            message for message in client.get(f"/api/threads/{thread_id}/messages").json()
+            if message["id"] == answer_msg_id
+        )
+        assert projected_answer["role"] == "user"
+        assert projected_answer["content"] == "Continue with the next slice."
+        assert projected_answer["consumed_by_tool_call_id"] == tool_call_id
+        assert projected_answer["consumed_by_tool_name"] == get_user_tool_name
 
         state_after_answer = client.get(f"/api/threads/{thread_id}/state").json()
         assert state_after_answer["active_get_user_wait"] is False
@@ -2196,6 +2271,39 @@ class TestEventStreaming:
             "chunk_seq",
             "payload",
         }
+
+    def test_consumed_get_user_edit_streams_exact_display_identity(self, client):
+        from eggthreads import append_message, edit_message
+
+        thread_id = client.post("/api/threads", json={"name": "get-user edit"}).json()["id"]
+        answer_id = append_message(core_state.db, thread_id, "user", "Continue")
+        cursor = core_state.db.max_event_seq(thread_id)
+        edit_message(
+            core_state.db,
+            thread_id,
+            answer_id,
+            "Continue",
+            extra={
+                "no_api": True,
+                "keep_user_turn": True,
+                "consumed_by_tool_call_id": "call-get-user",
+                "consumed_by_tool_name": "get_user_message_while_preserving_llm_turn",
+            },
+        )
+
+        response = self._finite_get(
+            client,
+            f"/api/threads/{thread_id}/events?after_seq={cursor}",
+        )
+        events = self._sse_events(response)
+
+        assert len(events) == 1
+        envelope = events[0]["data"]
+        assert envelope["type"] == "msg.edit"
+        assert envelope["msg_id"] == answer_id
+        assert envelope["payload"]["consumed_by_tool_call_id"] == "call-get-user"
+        assert envelope["payload"]["consumed_by_tool_name"] == "get_user_message_while_preserving_llm_turn"
+        assert envelope["payload"]["no_api"] is True
 
     def test_after_seq_precedes_last_event_id_and_reconnect_has_no_duplicates(self, client):
         from eggthreads import append_message

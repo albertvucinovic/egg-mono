@@ -143,6 +143,15 @@ def test_read_key_preserves_full_csi_u_shift_enter():
     )
 
 
+def test_read_key_preserves_ctrl_alt_sequence_for_app_shortcuts():
+    chars = iter(b"\x1b\x01")
+
+    def read_byte():
+        return bytes([next(chars)])
+
+    assert LiveEditorBase._read_key_bytes(read_byte, lambda _timeout: True) == "\x1b\x01"
+
+
 def test_read_key_returns_bare_escape_when_no_tail():
     chars = iter(b"\x1b")
 

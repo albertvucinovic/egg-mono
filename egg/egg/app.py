@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import time
 import uuid
 from dataclasses import replace
@@ -44,6 +45,7 @@ from eggthreads import (  # type: ignore
     pause_thread,
     resume_thread,
     current_thread_model_info,
+    parse_quick_start_args,
 )
 from eggthreads import (  # type: ignore
     get_sandbox_status,
@@ -84,7 +86,7 @@ from .attachments import (
     staged_attachments_for_thread,
 )
 from .image_generation import register_image_generation_command
-from .edit_answer import register_edit_answer_command
+from .edit_answer import register_edit_answer_command, set_input_panel_text
 from .commands import (
     ModelCommandsMixin,
     ThreadCommandsMixin,
@@ -128,7 +130,7 @@ class EggDisplayApp(
     Commands start with '/'.
     """
 
-    def __init__(self):
+    def __init__(self, *, quick_start_args: Optional[List[str]] = None):
         self.console = Console()
         self._theme = "default"
         self._rich_theme = None
@@ -361,6 +363,40 @@ class EggDisplayApp(
         self._pending_prompt: Dict[str, Any] = {}
         # Last time we refreshed the children tree panel (sec since epoch)
         self._last_children_refresh: float = time.time()
+
+        self._apply_quick_start_args(quick_start_args or [])
+
+    def _apply_quick_start_args(self, args: List[str]) -> None:
+        """Prefill the existing composer/staging state for a fresh launch."""
+
+        # /reload re-execs the wrapper with its original argv. The durable
+        # thread handoff wins, and launch arguments must not overwrite a draft
+        # or restage a file on every reload.
+        if (os.environ.get('EGG_RELOAD_THREAD_ID') or '').strip():
+            return
+        # --force-without-aiohttp is an Egg runtime option, not draft text. It
+        # was removed from sys.argv at module import; mirror that for explicit
+        # constructor arguments used by embedders/tests.
+        launch_args = [arg for arg in args if arg != '--force-without-aiohttp']
+        request = parse_quick_start_args(launch_args, cwd=Path.cwd())
+        if request is None:
+            return
+        if request.kind == 'draft':
+            set_input_panel_text(self, request.draft)
+            if request.draft:
+                self.log_system('Loaded command-line text as an unsent draft.')
+            return
+
+        if request.source_path is None:
+            return
+        before = staged_attachment_count(self, self.current_thread)
+        self.command_registry.execute(
+            'attach',
+            self._command_context(),
+            shlex.quote(str(request.source_path)),
+        )
+        if staged_attachment_count(self, self.current_thread) <= before:
+            self.log_system('Quick-start file could not be staged; see /attach error above.')
 
     def _notify_input_ready(self) -> None:
         """Wake the UI loop from the terminal reader thread."""
@@ -1181,7 +1217,7 @@ class EggDisplayApp(
 
 
 async def run_cli() -> int:
-    app = EggDisplayApp()
+    app = EggDisplayApp(quick_start_args=list(_sys.argv[1:]))
     await app.run()
     if getattr(app, '_reload_requested', False):
         if not getattr(app, '_reload_via_shell', False):

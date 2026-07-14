@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import stat
 import subprocess
@@ -185,7 +186,7 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def _run_launcher(tmp_path: Path, **environment: str) -> subprocess.CompletedProcess[str]:
+def _run_launcher(tmp_path: Path, *launcher_args: str, **environment: str) -> subprocess.CompletedProcess[str]:
     repo_root = Path(__file__).resolve().parents[2]
     tmp_path.mkdir(parents=True, exist_ok=True)
     fake_bin = tmp_path / "bin"
@@ -198,6 +199,7 @@ def _run_launcher(tmp_path: Path, **environment: str) -> subprocess.CompletedPro
         'printf "%s\\n" "$@" > "$EGGW_TEST_CAPTURE/backend-args"\n'
         'printf "%s" "$EGGW_API_TOKEN" > "$EGGW_TEST_CAPTURE/backend-token"\n'
         'printf "%s" "$EGGW_ALLOWED_ORIGINS" > "$EGGW_TEST_CAPTURE/origins"\n'
+        'printf "%s" "${EGGW_QUICK_START_ARGS_JSON:-}" > "$EGGW_TEST_CAPTURE/quick-start-json"\n'
         'sleep 3',
     )
     _write_executable(
@@ -228,11 +230,13 @@ def _run_launcher(tmp_path: Path, **environment: str) -> subprocess.CompletedPro
         "EGGW_FRONTEND_BIND_HOST",
         "EGGW_PUBLIC",
         "NEXT_PUBLIC_API_URL",
+        "EGGW_RELOAD_THREAD_ID",
+        "EGGW_QUICK_START_ARGS_JSON",
     ):
         if key not in environment:
             env.pop(key, None)
     return subprocess.run(
-        [str(repo_root / "eggw" / "eggw.sh")],
+        [str(repo_root / "eggw" / "eggw.sh"), *launcher_args],
         cwd=tmp_path,
         env=env,
         text=True,
@@ -259,6 +263,24 @@ def test_launcher_generates_shared_high_entropy_token_and_binds_loopback(tmp_pat
     assert frontend_args[-4:] == ["-H", "127.0.0.1", "-p", "18124"]
     assert (capture / "frontend-api-url").read_text() == "http://localhost:18123"
     assert (capture / "origins").read_text() == "http://localhost:18124,http://127.0.0.1:18124"
+
+
+def test_launcher_preserves_quick_start_argument_boundaries_and_reload_suppresses_them(tmp_path: Path):
+    result = _run_launcher(tmp_path / "fresh", "Tell", "me a story", 'quote "inside"')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads((tmp_path / "fresh" / "capture" / "quick-start-json").read_text()) == [
+        "Tell",
+        "me a story",
+        'quote "inside"',
+    ]
+
+    reloaded = _run_launcher(
+        tmp_path / "reload",
+        "must not reapply",
+        EGGW_RELOAD_THREAD_ID="existing-thread",
+    )
+    assert reloaded.returncode == 0, reloaded.stdout + reloaded.stderr
+    assert json.loads((tmp_path / "reload" / "capture" / "quick-start-json").read_text()) == []
 
 
 @pytest.mark.skipif(not (Path(__file__).resolve().parents[1] / "frontend" / "node_modules").is_dir(), reason="frontend dependencies not installed")

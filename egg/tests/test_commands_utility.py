@@ -41,6 +41,24 @@ class TestCmdHelp:
         assert any("/skill" in str(call) for call in app.printed)
         assert any("/reload" in str(call) for call in app.printed)
 
+    def test_help_lists_all_terminal_keyboard_shortcuts(self):
+        from egg.commands.utility import UtilityCommandsMixin
+        from egg.input import KEYBOARD_SHORTCUTS_HELP
+
+        class App(HelpOnlyApp, UtilityCommandsMixin):
+            keyboard_shortcuts_help = KEYBOARD_SHORTCUTS_HELP
+
+        app = App()
+        app.cmd_help("")
+        rendered = str(app.printed)
+
+        for shortcut in (
+            "Ctrl+Alt+A", "Ctrl+Alt+X", "Enter or Ctrl+D", "Shift+Enter or Alt+Enter",
+            "Ctrl+E", "Ctrl+P", "Ctrl+C", "Tab", "Up/Down", "Left/Right",
+            "Home/End", "Esc", "Backspace/Delete", "PageUp", "PageDown",
+        ):
+            assert shortcut in rendered
+
     def test_help_uses_command_registry_metadata(self):
         from egg.commands.utility import UtilityCommandsMixin
         from eggthreads.command_catalog import CommandRegistry, CommandSpec

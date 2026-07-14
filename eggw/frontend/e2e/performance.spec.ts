@@ -63,7 +63,7 @@ test.describe('Deterministic performance gates', () => {
     expect(Buffer.byteLength(JSON.stringify(messages))).toBeGreaterThan(1_800_000);
     await page.goto(`/${threadId}`);
     await expect(page.getByText(/Chat Messages · 300 loaded/)).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(60);
 
     const before = await counters(page);
     await page.getByTestId('message-input').pressSequentially('x'.repeat(200), { delay: 0 });
@@ -74,15 +74,21 @@ test.describe('Deterministic performance gates', () => {
 
     await page.getByTitle('Transcript display verbosity').selectOption('min');
     // Minimum verbosity must honor the same mounted window. It must not turn
-    // all 295 unmounted entries into one synthetic prefix tool group.
-    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
-    await expect(page.getByTestId('hidden-details').getByRole('button')).toHaveCount(1);
+    // all 240 unmounted entries into one synthetic prefix tool group.
+    // Min renders the same 60 source messages; synthetic hidden-detail groups
+    // can add cards but must remain bounded rather than aggregating the prefix.
+    const minCardCount = await page.locator('.eggw-message-card').count();
+    expect(minCardCount).toBeGreaterThanOrEqual(60);
+    expect(minCardCount).toBeLessThanOrEqual(90);
+    const initialToolButtons = await page.getByTestId('hidden-details').getByRole('button').count();
+    expect(initialToolButtons).toBeGreaterThan(1);
+    expect(initialToolButtons).toBeLessThan(30);
 
     await page.getByTestId('show-more-loaded-messages').click();
-    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('235 earlier');
+    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('180 earlier');
     const revealedToolButtons = await page.getByTestId('hidden-details').getByRole('button').count();
-    expect(revealedToolButtons).toBeGreaterThan(1);
-    expect(revealedToolButtons).toBeLessThan(30);
+    expect(revealedToolButtons).toBeGreaterThan(initialToolButtons);
+    expect(revealedToolButtons).toBeLessThan(60);
     await expect(page.getByTestId('hidden-details').first()).toBeVisible();
     await expect(page.getByText('Streaming performance fixture').first()).toBeVisible();
   });

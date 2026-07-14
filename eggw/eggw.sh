@@ -15,6 +15,15 @@ RELOAD_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/eggw-reload.XXXXXX")"
 export EGGW_RELOAD_EXIT_CODE="$RELOAD_EXIT_CODE"
 export EGGW_RELOAD_STATE_FILE="$RELOAD_STATE_FILE"
 
+# Preserve shell argument boundaries in one backend-only payload. The backend
+# claims it only for the landing page's fresh thread; /reload keeps the same argv
+# but EGGW_RELOAD_THREAD_ID prevents draft replacement or file restaging.
+if [ -z "${EGGW_RELOAD_THREAD_ID:-}" ]; then
+    EGGW_QUICK_START_ARGS_JSON="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@")"
+else
+    EGGW_QUICK_START_ARGS_JSON='[]'
+fi
+
 # Function to check if a port is available
 is_port_available() {
     ! nc -z localhost "$1" 2>/dev/null
@@ -309,7 +318,7 @@ fi
 # Start backend
 echo "Starting backend on $BACKEND_HOST:$BACKEND_PORT (HTTP/2)..."
 cd "$CALLER_CWD"
-start_prefixed backend env PYTHONSAFEPATH=1 "${EGGW_HYPERCORN_BIN:-hypercorn}" eggw.main:app --bind "$BACKEND_HOST:$BACKEND_PORT"
+start_prefixed backend env PYTHONSAFEPATH=1 EGGW_QUICK_START_ARGS_JSON="$EGGW_QUICK_START_ARGS_JSON" "${EGGW_HYPERCORN_BIN:-hypercorn}" eggw.main:app --bind "$BACKEND_HOST:$BACKEND_PORT"
 BACKEND_PID="$STARTED_PID"
 
 # Wait a moment for backend to start

@@ -35,7 +35,7 @@ def editor_argv_for_path(path: Path) -> list[str]:
     return [*argv, str(path)]
 
 
-def _set_input_panel_text(app: Any, text: str) -> None:
+def set_input_panel_text(app: Any, text: str) -> None:
     safe = sanitize_terminal_text(text)
     editor = app.input_panel.editor.editor
     editor.set_text(safe)
@@ -122,7 +122,7 @@ async def _open_editor_draft_command_async(ctx: Any, arg: str, *, command_name: 
     if not edited.strip():
         return CommandResult(clear_input=True, message=f"/{command_name} cancelled: edited draft was empty.")
 
-    _set_input_panel_text(app, edited.rstrip("\n"))
+    set_input_panel_text(app, edited.rstrip("\n"))
     suffix = f" {draft.source_suffix}" if draft.source_suffix else ""
     if draft.source_kind == "input_message":
         return CommandResult(
@@ -224,6 +224,7 @@ __all__ = [
     "editor_command_async",
     "editor_argv_for_path",
     "quote_markdown_blockquote",
+    "set_input_panel_text",
     "register_edit_answer_command",
     "select_assistant_message",
 ]

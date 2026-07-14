@@ -368,6 +368,8 @@ from .command_catalog import (
     create_default_input_prefix_registry,
     render_command_registry_help,
 )
+from .quick_start import QuickStartRequest, parse_quick_start_args, quick_start_args_from_json
+
 from .attachment_staging import (
     build_message_content_with_attachments,
     format_staged_attachments,
@@ -411,6 +413,9 @@ __all__ = [
     'collect_subtree', 'list_active_threads', 'wait_subtree_idle', 'wait_thread_settled',
     'word_count_from_snapshot', 'word_count_from_events',
     'set_subtree_working_directory',
+    'QuickStartRequest',
+    'parse_quick_start_args',
+    'quick_start_args_from_json',
     'is_descendant_thread', 'send_message_to_child_thread',
     'ChildThreadStatus', 'get_child_thread_status', 'get_child_thread_statuses', 'get_active_get_user_message_waiting_note',
     'approve_tool_calls_for_thread', 'finalize_tool_output',

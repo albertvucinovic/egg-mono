@@ -244,6 +244,7 @@ def test_generate_image_tool_publishes_artifact_content_parts_in_runner_transcri
 
     messages = ts.create_snapshot(db, thread_id)["messages"]
     tool_message = next(msg for msg in messages if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id)
+    assert tool_message["name"] == "generate_image"
     content = tool_message["content"]
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
