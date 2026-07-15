@@ -921,3 +921,139 @@ def test_duplicate_missing_id_at_apply_is_idempotent_disappearance(monkeypatch, 
     assert report["action"] == "removed"
     assert report["reason"] == "already_removed"
     assert calls == []
+
+
+def test_claim_waits_until_quarantine_cleanup_finishes_and_uses_fresh_tree(
+    monkeypatch, tmp_path,
+):
+    import threading
+
+    monkeypatch.chdir(tmp_path)
+    db_a_path = tmp_path / "lock-a.sqlite"
+    db_a = ts.ThreadsDB(db_a_path); db_a.init_schema()
+    db_b_path = tmp_path / "lock-b.sqlite"
+    db_b = ts.ThreadsDB(db_b_path); db_b.init_schema()
+    sid = "sess_storage_lock"
+    root = _old_tree(monkeypatch, tmp_path, sid, db_path=tmp_path / "lock-a.sqlite")
+    old_file = root / "runtime" / "old.txt"; old_file.write_text("old")
+    old = time.time() - 7200
+    for path in [old_file, root / "runtime", root]:
+        os.utime(path, (old, old))
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+    quarantine_ready = threading.Event()
+    allow_remove = threading.Event()
+    real_remove = session._remove_quarantined_session_tree
+
+    def paused_remove(authority, quarantine):
+        quarantine_ready.set()
+        assert allow_remove.wait(3)
+        real_remove(authority, quarantine)
+
+    monkeypatch.setattr(session, "_remove_quarantined_session_tree", paused_remove)
+    cleanup_result = []
+    def run_cleanup():
+        cleanup_result.extend(ts.cleanup_docker_sessions(
+            ts.ThreadsDB(db_a_path), dry_run=False,
+        ))
+    cleanup = threading.Thread(
+        target=run_cleanup,
+    )
+    cleanup.start()
+    assert quarantine_ready.wait(3)
+    assert not root.exists()
+
+    claim_result = []
+    claim = threading.Thread(
+        target=lambda: (
+            session._write_session_storage_owner(ts.ThreadsDB(db_b_path), sid),
+            claim_result.append("done"),
+        ),
+    )
+    claim.start()
+    time.sleep(0.05)
+    assert claim.is_alive()
+    assert not root.exists()
+
+    allow_remove.set()
+    cleanup.join(3); claim.join(3)
+    assert not cleanup.is_alive() and not claim.is_alive()
+    assert claim_result == ["done"]
+    assert root.is_dir()
+    assert not (root / "runtime" / "old.txt").exists()
+    assert json.loads((root / session._SESSION_STORAGE_METADATA).read_text()) == session._session_storage_owner_payload(
+        ts.ThreadsDB(db_b_path), sid,
+    )
+    assert any(item.get("action") == "removed" for item in cleanup_result)
+
+
+def test_replacement_created_after_quarantine_is_never_deleted(monkeypatch, tmp_path):
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_post_quarantine_replacement"
+    root = _old_tree(monkeypatch, tmp_path, sid)
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+    real_remove = session._remove_quarantined_session_tree
+    replacement = []
+
+    def replace_then_remove(authority, quarantine):
+        root.mkdir(parents=True)
+        marker = root / "replacement.txt"; marker.write_text("keep")
+        replacement.append(marker)
+        real_remove(authority, quarantine)
+
+    monkeypatch.setattr(session, "_remove_quarantined_session_tree", replace_then_remove)
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("session_id") == sid)
+    assert report["action"] == "removed"
+    assert replacement[0].read_text() == "keep"
+
+
+def test_quarantine_identity_mismatch_restores_original_and_deletes_nothing(
+    monkeypatch, tmp_path,
+):
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_quarantine_mismatch"
+    root = _old_tree(monkeypatch, tmp_path, sid)
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+    # More deterministic: wrap rename helper by replacing os.stat only for the
+    # generated quarantine name after rename.
+    real_stat = session.os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if isinstance(path, str) and path.startswith(".egg-quarantine-"):
+            values = list(result)
+            values[1] += 1
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(session.os, "stat", fake_stat)
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("session_id") == sid)
+    assert report["action"] == "error"
+    assert "quarantine identity mismatch" in report["error"]
+    assert root.exists()
+    assert (root / session._SESSION_STORAGE_METADATA).exists()
+    assert not list(session._bridge_root().glob(f".egg-quarantine-{sid}-*"))
+
+
+def test_quarantine_delete_failure_leaves_recoverable_quarantine_not_replacement(
+    monkeypatch, tmp_path,
+):
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_quarantine_failure"
+    root = _old_tree(monkeypatch, tmp_path, sid)
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+    quarantines = []
+
+    def fail_remove(_authority, quarantine):
+        quarantines.append(quarantine.lexical)
+        raise RuntimeError("injected quarantine deletion failure")
+
+    monkeypatch.setattr(session, "_remove_quarantined_session_tree", fail_remove)
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("session_id") == sid)
+    assert report["action"] == "error"
+    assert not root.exists()
+    assert quarantines and quarantines[0].is_dir()
+    assert (quarantines[0] / session._SESSION_STORAGE_METADATA).exists()

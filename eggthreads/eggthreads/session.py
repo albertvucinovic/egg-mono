@@ -900,6 +900,43 @@ def _session_storage_paths(session_id: str) -> Optional[tuple[Path, Path, Path]]
     return root, root / "bridge", root / "runtime"
 
 
+def _session_storage_lock_path(session_id: str) -> Path:
+    safe = _safe_session_storage_name(session_id)
+    if safe is None:
+        raise ValueError("invalid Docker session storage identity")
+    project = str(Path.cwd().resolve())
+    digest = hashlib.sha256(f"{project}\0{safe}".encode("utf-8")).hexdigest()[:32]
+    return Path(tempfile.gettempdir()) / "egg-session-storage" / f"{digest}.lock"
+
+
+@contextmanager
+def _session_storage_guard(session_id: str, *, blocking: bool) -> Any:
+    """Exclude owner claim and deletion for one lexical project/session name.
+
+    Lock order is session activity guard first, then this storage guard. Owner
+    claim takes only storage; no code may acquire activity while holding it.
+    """
+
+    try:
+        import fcntl
+    except ImportError:
+        yield False
+        return
+    lock_path = _session_storage_lock_path(session_id)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(lock_file.fileno(), operation)
+        except (BlockingIOError, OSError):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _session_storage_owner_payload(db: ThreadsDB, session_id: str) -> Dict[str, Any]:
     return {
         "version": _SESSION_STORAGE_METADATA_VERSION,
@@ -926,6 +963,13 @@ def _read_session_storage_owner_nofollow(path: Path) -> Dict[str, Any]:
 
 
 def _write_session_storage_owner(db: ThreadsDB, session_id: str) -> None:
+    with _session_storage_guard(session_id, blocking=True) as acquired:
+        if not acquired:
+            raise RuntimeError("Could not acquire Docker session storage ownership lock")
+        _write_session_storage_owner_locked(db, session_id)
+
+
+def _write_session_storage_owner_locked(db: ThreadsDB, session_id: str) -> None:
     storage = _session_storage_paths(session_id)
     if storage is None:
         raise ValueError("invalid Docker session storage identity")
@@ -961,6 +1005,11 @@ def _write_session_storage_owner(db: ThreadsDB, session_id: str) -> None:
         raise
     finally:
         os.close(fd)
+    try:
+        if _read_session_storage_owner_nofollow(path) != expected:
+            raise RuntimeError("Docker session storage ownership claim was not stable")
+    except Exception as e:
+        raise RuntimeError(f"Docker session storage metadata validation failed: {e}")
 
 
 def _session_storage_owner_matches(db: ThreadsDB, session_root: Path) -> tuple[bool, str]:
@@ -1196,12 +1245,17 @@ def _remove_directory_contents_fd(directory_fd: int) -> None:
             raise RuntimeError(f"unsupported file type during cleanup: {name}")
 
 
-def _remove_pinned_session_tree(
+def _session_quarantine_name(session_id: str) -> str:
+    return f".egg-quarantine-{session_id}-{uuid.uuid4().hex}"
+
+
+def _quarantine_pinned_session_tree(
     root_authority: _DirectoryAuthority,
     candidate: _DirectoryAuthority,
-) -> None:
+) -> _DirectoryAuthority:
+    """Atomically detach the exact live name before descriptor deletion."""
+
     root_fd = _open_directory_nofollow(root_authority.lexical)
-    candidate_fd: Optional[int] = None
     try:
         root_stat = os.fstat(root_fd)
         if _directory_identity(root_stat) != (root_authority.device, root_authority.inode):
@@ -1209,18 +1263,75 @@ def _remove_pinned_session_tree(
         current = os.stat(candidate.lexical.name, dir_fd=root_fd, follow_symlinks=False)
         if _directory_identity(current) != (candidate.device, candidate.inode):
             raise RuntimeError("session artifact root changed")
-        candidate_fd = _open_directory_nofollow(candidate.lexical.name, dir_fd=root_fd)
-        opened = os.fstat(candidate_fd)
-        if _directory_identity(opened) != (candidate.device, candidate.inode):
-            raise RuntimeError("session artifact root changed while opening")
-        _remove_directory_contents_fd(candidate_fd)
-        current = os.stat(candidate.lexical.name, dir_fd=root_fd, follow_symlinks=False)
-        if _directory_identity(current) != (candidate.device, candidate.inode):
-            raise RuntimeError("session artifact root replaced before removal")
-        os.rmdir(candidate.lexical.name, dir_fd=root_fd)
+        quarantine_name = _session_quarantine_name(candidate.lexical.name)
+        os.rename(
+            candidate.lexical.name,
+            quarantine_name,
+            src_dir_fd=root_fd,
+            dst_dir_fd=root_fd,
+        )
+        try:
+            moved = os.stat(quarantine_name, dir_fd=root_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(moved.st_mode)
+                or _directory_identity(moved) != (candidate.device, candidate.inode)
+            ):
+                raise RuntimeError("quarantine identity mismatch")
+            quarantine_fd = _open_directory_nofollow(quarantine_name, dir_fd=root_fd)
+            try:
+                opened = os.fstat(quarantine_fd)
+                if _directory_identity(opened) != (candidate.device, candidate.inode):
+                    raise RuntimeError("quarantine identity changed while opening")
+            finally:
+                os.close(quarantine_fd)
+        except Exception:
+            # Restore only when the reusable live name is still free. Never
+            # replace a new owner that appeared unexpectedly.
+            try:
+                os.stat(candidate.lexical.name, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                os.rename(
+                    quarantine_name,
+                    candidate.lexical.name,
+                    src_dir_fd=root_fd,
+                    dst_dir_fd=root_fd,
+                )
+            raise
+        return _DirectoryAuthority(
+            root_authority.lexical / quarantine_name,
+            root_authority.resolved / quarantine_name,
+            candidate.device,
+            candidate.inode,
+        )
     finally:
-        if candidate_fd is not None:
-            os.close(candidate_fd)
+        os.close(root_fd)
+
+
+def _remove_quarantined_session_tree(
+    root_authority: _DirectoryAuthority,
+    quarantine: _DirectoryAuthority,
+) -> None:
+    root_fd = _open_directory_nofollow(root_authority.lexical)
+    quarantine_fd: Optional[int] = None
+    try:
+        root_stat = os.fstat(root_fd)
+        if _directory_identity(root_stat) != (root_authority.device, root_authority.inode):
+            raise RuntimeError("session authority root changed")
+        current = os.stat(quarantine.lexical.name, dir_fd=root_fd, follow_symlinks=False)
+        if _directory_identity(current) != (quarantine.device, quarantine.inode):
+            raise RuntimeError("quarantine identity changed")
+        quarantine_fd = _open_directory_nofollow(quarantine.lexical.name, dir_fd=root_fd)
+        opened = os.fstat(quarantine_fd)
+        if _directory_identity(opened) != (quarantine.device, quarantine.inode):
+            raise RuntimeError("quarantine identity changed while opening")
+        _remove_directory_contents_fd(quarantine_fd)
+        current = os.stat(quarantine.lexical.name, dir_fd=root_fd, follow_symlinks=False)
+        if _directory_identity(current) != (quarantine.device, quarantine.inode):
+            raise RuntimeError("quarantine replaced before removal")
+        os.rmdir(quarantine.lexical.name, dir_fd=root_fd)
+    finally:
+        if quarantine_fd is not None:
+            os.close(quarantine_fd)
         os.close(root_fd)
 
 
@@ -1618,113 +1729,123 @@ def cleanup_docker_sessions(
                 report.update(action="skipped", reason="host_activity")
                 results.append(report)
                 continue
-            current_references, current_error = _session_reference_thread_ids(db, session_id)
-            if current_error or current_references is None:
-                report.update(
-                    action="skipped", reason="reference_state_uncertain",
-                    error=current_error or "reference scan failed",
-                )
-                results.append(report)
-                continue
-            if current_references:
-                report.update(
-                    action="skipped", reason="session_referenced",
-                    references=current_references,
-                )
-                results.append(report)
-                continue
-            path_users, path_error = _docker_containers_mounting_session_root(
-                session_root, all_mounts,
-            )
-            if path_error or path_users is None:
-                report.update(
-                    action="skipped", reason="container_mount_state_uncertain",
-                    error=path_error or "container mount-owner scan failed",
-                )
-            elif path_users:
-                report.update(
-                    action="skipped", reason="container_mount_present",
-                    containers=path_users,
-                )
-            elif dry_run:
-                report.update(action="would_remove", reason="stale_session_artifacts")
-            else:
-                # Revalidate path shape, heartbeat/control state, and age while
-                # holding the activity guard immediately before deletion.
-                if not _bridge_root_authority_matches(root_authority):
-                    report.update(action="skipped", reason="artifact_root_changed")
+            with _session_storage_guard(session_id, blocking=False) as storage_acquired:
+                if not storage_acquired:
+                    report.update(action="skipped", reason="storage_activity")
                     results.append(report)
                     continue
-                final_candidate, candidate_error = _pin_session_candidate(
-                    root_authority, session_id,
-                )
-                if final_candidate is None or final_candidate != candidate_authority:
+                current_references, current_error = _session_reference_thread_ids(db, session_id)
+                if current_error or current_references is None:
                     report.update(
-                        action="skipped", reason="artifact_root_changed",
-                        error=candidate_error or "session artifact root identity changed",
+                        action="skipped", reason="reference_state_uncertain",
+                        error=current_error or "reference scan failed",
                     )
                     results.append(report)
                     continue
-                final_root = final_candidate.lexical
-                final_error = _session_artifact_tree_error(final_root)
-                final_owner, final_owner_reason = _session_storage_owner_matches(db, final_root)
-                if final_error:
-                    report.update(action="skipped", reason="artifact_path_unsafe", error=final_error)
-                elif not final_owner:
-                    report.update(action="skipped", reason=final_owner_reason)
+                if current_references:
+                    report.update(
+                        action="skipped", reason="session_referenced",
+                        references=current_references,
+                    )
+                    results.append(report)
+                    continue
+                path_users, path_error = _docker_containers_mounting_session_root(
+                    session_root, all_mounts,
+                )
+                if path_error or path_users is None:
+                    report.update(
+                        action="skipped", reason="container_mount_state_uncertain",
+                        error=path_error or "container mount-owner scan failed",
+                    )
+                elif path_users:
+                    report.update(
+                        action="skipped", reason="container_mount_present",
+                        containers=path_users,
+                    )
+                elif dry_run:
+                    report.update(action="would_remove", reason="stale_session_artifacts")
                 else:
-                    final_associated, final_associated_error = _docker_exact_container_inventory(
-                        associated_names,
+                    # Revalidate path shape, heartbeat/control state, and age while
+                    # holding the activity guard immediately before deletion.
+                    if not _bridge_root_authority_matches(root_authority):
+                        report.update(action="skipped", reason="artifact_root_changed")
+                        results.append(report)
+                        continue
+                    final_candidate, candidate_error = _pin_session_candidate(
+                        root_authority, session_id,
                     )
-                    if final_associated_error or final_associated is None:
+                    if final_candidate is None or final_candidate != candidate_authority:
                         report.update(
-                            action="skipped", reason="associated_container_state_uncertain",
-                            error=final_associated_error or "associated container scan failed",
+                            action="skipped", reason="artifact_root_changed",
+                            error=candidate_error or "session artifact root identity changed",
                         )
                         results.append(report)
                         continue
-                    if final_associated:
-                        report.update(
-                            action="skipped", reason="associated_container_preserved",
-                            containers=sorted(item["name"] for item in final_associated),
-                        )
-                        results.append(report)
-                        continue
-                    final_mounts, final_mount_error = _docker_all_bind_mounts()
-                    final_users, final_users_error = _docker_containers_mounting_session_root(
-                        final_root, final_mounts,
-                    ) if final_mounts is not None else (None, final_mount_error)
-                    if final_users_error or final_users is None:
-                        report.update(
-                            action="skipped", reason="container_mount_state_uncertain",
-                            error=final_users_error or "container mount scan failed",
-                        )
-                        results.append(report)
-                        continue
-                    if final_users:
-                        report.update(
-                            action="skipped", reason="container_mount_present",
-                            containers=final_users,
-                        )
-                        results.append(report)
-                        continue
-                    final_reason, final_protection_error = _session_artifact_protection_error(
-                        final_root, now=time.time(), stale_sec=stale_sec,
-                    )
-                    if final_reason:
-                        report.update(action="skipped", reason=final_reason)
-                        if final_protection_error:
-                            report["error"] = final_protection_error
+                    final_root = final_candidate.lexical
+                    final_error = _session_artifact_tree_error(final_root)
+                    final_owner, final_owner_reason = _session_storage_owner_matches(db, final_root)
+                    if final_error:
+                        report.update(action="skipped", reason="artifact_path_unsafe", error=final_error)
+                    elif not final_owner:
+                        report.update(action="skipped", reason=final_owner_reason)
                     else:
-                        try:
-                            _remove_pinned_session_tree(root_authority, final_candidate)
-                            report.update(action="removed", reason="stale_session_artifacts")
-                        except Exception as e:
+                        final_associated, final_associated_error = _docker_exact_container_inventory(
+                            associated_names,
+                        )
+                        if final_associated_error or final_associated is None:
                             report.update(
-                                action="error", reason="artifact_remove_failed",
-                                error=f"{type(e).__name__}: {e}",
+                                action="skipped", reason="associated_container_state_uncertain",
+                                error=final_associated_error or "associated container scan failed",
                             )
-            results.append(report)
+                            results.append(report)
+                            continue
+                        if final_associated:
+                            report.update(
+                                action="skipped", reason="associated_container_preserved",
+                                containers=sorted(item["name"] for item in final_associated),
+                            )
+                            results.append(report)
+                            continue
+                        final_mounts, final_mount_error = _docker_all_bind_mounts()
+                        final_users, final_users_error = _docker_containers_mounting_session_root(
+                            final_root, final_mounts,
+                        ) if final_mounts is not None else (None, final_mount_error)
+                        if final_users_error or final_users is None:
+                            report.update(
+                                action="skipped", reason="container_mount_state_uncertain",
+                                error=final_users_error or "container mount scan failed",
+                            )
+                            results.append(report)
+                            continue
+                        if final_users:
+                            report.update(
+                                action="skipped", reason="container_mount_present",
+                                containers=final_users,
+                            )
+                            results.append(report)
+                            continue
+                        final_reason, final_protection_error = _session_artifact_protection_error(
+                            final_root, now=time.time(), stale_sec=stale_sec,
+                        )
+                        if final_reason:
+                            report.update(action="skipped", reason=final_reason)
+                            if final_protection_error:
+                                report["error"] = final_protection_error
+                        else:
+                            try:
+                                quarantine = _quarantine_pinned_session_tree(
+                                    root_authority, final_candidate,
+                                )
+                                _remove_quarantined_session_tree(
+                                    root_authority, quarantine,
+                                )
+                                report.update(action="removed", reason="stale_session_artifacts")
+                            except Exception as e:
+                                report.update(
+                                    action="error", reason="artifact_remove_failed",
+                                    error=f"{type(e).__name__}: {e}",
+                                )
+                results.append(report)
     return results
 
 
