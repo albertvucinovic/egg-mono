@@ -18,7 +18,7 @@ import threading
 import traceback
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 
 PY_REPLS: Dict[str, Dict[str, Any]] = {}
@@ -420,7 +420,7 @@ def _finish_channel_teardown_locked(
     error: str,
     own_reservation: bool,
     preserve_activity: bool,
-) -> bool:
+) -> Literal["completed", "already_completed", "failed", "generation_mismatch"]:
     key = _channel_key(language, channel)
     current = CHANNEL_PROCESS_META.get(key)
     same_generation = (
@@ -439,10 +439,20 @@ def _finish_channel_teardown_locked(
                 CHANNEL_ACTIVITY.pop(key, None)
         else:
             _mark_channel_teardown_failed_locked(key, error)
+        outcome = "completed" if ok else "failed"
+    elif current is None:
+        # Another concurrent teardown already verified and retired this exact
+        # generation. Its clean absence is idempotent success even if this
+        # caller observed ProcessLookupError/a stale local process object.
+        outcome = "already_completed"
+    else:
+        # A successor owns the channel. Never remove or quarantine it based on
+        # a stale generation's result.
+        outcome = "generation_mismatch"
     if own_reservation:
         CHANNEL_REAPING.discard(key)
         _channel_condition_locked(key).notify_all()
-    return same_generation
+    return outcome
 
 
 def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> bool:
@@ -465,7 +475,7 @@ def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> b
             pass
     ok, error = _kill_and_verify_process_group(int(meta["pgid"]), proc)
     with ACTIVE_EVALS_LOCK:
-        same_generation = _finish_channel_teardown_locked(
+        outcome = _finish_channel_teardown_locked(
             "python",
             repl_name,
             meta,
@@ -474,7 +484,7 @@ def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> b
             own_reservation=own_reservation,
             preserve_activity=preserve_activity,
         )
-    return ok and same_generation
+    return outcome in {"completed", "already_completed"}
 
 
 def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -1356,7 +1366,7 @@ def _terminate_bash_channel(channel: str, *, preserve_activity: bool = False) ->
             return True
     ok, error = _kill_and_verify_process_group(int(meta["pgid"]), proc)
     with ACTIVE_EVALS_LOCK:
-        same_generation = _finish_channel_teardown_locked(
+        outcome = _finish_channel_teardown_locked(
             "bash",
             channel,
             meta,
@@ -1365,7 +1375,7 @@ def _terminate_bash_channel(channel: str, *, preserve_activity: bool = False) ->
             own_reservation=own_reservation,
             preserve_activity=preserve_activity,
         )
-    return ok and same_generation
+    return outcome in {"completed", "already_completed"}
 
 
 def reap_idle_channels(

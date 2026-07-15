@@ -651,3 +651,100 @@ def test_bash_current_eval_leader_death_teardown_failure_quarantines(
     monkeypatch.setattr(sessiond, "_kill_and_verify_process_group", real_teardown)
     assert sessiond._terminate_bash_channel(channel)
     assert not Path(f"/proc/{descendant_pid}").exists()
+
+
+def test_concurrent_service_and_bash_cancel_teardown_is_idempotent(
+    monkeypatch, tmp_path,
+):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    channel = "concurrent-cancel"
+    key = f"bash:{channel}"
+    request_id = "concurrent-cancel"
+    direct_cancel = threading.Event()
+    first_teardown = threading.Event()
+    teardown_barrier = threading.Barrier(2)
+    real_teardown = sessiond._kill_and_verify_process_group
+    teardown_calls = []
+
+    def synchronized_teardown(*args, **kwargs):
+        teardown_calls.append(args[0])
+        first_teardown.set()
+        teardown_barrier.wait(timeout=2)
+        return real_teardown(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sessiond, "_kill_and_verify_process_group", synchronized_teardown,
+    )
+    outputs = []
+    execute_thread = threading.Thread(
+        target=lambda: outputs.append(sessiond.execute_bash(
+            "sleep 99",
+            channel,
+            bridge,
+            "token",
+            runtime,
+            timeout_sec=2,
+            cancel_check=direct_cancel.is_set,
+        )),
+    )
+    execute_thread.start()
+    _wait_until(lambda: key in sessiond.CHANNEL_PROCESS_META)
+
+    cancel_event = threading.Event()
+    with sessiond.ACTIVE_EVALS_LOCK:
+        sessiond.ACTIVE_EVALS[request_id] = {
+            "cancel": cancel_event,
+            "cancel_reason": None,
+            "payload": {
+                "protocol_version": 2,
+                "language": "bash",
+                "channel": channel,
+                "host_owner_id": "host-a",
+            },
+            "running": True,
+            "terminal_written": False,
+        }
+        sessiond.CHANNEL_QUEUES[key] = [request_id]
+
+    # Start execute_bash's cancel-check teardown first. The bridge cancellation
+    # then reserves the same generation while both kill calls are in flight.
+    direct_cancel.set()
+    assert first_teardown.wait(2)
+    (bridge / f"eval_{request_id}.cancel.json").write_text(json.dumps({
+        "host_owner_id": "host-a", "reason": "interrupted",
+    }))
+    service_thread = threading.Thread(
+        target=sessiond.service_cancel_requests, args=(bridge,),
+    )
+    service_thread.start()
+    execute_thread.join(3)
+    service_thread.join(3)
+    assert not execute_thread.is_alive()
+    assert not service_thread.is_alive()
+    assert len(teardown_calls) == 2
+
+    response = json.loads((bridge / f"eval_{request_id}.res.json").read_text())
+    assert response["ok"] is True
+    assert response["reason"] == "cancelled"
+    assert response["output"].startswith("--- CANCELLED ---")
+    assert "CONTAINMENT FAILURE" not in response["output"]
+    assert outputs == [
+        "--- INTERRUPTED ---\nBash REPL eval was cancelled; this Bash channel was reset."
+    ]
+    assert key not in sessiond.CHANNEL_PROCESS_META
+    assert channel not in sessiond.BASH_REPLS
+    assert "reap_error" not in sessiond.CHANNEL_ACTIVITY.get(key, {})
+
+    with sessiond.ACTIVE_EVALS_LOCK:
+        sessiond.ACTIVE_EVALS.pop(request_id, None)
+        sessiond.CHANNEL_QUEUES.pop(key, None)
+        sessiond.CHANNEL_ACTIVITY.pop(key, None)
+        sessiond.CHANNEL_CONDITIONS.pop(key, None)
+    monkeypatch.setattr(sessiond, "_kill_and_verify_process_group", real_teardown)
+
+    successor = sessiond.execute_bash(
+        "echo successor", channel, bridge, "token", runtime, timeout_sec=1,
+    )
+    assert "successor" in successor
+    assert sessiond._terminate_bash_channel(channel)

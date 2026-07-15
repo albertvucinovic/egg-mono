@@ -584,3 +584,35 @@ def test_channel_status_truthfully_reports_ready_busy_reaping_and_reaped(tmp_pat
         "reaped_at": 12.0,
         "reap_reason": "idle_timeout:5s",
     }
+
+
+def test_teardown_completion_is_idempotent_but_preserves_different_generation():
+    key = "bash:generation-race"
+    reserved = {"generation": 11, "pgid": 1111, "pid": 1111}
+
+    # A concurrent successful caller already retired the reserved generation.
+    assert sessiond._finish_channel_teardown_locked(
+        "bash", "generation-race", reserved,
+        ok=True, error="", own_reservation=False, preserve_activity=True,
+    ) == "already_completed"
+    assert sessiond._finish_channel_teardown_locked(
+        "bash", "generation-race", reserved,
+        ok=False, error="stale local failure", own_reservation=False,
+        preserve_activity=True,
+    ) == "already_completed"
+
+    successor = _fake_bash_proc()
+    successor_meta = {"generation": 12, "pgid": 2222, "pid": 2222}
+    sessiond.BASH_REPLS["generation-race"] = successor
+    sessiond.CHANNEL_PROCESS_META[key] = dict(successor_meta)
+    sessiond.CHANNEL_ACTIVITY[key] = {"last_activity_at": 10.0}
+
+    # Neither an old success nor an old failure may retire/quarantine successor.
+    for ok, error in ((True, ""), (False, "old teardown failed")):
+        assert sessiond._finish_channel_teardown_locked(
+            "bash", "generation-race", reserved,
+            ok=ok, error=error, own_reservation=False, preserve_activity=True,
+        ) == "generation_mismatch"
+        assert sessiond.BASH_REPLS["generation-race"] is successor
+        assert sessiond.CHANNEL_PROCESS_META[key] == successor_meta
+        assert sessiond.CHANNEL_ACTIVITY[key] == {"last_activity_at": 10.0}
