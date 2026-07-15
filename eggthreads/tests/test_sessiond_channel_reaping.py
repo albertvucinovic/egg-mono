@@ -26,6 +26,9 @@ def _reset_state() -> None:
     sessiond.CHANNEL_CONDITIONS.clear()
     sessiond.CHANNEL_ACTIVITY.clear()
     sessiond.CHANNEL_REAPING.clear()
+    sessiond.CHANNEL_STARTING.clear()
+    sessiond.CHANNEL_PROCESS_META.clear()
+    sessiond.CHANNEL_GENERATIONS.clear()
     sessiond.CHANNEL_IDLE_TIMEOUT_SEC = None
     sessiond.STATUS_PATH = None
 
@@ -125,16 +128,14 @@ def test_threshold_and_independent_channels(monkeypatch):
         "python:fresh": {"last_activity_at": 95.0},
     })
     killed = []
-    original = sessiond._kill_python_worker
-
-    def kill(channel, *, preserve_activity=False):
-        killed.append(channel)
-        original(channel, preserve_activity=preserve_activity)
-
-    monkeypatch.setattr(sessiond, "_kill_python_worker", kill)
+    monkeypatch.setattr(
+        sessiond,
+        "_kill_and_verify_process_group",
+        lambda pgid, proc: killed.append((pgid, proc)) or (True, ""),
+    )
 
     assert sessiond.reap_idle_channels(timeout_sec=10, now=100.0) == ["python:old"]
-    assert killed == ["old"]
+    assert len(killed) == 1
     assert "fresh" in sessiond.PY_WORKERS
     assert sessiond.CHANNEL_ACTIVITY["python:old"]["reap_reason"] == "idle_timeout:10s"
 
@@ -267,6 +268,165 @@ def test_same_channel_admission_waits_for_reap_reservation(monkeypatch, tmp_path
     while not response.exists() and time.time() < deadline:
         time.sleep(0.005)
     assert json.loads(response.read_text())["output"] == "after-reap"
+
+
+
+def _spawn_dead_leader_with_descendant(tmp_path: Path, name: str) -> tuple[int, int]:
+    pid_file = tmp_path / f"{name}.pid"
+    script = (
+        "import os,subprocess; "
+        "p=subprocess.Popen(['sleep','99']); "
+        f"open({str(pid_file)!r},'w').write(str(p.pid)); "
+        "os._exit(0)"
+    )
+    leader = subprocess.Popen(["python", "-c", script], start_new_session=True)
+    pgid = os.getpgid(leader.pid)
+    leader.wait(timeout=2)
+    deadline = time.time() + 2
+    while not pid_file.exists() and time.time() < deadline:
+        time.sleep(0.01)
+    descendant = int(pid_file.read_text())
+    assert sessiond._process_group_has_live_members(pgid)
+    return pgid, descendant
+
+
+def test_reap_python_dead_leader_kills_live_group_descendant(tmp_path):
+    pgid, descendant = _spawn_dead_leader_with_descendant(tmp_path, "python")
+    key = "python:dead"
+    sessiond.CHANNEL_PROCESS_META[key] = {"generation": 1, "pgid": pgid, "pid": pgid}
+    sessiond.CHANNEL_ACTIVITY[key] = {"last_activity_at": 1.0}
+
+    assert sessiond.reap_idle_channels(timeout_sec=10, now=100.0) == [key]
+    assert not sessiond._process_group_has_live_members(pgid)
+    assert key not in sessiond.CHANNEL_PROCESS_META
+    assert sessiond.CHANNEL_ACTIVITY[key]["reaped_at"] == 100.0
+
+
+def test_reap_bash_dead_leader_kills_live_group_descendant(tmp_path):
+    pgid, descendant = _spawn_dead_leader_with_descendant(tmp_path, "bash")
+    key = "bash:dead"
+    sessiond.CHANNEL_PROCESS_META[key] = {"generation": 1, "pgid": pgid, "pid": pgid}
+    sessiond.CHANNEL_ACTIVITY[key] = {"last_activity_at": 1.0}
+
+    assert sessiond.reap_idle_channels(timeout_sec=10, now=100.0) == [key]
+    assert not sessiond._process_group_has_live_members(pgid)
+    assert key not in sessiond.CHANNEL_PROCESS_META
+
+
+def test_reap_kill_failure_is_truthful_and_retryable(monkeypatch):
+    key = "python:failure"
+    sessiond.CHANNEL_PROCESS_META[key] = {"generation": 1, "pgid": 4444, "pid": 4444}
+    sessiond.CHANNEL_ACTIVITY[key] = {"last_activity_at": 1.0}
+    monkeypatch.setattr(
+        sessiond, "_kill_and_verify_process_group",
+        lambda *_a, **_k: (False, "permission denied"),
+    )
+
+    assert sessiond.reap_idle_channels(timeout_sec=10, now=100.0) == []
+    assert key in sessiond.CHANNEL_PROCESS_META
+    assert "reaped_at" not in sessiond.CHANNEL_ACTIVITY[key]
+    assert sessiond.CHANNEL_ACTIVITY[key]["reap_reason"] == "teardown_failed"
+    assert sessiond.CHANNEL_ACTIVITY[key]["reap_error"] == "permission denied"
+    payload = sessiond._daemon_status_payload(now=101.0)
+    assert payload["channel_state"][key]["state"] == "reap_failed"
+
+
+def test_timeout_and_cancel_remove_unique_channel_activity(monkeypatch, tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    release = threading.Event()
+
+    def fake_python(*_a, cancel_check=None, **_k):
+        while not (cancel_check and cancel_check()):
+            time.sleep(0.005)
+        sessiond._kill_python_worker("unique-py")
+        return "--- INTERRUPTED ---"
+
+    monkeypatch.setattr(sessiond, "execute_python", fake_python)
+    request = bridge / "eval_py.req.json"
+    request.write_text(json.dumps({
+        "protocol_version": 2, "request_id": "py", "language": "python",
+        "channel": "unique-py", "host_owner_id": "host",
+    }))
+    sessiond.process_eval_request(request, bridge, runtime)
+    deadline = time.time() + 2
+    while "py" not in sessiond.ACTIVE_EVALS and time.time() < deadline:
+        time.sleep(0.005)
+    (bridge / "eval_py.cancel.json").write_text(json.dumps({"host_owner_id": "host", "reason": "timeout"}))
+    sessiond.service_cancel_requests(bridge)
+    deadline = time.time() + 2
+    while "py" in sessiond.ACTIVE_EVALS and time.time() < deadline:
+        time.sleep(0.005)
+    assert "python:unique-py" not in sessiond.CHANNEL_ACTIVITY
+
+    def fake_bash(*_a, cancel_check=None, **_k):
+        while not (cancel_check and cancel_check()):
+            time.sleep(0.005)
+        sessiond._terminate_bash_channel("unique-bash")
+        return "--- INTERRUPTED ---"
+
+    monkeypatch.setattr(sessiond, "execute_bash", fake_bash)
+    request = bridge / "eval_bash.req.json"
+    request.write_text(json.dumps({
+        "protocol_version": 2, "request_id": "bash", "language": "bash",
+        "channel": "unique-bash", "host_owner_id": "host",
+    }))
+    sessiond.process_eval_request(request, bridge, runtime)
+    deadline = time.time() + 2
+    while "bash" not in sessiond.ACTIVE_EVALS and time.time() < deadline:
+        time.sleep(0.005)
+    (bridge / "eval_bash.cancel.json").write_text(json.dumps({"host_owner_id": "host", "reason": "timeout"}))
+    sessiond.service_cancel_requests(bridge)
+    deadline = time.time() + 2
+    while "bash" in sessiond.ACTIVE_EVALS and time.time() < deadline:
+        time.sleep(0.005)
+    assert "bash:unique-bash" not in sessiond.CHANNEL_ACTIVITY
+
+
+def test_process_map_stress_creation_reset_and_reap(monkeypatch):
+    errors = []
+    stop = threading.Event()
+
+    def mutate(prefix: str):
+        try:
+            for index in range(300):
+                channel = f"{prefix}-{index % 11}"
+                key = f"python:{channel}"
+                with sessiond.ACTIVE_EVALS_LOCK:
+                    sessiond.PY_WORKERS[channel] = _fake_python_worker()
+                    generation = sessiond._next_channel_generation_locked(key)
+                    sessiond.CHANNEL_PROCESS_META[key] = {
+                        "generation": generation, "pgid": 10000 + index, "pid": 10000 + index,
+                    }
+                    sessiond.CHANNEL_ACTIVITY[key] = {"last_activity_at": 1.0}
+                if index % 3 == 0:
+                    with sessiond.ACTIVE_EVALS_LOCK:
+                        sessiond.PY_WORKERS.pop(channel, None)
+                        sessiond.CHANNEL_PROCESS_META.pop(key, None)
+        except Exception as exc:
+            errors.append(exc)
+
+    def snapshot_and_reap():
+        try:
+            for _ in range(500):
+                sessiond._daemon_status_payload()
+                sessiond.reap_idle_channels(timeout_sec=10, now=100.0)
+        except Exception as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(sessiond, "_kill_and_verify_process_group", lambda *_a, **_k: (True, ""))
+    threads = [
+        threading.Thread(target=mutate, args=("a",)),
+        threading.Thread(target=mutate, args=("b",)),
+        threading.Thread(target=snapshot_and_reap),
+        threading.Thread(target=snapshot_and_reap),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
 
 
 def test_channel_status_truthfully_reports_ready_busy_reaping_and_reaped(tmp_path):

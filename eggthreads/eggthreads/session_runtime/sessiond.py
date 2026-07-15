@@ -34,6 +34,9 @@ CHANNEL_CONDITIONS: Dict[str, threading.Condition] = {}
 CHANNEL_QUEUES: Dict[str, List[str]] = {}
 CHANNEL_ACTIVITY: Dict[str, Dict[str, Any]] = {}
 CHANNEL_REAPING: set[str] = set()
+CHANNEL_STARTING: Dict[str, int] = {}
+CHANNEL_PROCESS_META: Dict[str, Dict[str, int]] = {}
+CHANNEL_GENERATIONS: Dict[str, int] = {}
 CHANNEL_IDLE_TIMEOUT_SEC: Optional[float] = None
 DAEMON_GENERATION = uuid.uuid4().hex
 DAEMON_STARTED_AT = time.time()
@@ -54,6 +57,91 @@ def parse_positive_timeout(value: Any) -> Optional[float]:
 
 def _channel_key(language: str, channel: str) -> str:
     return f"{language}:{channel}"
+
+
+def _next_channel_generation_locked(channel_key: str) -> int:
+    generation = CHANNEL_GENERATIONS.get(channel_key, 0) + 1
+    CHANNEL_GENERATIONS[channel_key] = generation
+    return generation
+
+
+def _channel_condition_locked(channel_key: str) -> threading.Condition:
+    return CHANNEL_CONDITIONS.setdefault(
+        channel_key, threading.Condition(ACTIVE_EVALS_LOCK),
+    )
+
+
+def _channel_process_locked(language: str, channel: str):
+    if language == "python":
+        return PY_WORKERS.get(channel)
+    if language == "bash":
+        return BASH_REPLS.get(channel)
+    return None
+
+
+def _derive_process_meta_locked(language: str, channel: str, process: Any) -> Optional[Dict[str, int]]:
+    key = _channel_key(language, channel)
+    meta = CHANNEL_PROCESS_META.get(key)
+    if meta is not None:
+        return dict(meta)
+    proc = process[0] if language == "python" and isinstance(process, tuple) else process
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        pgid = int(os.getpgid(pid))
+    except Exception:
+        pgid = pid
+    generation = _next_channel_generation_locked(key)
+    meta = {"generation": generation, "pgid": pgid, "pid": pid}
+    CHANNEL_PROCESS_META[key] = meta
+    return dict(meta)
+
+
+def _process_group_has_live_members(pgid: int) -> bool:
+    proc_root = Path("/proc")
+    if proc_root.exists():
+        try:
+            for stat_path in proc_root.glob("[0-9]*/stat"):
+                try:
+                    parts = stat_path.read_text().split()
+                    if len(parts) > 4 and int(parts[4]) == pgid and parts[2] != "Z":
+                        return True
+                except (FileNotFoundError, PermissionError, ValueError, IndexError):
+                    continue
+            return False
+        except Exception:
+            pass
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _kill_and_verify_process_group(pgid: int, proc: Any = None, timeout_sec: float = 1.0) -> tuple[bool, str]:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except Exception as e:
+        return False, f"killpg failed: {type(e).__name__}: {e}"
+    if proc is not None:
+        try:
+            if hasattr(proc, "join"):
+                proc.join(min(timeout_sec, 1.0))
+            elif hasattr(proc, "wait"):
+                proc.wait(timeout=min(timeout_sec, 1.0))
+        except Exception:
+            pass
+    deadline = time.monotonic() + timeout_sec
+    while _process_group_has_live_members(pgid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if _process_group_has_live_members(pgid):
+        return False, f"process group {pgid} is still alive after SIGKILL"
+    return True, ""
 
 
 def _touch_channel_locked(
@@ -155,67 +243,101 @@ def _python_worker_loop(conn) -> None:
 
 
 def _get_python_worker(repl_name: str) -> tuple[mp.Process, Any]:
-    existing = PY_WORKERS.get(repl_name)
-    if existing is not None:
-        proc, conn = existing
-        if proc.is_alive():
-            return proc, conn
+    key = _channel_key("python", repl_name)
+    while True:
+        with ACTIVE_EVALS_LOCK:
+            _wait_for_channel_reap_locked(key)
+            existing = PY_WORKERS.get(repl_name)
+            if existing is not None and existing[0].is_alive():
+                return existing
+            if key in CHANNEL_STARTING:
+                _channel_condition_locked(key).wait(0.05)
+                continue
+            generation = _next_channel_generation_locked(key)
+            CHANNEL_STARTING[key] = generation
+            break
+
+    parent_conn = child_conn = proc = None
+    try:
+        parent_conn, child_conn = mp.Pipe(duplex=True)
+        proc = mp.Process(target=_python_worker_loop, args=(child_conn,), daemon=True)
+        proc.start()
         try:
-            conn.close()
+            child_conn.close()
         except Exception:
             pass
-        PY_WORKERS.pop(repl_name, None)
-    parent_conn, child_conn = mp.Pipe(duplex=True)
-    proc = mp.Process(target=_python_worker_loop, args=(child_conn,), daemon=True)
-    proc.start()
-    try:
-        child_conn.close()
-    except Exception:
-        pass
-    try:
         if not parent_conn.poll(5.0):
             raise RuntimeError("Python worker did not become ready")
         ready = parent_conn.recv()
         if not (isinstance(ready, dict) and ready.get("ready")):
             raise RuntimeError("Python worker returned an invalid ready message")
+        pgid = int(ready.get("pgid") or os.getpgid(proc.pid))
+        with ACTIVE_EVALS_LOCK:
+            if CHANNEL_STARTING.get(key) != generation:
+                raise RuntimeError("Python worker generation was replaced during startup")
+            PY_WORKERS[repl_name] = (proc, parent_conn)
+            CHANNEL_PROCESS_META[key] = {"generation": generation, "pgid": pgid, "pid": proc.pid}
+            CHANNEL_STARTING.pop(key, None)
+            _touch_channel_locked("python", repl_name)
+            _channel_condition_locked(key).notify_all()
+        return proc, parent_conn
     except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            parent_conn.close()
-        except Exception:
-            pass
-        raise
-    PY_WORKERS[repl_name] = (proc, parent_conn)
-    touch_channel("python", repl_name)
-    return proc, parent_conn
-
-
-def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> None:
-    existing = PY_WORKERS.pop(repl_name, None)
-    if existing is None:
-        return
-    proc, conn = existing
-    try:
-        conn.close()
-    except Exception:
-        pass
-    if proc.is_alive():
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:
+        if proc is not None and getattr(proc, "pid", None):
             try:
                 proc.kill()
             except Exception:
                 pass
-    try:
-        proc.join(1.0)
-    except Exception:
-        pass
-    if not preserve_activity:
-        _forget_channel_if_reset("python", repl_name)
+        if parent_conn is not None:
+            try:
+                parent_conn.close()
+            except Exception:
+                pass
+        with ACTIVE_EVALS_LOCK:
+            if CHANNEL_STARTING.get(key) == generation:
+                CHANNEL_STARTING.pop(key, None)
+            _channel_condition_locked(key).notify_all()
+        raise
+
+
+def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> bool:
+    key = _channel_key("python", repl_name)
+    with ACTIVE_EVALS_LOCK:
+        existing = PY_WORKERS.get(repl_name)
+        meta = _derive_process_meta_locked("python", repl_name, existing) if existing is not None else CHANNEL_PROCESS_META.get(key)
+        if meta is None:
+            if not preserve_activity:
+                _forget_channel_if_reset("python", repl_name)
+            return True
+        generation = int(meta["generation"])
+        if key not in CHANNEL_REAPING:
+            CHANNEL_REAPING.add(key)
+            own_reservation = True
+        else:
+            own_reservation = False
+    proc = existing[0] if existing is not None else None
+    conn = existing[1] if existing is not None else None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    ok, error = _kill_and_verify_process_group(int(meta["pgid"]), proc)
+    with ACTIVE_EVALS_LOCK:
+        current = CHANNEL_PROCESS_META.get(key)
+        if current is not None and int(current.get("generation", -1)) == generation:
+            if ok:
+                PY_WORKERS.pop(repl_name, None)
+                CHANNEL_PROCESS_META.pop(key, None)
+                if not preserve_activity and not CHANNEL_QUEUES.get(key):
+                    CHANNEL_ACTIVITY.pop(key, None)
+            else:
+                activity = CHANNEL_ACTIVITY.setdefault(key, {})
+                activity["reap_error"] = error
+                activity["reap_reason"] = "teardown_failed"
+        if own_reservation:
+            CHANNEL_REAPING.discard(key)
+            _channel_condition_locked(key).notify_all()
+    return ok
 
 
 def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -247,8 +369,8 @@ def _daemon_status_payload(now: Optional[float] = None) -> Dict[str, Any]:
         channel_state: Dict[str, Any] = {}
         all_channel_keys = {
             key for key, activity in CHANNEL_ACTIVITY.items()
-            if activity.get("reaped_at") is not None
-        } | set(queue_snapshot) | set(CHANNEL_REAPING)
+            if activity.get("reaped_at") is not None or activity.get("reap_error") is not None
+        } | set(queue_snapshot) | set(CHANNEL_REAPING) | set(CHANNEL_PROCESS_META)
         all_channel_keys.update(f"python:{channel}" for channel in python_channels)
         all_channel_keys.update(f"bash:{channel}" for channel in bash_channels)
         for channel_key in sorted(all_channel_keys):
@@ -261,7 +383,10 @@ def _daemon_status_payload(now: Optional[float] = None) -> Dict[str, Any]:
             details: Dict[str, Any] = {
                 "state": (
                     "reaping" if channel_key in CHANNEL_REAPING
-                    else ("busy" if queue else ("reaped" if activity.get("reaped_at") else "ready"))
+                    else (
+                        "busy" if queue
+                        else ("reaped" if activity.get("reaped_at") else ("reap_failed" if activity.get("reap_error") else "ready"))
+                    )
                 ),
                 "last_activity_at": activity.get("last_activity_at"),
             }
@@ -273,10 +398,17 @@ def _daemon_status_payload(now: Optional[float] = None) -> Dict[str, Any]:
             if activity.get("reaped_at") is not None:
                 details["reaped_at"] = activity.get("reaped_at")
                 details["reap_reason"] = activity.get("reap_reason")
+            if activity.get("reap_error") is not None:
+                details["reap_reason"] = activity.get("reap_reason")
+                details["reap_error"] = activity.get("reap_error")
             channel_state[channel_key] = details
     return {
         "protocol_version": 2,
         "daemon_generation": DAEMON_GENERATION,
+        "channel_reaping": {
+            "enabled": CHANNEL_IDLE_TIMEOUT_SEC is not None,
+            "idle_timeout_sec": CHANNEL_IDLE_TIMEOUT_SEC,
+        },
         "started_at": DAEMON_STARTED_AT,
         "heartbeat_at": heartbeat_at,
         "last_activity_at": LAST_ACTIVITY_AT,
@@ -542,26 +674,59 @@ def execute_python(
 
 
 def _bash_proc(repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) -> subprocess.Popen:
-    proc = BASH_REPLS.get(repl_name)
-    if proc is not None and proc.poll() is None:
+    key = _channel_key("bash", repl_name)
+    while True:
+        with ACTIVE_EVALS_LOCK:
+            _wait_for_channel_reap_locked(key)
+            existing = BASH_REPLS.get(repl_name)
+            meta = CHANNEL_PROCESS_META.get(key)
+            if existing is not None and existing.poll() is None:
+                return existing
+            if meta is not None and _process_group_has_live_members(int(meta["pgid"])):
+                raise RuntimeError("Bash channel leader exited while descendants remain")
+            if key in CHANNEL_STARTING:
+                _channel_condition_locked(key).wait(0.05)
+                continue
+            generation = _next_channel_generation_locked(key)
+            CHANNEL_STARTING[key] = generation
+            break
+    proc = None
+    try:
+        env = os.environ.copy()
+        env["EGG_BRIDGE_DIR"] = str(bridge_dir)
+        env["EGG_EVAL_TOKEN"] = token
+        env["PATH"] = f"{runtime_dir}:{env.get('PATH', '')}"
+        proc = subprocess.Popen(
+            ["bash", "--noprofile", "--norc"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+            start_new_session=True,
+        )
+        pgid = os.getpgid(proc.pid)
+        with ACTIVE_EVALS_LOCK:
+            if CHANNEL_STARTING.get(key) != generation:
+                raise RuntimeError("Bash process generation was replaced during startup")
+            BASH_REPLS[repl_name] = proc
+            CHANNEL_PROCESS_META[key] = {"generation": generation, "pgid": pgid, "pid": proc.pid}
+            CHANNEL_STARTING.pop(key, None)
+            _touch_channel_locked("bash", repl_name)
+            _channel_condition_locked(key).notify_all()
         return proc
-    env = os.environ.copy()
-    env["EGG_BRIDGE_DIR"] = str(bridge_dir)
-    env["EGG_EVAL_TOKEN"] = token
-    env["PATH"] = f"{runtime_dir}:{env.get('PATH', '')}"
-    proc = subprocess.Popen(
-        ["bash", "--noprofile", "--norc"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        env=env,
-        start_new_session=True,
-    )
-    BASH_REPLS[repl_name] = proc
-    touch_channel("bash", repl_name)
-    return proc
+    except Exception:
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        with ACTIVE_EVALS_LOCK:
+            if CHANNEL_STARTING.get(key) == generation:
+                CHANNEL_STARTING.pop(key, None)
+            _channel_condition_locked(key).notify_all()
+        raise
 
 
 def execute_bash(
@@ -597,18 +762,10 @@ def execute_bash(
     output = ""
     while True:
         if cancel_check is not None and cancel_check():
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except Exception:
-                proc.kill()
-            BASH_REPLS.pop(repl_name, None)
+            _terminate_bash_channel(repl_name)
             return "--- INTERRUPTED ---\nBash REPL eval was cancelled; this Bash channel was reset."
         if timeout_sec is not None and (time.monotonic() - start) >= timeout_sec:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except Exception:
-                proc.kill()
-            BASH_REPLS.pop(repl_name, None)
+            _terminate_bash_channel(repl_name)
             return f"--- TIMEOUT ---\nBash REPL timed out after {timeout_sec} seconds"
         ready, _, _ = select.select([proc.stdout], [], [], 0.05)
         if not ready:
@@ -623,7 +780,14 @@ def execute_bash(
         except Exception:
             chunk = ""
         if not chunk and proc.poll() is not None:
-            BASH_REPLS.pop(repl_name, None)
+            # Keep immutable PGID metadata if descendants survive the leader;
+            # otherwise retire the dead mapping without claiming a live channel.
+            key = _channel_key("bash", repl_name)
+            with ACTIVE_EVALS_LOCK:
+                meta = CHANNEL_PROCESS_META.get(key)
+                if meta is None or not _process_group_has_live_members(int(meta["pgid"])):
+                    BASH_REPLS.pop(repl_name, None)
+                    CHANNEL_PROCESS_META.pop(key, None)
             return format_bash_output(output)
         output += chunk
         marker = f"\n{sentinel}:"
@@ -774,6 +938,13 @@ def _run_claimed_eval(
                 channel_condition.notify_all()
                 if not queue:
                     CHANNEL_QUEUES.pop(channel_key, None)
+                    if (
+                        channel_key not in CHANNEL_PROCESS_META
+                        and channel_key not in CHANNEL_REAPING
+                        and not CHANNEL_ACTIVITY.get(channel_key, {}).get("reaped_at")
+                        and not CHANNEL_ACTIVITY.get(channel_key, {}).get("reap_error")
+                    ):
+                        CHANNEL_ACTIVITY.pop(channel_key, None)
                     CHANNEL_CONDITIONS.pop(channel_key, None)
         try:
             claimed.unlink()
@@ -862,15 +1033,7 @@ def _cancel_active_channel(active: Dict[str, Any]) -> None:
         _kill_python_worker(channel)
         return
     if language == "bash":
-        proc = BASH_REPLS.pop(channel, None)
-        if proc is not None and proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+        _terminate_bash_channel(channel)
 
 
 def service_cancel_requests(bridge_dir: Path) -> None:
@@ -928,23 +1091,38 @@ def service_cancel_requests(bridge_dir: Path) -> None:
         write_daemon_status(activity=True)
 
 
-def _terminate_bash_channel(channel: str, *, preserve_activity: bool = False) -> None:
-    proc = BASH_REPLS.pop(channel, None)
-    if proc is None or proc.poll() is not None:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-    try:
-        proc.wait(timeout=1.0)
-    except Exception:
-        pass
-    if not preserve_activity:
-        _forget_channel_if_reset("bash", channel)
+def _terminate_bash_channel(channel: str, *, preserve_activity: bool = False) -> bool:
+    key = _channel_key("bash", channel)
+    with ACTIVE_EVALS_LOCK:
+        proc = BASH_REPLS.get(channel)
+        meta = _derive_process_meta_locked("bash", channel, proc) if proc is not None else CHANNEL_PROCESS_META.get(key)
+        if meta is None:
+            if not preserve_activity:
+                _forget_channel_if_reset("bash", channel)
+            return True
+        generation = int(meta["generation"])
+        if key not in CHANNEL_REAPING:
+            CHANNEL_REAPING.add(key)
+            own_reservation = True
+        else:
+            own_reservation = False
+    ok, error = _kill_and_verify_process_group(int(meta["pgid"]), proc)
+    with ACTIVE_EVALS_LOCK:
+        current = CHANNEL_PROCESS_META.get(key)
+        if current is not None and int(current.get("generation", -1)) == generation:
+            if ok:
+                BASH_REPLS.pop(channel, None)
+                CHANNEL_PROCESS_META.pop(key, None)
+                if not preserve_activity and not CHANNEL_QUEUES.get(key):
+                    CHANNEL_ACTIVITY.pop(key, None)
+            else:
+                activity = CHANNEL_ACTIVITY.setdefault(key, {})
+                activity["reap_error"] = error
+                activity["reap_reason"] = "teardown_failed"
+        if own_reservation:
+            CHANNEL_REAPING.discard(key)
+            _channel_condition_locked(key).notify_all()
+    return ok
 
 
 def reap_idle_channels(
@@ -953,67 +1131,90 @@ def reap_idle_channels(
     now: Optional[float] = None,
     before_teardown: Any = None,
 ) -> List[str]:
-    """Reap idle interpreter channels without racing channel admission."""
+    """Reap idle interpreter groups without racing process-map successors."""
 
     threshold = CHANNEL_IDLE_TIMEOUT_SEC if timeout_sec is None else parse_positive_timeout(timeout_sec)
     if threshold is None:
         return []
     observed_at = float(time.time() if now is None else now)
-    candidates: List[str] = []
+    candidates: List[tuple[str, Dict[str, int]]] = []
     with ACTIVE_EVALS_LOCK:
-        live_keys = {
-            *(_channel_key("python", channel) for channel in PY_WORKERS),
-            *(_channel_key("bash", channel) for channel, proc in BASH_REPLS.items() if proc.poll() is None),
-        }
+        live_keys = set(CHANNEL_PROCESS_META)
+        for channel in list(PY_WORKERS):
+            meta = _derive_process_meta_locked("python", channel, PY_WORKERS.get(channel))
+            if meta is not None:
+                live_keys.add(_channel_key("python", channel))
+        for channel in list(BASH_REPLS):
+            meta = _derive_process_meta_locked("bash", channel, BASH_REPLS.get(channel))
+            if meta is not None:
+                live_keys.add(_channel_key("bash", channel))
         for channel_key in sorted(live_keys):
             activity = CHANNEL_ACTIVITY.get(channel_key, {})
             last_activity = activity.get("last_activity_at")
             queue = CHANNEL_QUEUES.get(channel_key, [])
-            cancelling = any(
-                bool(ACTIVE_EVALS.get(req_id, {}).get("cancel_reason"))
-                or bool(
-                    ACTIVE_EVALS.get(req_id, {}).get("cancel") is not None
-                    and ACTIVE_EVALS[req_id]["cancel"].is_set()
-                )
-                for req_id in queue
-            )
             if (
                 channel_key in CHANNEL_REAPING
+                or channel_key in CHANNEL_STARTING
                 or queue
-                or cancelling
                 or not isinstance(last_activity, (int, float))
                 or observed_at - float(last_activity) <= threshold
             ):
                 continue
+            meta = CHANNEL_PROCESS_META.get(channel_key)
+            if meta is None:
+                continue
             CHANNEL_REAPING.add(channel_key)
-            candidates.append(channel_key)
+            candidates.append((channel_key, dict(meta)))
     reaped: List[str] = []
-    for channel_key in candidates:
+    for channel_key, reserved_meta in candidates:
         language, channel = channel_key.split(":", 1)
+        success = False
+        error = "unsupported channel language"
         try:
             if before_teardown is not None:
                 before_teardown(channel_key)
-            if language == "python":
-                _kill_python_worker(channel, preserve_activity=True)
-            elif language == "bash":
-                _terminate_bash_channel(channel, preserve_activity=True)
-            else:
-                continue
-            reaped.append(channel_key)
-        finally:
+            with ACTIVE_EVALS_LOCK:
+                current = CHANNEL_PROCESS_META.get(channel_key)
+                if current is None or current.get("generation") != reserved_meta.get("generation"):
+                    error = "channel generation changed before teardown"
+                    continue
+                process = _channel_process_locked(language, channel)
+                proc = process[0] if language == "python" and isinstance(process, tuple) else process
+            success, error = _kill_and_verify_process_group(int(reserved_meta["pgid"]), proc)
             completed_at = float(time.time() if now is None else now)
             with ACTIVE_EVALS_LOCK:
+                current = CHANNEL_PROCESS_META.get(channel_key)
+                same_generation = current is not None and current.get("generation") == reserved_meta.get("generation")
                 activity = CHANNEL_ACTIVITY.setdefault(channel_key, {})
                 activity["last_activity_at"] = completed_at
-                activity["reaped_at"] = completed_at
-                activity["reap_reason"] = f"idle_timeout:{threshold:g}s"
+                if success and same_generation:
+                    if language == "python":
+                        existing = PY_WORKERS.pop(channel, None)
+                        if existing is not None:
+                            try:
+                                existing[1].close()
+                            except Exception:
+                                pass
+                    elif language == "bash":
+                        BASH_REPLS.pop(channel, None)
+                    CHANNEL_PROCESS_META.pop(channel_key, None)
+                    activity.pop("reap_error", None)
+                    activity["reaped_at"] = completed_at
+                    activity["reap_reason"] = f"idle_timeout:{threshold:g}s"
+                    reaped.append(channel_key)
+                else:
+                    activity.pop("reaped_at", None)
+                    activity["reap_reason"] = "teardown_failed"
+                    activity["reap_error"] = error or "process group teardown was not verified"
+        finally:
+            with ACTIVE_EVALS_LOCK:
                 CHANNEL_REAPING.discard(channel_key)
-                condition = CHANNEL_CONDITIONS.get(channel_key)
-                if condition is not None:
-                    condition.notify_all()
-                    if not CHANNEL_QUEUES.get(channel_key):
+                _channel_condition_locked(channel_key).notify_all()
+                if not CHANNEL_QUEUES.get(channel_key) and channel_key not in CHANNEL_PROCESS_META:
+                    condition = CHANNEL_CONDITIONS.get(channel_key)
+                    if condition is not None:
                         CHANNEL_CONDITIONS.pop(channel_key, None)
-    if reaped:
+    if candidates:
         write_daemon_status(activity=True)
     return reaped
 

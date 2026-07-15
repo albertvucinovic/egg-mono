@@ -93,6 +93,55 @@ def test_daemon_status_snapshot_reports_generation_requests_channels_and_activit
         sessiond.CHANNEL_QUEUES.clear()
 
 
+def test_disabled_channel_reaping_preserves_legacy_hash_and_status(monkeypatch, tmp_path):
+    db, thread_id, session_id = _configured_docker_session(tmp_path, monkeypatch)
+    cfg = ts.get_thread_session_config(db, thread_id)
+    monkeypatch.delenv("EGG_RLM_CHANNEL_IDLE_TIMEOUT", raising=False)
+    mount_dir = session.docker_session_mount_dir(db, thread_id, cfg)
+    body = {
+        "mount_policy": session._DOCKER_MOUNT_POLICY,
+        "image": cfg.image,
+        "workspace": cfg.workspace,
+        "network": cfg.network,
+        "mount_dir": str(mount_dir.resolve()),
+    }
+    try:
+        from eggthreads.sandbox import get_thread_sandbox_config
+        sb = get_thread_sandbox_config(db, thread_id)
+        body["sandbox"] = {
+            "enabled": bool(sb.enabled), "provider": sb.provider,
+            "settings": dict(sb.settings or {}),
+        }
+    except Exception as e:
+        body["sandbox_error"] = f"{type(e).__name__}: {e}"
+    import hashlib
+    expected = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()[:24]
+    assert session._docker_session_policy_hash(db, thread_id, cfg) == expected
+
+    monkeypatch.setattr(
+        session, "_docker_container_state",
+        lambda _name: session._DockerContainerState(True, True, "running"),
+    )
+    # Exact Phase-4 legacy protocol-2 channel shape: no capability or channel
+    # last-activity fields. Disabled upgrade must accept it as healthy.
+    _write_health(
+        session_id,
+        channel_state={"python:default": {"state": "ready"}},
+    )
+    status = ts.get_thread_session_status(db, thread_id)
+    assert status.status == "ready"
+
+    monkeypatch.setenv("EGG_RLM_CHANNEL_IDLE_TIMEOUT", "1h")
+    _write_health(
+        session_id,
+        channel_reaping={"enabled": True, "idle_timeout_sec": 3600},
+        channel_state={"python:default": {"state": "ready"}},
+    )
+    assert ts.get_thread_session_status(db, thread_id).status == "unhealthy"
+
+
 def test_docker_status_reports_missing_ready_busy_and_unhealthy(tmp_path, monkeypatch):
     db, thread_id, session_id = _configured_docker_session(tmp_path, monkeypatch)
 

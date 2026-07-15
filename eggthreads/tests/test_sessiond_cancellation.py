@@ -31,6 +31,9 @@ def _reset_sessiond_state() -> None:
     sessiond.CHANNEL_CONDITIONS.clear()
     sessiond.CHANNEL_ACTIVITY.clear()
     sessiond.CHANNEL_REAPING.clear()
+    sessiond.CHANNEL_STARTING.clear()
+    sessiond.CHANNEL_PROCESS_META.clear()
+    sessiond.CHANNEL_GENERATIONS.clear()
     sessiond.CHANNEL_IDLE_TIMEOUT_SEC = None
 
 

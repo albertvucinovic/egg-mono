@@ -658,8 +658,12 @@ def _docker_session_policy_hash(db: ThreadsDB, runtime_thread_id: str, cfg: Sess
         "workspace": cfg.workspace,
         "network": cfg.network,
         "mount_dir": str(docker_session_mount_dir(db, runtime_thread_id, cfg).resolve()),
-        "channel_idle_timeout_sec": _configured_channel_idle_timeout_sec(),
     }
+    channel_idle_timeout = _configured_channel_idle_timeout_sec()
+    if channel_idle_timeout is not None:
+        # Preserve the exact pre-feature canonical hash while disabled so an
+        # upgrade cannot restart and discard existing persistent REPL state.
+        body["channel_idle_timeout_sec"] = channel_idle_timeout
     try:
         from .sandbox import get_thread_sandbox_config
 
@@ -2092,6 +2096,20 @@ def _docker_daemon_status(bridge_dir: Path) -> tuple[Optional[Dict[str, Any]], s
     if generation.strip() != announced_generation.strip():
         return payload, "Docker session daemon generation does not match its heartbeat"
 
+    reaping_policy = payload.get("channel_reaping")
+    if reaping_policy is None:
+        channel_reaping_enabled = False
+    elif not isinstance(reaping_policy, dict) or not isinstance(reaping_policy.get("enabled"), bool):
+        return payload, "Docker session daemon channel reaping capability is invalid"
+    else:
+        channel_reaping_enabled = reaping_policy["enabled"]
+        policy_timeout = reaping_policy.get("idle_timeout_sec")
+        if channel_reaping_enabled:
+            if not isinstance(policy_timeout, (int, float)) or isinstance(policy_timeout, bool) or not math.isfinite(float(policy_timeout)) or float(policy_timeout) <= 0:
+                return payload, "Docker session daemon channel reaping timeout is invalid"
+        elif policy_timeout is not None:
+            return payload, "Docker session daemon disabled channel reaping has a timeout"
+
     active_requests = payload.get("active_requests")
     if not isinstance(active_requests, list):
         return payload, "Docker session daemon active request status is invalid"
@@ -2124,19 +2142,25 @@ def _docker_daemon_status(bridge_dir: Path) -> tuple[Optional[Dict[str, Any]], s
         if not isinstance(channel, str) or not channel.strip() or not isinstance(details, dict):
             return payload, "Docker session daemon channel entry is invalid"
         state = details.get("state")
-        if state not in {"ready", "busy", "reaping", "reaped"}:
+        allowed_states = {"ready", "busy", "reaping", "reaped", "reap_failed"} if channel_reaping_enabled else {"ready", "busy"}
+        if state not in allowed_states:
             return payload, "Docker session daemon channel state is invalid"
         channel_last_activity = details.get("last_activity_at")
-        if not _valid_daemon_timestamp(channel_last_activity):
+        if channel_reaping_enabled and not _valid_daemon_timestamp(channel_last_activity):
+            return payload, "Docker session daemon channel last activity is invalid"
+        if channel_last_activity is not None and not _valid_daemon_timestamp(channel_last_activity):
             return payload, "Docker session daemon channel last activity is invalid"
         reaped_at = details.get("reaped_at")
         reap_reason = details.get("reap_reason")
         if state == "reaped":
-            if not _valid_daemon_timestamp(reaped_at) or not isinstance(reap_reason, str) or not reap_reason:
+            if not _valid_daemon_timestamp(reaped_at) or not isinstance(reap_reason, str) or not reap_reason or details.get("reap_error") is not None:
                 return payload, "Docker session daemon reaped channel status is invalid"
-        elif reaped_at is not None or reap_reason is not None:
+        elif state == "reap_failed":
+            if reaped_at is not None or reap_reason != "teardown_failed" or not isinstance(details.get("reap_error"), str) or not details["reap_error"]:
+                return payload, "Docker session daemon failed reap status is invalid"
+        elif reaped_at is not None or reap_reason is not None or details.get("reap_error") is not None:
             return payload, "Docker session daemon live channel has stale reap status"
-        if state in {"ready", "reaping", "reaped"}:
+        if state in {"ready", "reaping", "reaped", "reap_failed"}:
             if any(key in details for key in ("running_request_id", "queued_request_ids")):
                 return payload, "Docker session daemon non-busy channel contains request IDs"
             continue
