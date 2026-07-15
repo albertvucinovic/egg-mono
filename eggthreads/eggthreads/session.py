@@ -136,6 +136,8 @@ class SessionProvider(Protocol):
 
 _DOCKER_MOUNT_POLICY = "thread-workdir-mask-egg-sandbox-v2"
 _CHANNEL_REAPER_RUNTIME_VERSION = 2
+_SESSION_STORAGE_METADATA = "session_owner.json"
+_SESSION_STORAGE_METADATA_VERSION = 1
 _SESSION_ACTIVITY_LOCKS: Dict[str, threading.RLock] = {}
 _SESSION_ACTIVITY_LOCK_USERS: Dict[str, int] = {}
 _SESSION_ACTIVITY_LOCKS_GUARD = threading.Lock()
@@ -419,8 +421,49 @@ def docker_session_available() -> bool:
         return False
 
 
+def _bridge_root_lexical() -> Path:
+    return Path(os.path.abspath(Path.cwd() / ".egg" / "rlm_sessions"))
+
+
 def _bridge_root() -> Path:
-    return (Path.cwd() / ".egg" / "rlm_sessions").resolve()
+    return _bridge_root_lexical().resolve()
+
+
+def _bridge_root_authority() -> tuple[Optional[tuple[Path, Path]], str]:
+    """Return stable lexical/resolved roots only for real project directories."""
+
+    raw_project = Path(os.getcwd())
+    project = Path(os.path.abspath(raw_project))
+    egg = project / ".egg"
+    lexical = _bridge_root_lexical()
+    try:
+        raw_parts = [raw_project.anchor] if raw_project.anchor else []
+        raw_parts.extend(raw_project.parts[1:] if raw_project.anchor else raw_project.parts)
+        current = Path(raw_parts[0]) if raw_parts else Path()
+        project_has_symlink = False
+        for part in raw_parts[1:] if raw_parts else ():
+            current /= part
+            if current.is_symlink():
+                project_has_symlink = True
+                break
+        if project_has_symlink or project.is_symlink() or egg.is_symlink() or lexical.is_symlink():
+            return None, "session authority root contains a symlink"
+        if not egg.exists() or not lexical.exists():
+            return None, "session authority root is missing"
+        if not egg.is_dir() or not lexical.is_dir():
+            return None, "session authority root is not a directory"
+        resolved_project = project.resolve()
+        resolved = lexical.resolve()
+        if not _is_relative_to(resolved, resolved_project):
+            return None, "session authority root escapes the project"
+    except Exception as e:
+        return None, f"session authority root inspection failed: {type(e).__name__}: {e}"
+    return (lexical, resolved), ""
+
+
+def _bridge_root_authority_matches(expected: tuple[Path, Path]) -> bool:
+    current, error = _bridge_root_authority()
+    return not error and current == expected
 
 
 def _session_bridge_dir(session_id: str) -> Path:
@@ -663,6 +706,20 @@ def _docker_existing_label(container_name: str, label: str) -> Optional[str]:
     return value or None
 
 
+def _docker_existing_id(container_name: str) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "-f", "{{.Id}}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    value = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+    return value or None
+
+
 def _configured_channel_idle_timeout_sec() -> Optional[float]:
     timeout = _parse_duration_seconds(os.environ.get("EGG_RLM_CHANNEL_IDLE_TIMEOUT"))
     if timeout is None or not math.isfinite(timeout) or timeout <= 0:
@@ -818,6 +875,47 @@ def _session_storage_paths(session_id: str) -> Optional[tuple[Path, Path, Path]]
     return root, root / "bridge", root / "runtime"
 
 
+def _session_storage_owner_payload(db: ThreadsDB, session_id: str) -> Dict[str, Any]:
+    return {
+        "version": _SESSION_STORAGE_METADATA_VERSION,
+        "kind": "egg.rlm_session_storage",
+        "session_id": session_id,
+        "db_hash": docker_session_db_hash(db),
+        "db_path": _canonical_database_path(db),
+    }
+
+
+def _write_session_storage_owner(db: ThreadsDB, session_id: str) -> None:
+    storage = _session_storage_paths(session_id)
+    if storage is None:
+        raise ValueError("invalid Docker session storage identity")
+    root, _bridge, _runtime = storage
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / _SESSION_STORAGE_METADATA
+    expected = _session_storage_owner_payload(db, session_id)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise RuntimeError(f"Docker session storage metadata is unreadable: {e}")
+        if existing != expected:
+            raise RuntimeError("Docker session storage belongs to a different database identity")
+        return
+    _atomic_write_json(path, expected)
+
+
+def _session_storage_owner_matches(db: ThreadsDB, session_root: Path) -> tuple[bool, str]:
+    path = session_root / _SESSION_STORAGE_METADATA
+    if not path.exists():
+        return False, "ownership_unknown"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False, "ownership_invalid"
+    expected = _session_storage_owner_payload(db, session_root.name)
+    return (True, "") if payload == expected else (False, "ownership_mismatch")
+
+
 def _current_session_reference_map(
     db: ThreadsDB,
 ) -> tuple[Optional[Dict[str, List[str]]], str]:
@@ -858,6 +956,7 @@ def _docker_owned_session_inventory() -> tuple[List[Dict[str, Any]], str]:
     for name in [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]:
         inventory.append({
             "name": name,
+            "id": _docker_existing_id(name),
             "kind_label": _docker_existing_label(name, "egg.kind"),
             "db_hash_label": _docker_existing_label(name, "egg.db_hash"),
             "session_id": _docker_existing_label(name, "egg.session_id"),
@@ -869,16 +968,12 @@ def _docker_owned_session_inventory() -> tuple[List[Dict[str, Any]], str]:
     return inventory, ""
 
 
-def _docker_container_names_using_path(path: Path) -> tuple[Optional[List[str]], str]:
-    """Find any container mounting ``path``; labels are irrelevant to safety."""
+def _docker_all_bind_mounts() -> tuple[Optional[List[Dict[str, str]]], str]:
+    """Inspect bind sources for every container, independent of Egg labels."""
 
     try:
         proc = subprocess.run(
-            [
-                "docker", "ps", "-a",
-                "--filter", f"volume={path}",
-                "--format", "{{.Names}}",
-            ],
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -888,11 +983,86 @@ def _docker_container_names_using_path(path: Path) -> tuple[Optional[List[str]],
     if proc.returncode != 0:
         error = (proc.stderr or proc.stdout or "Docker mount-owner discovery failed").strip()
         return None, error
-    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()], ""
+    mounts: List[Dict[str, str]] = []
+    for name in [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]:
+        try:
+            inspected = subprocess.run(
+                [
+                    "docker", "inspect", "-f",
+                    "{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Source}}\t{{.Destination}}\n{{end}}{{end}}",
+                    name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception as e:
+            return None, f"Docker mount inspect failed for {name}: {type(e).__name__}: {e}"
+        if inspected.returncode != 0:
+            error = (inspected.stderr or inspected.stdout or "Docker mount inspect failed").strip()
+            return None, f"{name}: {error}"
+        for line in (inspected.stdout or "").splitlines():
+            source, separator, destination = line.partition("\t")
+            if not separator or not source:
+                return None, f"Docker mount inspect returned malformed data for {name}"
+            mounts.append({
+                "name": name,
+                "source": str(Path(source).resolve()),
+                "destination": destination,
+            })
+    return mounts, ""
+
+
+def _docker_exact_container_inventory(names: set[str]) -> tuple[Optional[List[Dict[str, Any]]], str]:
+    """Reinspect named Egg containers needed for artifact deletion authority."""
+
+    inventory: List[Dict[str, Any]] = []
+    for name in sorted(names):
+        kind = _docker_existing_label(name, "egg.kind")
+        session_id = _docker_existing_label(name, "egg.session_id")
+        container_id = _docker_existing_id(name)
+        state = _docker_container_state(name)
+        if (
+            kind is None
+            and session_id is None
+            and container_id is None
+            and state.exists is False
+        ):
+            continue
+        if not kind or not session_id or not container_id or state.exists is not True or state.running is None:
+            return None, f"container identity/state is uncertain: {name}"
+        inventory.append({
+            "name": name,
+            "id": container_id,
+            "kind_label": kind,
+            "db_hash_label": _docker_existing_label(name, "egg.db_hash"),
+            "session_id": session_id,
+            "bridge_source": _docker_bind_mount_source(name, "/egg-bridge"),
+            "runtime_source": _docker_bind_mount_source(name, "/egg-runtime"),
+            "state": state,
+        })
+    return inventory, ""
+
+
+def _docker_containers_mounting_session_root(
+    session_root: Path,
+    mounts: Optional[List[Dict[str, str]]],
+) -> tuple[Optional[List[str]], str]:
+    if mounts is None:
+        mounts, error = _docker_all_bind_mounts()
+        if mounts is None:
+            return None, error
+    root = session_root.resolve()
+    names = sorted({
+        item["name"]
+        for item in mounts
+        if _is_relative_to(Path(item["source"]), root)
+    })
+    return names, ""
 
 
 def _session_artifact_tree_error(session_root: Path) -> str:
-    allowed = {"bridge", "runtime", "masks", "activity.lock"}
+    allowed = {"bridge", "runtime", "masks", "activity.lock", _SESSION_STORAGE_METADATA}
     try:
         if session_root.is_symlink() or not session_root.is_dir():
             return "session artifact root is not a real directory"
@@ -992,6 +1162,8 @@ def _docker_duplicate_cleanup_authority(
     session_id: str,
     name: str,
     canonical_name: str,
+    expected_id: str,
+    expected_canonical_id: str,
 ) -> tuple[bool, str, Optional[float]]:
     """Revalidate one duplicate under its session activity guard."""
 
@@ -1003,6 +1175,8 @@ def _docker_duplicate_cleanup_authority(
         return False, "ownership_label_invalid", None
     if _docker_existing_label(name, "egg.session_id") != session_id:
         return False, "session_identity_changed", None
+    if not expected_id or _docker_existing_id(name) != expected_id:
+        return False, "container_identity_changed", None
     if name == canonical_name:
         return False, "canonical_preserved", None
     references, reference_error = _session_reference_thread_ids(db, session_id)
@@ -1024,10 +1198,10 @@ def _docker_duplicate_cleanup_authority(
     if state.running:
         return False, "running_container", None
     canonical_state = _docker_container_state(canonical_name)
-    if canonical_state.exists is None or (
-        canonical_state.exists is True and canonical_state.running is None
-    ):
+    if canonical_state.exists is not True or canonical_state.running is None:
         return False, "canonical_state_uncertain", None
+    if not expected_canonical_id or _docker_existing_id(canonical_name) != expected_canonical_id:
+        return False, "canonical_identity_changed", None
     return True, "", _docker_container_created_at(name)
 
 
@@ -1125,6 +1299,10 @@ def cleanup_docker_sessions(
                 report.update(action="skipped", reason="canonical_missing_or_uncertain")
             elif not isinstance(state, _DockerContainerState) or state.exists is not True or state.running is None:
                 report.update(action="skipped", reason="container_state_uncertain")
+            elif not isinstance(item.get("id"), str) or not item["id"]:
+                report.update(action="skipped", reason="container_identity_uncertain")
+            elif not isinstance((canonical or {}).get("id"), str) or not canonical["id"]:
+                report.update(action="skipped", reason="canonical_identity_uncertain")
             elif state.running:
                 report.update(action="skipped", reason="running_container")
             elif container_age is not None and not isinstance(item.get("created_at"), (int, float)):
@@ -1139,7 +1317,12 @@ def cleanup_docker_sessions(
                         report.update(action="skipped", reason="host_activity")
                     else:
                         authorized, reason, current_created_at = _docker_duplicate_cleanup_authority(
-                            db, session_id, name, canonical_name,
+                            db,
+                            session_id,
+                            name,
+                            canonical_name,
+                            str(item["id"]),
+                            str(canonical["id"]),
                         )
                         if not authorized:
                             report.update(action="skipped", reason=reason)
@@ -1169,9 +1352,18 @@ def cleanup_docker_sessions(
                                 )
             results.append(report)
 
-    root = _bridge_root()
-    if not root.exists():
+    lexical_candidate = _bridge_root_lexical()
+    if not lexical_candidate.exists() and not lexical_candidate.is_symlink():
         return results
+    root_authority, root_error = _bridge_root_authority()
+    if root_authority is None:
+        results.append({
+            "kind": "doctor", "name": str(_bridge_root_lexical()), "action": "error",
+            "reason": "artifact_root_unsafe", "error": root_error,
+        })
+        return results
+    root_lexical, root = root_authority
+    all_mounts, mount_discovery_error = _docker_all_bind_mounts()
     try:
         candidates = sorted(root.iterdir(), key=lambda path: path.name)
     except Exception as e:
@@ -1186,6 +1378,30 @@ def cleanup_docker_sessions(
         report = {"kind": "artifact", "name": str(session_root), "session_id": session_id}
         if _safe_session_storage_name(session_id) != session_id:
             report.update(action="skipped", reason="session_identity_invalid")
+            results.append(report)
+            continue
+        owner_matches, owner_reason = _session_storage_owner_matches(db, session_root)
+        associated = [
+            item for item in inventory
+            if item.get("identity_verified") and item.get("session_id") == session_id
+        ]
+        legacy_proven = bool(associated)
+        if not owner_matches and not legacy_proven:
+            report.update(action="skipped", reason=owner_reason)
+            results.append(report)
+            continue
+        associated_names = {str(item.get("name") or "") for item in associated}
+        associated_failures = [
+            item for item in results
+            if item.get("kind") == "container"
+            and item.get("name") in associated_names
+            and item.get("reason") not in {"stopped_legacy_duplicate"}
+        ]
+        if associated_failures:
+            report.update(
+                action="skipped", reason="associated_container_preserved",
+                containers=sorted(associated_names),
+            )
             results.append(report)
             continue
         tree_error = _session_artifact_tree_error(session_root)
@@ -1204,8 +1420,9 @@ def cleanup_docker_sessions(
             )
             results.append(report)
             continue
-        if discovery_error:
+        if discovery_error or mount_discovery_error:
             report.update(action="skipped", reason="docker_state_uncertain")
+            report["error"] = discovery_error or mount_discovery_error
             results.append(report)
             continue
         protection_reason, protection_error = _session_artifact_protection_error(
@@ -1237,7 +1454,9 @@ def cleanup_docker_sessions(
                 )
                 results.append(report)
                 continue
-            path_users, path_error = _docker_container_names_using_path(session_root)
+            path_users, path_error = _docker_containers_mounting_session_root(
+                session_root, all_mounts,
+            )
             if path_error or path_users is None:
                 report.update(
                     action="skipped", reason="container_mount_state_uncertain",
@@ -1253,12 +1472,55 @@ def cleanup_docker_sessions(
             else:
                 # Revalidate path shape, heartbeat/control state, and age while
                 # holding the activity guard immediately before deletion.
-                final_error = _session_artifact_tree_error(session_root)
+                if not _bridge_root_authority_matches(root_authority):
+                    report.update(action="skipped", reason="artifact_root_changed")
+                    results.append(report)
+                    continue
+                final_root = root_lexical / session_id
+                final_error = _session_artifact_tree_error(final_root)
+                final_owner, final_owner_reason = _session_storage_owner_matches(db, final_root)
                 if final_error:
                     report.update(action="skipped", reason="artifact_path_unsafe", error=final_error)
+                elif not final_owner:
+                    report.update(action="skipped", reason=final_owner_reason)
                 else:
+                    final_associated, final_associated_error = _docker_exact_container_inventory(
+                        associated_names,
+                    )
+                    if final_associated_error or final_associated is None:
+                        report.update(
+                            action="skipped", reason="associated_container_state_uncertain",
+                            error=final_associated_error or "associated container scan failed",
+                        )
+                        results.append(report)
+                        continue
+                    if final_associated:
+                        report.update(
+                            action="skipped", reason="associated_container_preserved",
+                            containers=sorted(item["name"] for item in final_associated),
+                        )
+                        results.append(report)
+                        continue
+                    final_mounts, final_mount_error = _docker_all_bind_mounts()
+                    final_users, final_users_error = _docker_containers_mounting_session_root(
+                        final_root, final_mounts,
+                    ) if final_mounts is not None else (None, final_mount_error)
+                    if final_users_error or final_users is None:
+                        report.update(
+                            action="skipped", reason="container_mount_state_uncertain",
+                            error=final_users_error or "container mount scan failed",
+                        )
+                        results.append(report)
+                        continue
+                    if final_users:
+                        report.update(
+                            action="skipped", reason="container_mount_present",
+                            containers=final_users,
+                        )
+                        results.append(report)
+                        continue
                     final_reason, final_protection_error = _session_artifact_protection_error(
-                        session_root, now=time.time(), stale_sec=stale_sec,
+                        final_root, now=time.time(), stale_sec=stale_sec,
                     )
                     if final_reason:
                         report.update(action="skipped", reason=final_reason)
@@ -1266,7 +1528,7 @@ def cleanup_docker_sessions(
                             report["error"] = final_protection_error
                     else:
                         try:
-                            shutil.rmtree(session_root)
+                            shutil.rmtree(final_root)
                             report.update(action="removed", reason="stale_session_artifacts")
                         except Exception as e:
                             report.update(
@@ -2393,6 +2655,7 @@ def _get_or_start_docker_session_locked(
     bridge_dir = _session_bridge_dir(cfg.session_id)
     runtime_dir = _session_runtime_dir(cfg.session_id)
     mount_dir = docker_session_mount_dir(db, thread_id, cfg)
+    _write_session_storage_owner(db, cfg.session_id)
     _write_runtime_files(runtime_dir)
     try:
         restarted = _start_docker_container(

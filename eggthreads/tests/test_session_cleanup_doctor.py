@@ -39,6 +39,7 @@ def _container(
     root = session._bridge_root() / session_id
     return {
         "name": name,
+        "id": f"id-{name}",
         "kind_label": "rlm-session",
         "db_hash_label": db_hash if db_hash is not None else ts.docker_session_db_hash(db),
         "session_id": session_id,
@@ -49,7 +50,10 @@ def _container(
     }
 
 
-def _old_tree(monkeypatch, tmp_path: Path, session_id: str, *, age: float = 7200) -> Path:
+def _old_tree(
+    monkeypatch, tmp_path: Path, session_id: str, *, age: float = 7200,
+    marked: bool = True, db_path: Path | None = None,
+) -> Path:
     monkeypatch.chdir(tmp_path)
     root = session._bridge_root() / session_id
     (root / "bridge").mkdir(parents=True)
@@ -57,6 +61,9 @@ def _old_tree(monkeypatch, tmp_path: Path, session_id: str, *, age: float = 7200
     (root / "runtime" / "sessiond.py").write_text("# owned runtime")
     (root / "masks" / "egg").mkdir(parents=True)
     (root / "activity.lock").write_text("")
+    if marked:
+        owner_db = ts.ThreadsDB(db_path or tmp_path / "threads.sqlite")
+        session._write_session_storage_owner(owner_db, session_id)
     old = time.time() - age
     for current, dirs, files in os.walk(root, topdown=False):
         for name in files:
@@ -68,7 +75,7 @@ def _old_tree(monkeypatch, tmp_path: Path, session_id: str, *, age: float = 7200
 
 
 def _safe_artifact_dependencies(monkeypatch):
-    monkeypatch.setattr(session, "_docker_container_names_using_path", lambda _path: ([], ""))
+    monkeypatch.setattr(session, "_docker_all_bind_mounts", lambda: ([], ""))
 
 
 def _revalidate_from_inventory(monkeypatch, inventory):
@@ -87,6 +94,7 @@ def _revalidate_from_inventory(monkeypatch, inventory):
             "bridge_source" if destination == "/egg-bridge" else "runtime_source"
         ],
     )
+    monkeypatch.setattr(session, "_docker_existing_id", lambda name: by_name[name]["id"])
     monkeypatch.setattr(session, "_docker_container_state", lambda name: by_name[name]["state"])
     monkeypatch.setattr(session, "_docker_container_created_at", lambda name: by_name[name]["created_at"])
 
@@ -321,8 +329,12 @@ def test_artifact_symlink_unexpected_entry_mount_owner_and_activity_lock_fail_cl
     monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
     monkeypatch.setattr(
         session,
-        "_docker_container_names_using_path",
-        lambda path: (["unknown-owner"], "") if path == mount_root else ([], ""),
+        "_docker_all_bind_mounts",
+        lambda: ([{
+            "name": "unknown-owner",
+            "source": str((mount_root / "bridge").resolve()),
+            "destination": "/egg-bridge",
+        }], ""),
     )
     real_guard = session._session_activity_guard
 
@@ -432,3 +444,243 @@ def test_programmatic_cleanup_rejects_invalid_duration(monkeypatch, tmp_path, va
     db, _thread_id = _db(tmp_path)
     with pytest.raises(ValueError, match="positive finite"):
         ts.cleanup_docker_sessions(db, older_than_sec=value)
+
+
+def test_storage_owner_metadata_is_atomic_and_normal_start_writes_it(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db, thread_id = _db(tmp_path)
+    sid = ts.enable_thread_session(db, thread_id, provider="docker")
+    cfg = ts.get_thread_session_config(db, thread_id)
+    monkeypatch.setattr(session, "_session_status_for_config", lambda *_a: ts.SessionStatus(
+        True, "docker", sid, "missing", container_name=ts.docker_session_container_name(db, sid),
+    ))
+    monkeypatch.setattr(session, "docker_session_mount_dir", lambda *_a: tmp_path)
+    monkeypatch.setattr(session, "_write_runtime_files", lambda _path: None)
+    monkeypatch.setattr(session, "_start_docker_container", lambda *_a, **_k: False)
+    atomic_calls = []
+    real_atomic = session._atomic_write_json
+    monkeypatch.setattr(
+        session, "_atomic_write_json",
+        lambda path, payload: atomic_calls.append((path, payload)) or real_atomic(path, payload),
+    )
+
+    session._get_or_start_docker_session_locked(db, thread_id, cfg)
+
+    root = session._bridge_root() / sid
+    metadata = json.loads((root / session._SESSION_STORAGE_METADATA).read_text())
+    assert metadata == session._session_storage_owner_payload(db, sid)
+    assert atomic_calls and atomic_calls[0][0].name == session._SESSION_STORAGE_METADATA
+    # Reattachment validates rather than rewriting ownership metadata.
+    session._write_session_storage_owner(db, sid)
+    assert len(atomic_calls) == 1
+
+
+def test_storage_owner_scopes_cleanup_between_databases_in_shared_cwd(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db_a = ts.ThreadsDB(tmp_path / "a.sqlite"); db_a.init_schema()
+    db_b = ts.ThreadsDB(tmp_path / "b.sqlite"); db_b.init_schema()
+    sid = "sess_db_a"
+    root = _old_tree(monkeypatch, tmp_path, sid, db_path=tmp_path / "a.sqlite")
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+
+    report_b = next(item for item in ts.cleanup_docker_sessions(db_b, dry_run=False) if item.get("session_id") == sid)
+    assert report_b["reason"] == "ownership_mismatch"
+    assert root.exists()
+
+    report_a = next(item for item in ts.cleanup_docker_sessions(db_a, dry_run=False) if item.get("session_id") == sid)
+    assert report_a["action"] == "removed"
+    assert not root.exists()
+
+
+def test_unmarked_legacy_tree_without_proof_is_ownership_unknown(monkeypatch, tmp_path):
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_legacy_unknown"
+    root = _old_tree(monkeypatch, tmp_path, sid, marked=False)
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+
+    report = next(item for item in ts.cleanup_docker_sessions(db) if item.get("session_id") == sid)
+    assert report["action"] == "skipped"
+    assert report["reason"] == "ownership_unknown"
+    assert root.exists()
+
+
+def test_descendant_bind_mount_blocks_artifact_cleanup(monkeypatch, tmp_path):
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_descendant_mount"
+    root = _old_tree(monkeypatch, tmp_path, sid)
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    monkeypatch.setattr(session, "_docker_all_bind_mounts", lambda: ([{
+        "name": "any-container",
+        "source": str((root / "runtime").resolve()),
+        "destination": "/runtime",
+    }], ""))
+
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("session_id") == sid)
+    assert report["reason"] == "container_mount_present"
+    assert report["containers"] == ["any-container"]
+    assert root.exists()
+
+
+def test_stopped_canonical_or_duplicate_remove_error_keeps_artifact_tree(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_associated"
+    root = _old_tree(monkeypatch, tmp_path, sid)
+    canonical = ts.docker_session_container_name(db, sid)
+    legacy = "legacy-associated"
+    inventory = [
+        _container(db, sid, canonical, running=False),
+        _container(db, sid, legacy, running=False),
+    ]
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: (inventory, ""))
+    _revalidate_from_inventory(monkeypatch, inventory)
+    monkeypatch.setattr(session, "_docker_all_bind_mounts", lambda: ([], ""))
+    monkeypatch.setattr(
+        session.subprocess, "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1, "", "remove denied"),
+    )
+
+    reports = ts.cleanup_docker_sessions(db, dry_run=False)
+    artifact = next(item for item in reports if item.get("kind") == "artifact")
+    assert artifact["reason"] == "associated_container_preserved"
+    assert root.exists()
+    duplicate = next(item for item in reports if item.get("name") == legacy)
+    assert duplicate["reason"] == "docker_remove_failed"
+
+
+@pytest.mark.parametrize("link_kind", ["egg", "rlm_sessions"])
+def test_symlinked_authority_root_is_rejected(monkeypatch, tmp_path, link_kind):
+    monkeypatch.chdir(tmp_path)
+    db, _thread_id = _db(tmp_path)
+    outside = tmp_path / "outside"; outside.mkdir()
+    if link_kind == "egg":
+        (tmp_path / ".egg").symlink_to(outside, target_is_directory=True)
+        (outside / "rlm_sessions").mkdir()
+    else:
+        (tmp_path / ".egg").mkdir()
+        (tmp_path / ".egg" / "rlm_sessions").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+
+    reports = ts.cleanup_docker_sessions(db, dry_run=False)
+    doctor = next(item for item in reports if item.get("kind") == "doctor")
+    assert doctor["reason"] == "artifact_root_unsafe"
+    assert outside.exists()
+
+
+def test_apply_time_authority_root_replacement_is_rejected(monkeypatch, tmp_path):
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_root_swap"
+    root = _old_tree(monkeypatch, tmp_path, sid)
+    original_authority = session._bridge_root_authority()
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+    checks = []
+
+    def changed(_expected):
+        checks.append(1)
+        return False
+
+    monkeypatch.setattr(session, "_bridge_root_authority_matches", changed)
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("session_id") == sid)
+    assert report["reason"] == "artifact_root_changed"
+    assert checks == [1]
+    assert root.exists()
+    assert original_authority[0] is not None
+
+
+def test_duplicate_apply_preserves_legacy_if_canonical_disappears(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_canonical_race"
+    canonical = ts.docker_session_container_name(db, sid)
+    legacy = "legacy-canonical-race"
+    inventory = [
+        _container(db, sid, canonical, running=False),
+        _container(db, sid, legacy, running=False),
+    ]
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: (inventory, ""))
+    _revalidate_from_inventory(monkeypatch, inventory)
+    real_state = session._docker_container_state
+    monkeypatch.setattr(
+        session, "_docker_container_state",
+        lambda name: session._DockerContainerState(False, False, "missing")
+        if name == canonical else real_state(name),
+    )
+    calls = []
+    monkeypatch.setattr(session.subprocess, "run", lambda argv, **_kwargs: calls.append(argv))
+
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("name") == legacy)
+    assert report["reason"] == "canonical_state_uncertain"
+    assert calls == []
+
+
+def test_duplicate_apply_rejects_name_id_replacement_race(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_id_race"
+    canonical = ts.docker_session_container_name(db, sid)
+    legacy = "legacy-id-race"
+    inventory = [
+        _container(db, sid, canonical, running=False),
+        _container(db, sid, legacy, running=False),
+    ]
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: (inventory, ""))
+    _revalidate_from_inventory(monkeypatch, inventory)
+    monkeypatch.setattr(
+        session, "_docker_existing_id",
+        lambda name: "replacement-id" if name == legacy else f"id-{name}",
+    )
+    calls = []
+    monkeypatch.setattr(session.subprocess, "run", lambda argv, **_kwargs: calls.append(argv))
+
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("name") == legacy)
+    assert report["reason"] == "container_identity_changed"
+    assert calls == []
+
+
+def test_duplicate_apply_rejects_canonical_id_replacement_race(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_canonical_id_race"
+    canonical = ts.docker_session_container_name(db, sid)
+    legacy = "legacy-canonical-id-race"
+    inventory = [
+        _container(db, sid, canonical, running=False),
+        _container(db, sid, legacy, running=False),
+    ]
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: (inventory, ""))
+    _revalidate_from_inventory(monkeypatch, inventory)
+    monkeypatch.setattr(
+        session, "_docker_existing_id",
+        lambda name: "replacement-canonical" if name == canonical else f"id-{name}",
+    )
+    calls = []
+    monkeypatch.setattr(session.subprocess, "run", lambda argv, **_kwargs: calls.append(argv))
+
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("name") == legacy)
+    assert report["reason"] == "canonical_identity_changed"
+    assert calls == []
+
+
+def test_unmarked_legacy_tree_with_associated_container_proof_is_diagnostic_only(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.chdir(tmp_path)
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_legacy_proven"
+    root = _old_tree(monkeypatch, tmp_path, sid, marked=False)
+    canonical = ts.docker_session_container_name(db, sid)
+    inventory = [_container(db, sid, canonical, running=False)]
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: (inventory, ""))
+    _revalidate_from_inventory(monkeypatch, inventory)
+    monkeypatch.setattr(session, "_docker_all_bind_mounts", lambda: ([{
+        "name": canonical,
+        "source": str((root / "bridge").resolve()),
+        "destination": "/egg-bridge",
+    }], ""))
+
+    report = next(item for item in ts.cleanup_docker_sessions(db) if item.get("kind") == "artifact")
+    assert report["reason"] == "associated_container_preserved"
+    assert root.exists()
