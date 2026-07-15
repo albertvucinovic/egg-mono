@@ -97,12 +97,15 @@ class _DirectoryAuthority:
 @dataclass(frozen=True)
 class _DockerSessionLimits:
     memory_bytes: Optional[int] = None
+    memory_swap_bytes: Optional[int] = None
     pids_limit: Optional[int] = None
 
     def policy(self) -> Dict[str, int]:
         values: Dict[str, int] = {}
         if self.memory_bytes is not None:
             values["memory_bytes"] = self.memory_bytes
+        if self.memory_swap_bytes is not None:
+            values["memory_swap_bytes"] = self.memory_swap_bytes
         if self.pids_limit is not None:
             values["pids_limit"] = self.pids_limit
         return values
@@ -802,6 +805,7 @@ def _docker_existing_resource_limits(container_name: str) -> tuple[Optional[Dict
     values: Dict[str, int] = {}
     for label, key, host_key in (
         ("egg.session_memory_bytes", "memory_bytes", "Memory"),
+        ("egg.session_memory_swap_bytes", "memory_swap_bytes", "MemorySwap"),
         ("egg.session_pids_limit", "pids_limit", "PidsLimit"),
     ):
         raw = labels.get(label)
@@ -842,8 +846,12 @@ def _configured_channel_idle_timeout_sec() -> Optional[float]:
     return float(timeout)
 
 
-_DOCKER_MEMORY_MIN_BYTES = 6 * 1024 * 1024
-_DOCKER_MEMORY_MAX_BYTES = (1 << 63) - 1
+_DOCKER_MEMORY_ALIGNMENT_BYTES = 1024 * 1024
+# The largest MiB-aligned signed-64-bit value. MiB alignment remains exactly
+# representable even through Docker's JSON/CLI numeric path near this boundary.
+_DOCKER_MEMORY_MIN_BYTES = 32 * _DOCKER_MEMORY_ALIGNMENT_BYTES
+_DOCKER_MEMORY_MAX_BYTES = (1 << 63) - _DOCKER_MEMORY_ALIGNMENT_BYTES
+_DOCKER_PIDS_MIN = 4
 _DOCKER_PIDS_MAX = 4_194_304
 _LIMIT_DISABLED_VALUES = {"", "off", "none", "unlimited"}
 
@@ -866,10 +874,14 @@ def _configured_docker_memory_bytes(value: Any = None) -> Optional[int]:
     unit = match.group(2) or "b"
     power = {"b": 0, "k": 1, "m": 2, "g": 3, "t": 4}[unit[0]]
     normalized = amount * (1024 ** power)
+    if normalized % _DOCKER_MEMORY_ALIGNMENT_BYTES:
+        raise ValueError("EGG_RLM_SESSION_MEMORY must be aligned to whole MiB")
     if normalized < _DOCKER_MEMORY_MIN_BYTES:
-        raise ValueError("EGG_RLM_SESSION_MEMORY must be at least 6 MiB")
+        raise ValueError("EGG_RLM_SESSION_MEMORY must be at least 32 MiB")
     if normalized > _DOCKER_MEMORY_MAX_BYTES:
-        raise ValueError("EGG_RLM_SESSION_MEMORY exceeds Docker's signed 64-bit byte range")
+        raise ValueError(
+            f"EGG_RLM_SESSION_MEMORY must be no more than {_DOCKER_MEMORY_MAX_BYTES} bytes"
+        )
     return normalized
 
 
@@ -885,14 +897,20 @@ def _configured_docker_pids_limit(value: Any = None) -> Optional[int]:
     if re.fullmatch(r"[0-9]+", text) is None:
         raise ValueError("EGG_RLM_SESSION_PIDS_LIMIT must be a decimal integer")
     normalized = int(text)
-    if normalized < 1 or normalized > _DOCKER_PIDS_MAX:
-        raise ValueError(f"EGG_RLM_SESSION_PIDS_LIMIT must be between 1 and {_DOCKER_PIDS_MAX}")
+    if normalized < _DOCKER_PIDS_MIN or normalized > _DOCKER_PIDS_MAX:
+        raise ValueError(
+            f"EGG_RLM_SESSION_PIDS_LIMIT must be between {_DOCKER_PIDS_MIN} and {_DOCKER_PIDS_MAX}"
+        )
     return normalized
 
 
 def _configured_docker_session_limits() -> _DockerSessionLimits:
+    memory_bytes = _configured_docker_memory_bytes()
     return _DockerSessionLimits(
-        memory_bytes=_configured_docker_memory_bytes(),
+        memory_bytes=memory_bytes,
+        # Equal memory/swap totals explicitly disable swap and avoid Docker's
+        # implicit 2x memory calculation overflowing at large values.
+        memory_swap_bytes=memory_bytes,
         pids_limit=_configured_docker_pids_limit(),
     )
 
@@ -2397,7 +2415,9 @@ def _start_docker_container(
     if limits.memory_bytes is not None:
         resource_limit_args.extend([
             "--memory", f"{limits.memory_bytes}b",
+            "--memory-swap", f"{limits.memory_swap_bytes}b",
             "--label", f"egg.session_memory_bytes={limits.memory_bytes}",
+            "--label", f"egg.session_memory_swap_bytes={limits.memory_swap_bytes}",
         ])
     if limits.pids_limit is not None:
         resource_limit_args.extend([
@@ -2993,8 +3013,8 @@ def ensure_thread_session_for_repl(
     - ``EGG_RLM_AUTO_SESSION`` (default: on)
     - ``EGG_RLM_SESSION_PROVIDER`` (default: docker)
     - ``EGG_RLM_SESSION_IMAGE`` (default: egg-rlm-session)
-    - ``EGG_RLM_SESSION_MEMORY`` (optional Docker bytes or b/k/m/g/t unit)
-    - ``EGG_RLM_SESSION_PIDS_LIMIT`` (optional positive Docker PID limit)
+    - ``EGG_RLM_SESSION_MEMORY`` (optional whole-MiB Docker memory/no-swap limit)
+    - ``EGG_RLM_SESSION_PIDS_LIMIT`` (optional Docker PID limit, minimum 4)
     """
 
     cfg = get_thread_session_config(db, runtime_thread_id)

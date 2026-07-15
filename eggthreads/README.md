@@ -182,11 +182,17 @@ export EGG_RLM_SESSION_PIDS_LIMIT=256
 ```
 
 Memory accepts an integer byte count or an integer binary unit (`b`, `k`, `m`,
-`g`, `t`, with optional `iB` spelling), from 6 MiB through signed 64-bit bytes.
-The PID limit is an integer from 1 through 4,194,304. Unset, empty, `off`,
-`none`, or `unlimited` leaves the corresponding Docker limit disabled. Invalid
-values fail before session-container reconciliation; changing an enabled limit
-recreates the container because Docker stores these limits in `HostConfig`.
+`g`, `t`, with optional `iB` spelling). The normalized value must be aligned to
+whole MiB and range from 32 MiB through 9,223,372,036,853,727,232 bytes (the
+largest MiB-aligned signed-64-bit value). Egg sets `--memory-swap` equal to
+`--memory`, deliberately disabling swap and avoiding Docker's implicit 2x swap
+calculation. The PID limit is an integer from 4 through 4,194,304; four is the
+structural minimum for Docker's fixed init process, the session daemon, and one
+Python or Bash worker. It is not enough for multiple simultaneous channels or
+arbitrary nested child processes. Unset, empty, `off`, `none`, or `unlimited`
+leaves the corresponding Docker limit disabled. Invalid values fail before
+session-container reconciliation; changing an enabled limit recreates the
+container because Docker stores these limits in `HostConfig`.
 
 ## Tests
 

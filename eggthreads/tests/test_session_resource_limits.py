@@ -79,21 +79,27 @@ def test_unset_limits_do_not_restart_existing_container(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("6291456", 6 * 1024 * 1024),
-        ("6m", 6 * 1024 * 1024),
-        ("6MiB", 6 * 1024 * 1024),
+        ("33554432", 32 * 1024 * 1024),
+        ("32m", 32 * 1024 * 1024),
+        ("32MiB", 32 * 1024 * 1024),
         ("1g", 1024 ** 3),
-        ("2TiB", 2 * 1024 ** 4),
+        (str(session._DOCKER_MEMORY_MAX_BYTES), session._DOCKER_MEMORY_MAX_BYTES),
     ],
 )
 def test_memory_limit_normalizes(monkeypatch, raw, expected):
     monkeypatch.setenv("EGG_RLM_SESSION_MEMORY", raw)
-    assert session._configured_docker_session_limits().memory_bytes == expected
+    limits = session._configured_docker_session_limits()
+    assert limits.memory_bytes == expected
+    assert limits.memory_swap_bytes == expected
 
 
 @pytest.mark.parametrize(
     "raw",
-    [True, "5m", "0", "-1", "+6m", "6.5m", "6x", "9223372036854775808b"],
+    [
+        True, "31m", "33554433", "0", "-1", "+32m", "32.5m", "32x",
+        str(session._DOCKER_MEMORY_MAX_BYTES + 1),
+        str(session._DOCKER_MEMORY_MAX_BYTES + session._DOCKER_MEMORY_ALIGNMENT_BYTES),
+    ],
 )
 def test_memory_limit_invalid_or_boundary(monkeypatch, raw):
     if isinstance(raw, str):
@@ -105,13 +111,13 @@ def test_memory_limit_invalid_or_boundary(monkeypatch, raw):
         call()
 
 
-@pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("00042", 42), ("4194304", 4194304)])
+@pytest.mark.parametrize(("raw", "expected"), [("4", 4), ("00042", 42), ("4194304", 4194304)])
 def test_pids_limit_normalizes(monkeypatch, raw, expected):
     monkeypatch.setenv("EGG_RLM_SESSION_PIDS_LIMIT", raw)
     assert session._configured_docker_session_limits().pids_limit == expected
 
 
-@pytest.mark.parametrize("raw", [True, "0", "-1", "+1", "1.0", "4194305", "NaN"])
+@pytest.mark.parametrize("raw", [True, "0", "1", "2", "3", "-1", "+4", "4.0", "4194305", "NaN"])
 def test_pids_limit_invalid_or_boundary(monkeypatch, raw):
     if isinstance(raw, str):
         monkeypatch.setenv("EGG_RLM_SESSION_PIDS_LIMIT", raw)
@@ -138,11 +144,33 @@ def test_valid_limits_change_hash_and_add_docker_args_and_labels(monkeypatch, tm
         session._session_runtime_dir(cfg.session_id),
     )
     command = calls[-1]
-    assert command[command.index("--memory") + 1] == f"{512 * 1024 * 1024}b"
+    memory_bytes = 512 * 1024 * 1024
+    assert command[command.index("--memory") + 1] == f"{memory_bytes}b"
+    assert command[command.index("--memory-swap") + 1] == f"{memory_bytes}b"
     assert command[command.index("--pids-limit") + 1] == "256"
-    assert f"egg.session_memory_bytes={512 * 1024 * 1024}" in command
+    assert f"egg.session_memory_bytes={memory_bytes}" in command
+    assert f"egg.session_memory_swap_bytes={memory_bytes}" in command
     assert "egg.session_pids_limit=256" in command
     assert f"egg.sandbox_policy_hash={limited_hash}" in command
+
+
+def test_swap_intent_changes_resource_policy_hash(monkeypatch, tmp_path):
+    db, thread_id, cfg = _configured(tmp_path, monkeypatch)
+    memory_bytes = 64 * 1024 * 1024
+
+    no_swap_hash = session._docker_session_policy_hash(
+        db, thread_id, cfg,
+        session._DockerSessionLimits(
+            memory_bytes=memory_bytes,
+            memory_swap_bytes=memory_bytes,
+        ),
+    )
+    implicit_swap_hash = session._docker_session_policy_hash(
+        db, thread_id, cfg,
+        session._DockerSessionLimits(memory_bytes=memory_bytes),
+    )
+
+    assert no_swap_hash != implicit_swap_hash
 
 
 def test_invalid_limit_fails_before_reconcile_or_docker_mutation(monkeypatch, tmp_path):
@@ -160,6 +188,32 @@ def test_invalid_limit_fails_before_reconcile_or_docker_mutation(monkeypatch, tm
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("EGG_RLM_SESSION_MEMORY", "33554433"),
+        ("EGG_RLM_SESSION_MEMORY", str(session._DOCKER_MEMORY_MAX_BYTES + 1)),
+        ("EGG_RLM_SESSION_PIDS_LIMIT", "3"),
+    ],
+)
+def test_boundary_invalid_limit_never_removes_existing_container(
+    monkeypatch, tmp_path, variable, value,
+):
+    db, thread_id, cfg = _configured(tmp_path, monkeypatch)
+    monkeypatch.setenv(variable, value)
+    calls = []
+    monkeypatch.setattr(session, "_reconcile_docker_session_containers", lambda *_a: calls.append("reconcile"))
+    monkeypatch.setattr(session.subprocess, "run", lambda *_a, **_k: calls.append("docker"))
+
+    with pytest.raises(ValueError, match=variable):
+        session._start_docker_container(
+            db, thread_id, cfg, "existing", session._session_bridge_dir(cfg.session_id),
+            session._session_runtime_dir(cfg.session_id),
+        )
+
+    assert calls == []
+
+
 def test_limit_policy_change_recreates_but_unchanged_preserves(monkeypatch, tmp_path):
     db, thread_id, cfg = _configured(tmp_path, monkeypatch)
     monkeypatch.setenv("EGG_RLM_SESSION_MEMORY", "256m")
@@ -173,7 +227,7 @@ def test_limit_policy_change_recreates_but_unchanged_preserves(monkeypatch, tmp_
     monkeypatch.setattr(session, "_docker_existing_channel_reaper_version", lambda _name: None)
     monkeypatch.setattr(
         session, "_docker_existing_resource_limits",
-        lambda _name: ({"memory_bytes": 256 * 1024 * 1024, "pids_limit": 64}, ""),
+        lambda _name: ({"memory_bytes": 256 * 1024 * 1024, "memory_swap_bytes": 256 * 1024 * 1024, "pids_limit": 64}, ""),
     )
     calls = []
     monkeypatch.setattr(
@@ -204,7 +258,7 @@ def test_effective_limit_mismatch_recreates_even_when_policy_label_matches(monke
     monkeypatch.setattr(session, "_docker_existing_sandbox_policy_hash", lambda _name: expected)
     monkeypatch.setattr(
         session, "_docker_existing_resource_limits",
-        lambda _name: ({"memory_bytes": 256 * 1024 * 1024}, "HostConfig.Memory mismatch"),
+        lambda _name: ({"memory_bytes": 256 * 1024 * 1024, "memory_swap_bytes": 256 * 1024 * 1024}, "HostConfig.Memory mismatch"),
     )
     calls = []
     monkeypatch.setattr(
@@ -268,13 +322,14 @@ def test_status_validates_and_displays_effective_limits(monkeypatch, tmp_path):
     monkeypatch.setattr(session, "_docker_container_state", lambda _name: session._DockerContainerState(True, False, "exited"))
     monkeypatch.setattr(
         session, "_docker_existing_resource_limits",
-        lambda _name: ({"memory_bytes": 64 * 1024 * 1024, "pids_limit": 32}, ""),
+        lambda _name: ({"memory_bytes": 64 * 1024 * 1024, "memory_swap_bytes": 64 * 1024 * 1024, "pids_limit": 32}, ""),
     )
     status = ts.get_thread_session_status(db, thread_id)
     assert status.status == "stopped"
-    assert status.resource_limits == {"memory_bytes": 64 * 1024 * 1024, "pids_limit": 32}
+    assert status.resource_limits == {"memory_bytes": 64 * 1024 * 1024, "memory_swap_bytes": 64 * 1024 * 1024, "pids_limit": 32}
     rendered = format_session_status(thread_id, db=db)
     assert f"Memory limit: {64 * 1024 * 1024} bytes" in rendered
+    assert f"Memory + swap limit: {64 * 1024 * 1024} bytes (swap disabled)" in rendered
     assert "PID limit: 32" in rendered
 
     monkeypatch.setattr(session, "_docker_existing_resource_limits", lambda _name: ({}, ""))
@@ -303,7 +358,7 @@ def test_status_rejects_stale_enabled_labels_when_limits_are_now_disabled(monkey
     )
     monkeypatch.setattr(
         session, "_docker_existing_resource_limits",
-        lambda _name: ({"memory_bytes": 64 * 1024 * 1024}, ""),
+        lambda _name: ({"memory_bytes": 64 * 1024 * 1024, "memory_swap_bytes": 64 * 1024 * 1024}, ""),
     )
 
     status = ts.get_thread_session_status(db, thread_id)
@@ -317,26 +372,33 @@ def test_status_rejects_stale_enabled_labels_when_limits_are_now_disabled(monkey
     ("labels", "host_config", "expected", "error_fragment"),
     [
         (
-            {"egg.session_memory_bytes": "67108864", "egg.session_pids_limit": "32"},
-            {"Memory": 67108864, "PidsLimit": 32},
-            {"memory_bytes": 67108864, "pids_limit": 32},
+            {
+                "egg.session_memory_bytes": "67108864",
+                "egg.session_memory_swap_bytes": "67108864",
+                "egg.session_pids_limit": "32",
+            },
+            {"Memory": 67108864, "MemorySwap": 67108864, "PidsLimit": 32},
+            {"memory_bytes": 67108864, "memory_swap_bytes": 67108864, "pids_limit": 32},
             "",
         ),
         (
-            {"egg.session_memory_bytes": "67108864"},
-            {"Memory": 33554432, "PidsLimit": 0},
-            {"memory_bytes": 67108864},
-            "HostConfig.Memory",
+            {
+                "egg.session_memory_bytes": "67108864",
+                "egg.session_memory_swap_bytes": "67108864",
+            },
+            {"Memory": 67108864, "MemorySwap": 134217728, "PidsLimit": 0},
+            {"memory_bytes": 67108864, "memory_swap_bytes": 67108864},
+            "HostConfig.MemorySwap",
         ),
         (
             {"egg.session_pids_limit": "not-an-integer"},
-            {"Memory": 0, "PidsLimit": 32},
+            {"Memory": 0, "MemorySwap": 0, "PidsLimit": 32},
             {},
             "label egg.session_pids_limit is invalid",
         ),
         (
             {},
-            {"Memory": 67108864, "PidsLimit": 0},
+            {"Memory": 67108864, "MemorySwap": 67108864, "PidsLimit": 0},
             {"memory_bytes": 67108864},
             "has no matching Egg resource-limit label",
         ),

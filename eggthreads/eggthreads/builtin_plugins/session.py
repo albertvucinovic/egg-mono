@@ -115,6 +115,8 @@ def _append_session_health_details(lines: list[str], status: Any) -> None:
     if limits:
         if limits.get("memory_bytes") is not None:
             lines.append(f"  Memory limit: {limits['memory_bytes']} bytes")
+        if limits.get("memory_swap_bytes") is not None:
+            lines.append(f"  Memory + swap limit: {limits['memory_swap_bytes']} bytes (swap disabled)")
         if limits.get("pids_limit") is not None:
             lines.append(f"  PID limit: {limits['pids_limit']}")
     if status.message:
