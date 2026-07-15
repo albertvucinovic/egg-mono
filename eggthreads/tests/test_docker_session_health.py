@@ -112,9 +112,17 @@ def test_docker_status_reports_missing_ready_busy_and_unhealthy(tmp_path, monkey
     assert ready.daemon_generation == "generation-a"
     assert ready.channel_state["python:default"]["state"] == "ready"
 
-    _write_health(session_id, active_requests=[{
-        "request_id": "req-b", "language": "bash", "channel": "shell", "state": "running",
-    }])
+    _write_health(
+        session_id,
+        active_requests=[{
+            "request_id": "req-b", "language": "bash", "channel": "shell", "state": "running",
+        }],
+        channel_state={
+            "bash:shell": {
+                "state": "busy", "running_request_id": "req-b", "queued_request_ids": [],
+            },
+        },
+    )
     busy = ts.get_thread_session_status(db, thread_id)
     assert busy.status == "busy"
     assert busy.active_requests[0]["request_id"] == "req-b"
@@ -180,6 +188,46 @@ def test_docker_status_rejects_malformed_authority_fields(tmp_path, monkeypatch)
         )
         status = ts.get_thread_session_status(db, thread_id)
         assert status.status == "unhealthy", override
+
+
+def test_docker_status_rejects_cross_field_request_channel_contradictions(tmp_path, monkeypatch):
+    db, thread_id, session_id = _configured_docker_session(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        session, "_docker_container_state",
+        lambda _name: session._DockerContainerState(True, True, "running"),
+    )
+    request = {
+        "request_id": "req-a", "language": "python", "channel": "work", "state": "running",
+    }
+    contradictions = [
+        ([request], {}),
+        ([], {"python:work": {"state": "busy", "running_request_id": "req-a", "queued_request_ids": []}}),
+        ([request], {"python:work": {"state": "busy", "running_request_id": None, "queued_request_ids": ["req-a"]}}),
+        ([request], {"bash:work": {"state": "busy", "running_request_id": "req-a", "queued_request_ids": []}}),
+        ([request], {"python:other": {"state": "busy", "running_request_id": "req-a", "queued_request_ids": []}}),
+        ([request], {"python:work": {"state": "ready", "running_request_id": "req-a"}}),
+    ]
+    for active, channels in contradictions:
+        _write_health(session_id, active_requests=active, channel_state=channels)
+        assert ts.get_thread_session_status(db, thread_id).status == "unhealthy"
+
+    queued = {
+        "request_id": "req-q", "language": "python", "channel": "work", "state": "queued",
+    }
+    _write_health(
+        session_id,
+        active_requests=[request, queued],
+        channel_state={
+            "python:work": {
+                "state": "busy",
+                "running_request_id": "req-a",
+                "queued_request_ids": ["req-q"],
+            },
+        },
+    )
+    valid = ts.get_thread_session_status(db, thread_id)
+    assert valid.status == "busy"
+    assert {item["request_id"] for item in valid.active_requests} == {"req-a", "req-q"}
 
 
 def test_docker_status_rejects_malformed_generation_authority(tmp_path, monkeypatch):

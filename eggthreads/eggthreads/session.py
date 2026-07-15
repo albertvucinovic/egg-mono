@@ -140,66 +140,73 @@ _SESSION_ACTIVITY_LOCKS_GUARD = threading.Lock()
 _SESSION_ACTIVITY_LOCAL = threading.local()
 
 
-def _session_activity_lock(session_id: str) -> threading.RLock:
+def _session_activity_lock(activity_key: str) -> threading.RLock:
     with _SESSION_ACTIVITY_LOCKS_GUARD:
-        lock = _SESSION_ACTIVITY_LOCKS.setdefault(session_id, threading.RLock())
-        _SESSION_ACTIVITY_LOCK_USERS[session_id] = _SESSION_ACTIVITY_LOCK_USERS.get(session_id, 0) + 1
+        lock = _SESSION_ACTIVITY_LOCKS.setdefault(activity_key, threading.RLock())
+        _SESSION_ACTIVITY_LOCK_USERS[activity_key] = _SESSION_ACTIVITY_LOCK_USERS.get(activity_key, 0) + 1
         return lock
 
 
-def _discard_session_activity_lock_user(session_id: str, lock: threading.RLock) -> None:
+def _discard_session_activity_lock_user(activity_key: str, lock: threading.RLock) -> None:
     with _SESSION_ACTIVITY_LOCKS_GUARD:
-        users = _SESSION_ACTIVITY_LOCK_USERS.get(session_id, 1) - 1
+        users = _SESSION_ACTIVITY_LOCK_USERS.get(activity_key, 1) - 1
         if users <= 0:
-            _SESSION_ACTIVITY_LOCK_USERS.pop(session_id, None)
-            if _SESSION_ACTIVITY_LOCKS.get(session_id) is lock:
-                _SESSION_ACTIVITY_LOCKS.pop(session_id, None)
+            _SESSION_ACTIVITY_LOCK_USERS.pop(activity_key, None)
+            if _SESSION_ACTIVITY_LOCKS.get(activity_key) is lock:
+                _SESSION_ACTIVITY_LOCKS.pop(activity_key, None)
         else:
-            _SESSION_ACTIVITY_LOCK_USERS[session_id] = users
+            _SESSION_ACTIVITY_LOCK_USERS[activity_key] = users
 
 
-def _release_session_activity_lock(session_id: str, lock: threading.RLock) -> None:
+def _release_session_activity_lock(activity_key: str, lock: threading.RLock) -> None:
     lock.release()
-    _discard_session_activity_lock_user(session_id, lock)
+    _discard_session_activity_lock_user(activity_key, lock)
 
 
-def _session_activity_coordination_path(session_id: str) -> Path:
-    identity = f"{_bridge_root()}\0{session_id}"
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+def _session_activity_key(db: ThreadsDB, session_id: str) -> Optional[str]:
+    db_path = _canonical_database_path(db)
+    session_id = str(session_id or "").strip()
+    if db_path is None or not session_id:
+        return None
+    return f"{db_path}\0{session_id}"
+
+
+def _session_activity_coordination_path(activity_key: str) -> Path:
+    digest = hashlib.sha256(activity_key.encode("utf-8")).hexdigest()[:32]
     return Path(tempfile.gettempdir()) / "egg-session-activity" / f"{digest}.lock"
 
 
 @contextmanager
-def _session_activity_guard(session_id: str, *, blocking: bool = True):
+def _session_activity_guard(db: ThreadsDB, session_id: str, *, blocking: bool = True):
     """Serialize Docker eval/reference activity with idle reclamation."""
 
-    session_id = str(session_id or "").strip()
-    if not session_id:
+    activity_key = _session_activity_key(db, session_id)
+    if activity_key is None:
         yield False
         return
     held = getattr(_SESSION_ACTIVITY_LOCAL, "held", None)
     if held is None:
         held = {}
         _SESSION_ACTIVITY_LOCAL.held = held
-    if held.get(session_id, 0):
-        held[session_id] += 1
+    if held.get(activity_key, 0):
+        held[activity_key] += 1
         try:
             yield True
         finally:
-            held[session_id] -= 1
+            held[activity_key] -= 1
         return
 
-    thread_lock = _session_activity_lock(session_id)
+    thread_lock = _session_activity_lock(activity_key)
     acquired = thread_lock.acquire(blocking=blocking)
     if not acquired:
-        _discard_session_activity_lock_user(session_id, thread_lock)
+        _discard_session_activity_lock_user(activity_key, thread_lock)
         yield False
         return
-    held[session_id] = 1
+    held[activity_key] = 1
     lock_file = None
     file_locked = False
     try:
-        lock_path = _session_activity_coordination_path(session_id)
+        lock_path = _session_activity_coordination_path(activity_key)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_file = lock_path.open("a+")
         try:
@@ -228,18 +235,18 @@ def _session_activity_guard(session_id: str, *, blocking: bool = True):
                 except Exception:
                     pass
             lock_file.close()
-        held.pop(session_id, None)
-        _release_session_activity_lock(session_id, thread_lock)
+        held.pop(activity_key, None)
+        _release_session_activity_lock(activity_key, thread_lock)
 
 
 @contextmanager
-def _session_activity_guards(session_ids: List[str]):
+def _session_activity_guards(db: ThreadsDB, session_ids: List[str]):
     """Acquire multiple Docker-session guards in stable order."""
 
     ordered = sorted({str(value).strip() for value in session_ids if str(value).strip()})
     with ExitStack() as stack:
         for session_id in ordered:
-            acquired = stack.enter_context(_session_activity_guard(session_id))
+            acquired = stack.enter_context(_session_activity_guard(db, session_id))
             if not acquired:
                 raise RuntimeError(f"Could not acquire Docker session activity guard: {session_id}")
         yield
@@ -1279,7 +1286,7 @@ def set_thread_session_config(
             provider=provider,
             session_id=effective_session_id,
         )
-        guard = _session_activity_guards(guard_ids) if guard_ids else nullcontext()
+        guard = _session_activity_guards(db, guard_ids) if guard_ids else nullcontext()
         retry = False
         with guard:
             # Re-resolve under the old/new guards. If another writer won before
@@ -1506,7 +1513,7 @@ def reap_idle_auto_docker_sessions(
             "idle_timeout_sec": threshold,
             "reclaimed": False,
         }
-        with _session_activity_guard(session_id, blocking=False) as acquired:
+        with _session_activity_guard(db, session_id, blocking=False) as acquired:
             if not acquired:
                 item.update(status="skipped", reason="host_activity")
                 results.append(item)
@@ -1646,11 +1653,13 @@ def _run_coordinated_idle_reaper_pass(
                 last_started = float(raw_last)
             except (TypeError, ValueError):
                 last_started = 0.0
-            if (
-                not math.isfinite(current)
-                or current <= 0
-                or (math.isfinite(last_started) and current - last_started < _IDLE_REAPER_CADENCE_SEC)
-            ):
+            if not math.isfinite(current) or current <= 0:
+                return False
+            elapsed = current - last_started if math.isfinite(last_started) else _IDLE_REAPER_CADENCE_SEC
+            # A marker meaningfully ahead of wall time indicates rollback or
+            # corruption; treat it as stale instead of suppressing forever.
+            marker_is_future = last_started > current + _IDLE_REAPER_CADENCE_SEC
+            if not marker_is_future and 0 <= elapsed < _IDLE_REAPER_CADENCE_SEC:
                 return False
             coordination.seek(0)
             coordination.truncate()
@@ -1825,7 +1834,7 @@ def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
         cfg = get_thread_session_config(db, thread_id)
         if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
             return _session_status_for_config(db, thread_id, cfg)
-        with _session_activity_guard(cfg.session_id):
+        with _session_activity_guard(db, cfg.session_id):
             current = get_thread_session_config(db, thread_id)
             if _session_config_identity(current) != _session_config_identity(cfg):
                 continue
@@ -1922,20 +1931,30 @@ def _get_or_start_docker_session_locked(
 
 
 def get_or_start_docker_session_handle(db: ThreadsDB, thread_id: str) -> DockerSessionHandle:
-    cfg = get_thread_session_config(db, thread_id)
-    if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
-        raise RuntimeError("Docker session is not enabled for this thread")
-    status = get_or_start_docker_session(db, thread_id)
-    if status.status not in ("ready", "busy") or not status.container_name:
-        raise RuntimeError(status.message or f"Docker session not available: {status.status}")
-    return DockerSessionHandle(
-        session_id=cfg.session_id,
-        container_name=status.container_name,
-        bridge_dir=str(_session_bridge_dir(cfg.session_id)),
-        runtime_dir=str(_session_runtime_dir(cfg.session_id)),
-        mount_dir=str(docker_session_mount_dir(db, thread_id, cfg)),
-        workspace=cfg.workspace,
-    )
+    """Build status and paths from one captured/revalidated config identity."""
+
+    while True:
+        cfg = get_thread_session_config(db, thread_id)
+        if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
+            raise RuntimeError("Docker session is not enabled for this thread")
+        with _session_activity_guard(db, cfg.session_id):
+            current = get_thread_session_config(db, thread_id)
+            if _session_config_identity(current) != _session_config_identity(cfg):
+                continue
+            status = _get_or_start_docker_session_locked(db, thread_id, cfg)
+            after_start = get_thread_session_config(db, thread_id)
+            if _session_config_identity(after_start) != _session_config_identity(cfg):
+                continue
+            if status.status not in ("ready", "busy") or not status.container_name:
+                raise RuntimeError(status.message or f"Docker session not available: {status.status}")
+            return DockerSessionHandle(
+                session_id=cfg.session_id,
+                container_name=status.container_name,
+                bridge_dir=str(_session_bridge_dir(cfg.session_id)),
+                runtime_dir=str(_session_runtime_dir(cfg.session_id)),
+                mount_dir=str(docker_session_mount_dir(db, thread_id, cfg)),
+                workspace=cfg.workspace,
+            )
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -2086,20 +2105,47 @@ def _docker_daemon_status(bridge_dir: Path) -> tuple[Optional[Dict[str, Any]], s
     channel_state = payload.get("channel_state")
     if not isinstance(channel_state, dict):
         return payload, "Docker session daemon channel status is invalid"
+    active_by_id = {request["request_id"]: request for request in active_requests}
+    if len(active_by_id) != len(active_requests):
+        return payload, "Docker session daemon active request IDs are duplicated"
+    channel_request_ids: set[str] = set()
     for channel, details in channel_state.items():
         if not isinstance(channel, str) or not channel.strip() or not isinstance(details, dict):
             return payload, "Docker session daemon channel entry is invalid"
         if details.get("state") not in {"ready", "busy"}:
             return payload, "Docker session daemon channel state is invalid"
-        if details.get("state") == "busy":
-            running_id = details.get("running_request_id")
-            queued_ids = details.get("queued_request_ids")
-            if running_id is not None and (not isinstance(running_id, str) or not running_id.strip()):
-                return payload, "Docker session daemon running request ID is invalid"
-            if not isinstance(queued_ids, list) or any(
-                not isinstance(value, str) or not value.strip() for value in queued_ids
-            ):
-                return payload, "Docker session daemon queued request IDs are invalid"
+        if details.get("state") == "ready":
+            if any(key in details for key in ("running_request_id", "queued_request_ids")):
+                return payload, "Docker session daemon ready channel contains request IDs"
+            continue
+        running_id = details.get("running_request_id")
+        queued_ids = details.get("queued_request_ids")
+        if running_id is not None and (not isinstance(running_id, str) or not running_id.strip()):
+            return payload, "Docker session daemon running request ID is invalid"
+        if not isinstance(queued_ids, list) or any(
+            not isinstance(value, str) or not value.strip() for value in queued_ids
+        ):
+            return payload, "Docker session daemon queued request IDs are invalid"
+        ids = ([running_id] if running_id is not None else []) + list(queued_ids)
+        if not ids:
+            return payload, "Docker session daemon busy channel has no active requests"
+        if len(ids) != len(set(ids)) or any(value in channel_request_ids for value in ids):
+            return payload, "Docker session daemon request appears in multiple channel slots"
+        channel_request_ids.update(ids)
+        language, separator, channel_name = channel.partition(":")
+        if not separator or not language or not channel_name:
+            return payload, "Docker session daemon channel key is invalid"
+        for request_id in ids:
+            request = active_by_id.get(request_id)
+            if request is None:
+                return payload, "Docker session daemon channel references an unknown active request"
+            expected_state = "running" if request_id == running_id else "queued"
+            if request["state"] != expected_state:
+                return payload, "Docker session daemon channel/request state is contradictory"
+            if request["language"] != language or request["channel"] != channel_name:
+                return payload, "Docker session daemon channel/request identity is contradictory"
+    if channel_request_ids != set(active_by_id):
+        return payload, "Docker session daemon active requests are missing from channel state"
 
     age = max(0.0, time.time() - float(heartbeat))
     if age > _DOCKER_HEARTBEAT_STALE_SEC:
@@ -2329,7 +2375,7 @@ def _execute_python_docker(
         cfg = get_thread_session_config(db, runtime_thread_id)
         if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
             raise RuntimeError("Docker session is not enabled for this thread")
-        with _session_activity_guard(cfg.session_id):
+        with _session_activity_guard(db, cfg.session_id):
             current = get_thread_session_config(db, runtime_thread_id)
             if _session_config_identity(current) != _session_config_identity(cfg):
                 continue
@@ -2438,7 +2484,7 @@ def _execute_bash_docker(
         cfg = get_thread_session_config(db, runtime_thread_id)
         if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
             raise RuntimeError("Docker session is not enabled for this thread")
-        with _session_activity_guard(cfg.session_id):
+        with _session_activity_guard(db, cfg.session_id):
             current = get_thread_session_config(db, runtime_thread_id)
             if _session_config_identity(current) != _session_config_identity(cfg):
                 continue
@@ -3103,7 +3149,7 @@ def stop_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user") 
             )
             return _session_status_for_config(db, thread_id, cfg)
         guard = (
-            _session_activity_guard(cfg.session_id)
+            _session_activity_guard(db, cfg.session_id)
             if cfg.provider == "docker"
             else nullcontext(True)
         )
@@ -3114,21 +3160,26 @@ def stop_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user") 
             return _stop_captured_session(db, thread_id, cfg, reason=reason)
 
 
-def _reset_thread_session_core(db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> str:
-    """Reset a session's mutable state and assign a fresh session id.
-
-    Reset is event-sourced as a stop/lifecycle event followed by a new
-    ``session.config`` event with the same provider/image/share policy but a
-    new session id.  This preserves auditability and keeps containers out of
-    the authority path.
-    """
+def _reset_captured_session_locked(
+    db: ThreadsDB,
+    thread_id: str,
+    cfg: SessionConfig,
+    *,
+    reason: str,
+) -> str:
+    """Stop and replace exactly ``cfg`` while its identity guard is held."""
 
     if cfg.enabled and cfg.session_id:
-        stop_thread_session(db, thread_id, reason=f"reset:{reason}")
+        stopped = _stop_captured_session(db, thread_id, cfg, reason=f"reset:{reason}")
+        if stopped.status != "stopped":
+            return ""
+    current = get_thread_session_config(db, thread_id)
+    if _session_config_identity(current) != _session_config_identity(cfg):
+        return ""
 
     old_session_id = cfg.session_id
     new_session_id = _session_id_for_thread(f"{thread_id}{os.urandom(8).hex()}")
-    sid = set_thread_session_config(
+    sid = _set_thread_session_config_unlocked(
         db,
         thread_id,
         enabled=True,
@@ -3138,7 +3189,7 @@ def _reset_thread_session_core(db: ThreadsDB, thread_id: str, cfg: SessionConfig
         session_id=new_session_id,
         owner_thread_id=cfg.owner_thread_id or thread_id,
         workspace=cfg.workspace,
-                network=cfg.network,
+        network=cfg.network,
         share_with_children_default=cfg.share_with_children_default,
         share_repl=cfg.share_repl,
         reason=f"reset:{reason}",
@@ -3153,29 +3204,51 @@ def _reset_thread_session_core(db: ThreadsDB, thread_id: str, cfg: SessionConfig
     return sid
 
 
+def _reset_thread_session_core(
+    db: ThreadsDB,
+    thread_id: str,
+    cfg: SessionConfig,
+    *,
+    reason: str = "user",
+) -> str:
+    """Provider entrypoint preserving the captured identity boundary."""
+
+    guard = (
+        _session_activity_guard(db, cfg.session_id or "")
+        if cfg.provider == "docker" and cfg.session_id
+        else nullcontext(True)
+    )
+    with guard:
+        current = get_thread_session_config(db, thread_id)
+        if _session_config_identity(current) != _session_config_identity(cfg):
+            return ""
+        return _reset_captured_session_locked(db, thread_id, cfg, reason=reason)
+
+
 def reset_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user") -> str:
-    """Reset a session's mutable state and assign a fresh session id.
+    """Reset only the identity captured and revalidated under its guard."""
 
-    Reset is event-sourced as a stop/lifecycle event followed by a new
-    ``session.config`` event with the same provider/image/share policy but a
-    new session id.  This preserves auditability and keeps providers out of
-    the authority path.
-    """
-
-    cfg = get_thread_session_config(db, thread_id)
-    if not cfg.enabled:
-        append_session_lifecycle_event(
-            db,
-            thread_id,
-            action="reset_ignored",
-            session_id=cfg.session_id,
-            payload={"provider": cfg.provider, "reason": reason, "message": "Session is not enabled"},
+    while True:
+        cfg = get_thread_session_config(db, thread_id)
+        if not cfg.enabled:
+            append_session_lifecycle_event(
+                db,
+                thread_id,
+                action="reset_ignored",
+                session_id=cfg.session_id,
+                payload={"provider": cfg.provider, "reason": reason, "message": "Session is not enabled"},
+            )
+            return ""
+        guard = (
+            _session_activity_guard(db, cfg.session_id or "")
+            if cfg.provider == "docker" and cfg.session_id
+            else nullcontext(True)
         )
-        return ""
-    provider = get_session_provider(cfg.provider)
-    if provider is not None:
-        return provider.reset(db, thread_id, cfg, reason=reason)
-    return _reset_thread_session_core(db, thread_id, cfg, reason=reason)
+        with guard:
+            current = get_thread_session_config(db, thread_id)
+            if _session_config_identity(current) != _session_config_identity(cfg):
+                continue
+            return _reset_captured_session_locked(db, thread_id, cfg, reason=reason)
 
 
 def _execute_bash_memory(session_id: str, repl_name: str, script: str, *, eval_token: Optional[str] = None, timeout_sec: Optional[float] = None) -> str:
@@ -3392,7 +3465,7 @@ class DockerSessionProvider:
         while True:
             if not captured.enabled or captured.provider != "docker" or not captured.session_id:
                 return "Error: Docker session configuration changed before eval."
-            with _session_activity_guard(captured.session_id):
+            with _session_activity_guard(db, captured.session_id):
                 current = get_thread_session_config(db, runtime_thread_id)
                 if _session_config_identity(current) != _session_config_identity(captured):
                     captured = current
@@ -4043,6 +4116,35 @@ def _get_or_create_runtime_thread_unlocked(
     return child
 
 
+def _prospective_runtime_inherited_docker_session_id(
+    db: ThreadsDB,
+    parent_thread_id: str,
+) -> Optional[str]:
+    """Resolve nearest enabled Docker ancestor for a prospective runtime."""
+
+    current: Optional[str] = parent_thread_id
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        payload = _local_session_config_payload(db, current)
+        if payload is not None:
+            if not bool(payload.get("enabled", False)):
+                return None
+            if _clean_runtime_part(payload.get("provider"), "docker") != "docker":
+                return None
+            session_id = str(payload.get("session_id") or "").strip()
+            if session_id:
+                return session_id
+            owner = str(payload.get("owner_thread_id") or current)
+            return _session_id_for_thread(owner)
+        parent = db.conn.execute(
+            "SELECT parent_id FROM children WHERE child_id=? LIMIT 1",
+            (current,),
+        ).fetchone()
+        current = str(parent[0]) if parent and parent[0] else None
+    return None
+
+
 def get_or_create_runtime_thread(
     db: ThreadsDB,
     parent_thread_id: str,
@@ -4055,20 +4157,14 @@ def get_or_create_runtime_thread(
     """Create runtime inheritance while guarding the captured Docker session."""
 
     while True:
-        parent_cfg = get_thread_session_config(db, parent_thread_id)
-        inherited_session_id = (
-            parent_cfg.session_id
-            if parent_cfg.enabled and parent_cfg.provider == "docker"
-            else None
+        inherited_session_id = _prospective_runtime_inherited_docker_session_id(
+            db, parent_thread_id,
         )
-        guard = _session_activity_guard(inherited_session_id) if inherited_session_id else nullcontext(True)
+        guard = _session_activity_guard(db, inherited_session_id) if inherited_session_id else nullcontext(True)
         retry = False
         with guard:
-            current_cfg = get_thread_session_config(db, parent_thread_id)
-            current_inherited_id = (
-                current_cfg.session_id
-                if current_cfg.enabled and current_cfg.provider == "docker"
-                else None
+            current_inherited_id = _prospective_runtime_inherited_docker_session_id(
+                db, parent_thread_id,
             )
             if current_inherited_id != inherited_session_id:
                 retry = True

@@ -167,7 +167,7 @@ def test_active_eval_and_host_activity_lock_protect_session(monkeypatch, tmp_pat
     release = threading.Event()
 
     def hold_activity():
-        with session._session_activity_guard(session_id):
+        with session._session_activity_guard(db, session_id):
             entered.set()
             release.wait(2)
 
@@ -476,13 +476,185 @@ def test_runtime_reference_creation_blocks_behind_reaper_session_guard(monkeypat
         finally:
             worker_db.conn.close()
 
-    with session._session_activity_guard(session_id):
+    with session._session_activity_guard(db, session_id):
         worker = threading.Thread(target=create_runtime)
         worker.start()
         time.sleep(0.05)
         assert not created.is_set()
     worker.join(2)
     assert created.is_set()
+
+
+
+def test_indirect_runtime_inheritance_holds_nearest_ancestor_guard(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    root, session_id = _auto_session(db)
+    ordinary = ts.create_child_thread(db, root, name="ordinary")
+    assert ts.get_thread_session_config(db, ordinary).enabled is False
+    entered = []
+    original = session._session_activity_guard
+
+    @session.contextmanager
+    def recording_guard(seen_db, seen_session_id, *, blocking=True):
+        entered.append(seen_session_id)
+        with original(seen_db, seen_session_id, blocking=blocking) as acquired:
+            yield acquired
+
+    monkeypatch.setattr(session, "_session_activity_guard", recording_guard)
+    runtime = ts.get_or_create_runtime_thread(db, ordinary, language="python")
+
+    assert runtime
+    assert session_id in entered
+    assert ts.get_thread_session_config(db, runtime).session_id == session_id
+
+
+def test_indirect_runtime_reference_creation_blocks_reaper_guard(tmp_path):
+    db = _make_db(tmp_path)
+    root, session_id = _auto_session(db)
+    ordinary = ts.create_child_thread(db, root, name="ordinary")
+    created = threading.Event()
+
+    def create_runtime():
+        worker_db = ts.ThreadsDB(db.path)
+        try:
+            runtime = ts.get_or_create_runtime_thread(worker_db, ordinary, language="python")
+            assert ts.get_thread_session_config(worker_db, runtime).session_id == session_id
+            created.set()
+        finally:
+            worker_db.conn.close()
+
+    with session._session_activity_guard(db, session_id):
+        worker = threading.Thread(target=create_runtime)
+        worker.start()
+        time.sleep(0.05)
+        assert not created.is_set()
+    worker.join(2)
+    assert created.is_set()
+
+
+def test_reset_does_not_overwrite_concurrent_replacement(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    thread_id, session_a = _auto_session(db)
+    session_b = "sess_replacement_b"
+
+    def replace_during_stop(_db, _thread, captured, *, reason):
+        assert captured.session_id == session_a
+        session._set_thread_session_config_unlocked(
+            db,
+            thread_id,
+            enabled=True,
+            provider="docker",
+            session_id=session_b,
+            reason="/sessionOn",
+        )
+        return session.SessionStatus(True, "docker", session_a, "stopped")
+
+    monkeypatch.setattr(session, "_stop_captured_session", replace_during_stop)
+
+    assert ts.reset_thread_session(db, thread_id, reason="test") == ""
+    assert ts.get_thread_session_config(db, thread_id).session_id == session_b
+
+
+def test_handle_retries_config_race_without_mixing_paths(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id, session_a = _auto_session(db)
+    session_b = "sess_handle_b"
+    calls = []
+
+    def start_locked(_db, _thread, captured):
+        calls.append(captured.session_id)
+        if captured.session_id == session_a:
+            session._set_thread_session_config_unlocked(
+                db,
+                thread_id,
+                enabled=True,
+                provider="docker",
+                session_id=session_b,
+                reason="/sessionOn",
+            )
+            return session.SessionStatus(
+                True, "docker", captured.session_id, "unhealthy",
+                message="configuration changed", container_name=f"container-{captured.session_id}",
+            )
+        return session.SessionStatus(
+            True,
+            "docker",
+            captured.session_id,
+            "ready",
+            container_name=f"container-{captured.session_id}",
+        )
+
+    monkeypatch.setattr(session, "_get_or_start_docker_session_locked", start_locked)
+    monkeypatch.setattr(session, "docker_session_mount_dir", lambda *_a: tmp_path)
+
+    handle = ts.get_or_start_docker_session_handle(db, thread_id)
+
+    assert calls == [session_a, session_b]
+    assert handle.session_id == session_b
+    assert session_b in handle.bridge_dir
+    assert handle.container_name == f"container-{session_b}"
+
+
+def _attempt_reference_write_process(
+    db_path: str,
+    session_id: str,
+    owner_thread_id: str,
+    new_thread_id: str,
+    cwd: str,
+    started_path: str,
+    done_path: str,
+):
+    os.chdir(cwd)
+    child_db = ts.ThreadsDB(db_path)
+    try:
+        Path(started_path).write_text("started")
+        ts.set_thread_session_config(
+            child_db,
+            new_thread_id,
+            enabled=True,
+            provider="docker",
+            share="session",
+            session_id=session_id,
+            owner_thread_id=owner_thread_id,
+            reason="spawn_agent share_session",
+        )
+        Path(done_path).write_text("done")
+    finally:
+        child_db.conn.close()
+
+
+def test_activity_guard_converges_same_db_across_process_cwds(tmp_path):
+    import multiprocessing as mp
+
+    db = _make_db(tmp_path)
+    owner, session_id = _auto_session(db)
+    reference = ts.create_root_thread(db, name="reference")
+    cwd_a = tmp_path / "a"; cwd_a.mkdir()
+    cwd_b = tmp_path / "b"; cwd_b.mkdir()
+    started = tmp_path / "started"
+    done = tmp_path / "done"
+    ctx = mp.get_context("spawn")
+    writer = ctx.Process(
+        target=_attempt_reference_write_process,
+        args=(
+            str(db.path.resolve()), session_id, owner, reference,
+            str(cwd_b), str(started), str(done),
+        ),
+    )
+    os.chdir(cwd_a)
+    with session._session_activity_guard(db, session_id):
+        writer.start()
+        deadline = time.time() + 5
+        while not started.exists() and time.time() < deadline:
+            time.sleep(0.01)
+        assert started.exists()
+        time.sleep(0.1)
+        assert not done.exists()
+    writer.join(5)
+    assert writer.exitcode == 0
+    assert done.exists()
+    assert ts.get_thread_session_config(db, reference).session_id == session_id
 
 
 def test_cross_process_cadence_parallel_contenders_run_one_pass(monkeypatch, tmp_path):
@@ -542,12 +714,13 @@ def test_background_reaper_is_disabled_for_memory_db_and_duplicate_file_pass(mon
 
 def test_nonblocking_guard_collision_releases_lock_bookkeeping(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
     session_id = "sess_collision"
     entered = threading.Event()
     release = threading.Event()
 
     def hold():
-        with session._session_activity_guard(session_id):
+        with session._session_activity_guard(db, session_id):
             entered.set()
             release.wait(2)
 
@@ -556,17 +729,20 @@ def test_nonblocking_guard_collision_releases_lock_bookkeeping(monkeypatch, tmp_
     assert entered.wait(1)
     try:
         for _ in range(25):
-            with session._session_activity_guard(session_id, blocking=False) as acquired:
+            with session._session_activity_guard(db, session_id, blocking=False) as acquired:
                 assert acquired is False
-        assert session._SESSION_ACTIVITY_LOCK_USERS[session_id] == 1
+        activity_key = session._session_activity_key(db, session_id)
+        assert session._SESSION_ACTIVITY_LOCK_USERS[activity_key] == 1
     finally:
         release.set()
         holder.join(2)
-    assert session_id not in session._SESSION_ACTIVITY_LOCK_USERS
-    assert session_id not in session._SESSION_ACTIVITY_LOCKS
+    activity_key = session._session_activity_key(db, session_id)
+    assert activity_key not in session._SESSION_ACTIVITY_LOCK_USERS
+    assert activity_key not in session._SESSION_ACTIVITY_LOCKS
 
 
 def test_activity_lock_file_is_outside_read_only_worktree(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
     read_only = tmp_path / "read-only"
     read_only.mkdir()
     monkeypatch.chdir(read_only)
@@ -576,7 +752,7 @@ def test_activity_lock_file_is_outside_read_only_worktree(monkeypatch, tmp_path)
         lambda *_a: (_ for _ in ()).throw(PermissionError("bridge unavailable")),
     )
 
-    with session._session_activity_guard("sess_docker") as acquired:
+    with session._session_activity_guard(db, "sess_docker") as acquired:
         assert acquired is True
 
 
@@ -637,7 +813,7 @@ def test_config_transition_acquires_old_and_new_docker_ids_in_order(monkeypatch,
     seen = []
 
     @session.contextmanager
-    def fake_guards(ids):
+    def fake_guards(_db, ids):
         seen.append(list(ids))
         yield
 
@@ -662,9 +838,9 @@ def test_runtime_inheritance_creation_holds_parent_session_guard(monkeypatch, tm
     original = session._session_activity_guard
 
     @session.contextmanager
-    def recording_guard(seen_session_id, *, blocking=True):
+    def recording_guard(seen_db, seen_session_id, *, blocking=True):
         entered.append(seen_session_id)
-        with original(seen_session_id, blocking=blocking) as acquired:
+        with original(seen_db, seen_session_id, blocking=blocking) as acquired:
             yield acquired
 
     monkeypatch.setattr(session, "_session_activity_guard", recording_guard)
@@ -704,6 +880,19 @@ def test_canonical_database_identity_converges_relative_absolute_and_symlink(mon
     assert session._canonical_database_path(relative) == expected
     assert session._canonical_database_path(absolute) == expected
     assert session._canonical_database_path(symlinked) == expected
+
+
+def test_cross_process_cadence_future_marker_does_not_suppress_forever(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    canonical = session._canonical_database_path(db)
+    lock_path = tmp_path / "cadence.lock"
+    lock_path.write_text("10000")
+    monkeypatch.setattr(session, "_idle_reaper_coordination_path", lambda _path: lock_path)
+    calls = []
+    monkeypatch.setattr(session, "reap_idle_auto_docker_sessions", lambda _db, now: calls.append(now))
+
+    assert session._run_coordinated_idle_reaper_pass(canonical, now=100.0) is True
+    assert calls == [100.0]
 
 
 def test_cross_process_cadence_lock_is_nonblocking(monkeypatch, tmp_path):
