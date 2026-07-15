@@ -7,6 +7,7 @@ from pathlib import Path
 
 import eggthreads as ts
 import eggthreads.session as session
+import pytest
 
 
 def _make_db(tmp_path: Path) -> ts.ThreadsDB:
@@ -246,7 +247,6 @@ def test_docker_python_eval_refreshes_runtime_before_user_code(tmp_path, monkeyp
     monkeypatch.setattr(session, "_session_bridge_dir", lambda *_args: Path(handle.bridge_dir))
     monkeypatch.setattr(session, "_session_runtime_dir", lambda *_args: Path(handle.runtime_dir))
     monkeypatch.setattr(session, "docker_session_mount_dir", lambda *_args: Path(handle.mount_dir))
-    session._clear_python_runtime_refresh_cache()
     monkeypatch.setattr(
         session,
         "_run_docker_python_eval_request",
@@ -277,8 +277,124 @@ def test_docker_python_eval_refreshes_runtime_before_user_code(tmp_path, monkeyp
         eval_token="token",
         timeout_sec=5,
     )
+    assert len(calls) == 4
+    assert "repl_refresh.py" in calls[2]["code"]
+    assert calls[3]["code"] == "42"
+
+
+def test_docker_python_eval_refreshes_after_alternating_host_staging(tmp_path, monkeypatch):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    staged_hash = {"value": "host-a"}
+    worker_hash = {"value": "host-b"}
+    user_observations = []
+    calls = []
+    cfg = session.SessionConfig(
+        enabled=True, provider="docker", session_id="session", workspace="/workspace",
+    )
+    monkeypatch.setattr(
+        session, "_get_or_start_docker_session_locked",
+        lambda *_args: session.SessionStatus(
+            True, "docker", "session", "ready", container_name="container",
+        ),
+    )
+    monkeypatch.setattr(session, "_session_bridge_dir", lambda *_args: bridge_dir)
+    monkeypatch.setattr(session, "_session_runtime_dir", lambda *_args: runtime_dir)
+    monkeypatch.setattr(session, "docker_session_mount_dir", lambda *_args: tmp_path)
+    monkeypatch.setattr(
+        session, "_python_repl_runtime_code_hash", lambda _path: staged_hash["value"],
+    )
+
+    def run(_db, _thread, _bridge, payload, _timeout, _cancel=None):
+        calls.append(payload)
+        if "repl_refresh.py" in payload["code"]:
+            worker_hash["value"] = staged_hash["value"]
+            return session._PYTHON_REFRESH_SUCCESS_OUTPUT
+        user_observations.append(worker_hash["value"])
+        return f"--- STDOUT ---\n{worker_hash['value']}"
+
+    monkeypatch.setattr(session, "_run_docker_python_eval_request", run)
+
+    first = session._execute_python_docker_captured(
+        object(), "runtime-thread", cfg, "observe()",
+        repl_name="default", eval_token="token-a", timeout_sec=5,
+    )
+    # Another host stages/loads B. Host A then restages A before its next call;
+    # its stale process-local belief must never suppress the refresh guard.
+    staged_hash["value"] = "host-b"
+    worker_hash["value"] = "host-b"
+    staged_hash["value"] = "host-a"
+    second = session._execute_python_docker_captured(
+        object(), "runtime-thread", cfg, "observe()",
+        repl_name="default", eval_token="token-a2", timeout_sec=5,
+    )
+
+    assert first.endswith("host-a")
+    assert second.endswith("host-a")
+    assert user_observations == ["host-a", "host-a"]
+    assert len(calls) == 4
+    assert all("repl_refresh.py" in calls[index]["code"] for index in (0, 2))
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        "--- INTERRUPTED ---\nPython REPL eval was cancelled.",
+        "--- TIMEOUT ---\nPython REPL timed out.",
+        "--- CONTAINMENT FAILURE ---\nPython channel could not be contained.",
+        "Error: Docker session daemon restarted before completion.",
+        "Error: Docker REPL failed: worker exited.",
+        "--- STDERR ---\nTraceback (most recent call last):\nRuntimeError: refresh failed",
+    ],
+)
+def test_docker_python_interrupted_or_failed_refresh_aborts_user_code_and_retries(
+    tmp_path, monkeypatch, terminal,
+):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    cfg = session.SessionConfig(
+        enabled=True, provider="docker", session_id="session", workspace="/workspace",
+    )
+    monkeypatch.setattr(
+        session, "_get_or_start_docker_session_locked",
+        lambda *_args: session.SessionStatus(
+            True, "docker", "session", "ready", container_name="container",
+        ),
+    )
+    monkeypatch.setattr(session, "_session_bridge_dir", lambda *_args: bridge_dir)
+    monkeypatch.setattr(session, "_session_runtime_dir", lambda *_args: runtime_dir)
+    monkeypatch.setattr(session, "docker_session_mount_dir", lambda *_args: tmp_path)
+    monkeypatch.setattr(session, "_python_repl_runtime_code_hash", lambda _path: "runtime-hash")
+    responses = [terminal, session._PYTHON_REFRESH_SUCCESS_OUTPUT, "--- STDOUT ---\nuser-ok"]
+    calls = []
+    monkeypatch.setattr(
+        session,
+        "_run_docker_python_eval_request",
+        lambda _db, _thread, _bridge, payload, _timeout, _cancel=None:
+            calls.append(payload) or responses.pop(0),
+    )
+
+    first = session._execute_python_docker_captured(
+        object(), "runtime-thread", cfg, "user_code()",
+        repl_name="default", eval_token="token", timeout_sec=5,
+    )
+    assert first.startswith("Error: Egg could not refresh")
+    assert terminal in first
+    assert len(calls) == 1
+    assert "repl_refresh.py" in calls[0]["code"]
+
+    second = session._execute_python_docker_captured(
+        object(), "runtime-thread", cfg, "user_code()",
+        repl_name="default", eval_token="token-2", timeout_sec=5,
+    )
+    assert second == "--- STDOUT ---\nuser-ok"
     assert len(calls) == 3
-    assert calls[2]["code"] == "42"
+    assert "repl_refresh.py" in calls[1]["code"]
+    assert calls[2]["code"] == "user_code()"
 
 
 def test_generated_eggtools_wrappers_include_compact_thread_but_not_removed_compaction_helpers():

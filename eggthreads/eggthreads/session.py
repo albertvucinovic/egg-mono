@@ -2052,38 +2052,6 @@ _PYTHON_REPL_RUNTIME_FILES = (
     "_eggtools_generated.py",
     "repl_refresh.py",
 )
-_DOCKER_REFRESHED_PYTHON_RUNTIMES: set[tuple[str, str, str]] = set()
-# Session activity guards serialize lifecycle/eval operations for one Docker
-# session; this lock additionally protects the process-global cache across
-# unrelated sessions and direct callers.
-_DOCKER_REFRESHED_PYTHON_RUNTIMES_LOCK = threading.Lock()
-
-
-def _invalidate_python_runtime_refresh_cache(runtime_dir: Path) -> None:
-    runtime_key = str(runtime_dir)
-    with _DOCKER_REFRESHED_PYTHON_RUNTIMES_LOCK:
-        stale = {
-            key for key in _DOCKER_REFRESHED_PYTHON_RUNTIMES
-            if key[0] == runtime_key
-        }
-        _DOCKER_REFRESHED_PYTHON_RUNTIMES.difference_update(stale)
-
-
-def _python_runtime_refresh_cached(refresh_key: tuple[str, str, str]) -> bool:
-    with _DOCKER_REFRESHED_PYTHON_RUNTIMES_LOCK:
-        return refresh_key in _DOCKER_REFRESHED_PYTHON_RUNTIMES
-
-
-def _cache_python_runtime_refresh(refresh_key: tuple[str, str, str]) -> None:
-    with _DOCKER_REFRESHED_PYTHON_RUNTIMES_LOCK:
-        _DOCKER_REFRESHED_PYTHON_RUNTIMES.add(refresh_key)
-
-
-def _clear_python_runtime_refresh_cache() -> None:
-    """Clear process-local refresh state (primarily for isolated tests)."""
-
-    with _DOCKER_REFRESHED_PYTHON_RUNTIMES_LOCK:
-        _DOCKER_REFRESHED_PYTHON_RUNTIMES.clear()
 
 
 def _python_repl_runtime_code_hash(runtime_dir: Path) -> str:
@@ -3131,8 +3099,6 @@ def _stop_captured_session(
             True, cfg.provider, cfg.session_id, "unavailable",
             f"Unknown session provider: {cfg.provider}", share_repl=cfg.share_repl,
         )
-    if cfg.provider == "docker" and cfg.session_id:
-        _invalidate_python_runtime_refresh_cache(_session_runtime_dir(cfg.session_id))
     return provider.stop(db, thread_id, cfg, reason=reason)
 
 
@@ -3192,7 +3158,6 @@ def _get_or_start_docker_session_locked(
             status.status == "unhealthy",
         )
         if restarted:
-            _invalidate_python_runtime_refresh_cache(runtime_dir)
             _daemon, health_error = _wait_for_docker_daemon(bridge_dir)
             if health_error:
                 raise RuntimeError(health_error)
@@ -3725,6 +3690,15 @@ def _run_docker_python_eval_request(
     )
 
 
+_PYTHON_REFRESH_SUCCESS_OUTPUT = "--- The Python REPL executed successfully and produced no output ---"
+
+
+def _python_refresh_succeeded(output: str) -> bool:
+    """Accept only the refresh guard's explicit no-output success terminal."""
+
+    return str(output or "").strip() == _PYTHON_REFRESH_SUCCESS_OUTPUT
+
+
 def _execute_python_docker(
     db: ThreadsDB,
     runtime_thread_id: str,
@@ -3774,29 +3748,25 @@ def _execute_python_docker_captured(
     )
     runtime_hash = _python_repl_runtime_code_hash(Path(handle.runtime_dir))
     bridge_dir = Path(handle.bridge_dir)
-    refresh_key = (handle.runtime_dir, repl_name, runtime_hash)
-    if not _python_runtime_refresh_cached(refresh_key):
-        refresh_output = _run_docker_python_eval_request(
-            db,
-            runtime_thread_id,
-            bridge_dir,
-            {
-                "language": "python",
-                "code": _python_repl_runtime_refresh_code(runtime_hash),
-                "repl_name": repl_name,
-                "token": eval_token,
-                "timeout_sec": timeout_sec,
-            },
-            timeout_sec,
-            cancel_check,
-        )
-        refresh_failed = (
-            "Traceback (most recent call last):" in refresh_output
-            or refresh_output.startswith(("Error:", "--- TIMEOUT ---"))
-        )
-        if refresh_failed:
-            return "Error: Egg could not refresh the persistent Python REPL runtime code.\n" + refresh_output
-        _cache_python_runtime_refresh(refresh_key)
+    # The mounted runtime can be restaged by any Egg/EggW host sharing this
+    # session. A process-local cache cannot prove which hash the worker loaded,
+    # so always send the idempotent in-worker hash guard before user code.
+    refresh_output = _run_docker_python_eval_request(
+        db,
+        runtime_thread_id,
+        bridge_dir,
+        {
+            "language": "python",
+            "code": _python_repl_runtime_refresh_code(runtime_hash),
+            "repl_name": repl_name,
+            "token": eval_token,
+            "timeout_sec": timeout_sec,
+        },
+        timeout_sec,
+        cancel_check,
+    )
+    if not _python_refresh_succeeded(refresh_output):
+        return "Error: Egg could not refresh the persistent Python REPL runtime code.\n" + refresh_output
 
     payload = {
         "language": "python",

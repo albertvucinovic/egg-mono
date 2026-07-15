@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import threading
 from pathlib import Path
 
 import pytest
@@ -301,21 +300,13 @@ def test_uncertain_effective_limit_inspection_does_not_delete_container(monkeypa
     assert calls == []
 
 
-def test_policy_recreation_invalidates_used_python_cache_waits_and_next_eval_refreshes(
+def test_policy_recreation_waits_for_heartbeat_and_next_eval_refreshes(
     monkeypatch, tmp_path,
 ):
     db, thread_id, cfg = _configured(tmp_path, monkeypatch)
     runtime_dir = session._session_runtime_dir(cfg.session_id)
     runtime_dir.mkdir(parents=True, exist_ok=True)
     runtime_hash = "runtime-hash"
-    cache_key = (str(runtime_dir), "default", runtime_hash)
-    same_runtime_key = (str(runtime_dir), "other-channel", "other-hash")
-    other_key = (str(tmp_path / "other-runtime"), "default", runtime_hash)
-    session._clear_python_runtime_refresh_cache()
-    session._cache_python_runtime_refresh(cache_key)
-    session._cache_python_runtime_refresh(same_runtime_key)
-    session._cache_python_runtime_refresh(other_key)
-
     container_name = session.docker_session_container_name(db, cfg.session_id)
     configured_limits = {
         "memory_bytes": 64 * 1024 * 1024,
@@ -356,9 +347,6 @@ def test_policy_recreation_invalidates_used_python_cache_waits_and_next_eval_ref
     assert recreated.container_name == container_name
     assert recreated.resource_limits == configured_limits
     assert waits == [session._session_bridge_dir(cfg.session_id)]
-    assert not session._python_runtime_refresh_cached(cache_key)
-    assert not session._python_runtime_refresh_cached(same_runtime_key)
-    assert session._python_runtime_refresh_cached(other_key)
 
     monkeypatch.setattr(
         session, "_get_or_start_docker_session_locked", lambda *_a: recreated,
@@ -370,7 +358,7 @@ def test_policy_recreation_invalidates_used_python_cache_waits_and_next_eval_ref
         session,
         "_run_docker_python_eval_request",
         lambda _db, _thread, _bridge, payload, _timeout, _cancel=None:
-            calls.append(payload) or "--- STDOUT ---\nnext-eval-ok",
+            calls.append(payload) or session._PYTHON_REFRESH_SUCCESS_OUTPUT,
     )
 
     result = session._execute_python_docker_captured(
@@ -378,68 +366,10 @@ def test_policy_recreation_invalidates_used_python_cache_waits_and_next_eval_ref
         repl_name="default", eval_token="token", timeout_sec=5,
     )
 
-    assert result == "--- STDOUT ---\nnext-eval-ok"
+    assert result == session._PYTHON_REFRESH_SUCCESS_OUTPUT
     assert len(calls) == 2
     assert "repl_refresh.py" in calls[0]["code"]
     assert calls[1]["code"] == "print('next-eval-ok')"
-    assert session._python_runtime_refresh_cached(cache_key)
-    session._clear_python_runtime_refresh_cache()
-
-
-def test_refresh_cache_helpers_are_safe_during_concurrent_invalidation(tmp_path):
-    runtime_dir = tmp_path / "runtime"
-    target_keys = [
-        (str(runtime_dir), f"channel-{index}", f"hash-{index}")
-        for index in range(40)
-    ]
-    other_key = (str(tmp_path / "other-runtime"), "default", "other-hash")
-    errors = []
-    start = threading.Barrier(4)
-
-    def writer() -> None:
-        try:
-            start.wait()
-            for _ in range(40):
-                for key in target_keys:
-                    session._cache_python_runtime_refresh(key)
-        except BaseException as e:
-            errors.append(e)
-
-    def reader() -> None:
-        try:
-            start.wait()
-            for _ in range(1600):
-                session._python_runtime_refresh_cached(target_keys[_ % len(target_keys)])
-        except BaseException as e:
-            errors.append(e)
-
-    def invalidator() -> None:
-        try:
-            start.wait()
-            for _ in range(1600):
-                session._invalidate_python_runtime_refresh_cache(runtime_dir)
-        except BaseException as e:
-            errors.append(e)
-
-    session._clear_python_runtime_refresh_cache()
-    session._cache_python_runtime_refresh(other_key)
-    threads = [
-        threading.Thread(target=writer),
-        threading.Thread(target=reader),
-        threading.Thread(target=invalidator),
-    ]
-    for thread in threads:
-        thread.start()
-    start.wait()
-    for thread in threads:
-        thread.join(timeout=10)
-
-    assert all(not thread.is_alive() for thread in threads)
-    assert errors == []
-    session._invalidate_python_runtime_refresh_cache(runtime_dir)
-    assert all(not session._python_runtime_refresh_cached(key) for key in target_keys)
-    assert session._python_runtime_refresh_cached(other_key)
-    session._clear_python_runtime_refresh_cache()
 
 
 def test_memory_provider_is_unaffected_by_docker_limit_environment(monkeypatch, tmp_path):
