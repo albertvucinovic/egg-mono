@@ -29,6 +29,9 @@ def _reset_sessiond_state() -> None:
         sessiond.BASH_REPLS.pop(channel, None)
     sessiond.CHANNEL_QUEUES.clear()
     sessiond.CHANNEL_CONDITIONS.clear()
+    sessiond.CHANNEL_ACTIVITY.clear()
+    sessiond.CHANNEL_REAPING.clear()
+    sessiond.CHANNEL_IDLE_TIMEOUT_SEC = None
 
 
 @pytest.fixture(autouse=True)

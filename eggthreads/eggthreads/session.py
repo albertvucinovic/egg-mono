@@ -642,6 +642,13 @@ def _docker_existing_label(container_name: str, label: str) -> Optional[str]:
     return value or None
 
 
+def _configured_channel_idle_timeout_sec() -> Optional[float]:
+    timeout = _parse_duration_seconds(os.environ.get("EGG_RLM_CHANNEL_IDLE_TIMEOUT"))
+    if timeout is None or not math.isfinite(timeout) or timeout <= 0:
+        return None
+    return float(timeout)
+
+
 def _docker_session_policy_hash(db: ThreadsDB, runtime_thread_id: str, cfg: SessionConfig) -> str:
     """Return a stable hash of the security-relevant Docker session policy."""
 
@@ -651,6 +658,7 @@ def _docker_session_policy_hash(db: ThreadsDB, runtime_thread_id: str, cfg: Sess
         "workspace": cfg.workspace,
         "network": cfg.network,
         "mount_dir": str(docker_session_mount_dir(db, runtime_thread_id, cfg).resolve()),
+        "channel_idle_timeout_sec": _configured_channel_idle_timeout_sec(),
     }
     try:
         from .sandbox import get_thread_sandbox_config
@@ -1163,6 +1171,9 @@ def _start_docker_container(
         cfg.image,
         "python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime",
     ]
+    channel_idle_timeout = _configured_channel_idle_timeout_sec()
+    if channel_idle_timeout is not None:
+        cmd.extend(["--channel-idle-timeout-sec", f"{channel_idle_timeout:g}"])
     _clear_docker_daemon_status(bridge_dir)
     subprocess.run(cmd, capture_output=True, check=True, timeout=60)
     return True
@@ -2112,11 +2123,22 @@ def _docker_daemon_status(bridge_dir: Path) -> tuple[Optional[Dict[str, Any]], s
     for channel, details in channel_state.items():
         if not isinstance(channel, str) or not channel.strip() or not isinstance(details, dict):
             return payload, "Docker session daemon channel entry is invalid"
-        if details.get("state") not in {"ready", "busy"}:
+        state = details.get("state")
+        if state not in {"ready", "busy", "reaping", "reaped"}:
             return payload, "Docker session daemon channel state is invalid"
-        if details.get("state") == "ready":
+        channel_last_activity = details.get("last_activity_at")
+        if not _valid_daemon_timestamp(channel_last_activity):
+            return payload, "Docker session daemon channel last activity is invalid"
+        reaped_at = details.get("reaped_at")
+        reap_reason = details.get("reap_reason")
+        if state == "reaped":
+            if not _valid_daemon_timestamp(reaped_at) or not isinstance(reap_reason, str) or not reap_reason:
+                return payload, "Docker session daemon reaped channel status is invalid"
+        elif reaped_at is not None or reap_reason is not None:
+            return payload, "Docker session daemon live channel has stale reap status"
+        if state in {"ready", "reaping", "reaped"}:
             if any(key in details for key in ("running_request_id", "queued_request_ids")):
-                return payload, "Docker session daemon ready channel contains request IDs"
+                return payload, "Docker session daemon non-busy channel contains request IDs"
             continue
         running_id = details.get("running_request_id")
         queued_ids = details.get("queued_request_ids")

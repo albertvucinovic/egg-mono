@@ -37,7 +37,7 @@ def _write_health(session_id: str, **overrides) -> Path:
         "heartbeat_at": now,
         "last_activity_at": now - 0.5,
         "active_requests": [],
-        "channel_state": {"python:default": {"state": "ready"}},
+        "channel_state": {"python:default": {"state": "ready", "last_activity_at": now - 0.5}},
         **overrides,
     }
     (bridge / "sessiond_generation.json").write_text(json.dumps({
@@ -120,6 +120,7 @@ def test_docker_status_reports_missing_ready_busy_and_unhealthy(tmp_path, monkey
         channel_state={
             "bash:shell": {
                 "state": "busy", "running_request_id": "req-b", "queued_request_ids": [],
+                "last_activity_at": time.time(),
             },
         },
     )
@@ -222,6 +223,7 @@ def test_docker_status_rejects_cross_field_request_channel_contradictions(tmp_pa
                 "state": "busy",
                 "running_request_id": "req-a",
                 "queued_request_ids": ["req-q"],
+                "last_activity_at": time.time(),
             },
         },
     )

@@ -32,11 +32,66 @@ ACTIVE_EVALS: Dict[str, Dict[str, Any]] = {}
 ACTIVE_EVALS_LOCK = threading.RLock()
 CHANNEL_CONDITIONS: Dict[str, threading.Condition] = {}
 CHANNEL_QUEUES: Dict[str, List[str]] = {}
+CHANNEL_ACTIVITY: Dict[str, Dict[str, Any]] = {}
+CHANNEL_REAPING: set[str] = set()
+CHANNEL_IDLE_TIMEOUT_SEC: Optional[float] = None
 DAEMON_GENERATION = uuid.uuid4().hex
 DAEMON_STARTED_AT = time.time()
 LAST_ACTIVITY_AT = DAEMON_STARTED_AT
 STATUS_PATH: Optional[Path] = None
 STATUS_WRITE_LOCK = threading.Lock()
+
+
+def parse_positive_timeout(value: Any) -> Optional[float]:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not (timeout > 0 and timeout < float("inf")):
+        return None
+    return timeout
+
+
+def _channel_key(language: str, channel: str) -> str:
+    return f"{language}:{channel}"
+
+
+def _touch_channel_locked(
+    language: str,
+    channel: str,
+    *,
+    now: Optional[float] = None,
+    clear_reap: bool = True,
+) -> None:
+    key = _channel_key(language, channel)
+    record = CHANNEL_ACTIVITY.setdefault(key, {})
+    record["last_activity_at"] = float(time.time() if now is None else now)
+    if clear_reap:
+        record.pop("reaped_at", None)
+        record.pop("reap_reason", None)
+
+
+def touch_channel(language: str, channel: str, *, now: Optional[float] = None) -> None:
+    with ACTIVE_EVALS_LOCK:
+        _touch_channel_locked(language, channel, now=now)
+
+
+def _forget_channel_if_reset(language: str, channel: str) -> None:
+    key = _channel_key(language, channel)
+    with ACTIVE_EVALS_LOCK:
+        if not CHANNEL_QUEUES.get(key):
+            CHANNEL_ACTIVITY.pop(key, None)
+
+
+def _wait_for_channel_reap_locked(channel_key: str) -> None:
+    while channel_key in CHANNEL_REAPING:
+        # The reaper reserves under ACTIVE_EVALS_LOCK, tears down outside it,
+        # then notifies. Admission cannot register a same-channel request in
+        # the vulnerable interval.
+        condition = CHANNEL_CONDITIONS.setdefault(
+            channel_key, threading.Condition(ACTIVE_EVALS_LOCK),
+        )
+        condition.wait(0.05)
 
 
 def _python_worker_loop(conn) -> None:
@@ -134,10 +189,11 @@ def _get_python_worker(repl_name: str) -> tuple[mp.Process, Any]:
             pass
         raise
     PY_WORKERS[repl_name] = (proc, parent_conn)
+    touch_channel("python", repl_name)
     return proc, parent_conn
 
 
-def _kill_python_worker(repl_name: str) -> None:
+def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> None:
     existing = PY_WORKERS.pop(repl_name, None)
     if existing is None:
         return
@@ -158,6 +214,8 @@ def _kill_python_worker(repl_name: str) -> None:
         proc.join(1.0)
     except Exception:
         pass
+    if not preserve_activity:
+        _forget_channel_if_reset("python", repl_name)
 
 
 def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -187,20 +245,35 @@ def _daemon_status_payload(now: Optional[float] = None) -> Dict[str, Any]:
                 "cancel_reason": active.get("cancel_reason"),
             })
         channel_state: Dict[str, Any] = {}
-        for channel_key, queue in sorted(queue_snapshot.items()):
+        all_channel_keys = {
+            key for key, activity in CHANNEL_ACTIVITY.items()
+            if activity.get("reaped_at") is not None
+        } | set(queue_snapshot) | set(CHANNEL_REAPING)
+        all_channel_keys.update(f"python:{channel}" for channel in python_channels)
+        all_channel_keys.update(f"bash:{channel}" for channel in bash_channels)
+        for channel_key in sorted(all_channel_keys):
+            queue = queue_snapshot.get(channel_key, [])
             running_id = next(
                 (req_id for req_id in queue if ACTIVE_EVALS.get(req_id, {}).get("running")),
                 None,
             )
-            channel_state[channel_key] = {
-                "state": "busy",
-                "running_request_id": running_id,
-                "queued_request_ids": [req_id for req_id in queue if req_id != running_id],
+            activity = CHANNEL_ACTIVITY.get(channel_key, {})
+            details: Dict[str, Any] = {
+                "state": (
+                    "reaping" if channel_key in CHANNEL_REAPING
+                    else ("busy" if queue else ("reaped" if activity.get("reaped_at") else "ready"))
+                ),
+                "last_activity_at": activity.get("last_activity_at"),
             }
-        for channel in sorted(python_channels):
-            channel_state.setdefault(f"python:{channel}", {"state": "ready"})
-        for channel in sorted(bash_channels):
-            channel_state.setdefault(f"bash:{channel}", {"state": "ready"})
+            if queue:
+                details.update(
+                    running_request_id=running_id,
+                    queued_request_ids=[req_id for req_id in queue if req_id != running_id],
+                )
+            if activity.get("reaped_at") is not None:
+                details["reaped_at"] = activity.get("reaped_at")
+                details["reap_reason"] = activity.get("reap_reason")
+            channel_state[channel_key] = details
     return {
         "protocol_version": 2,
         "daemon_generation": DAEMON_GENERATION,
@@ -487,6 +560,7 @@ def _bash_proc(repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) 
         start_new_session=True,
     )
     BASH_REPLS[repl_name] = proc
+    touch_channel("bash", repl_name)
     return proc
 
 
@@ -691,6 +765,7 @@ def _run_claimed_eval(
         })
     finally:
         with ACTIVE_EVALS_LOCK:
+            _touch_channel_locked(language, channel)
             ACTIVE_EVALS.pop(req_id, None)
             with channel_condition:
                 queue = CHANNEL_QUEUES.get(channel_key, [])
@@ -747,6 +822,8 @@ def process_eval_request(req_path: Path, bridge_dir: Path, runtime_dir: Path) ->
     channel = str(payload.get("channel") or payload.get("repl_name") or "default")
     channel_key = f"{language}:{channel}"
     with ACTIVE_EVALS_LOCK:
+        _wait_for_channel_reap_locked(channel_key)
+        _touch_channel_locked(language, channel)
         ACTIVE_EVALS[req_id] = {
             "cancel": cancel_event,
             "cancel_reason": None,
@@ -851,6 +928,96 @@ def service_cancel_requests(bridge_dir: Path) -> None:
         write_daemon_status(activity=True)
 
 
+def _terminate_bash_channel(channel: str, *, preserve_activity: bool = False) -> None:
+    proc = BASH_REPLS.pop(channel, None)
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=1.0)
+    except Exception:
+        pass
+    if not preserve_activity:
+        _forget_channel_if_reset("bash", channel)
+
+
+def reap_idle_channels(
+    *,
+    timeout_sec: Optional[float] = None,
+    now: Optional[float] = None,
+    before_teardown: Any = None,
+) -> List[str]:
+    """Reap idle interpreter channels without racing channel admission."""
+
+    threshold = CHANNEL_IDLE_TIMEOUT_SEC if timeout_sec is None else parse_positive_timeout(timeout_sec)
+    if threshold is None:
+        return []
+    observed_at = float(time.time() if now is None else now)
+    candidates: List[str] = []
+    with ACTIVE_EVALS_LOCK:
+        live_keys = {
+            *(_channel_key("python", channel) for channel in PY_WORKERS),
+            *(_channel_key("bash", channel) for channel, proc in BASH_REPLS.items() if proc.poll() is None),
+        }
+        for channel_key in sorted(live_keys):
+            activity = CHANNEL_ACTIVITY.get(channel_key, {})
+            last_activity = activity.get("last_activity_at")
+            queue = CHANNEL_QUEUES.get(channel_key, [])
+            cancelling = any(
+                bool(ACTIVE_EVALS.get(req_id, {}).get("cancel_reason"))
+                or bool(
+                    ACTIVE_EVALS.get(req_id, {}).get("cancel") is not None
+                    and ACTIVE_EVALS[req_id]["cancel"].is_set()
+                )
+                for req_id in queue
+            )
+            if (
+                channel_key in CHANNEL_REAPING
+                or queue
+                or cancelling
+                or not isinstance(last_activity, (int, float))
+                or observed_at - float(last_activity) <= threshold
+            ):
+                continue
+            CHANNEL_REAPING.add(channel_key)
+            candidates.append(channel_key)
+    reaped: List[str] = []
+    for channel_key in candidates:
+        language, channel = channel_key.split(":", 1)
+        try:
+            if before_teardown is not None:
+                before_teardown(channel_key)
+            if language == "python":
+                _kill_python_worker(channel, preserve_activity=True)
+            elif language == "bash":
+                _terminate_bash_channel(channel, preserve_activity=True)
+            else:
+                continue
+            reaped.append(channel_key)
+        finally:
+            completed_at = float(time.time() if now is None else now)
+            with ACTIVE_EVALS_LOCK:
+                activity = CHANNEL_ACTIVITY.setdefault(channel_key, {})
+                activity["last_activity_at"] = completed_at
+                activity["reaped_at"] = completed_at
+                activity["reap_reason"] = f"idle_timeout:{threshold:g}s"
+                CHANNEL_REAPING.discard(channel_key)
+                condition = CHANNEL_CONDITIONS.get(channel_key)
+                if condition is not None:
+                    condition.notify_all()
+                    if not CHANNEL_QUEUES.get(channel_key):
+                        CHANNEL_CONDITIONS.pop(channel_key, None)
+    if reaped:
+        write_daemon_status(activity=True)
+    return reaped
+
+
 def recover_stale_claims(bridge_dir: Path) -> None:
     for claimed in sorted(bridge_dir.glob("eval_*.req.json.processing")):
         name = claimed.name
@@ -870,12 +1037,14 @@ def main() -> int:
     parser.add_argument("--bridge-dir", default="/egg-bridge")
     parser.add_argument("--runtime-dir", default="/egg-runtime")
     parser.add_argument("--poll-sec", type=float, default=0.05)
+    parser.add_argument("--channel-idle-timeout-sec", type=float, default=None)
     args = parser.parse_args()
     bridge_dir = Path(args.bridge_dir)
     runtime_dir = Path(args.runtime_dir)
     bridge_dir.mkdir(parents=True, exist_ok=True)
-    global STATUS_PATH
+    global STATUS_PATH, CHANNEL_IDLE_TIMEOUT_SEC
     STATUS_PATH = bridge_dir / "sessiond_status.json"
+    CHANNEL_IDLE_TIMEOUT_SEC = parse_positive_timeout(args.channel_idle_timeout_sec)
     atomic_write_json(bridge_dir / "sessiond_generation.json", {
         "protocol_version": 2, "daemon_generation": DAEMON_GENERATION,
         "started_at": DAEMON_STARTED_AT,
@@ -889,6 +1058,7 @@ def main() -> int:
         for req in sorted(bridge_dir.glob("eval_*.req.json")):
             process_eval_request(req, bridge_dir, runtime_dir)
         if time.monotonic() >= next_heartbeat:
+            reap_idle_channels()
             write_daemon_status()
             next_heartbeat = time.monotonic() + heartbeat_interval
         time.sleep(args.poll_sec)
