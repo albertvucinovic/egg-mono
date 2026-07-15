@@ -2419,7 +2419,7 @@ def _run_docker_eval_request(
                 if str(response.get("request_id") or req_id) != req_id:
                     continue
                 response_reason = str(response.get("reason") or "")
-                if response_reason in {"timeout", "cancelled", "daemon_restarted", "containment_failure"}:
+                if response_reason in {"timeout", "cancelled", "daemon_restarted", "containment_failure", "worker_exited"}:
                     _record_docker_eval_lifecycle(
                         db, runtime_thread_id,
                         action="docker_eval_terminal",
@@ -2430,7 +2430,7 @@ def _run_docker_eval_request(
                     )
                 if response.get("ok"):
                     return str(response.get("output") or "")
-                if response_reason == "containment_failure":
+                if response_reason in {"containment_failure", "worker_exited"}:
                     return str(response.get("output") or response.get("error") or "Docker channel containment failed")
                 return f"Error: Docker REPL failed: {response.get('error') or 'unknown error'}"
             if cancel_check is not None and cancel_check():

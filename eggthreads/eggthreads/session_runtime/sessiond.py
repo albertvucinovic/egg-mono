@@ -420,10 +420,14 @@ def _finish_channel_teardown_locked(
     error: str,
     own_reservation: bool,
     preserve_activity: bool,
-) -> None:
+) -> bool:
     key = _channel_key(language, channel)
     current = CHANNEL_PROCESS_META.get(key)
-    if current is not None and current.get("generation") == reserved_meta.get("generation"):
+    same_generation = (
+        current is not None
+        and current.get("generation") == reserved_meta.get("generation")
+    )
+    if same_generation:
         if ok:
             if language == "python":
                 PY_WORKERS.pop(channel, None)
@@ -438,6 +442,7 @@ def _finish_channel_teardown_locked(
     if own_reservation:
         CHANNEL_REAPING.discard(key)
         _channel_condition_locked(key).notify_all()
+    return same_generation
 
 
 def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> bool:
@@ -460,7 +465,7 @@ def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> b
             pass
     ok, error = _kill_and_verify_process_group(int(meta["pgid"]), proc)
     with ACTIVE_EVALS_LOCK:
-        _finish_channel_teardown_locked(
+        same_generation = _finish_channel_teardown_locked(
             "python",
             repl_name,
             meta,
@@ -469,7 +474,7 @@ def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> b
             own_reservation=own_reservation,
             preserve_activity=preserve_activity,
         )
-    return ok
+    return ok and same_generation
 
 
 def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -959,15 +964,18 @@ def execute_bash(
         except Exception:
             chunk = ""
         if not chunk and proc.poll() is not None:
-            # Keep immutable PGID metadata if descendants survive the leader;
-            # otherwise retire the dead mapping without claiming a live channel.
-            key = _channel_key("bash", repl_name)
-            with ACTIVE_EVALS_LOCK:
-                meta = CHANNEL_PROCESS_META.get(key)
-                if meta is None or not _process_group_has_live_members(int(meta["pgid"])):
-                    BASH_REPLS.pop(repl_name, None)
-                    CHANNEL_PROCESS_META.pop(key, None)
-            return format_bash_output(output)
+            # A dead shell can leave descendants holding the process group even
+            # after redirected stdout reaches EOF. Reserve the exact generation
+            # and verify group teardown before publishing any terminal result.
+            if not _terminate_bash_channel(repl_name, preserve_activity=True):
+                return _channel_containment_failure_output(
+                    "Bash", repl_name, "process exited unexpectedly",
+                )
+            return (
+                "--- INTERRUPTED ---\n"
+                "Bash REPL process exited unexpectedly; its process group was "
+                "stopped and this Bash channel was reset."
+            )
         output += chunk
         marker = f"\n{sentinel}:"
         marker_at = output.find(marker)
@@ -1116,9 +1124,13 @@ def _run_claimed_eval(
             raise ValueError(f"Unsupported language: {language}")
         if output.startswith("--- CONTAINMENT FAILURE ---"):
             reason = "containment_failure"
+        elif output.startswith("--- INTERRUPTED ---\nBash REPL process exited unexpectedly"):
+            reason = "worker_exited"
         _write_terminal_response(bridge_dir, req_id, {
-            "ok": reason != "containment_failure", "output": output, "reason": reason,
-            "error": output if reason == "containment_failure" else None,
+            "ok": reason not in {"containment_failure", "worker_exited"},
+            "output": output,
+            "reason": reason,
+            "error": output if reason in {"containment_failure", "worker_exited"} else None,
             "channel": channel, "language": language,
             "host_owner_id": str(payload.get("host_owner_id") or ""),
         })
@@ -1344,7 +1356,7 @@ def _terminate_bash_channel(channel: str, *, preserve_activity: bool = False) ->
             return True
     ok, error = _kill_and_verify_process_group(int(meta["pgid"]), proc)
     with ACTIVE_EVALS_LOCK:
-        _finish_channel_teardown_locked(
+        same_generation = _finish_channel_teardown_locked(
             "bash",
             channel,
             meta,
@@ -1353,7 +1365,7 @@ def _terminate_bash_channel(channel: str, *, preserve_activity: bool = False) ->
             own_reservation=own_reservation,
             preserve_activity=preserve_activity,
         )
-    return ok
+    return ok and same_generation
 
 
 def reap_idle_channels(

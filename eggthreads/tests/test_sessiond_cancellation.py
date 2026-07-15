@@ -535,3 +535,119 @@ def test_real_eval_timeout_teardown_failure_leaves_channel_quarantined_until_ver
         assert sessiond._terminate_bash_channel(channel)
     assert key not in sessiond.CHANNEL_PROCESS_META
     assert key not in sessiond.CHANNEL_ACTIVITY
+
+
+def _bash_leader_death_script(pid_file: Path, comm_file: Path) -> str:
+    descendant = (
+        "import os,time; "
+        "open('/proc/self/comm','w').write('egg child name\\n'); "
+        f"open({str(pid_file)!r},'w').write(str(os.getpid())); "
+        f"open({str(comm_file)!r},'w').write(open('/proc/self/stat').read()); "
+        "time.sleep(99)"
+    )
+    return (
+        f"python -c {json.dumps(descendant)} >/dev/null 2>&1 &\n"
+        # Wait until the descendant has set its spaced comm and published PID,
+        # then kill the persistent shell leader before it can print a sentinel.
+        f"while [ ! -s {json.dumps(str(pid_file))} ]; do sleep 0.01; done\n"
+        "kill -KILL $$"
+    )
+
+
+def test_bash_current_eval_leader_death_contains_descendant_before_terminal(tmp_path):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    pid_file = tmp_path / "descendant.pid"
+    comm_file = tmp_path / "descendant.stat"
+    channel = "leader-death"
+    key = f"bash:{channel}"
+    request_id = "leader-death"
+
+    sessiond.process_eval_request(
+        _request(
+            bridge,
+            request_id,
+            language="bash",
+            channel=channel,
+            code=_bash_leader_death_script(pid_file, comm_file),
+        ),
+        bridge,
+        runtime,
+    )
+    response_path = bridge / f"eval_{request_id}.res.json"
+    _wait_until(response_path.exists)
+
+    descendant_pid = int(pid_file.read_text())
+    assert "egg child name" in comm_file.read_text()
+    response = json.loads(response_path.read_text())
+    assert response["ok"] is False
+    assert response["reason"] == "worker_exited"
+    assert response["output"].startswith("--- INTERRUPTED ---")
+    assert "exited unexpectedly" in response["output"]
+    assert not Path(f"/proc/{descendant_pid}").exists()
+    assert key not in sessiond.CHANNEL_PROCESS_META
+    assert channel not in sessiond.BASH_REPLS
+    assert key not in sessiond.CHANNEL_ACTIVITY
+
+
+def test_bash_current_eval_leader_death_teardown_failure_quarantines(
+    monkeypatch, tmp_path,
+):
+    import eggthreads.session as host_session
+
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    pid_file = tmp_path / "descendant.pid"
+    comm_file = tmp_path / "descendant.stat"
+    channel = "leader-death-failure"
+    key = f"bash:{channel}"
+    request_id = "leader-death-failure"
+    real_teardown = sessiond._kill_and_verify_process_group
+    monkeypatch.setattr(
+        sessiond,
+        "_kill_and_verify_process_group",
+        lambda *_a, **_k: (False, "injected verification failure"),
+    )
+
+    sessiond.process_eval_request(
+        _request(
+            bridge,
+            request_id,
+            language="bash",
+            channel=channel,
+            code=_bash_leader_death_script(pid_file, comm_file),
+        ),
+        bridge,
+        runtime,
+    )
+    response_path = bridge / f"eval_{request_id}.res.json"
+    _wait_until(response_path.exists)
+    _wait_until(lambda: request_id not in sessiond.ACTIVE_EVALS)
+
+    descendant_pid = int(pid_file.read_text())
+    assert "egg child name" in comm_file.read_text()
+    response = json.loads(response_path.read_text())
+    assert response["ok"] is False
+    assert response["reason"] == "containment_failure"
+    assert response["output"].startswith("--- CONTAINMENT FAILURE ---")
+    assert Path(f"/proc/{descendant_pid}").exists()
+    status = sessiond._daemon_status_payload()
+    assert status["channel_state"][key]["state"] == "reap_failed"
+    assert status["channel_state"][key]["reap_reason"] == "teardown_failed"
+    assert status["channel_state"][key]["reap_error"] == "injected verification failure"
+
+    generation = tmp_path / "sessiond_generation.json"
+    generation.write_text(json.dumps({
+        "protocol_version": 2,
+        "daemon_generation": sessiond.DAEMON_GENERATION,
+        "started_at": sessiond.DAEMON_STARTED_AT,
+    }))
+    status_path = tmp_path / "sessiond_status.json"
+    status_path.write_text(json.dumps(status))
+    payload, error = host_session._docker_daemon_status(tmp_path)
+    assert payload is not None
+    assert error == ""
+
+    monkeypatch.setattr(sessiond, "_kill_and_verify_process_group", real_teardown)
+    assert sessiond._terminate_bash_channel(channel)
+    assert not Path(f"/proc/{descendant_pid}").exists()
