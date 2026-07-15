@@ -935,7 +935,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             return _mk_items(SESSION_TARGET_COMPLETIONS, arg_tok)
 
         if cmd == '/sessionCleanup':
-            return _mk_items(['stopped', 'all', 'older_than=1h', 'older_than=1d'], arg_tok)
+            return _mk_items(['dry-run', 'apply', 'older_than=1h', 'older_than=1d'], arg_tok)
 
         if cmd == '/skill':
             try:

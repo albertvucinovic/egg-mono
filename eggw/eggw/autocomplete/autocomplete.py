@@ -312,7 +312,7 @@ async def get_autocomplete(
                         })
 
             elif cmd == '/sessionCleanup':
-                for opt in ['stopped', 'all', 'older_than=1h', 'older_than=1d']:
+                for opt in ['dry-run', 'apply', 'older_than=1h', 'older_than=1d']:
                     if not arg_tok or arg_tok.lower() in opt.lower():
                         suggestions.append({
                             "display": opt,

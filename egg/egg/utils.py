@@ -38,7 +38,7 @@ Commands:
   Persistent REPL sessions:
     /sessionStatus, /sessionOn [provider=docker|memory] [image=...] [share_with_children=true] [share_repl=true]
     /sessionOff, /sessionStop [python|bash|all], /sessionReset [python|bash|all]
-    /sessionCleanup [stopped|all] [older_than=1h]
+    /sessionCleanup [dry-run|apply] [older_than=1h]
     /pythonRepl <code>, /bashRepl <script>
   Skills:
     /skills [query], /skill <name> — show packaged skill documents (for example: /skill rlm)

@@ -10,6 +10,7 @@ thread used as the execution/audit container for programmatic REPL tool calls.
 import json
 import math
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -801,44 +802,479 @@ def list_docker_session_containers(db: ThreadsDB) -> List[Dict[str, Any]]:
     return out
 
 
+def _safe_session_storage_name(session_id: str) -> Optional[str]:
+    value = str(session_id or "").strip()
+    if not value:
+        return None
+    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in value)
+    return value if safe == value else None
+
+
+def _session_storage_paths(session_id: str) -> Optional[tuple[Path, Path, Path]]:
+    safe = _safe_session_storage_name(session_id)
+    if safe is None:
+        return None
+    root = _bridge_root() / safe
+    return root, root / "bridge", root / "runtime"
+
+
+def _current_session_reference_map(
+    db: ThreadsDB,
+) -> tuple[Optional[Dict[str, List[str]]], str]:
+    try:
+        rows = db.conn.execute("SELECT thread_id FROM threads ORDER BY thread_id").fetchall()
+        references: Dict[str, List[str]] = {}
+        for row in rows:
+            thread_id = str(row[0])
+            enabled, session_id = _strict_effective_session_reference(db, thread_id)
+            if enabled and session_id:
+                references.setdefault(session_id, []).append(thread_id)
+        return references, ""
+    except Exception as e:
+        return None, f"session reference scan failed: {type(e).__name__}: {e}"
+
+
+def _docker_owned_session_inventory() -> tuple[List[Dict[str, Any]], str]:
+    """Inspect only containers selected by Egg's ownership-kind label."""
+
+    try:
+        proc = subprocess.run(
+            [
+                "docker", "ps", "-a",
+                "--filter", "label=egg.kind=rlm-session",
+                "--format", "{{.Names}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as e:
+        return [], f"Docker discovery failed: {type(e).__name__}: {e}"
+    if proc.returncode != 0:
+        error = (proc.stderr or proc.stdout or "Docker discovery failed").strip()
+        return [], error
+
+    inventory: List[Dict[str, Any]] = []
+    for name in [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]:
+        inventory.append({
+            "name": name,
+            "kind_label": _docker_existing_label(name, "egg.kind"),
+            "db_hash_label": _docker_existing_label(name, "egg.db_hash"),
+            "session_id": _docker_existing_label(name, "egg.session_id"),
+            "bridge_source": _docker_bind_mount_source(name, "/egg-bridge"),
+            "runtime_source": _docker_bind_mount_source(name, "/egg-runtime"),
+            "state": _docker_container_state(name),
+            "created_at": _docker_container_created_at(name),
+        })
+    return inventory, ""
+
+
+def _docker_container_names_using_path(path: Path) -> tuple[Optional[List[str]], str]:
+    """Find any container mounting ``path``; labels are irrelevant to safety."""
+
+    try:
+        proc = subprocess.run(
+            [
+                "docker", "ps", "-a",
+                "--filter", f"volume={path}",
+                "--format", "{{.Names}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as e:
+        return None, f"Docker mount-owner discovery failed: {type(e).__name__}: {e}"
+    if proc.returncode != 0:
+        error = (proc.stderr or proc.stdout or "Docker mount-owner discovery failed").strip()
+        return None, error
+    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()], ""
+
+
+def _session_artifact_tree_error(session_root: Path) -> str:
+    allowed = {"bridge", "runtime", "masks", "activity.lock"}
+    try:
+        if session_root.is_symlink() or not session_root.is_dir():
+            return "session artifact root is not a real directory"
+        unexpected = sorted(child.name for child in session_root.iterdir() if child.name not in allowed)
+        if unexpected:
+            return "unexpected session artifact entries: " + ", ".join(unexpected)
+        for current, dirs, files in os.walk(session_root, followlinks=False):
+            for name in [*dirs, *files]:
+                candidate = Path(current) / name
+                if candidate.is_symlink():
+                    return f"symlink is not eligible for cleanup: {candidate.name}"
+                if not _is_relative_to(candidate, session_root):
+                    return "session artifact path escapes its root"
+    except Exception as e:
+        return f"session artifact inspection failed: {type(e).__name__}: {e}"
+    return ""
+
+
+def _session_artifact_latest_mtime(session_root: Path) -> tuple[Optional[float], str]:
+    latest = 0.0
+    try:
+        for current, dirs, files in os.walk(session_root, followlinks=False):
+            latest = max(latest, Path(current).stat().st_mtime)
+            for name in [*dirs, *files]:
+                latest = max(latest, (Path(current) / name).stat().st_mtime)
+        return latest, ""
+    except Exception as e:
+        return None, f"session artifact timestamp inspection failed: {type(e).__name__}: {e}"
+
+
+def _session_artifact_heartbeat_error(session_root: Path, *, now: float, stale_sec: float) -> str:
+    status_path = session_root / "bridge" / "sessiond_status.json"
+    try:
+        status_exists = status_path.exists()
+    except Exception as e:
+        return f"daemon heartbeat path is unreadable: {type(e).__name__}: {e}"
+    if not status_exists:
+        return ""
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+        heartbeat = payload.get("heartbeat_at") if isinstance(payload, dict) else None
+        if not _valid_daemon_timestamp(heartbeat):
+            return "daemon heartbeat is malformed"
+        if now - float(heartbeat) <= stale_sec:
+            return "daemon heartbeat is recent"
+    except Exception as e:
+        return f"daemon heartbeat is unreadable: {type(e).__name__}: {e}"
+    return ""
+
+
+def _session_artifact_active_eval_error(session_root: Path, *, now: float, stale_sec: float) -> str:
+    bridge = session_root / "bridge"
+    try:
+        control_files = [
+            path for pattern in (
+                "eval_*.req.json", "eval_*.req.json.processing", "eval_*.cancel.json",
+                "tool_*.req.json", "tool_*.req.json.processing",
+            )
+            for path in bridge.glob(pattern)
+        ] if bridge.is_dir() else []
+        for path in control_files:
+            if path.is_symlink():
+                return "active eval control path is a symlink"
+            if now - path.stat().st_mtime <= stale_sec:
+                return "active or recent eval control file is present"
+    except Exception as e:
+        return f"eval control inspection failed: {type(e).__name__}: {e}"
+    return ""
+
+
+def _session_artifact_protection_error(
+    session_root: Path,
+    *,
+    now: float,
+    stale_sec: float,
+) -> tuple[str, str]:
+    heartbeat_error = _session_artifact_heartbeat_error(
+        session_root, now=now, stale_sec=stale_sec,
+    )
+    if heartbeat_error:
+        return "heartbeat_protected", heartbeat_error
+    active_eval_error = _session_artifact_active_eval_error(
+        session_root, now=now, stale_sec=stale_sec,
+    )
+    if active_eval_error:
+        return "active_eval_protected", active_eval_error
+    latest_mtime, timestamp_error = _session_artifact_latest_mtime(session_root)
+    if timestamp_error or latest_mtime is None:
+        return "artifact_age_uncertain", timestamp_error or "timestamp inspection failed"
+    if now - latest_mtime <= stale_sec:
+        return "artifact_too_recent", ""
+    return "", ""
+
+
+def _docker_duplicate_cleanup_authority(
+    db: ThreadsDB,
+    session_id: str,
+    name: str,
+    canonical_name: str,
+) -> tuple[bool, str, Optional[float]]:
+    """Revalidate one duplicate under its session activity guard."""
+
+    storage = _session_storage_paths(session_id)
+    if storage is None:
+        return False, "session_identity_invalid", None
+    _root, bridge, runtime = storage
+    if _docker_existing_label(name, "egg.kind") != "rlm-session":
+        return False, "ownership_label_invalid", None
+    if _docker_existing_label(name, "egg.session_id") != session_id:
+        return False, "session_identity_changed", None
+    if name == canonical_name:
+        return False, "canonical_preserved", None
+    references, reference_error = _session_reference_thread_ids(db, session_id)
+    if reference_error or references is None:
+        return False, "reference_state_uncertain", None
+    if (
+        _docker_existing_label(name, "egg.db_hash") != docker_session_db_hash(db)
+        and not references
+    ):
+        return False, "database_identity_unverified", None
+    if (
+        _docker_bind_mount_source(name, "/egg-bridge") != str(bridge.resolve())
+        or _docker_bind_mount_source(name, "/egg-runtime") != str(runtime.resolve())
+    ):
+        return False, "mount_identity_changed", None
+    state = _docker_container_state(name)
+    if state.exists is not True or state.running is None:
+        return False, "container_state_uncertain", None
+    if state.running:
+        return False, "running_container", None
+    canonical_state = _docker_container_state(canonical_name)
+    if canonical_state.exists is None or (
+        canonical_state.exists is True and canonical_state.running is None
+    ):
+        return False, "canonical_state_uncertain", None
+    return True, "", _docker_container_created_at(name)
+
+
+def _session_cleanup_positive_duration(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+    ):
+        raise ValueError("session cleanup duration must be a positive finite number")
+    return float(value)
+
+
 def cleanup_docker_sessions(
     db: ThreadsDB,
     *,
     stopped_only: bool = True,
     older_than_sec: Optional[float] = None,
+    dry_run: bool = True,
+    artifact_stale_sec: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """Remove Docker RLM session containers for this database.
+    """Diagnose or explicitly clean bounded legacy Docker session resources.
 
-    Selection is label-based (`egg.kind=rlm-session` and this DB hash) so it
-    does not touch unrelated containers.  By default only stopped containers
-    are removed.
+    Dry-run is the default. Only stopped, noncanonical, label-positive duplicate
+    containers and strictly stale provider-owned session trees are eligible.
     """
 
+    del stopped_only  # Running containers are never destructive cleanup targets.
     now = time.time()
-    removed: List[Dict[str, Any]] = []
-    for info in list_docker_session_containers(db):
-        if stopped_only and info.get("running"):
-            continue
-        created = info.get("created_at")
-        if older_than_sec is not None and isinstance(created, (int, float)):
-            if now - float(created) < float(older_than_sec):
+    container_age = _session_cleanup_positive_duration(older_than_sec)
+    configured_stale = _session_cleanup_positive_duration(artifact_stale_sec)
+    stale_sec = configured_stale or container_age or 3600.0
+    references, reference_error = _current_session_reference_map(db)
+    inventory, discovery_error = _docker_owned_session_inventory()
+    results: List[Dict[str, Any]] = []
+    if reference_error:
+        results.append({
+            "kind": "doctor", "name": "session_references", "action": "error",
+            "reason": "reference_scan_failed", "error": reference_error,
+        })
+    if discovery_error:
+        results.append({
+            "kind": "doctor", "name": "docker", "action": "error",
+            "reason": "docker_discovery_failed", "error": discovery_error,
+        })
+
+    db_hash = docker_session_db_hash(db)
+    verified: Dict[str, List[Dict[str, Any]]] = {}
+    for item in inventory:
+        name = str(item.get("name") or "")
+        session_id = str(item.get("session_id") or "")
+        report = {"kind": "container", "name": name, "session_id": session_id}
+        storage = _session_storage_paths(session_id)
+        if item.get("kind_label") != "rlm-session":
+            report.update(action="skipped", reason="ownership_label_invalid")
+        elif storage is None:
+            report.update(action="skipped", reason="session_identity_invalid")
+        elif references is None:
+            report.update(action="skipped", reason="reference_state_uncertain")
+        else:
+            _root, bridge, runtime = storage
+            current_db = item.get("db_hash_label") == db_hash
+            legacy_current = session_id in references
+            mounts_match = (
+                item.get("bridge_source") == str(bridge.resolve())
+                and item.get("runtime_source") == str(runtime.resolve())
+            )
+            if not mounts_match or not (current_db or legacy_current):
+                report.update(action="skipped", reason="database_or_mount_identity_unverified")
+            else:
+                item["identity_verified"] = True
+                verified.setdefault(session_id, []).append(item)
                 continue
-        name = str(info.get("name") or "")
-        if not name:
+        results.append(report)
+
+    for session_id, items in sorted(verified.items()):
+        canonical_name = docker_session_container_name(db, session_id)
+        canonical = next((item for item in items if item["name"] == canonical_name), None)
+        canonical_state = canonical.get("state") if canonical is not None else None
+        canonical_certain = (
+            isinstance(canonical_state, _DockerContainerState)
+            and canonical_state.exists is True
+            and canonical_state.running is not None
+        )
+        for item in sorted(items, key=lambda value: str(value["name"])):
+            name = str(item["name"])
+            report = {"kind": "container", "name": name, "session_id": session_id}
+            state = item.get("state")
+            if name == canonical_name:
+                report.update(action="skipped", reason="canonical_preserved")
+            elif not canonical_certain:
+                report.update(action="skipped", reason="canonical_missing_or_uncertain")
+            elif not isinstance(state, _DockerContainerState) or state.exists is not True or state.running is None:
+                report.update(action="skipped", reason="container_state_uncertain")
+            elif state.running:
+                report.update(action="skipped", reason="running_container")
+            elif container_age is not None and not isinstance(item.get("created_at"), (int, float)):
+                report.update(action="skipped", reason="container_age_uncertain")
+            elif container_age is not None and now - float(item["created_at"]) < container_age:
+                report.update(action="skipped", reason="container_too_recent")
+            elif dry_run:
+                report.update(action="would_remove", reason="stopped_legacy_duplicate")
+            else:
+                with _session_activity_guard(db, session_id, blocking=False) as acquired:
+                    if not acquired:
+                        report.update(action="skipped", reason="host_activity")
+                    else:
+                        authorized, reason, current_created_at = _docker_duplicate_cleanup_authority(
+                            db, session_id, name, canonical_name,
+                        )
+                        if not authorized:
+                            report.update(action="skipped", reason=reason)
+                        elif container_age is not None and not isinstance(current_created_at, (int, float)):
+                            report.update(action="skipped", reason="container_age_uncertain")
+                        elif container_age is not None and now - float(current_created_at) < container_age:
+                            report.update(action="skipped", reason="container_too_recent")
+                        else:
+                            try:
+                                proc = subprocess.run(
+                                    ["docker", "rm", name],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=20,
+                                )
+                                if proc.returncode == 0:
+                                    report.update(action="removed", reason="stopped_legacy_duplicate")
+                                else:
+                                    report.update(
+                                        action="error", reason="docker_remove_failed",
+                                        error=(proc.stderr or proc.stdout or "Docker removal failed").strip(),
+                                    )
+                            except Exception as e:
+                                report.update(
+                                    action="error", reason="docker_remove_failed",
+                                    error=f"{type(e).__name__}: {e}",
+                                )
+            results.append(report)
+
+    root = _bridge_root()
+    if not root.exists():
+        return results
+    try:
+        candidates = sorted(root.iterdir(), key=lambda path: path.name)
+    except Exception as e:
+        results.append({
+            "kind": "doctor", "name": str(root), "action": "error",
+            "reason": "artifact_discovery_failed", "error": f"{type(e).__name__}: {e}",
+        })
+        return results
+
+    for session_root in candidates:
+        session_id = session_root.name
+        report = {"kind": "artifact", "name": str(session_root), "session_id": session_id}
+        if _safe_session_storage_name(session_id) != session_id:
+            report.update(action="skipped", reason="session_identity_invalid")
+            results.append(report)
             continue
-        try:
-            proc = subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, timeout=20)
-            ok = proc.returncode == 0
-            error = (proc.stderr or proc.stdout or "").strip()
-        except Exception as e:
-            ok = False
-            error = str(e)
-        item = dict(info)
-        item["removed"] = ok
-        if error and not ok:
-            item["error"] = error
-        removed.append(item)
-    return removed
+        tree_error = _session_artifact_tree_error(session_root)
+        if tree_error:
+            report.update(action="skipped", reason="artifact_path_unsafe", error=tree_error)
+            results.append(report)
+            continue
+        if references is None:
+            report.update(action="skipped", reason="reference_state_uncertain")
+            results.append(report)
+            continue
+        if references.get(session_id):
+            report.update(
+                action="skipped", reason="session_referenced",
+                references=list(references[session_id]),
+            )
+            results.append(report)
+            continue
+        if discovery_error:
+            report.update(action="skipped", reason="docker_state_uncertain")
+            results.append(report)
+            continue
+        protection_reason, protection_error = _session_artifact_protection_error(
+            session_root, now=now, stale_sec=stale_sec,
+        )
+        if protection_reason:
+            report.update(action="skipped", reason=protection_reason)
+            if protection_error:
+                report["error"] = protection_error
+            results.append(report)
+            continue
+        with _session_activity_guard(db, session_id, blocking=False) as acquired:
+            if not acquired:
+                report.update(action="skipped", reason="host_activity")
+                results.append(report)
+                continue
+            current_references, current_error = _session_reference_thread_ids(db, session_id)
+            if current_error or current_references is None:
+                report.update(
+                    action="skipped", reason="reference_state_uncertain",
+                    error=current_error or "reference scan failed",
+                )
+                results.append(report)
+                continue
+            if current_references:
+                report.update(
+                    action="skipped", reason="session_referenced",
+                    references=current_references,
+                )
+                results.append(report)
+                continue
+            path_users, path_error = _docker_container_names_using_path(session_root)
+            if path_error or path_users is None:
+                report.update(
+                    action="skipped", reason="container_mount_state_uncertain",
+                    error=path_error or "container mount-owner scan failed",
+                )
+            elif path_users:
+                report.update(
+                    action="skipped", reason="container_mount_present",
+                    containers=path_users,
+                )
+            elif dry_run:
+                report.update(action="would_remove", reason="stale_session_artifacts")
+            else:
+                # Revalidate path shape, heartbeat/control state, and age while
+                # holding the activity guard immediately before deletion.
+                final_error = _session_artifact_tree_error(session_root)
+                if final_error:
+                    report.update(action="skipped", reason="artifact_path_unsafe", error=final_error)
+                else:
+                    final_reason, final_protection_error = _session_artifact_protection_error(
+                        session_root, now=time.time(), stale_sec=stale_sec,
+                    )
+                    if final_reason:
+                        report.update(action="skipped", reason=final_reason)
+                        if final_protection_error:
+                            report["error"] = final_protection_error
+                    else:
+                        try:
+                            shutil.rmtree(session_root)
+                            report.update(action="removed", reason="stale_session_artifacts")
+                        except Exception as e:
+                            report.update(
+                                action="error", reason="artifact_remove_failed",
+                                error=f"{type(e).__name__}: {e}",
+                            )
+            results.append(report)
+    return results
 
 
 def cleanup_thread_sessions(db: ThreadsDB, provider_name: str = "docker", **kwargs: Any) -> List[Dict[str, Any]]:

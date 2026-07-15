@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Built-in persistent session and REPL tools/commands."""
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -301,25 +302,32 @@ def session_cleanup_command(context: Any, arg: str):
         return CommandResult(clear_input=False)
     db, _thread_id = target
     parsed = parse_args(arg or "")
-    mode = (parsed.positional_or(0, "stopped") or "stopped").strip().lower()
-    stopped_only = mode not in ("all", "force")
+    mode = (parsed.positional_or(0, "dry-run") or "dry-run").strip().lower()
+    apply = mode in ("apply", "clean", "remove")
     older_than = parsed.get("older_than") or parsed.get("olderThan")
     try:
+        older_than_sec = _parse_duration_seconds(older_than)
+        if older_than is not None and (
+            older_than_sec is None or not math.isfinite(older_than_sec) or older_than_sec <= 0
+        ):
+            raise ValueError("older_than must be a positive duration such as 1h")
         removed = _eggthreads.cleanup_thread_sessions(
             db,
             provider_name="docker",
-            stopped_only=stopped_only,
-            older_than_sec=_parse_duration_seconds(older_than),
+            dry_run=not apply,
+            older_than_sec=older_than_sec,
         )
         if not removed:
-            _command_log(context, "No matching Docker RLM session containers to clean up.")
+            _command_log(context, "Session doctor found no Egg-owned resources to report.")
             return CommandResult(clear_input=True)
         lines = []
         for item in removed:
-            status = "removed" if item.get("removed") else f"error: {item.get('error', 'unknown')}"
-            lines.append(f"{item.get('name')}: {status}")
+            status = str(item.get("action") or "skipped")
+            reason = str(item.get("reason") or "unspecified")
+            suffix = f" ({item.get('error')})" if item.get("error") else ""
+            lines.append(f"{item.get('kind', 'resource')} {item.get('name')}: {status} — {reason}{suffix}")
         text = "\n".join(lines)
-        _command_log(context, f"Session cleanup processed {len(removed)} container(s) (see console for details).")
+        _command_log(context, f"Session doctor reported {len(removed)} resource(s); mode={'apply' if apply else 'dry-run'}.")
         if context.console_print_block is not None:
             context.console_print_block("Session Cleanup", text, border_style="magenta")
         else:
@@ -395,7 +403,7 @@ def register_session_commands(registry: Any) -> None:
     registry.register(CommandSpec("sessionOff", session_off_command, category="session", usage="/sessionOff", description="Disable persistent sessions."))
     registry.register(CommandSpec("sessionStop", session_stop_command, category="session", usage="/sessionStop [python|bash|all]", description="Stop session runtimes."))
     registry.register(CommandSpec("sessionReset", session_reset_command, category="session", usage="/sessionReset [python|bash|all]", description="Reset session runtimes."))
-    registry.register(CommandSpec("sessionCleanup", session_cleanup_command, category="session", usage="/sessionCleanup [stopped|all] [older_than=1h]", description="Clean up session containers."))
+    registry.register(CommandSpec("sessionCleanup", session_cleanup_command, category="session", usage="/sessionCleanup [dry-run|apply] [older_than=1h]", description="Diagnose or explicitly clean stale Egg session resources."))
     registry.register(CommandSpec("pythonRepl", python_repl_command, category="session", usage="/pythonRepl <code>", description="Run code in the persistent Python REPL."))
     registry.register(CommandSpec("bashRepl", bash_repl_command, category="session", usage="/bashRepl <script>", description="Run script in the persistent bash REPL."))
 
