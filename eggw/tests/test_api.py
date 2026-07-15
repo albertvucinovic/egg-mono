@@ -624,6 +624,74 @@ class TestThreadOperations:
         state_after_answer = client.get(f"/api/threads/{thread_id}/state").json()
         assert state_after_answer["active_get_user_wait"] is False
 
+    def test_message_api_terminalizes_older_get_user_wait_before_newest_reply(self, client):
+        from eggthreads import append_message, build_tool_call_states, create_snapshot
+
+        thread_id = "thread-web-concurrent-waits"
+        core_state.db.create_thread(thread_id=thread_id, name="Concurrent waits", parent_id=None, depth=0)
+        invoke_id = "invoke-web-newest-wait"
+        assert core_state.db.try_open_stream(
+            thread_id, invoke_id, "2999-01-01 00:00:00", owner="test", purpose="tool"
+        )
+
+        def append_wait(tool_call_id, note, owner_invoke_id):
+            append_message(
+                core_state.db,
+                thread_id,
+                "assistant",
+                "",
+                extra={"tool_calls": [{
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": "get_user_message_while_preserving_llm_turn", "arguments": json.dumps({"assistant_note": note})},
+                }]},
+            )
+            core_state.db.append_event(
+                event_id=f"started-{tool_call_id}",
+                thread_id=thread_id,
+                type_="tool_call.execution_started",
+                payload={"tool_call_id": tool_call_id},
+                invoke_id=owner_invoke_id,
+            )
+            append_message(
+                core_state.db,
+                thread_id,
+                "assistant",
+                note,
+                extra={
+                    "answer_user_preserve_turn": True,
+                    "source_tool_name": "get_user_message_while_preserving_llm_turn",
+                    "tool_call_id": tool_call_id,
+                    "awaiting_user_message_tool_call_id": tool_call_id,
+                },
+            )
+
+        append_wait("call-web-old", "Old?", "invoke-web-old")
+        append_wait("call-web-new", "New?", invoke_id)
+        create_snapshot(core_state.db, thread_id)
+        assert core_state.db.current_open(thread_id)["invoke_id"] == invoke_id
+        waiting = __import__("eggthreads").get_active_get_user_message_waiting_note(core_state.db, thread_id)
+        assert waiting is not None
+        assert waiting["tool_call_id"] == "call-web-new"
+
+        response = client.post(f"/api/threads/{thread_id}/messages", json={"content": "Newest answer"})
+
+        assert response.status_code == 200
+        states = build_tool_call_states(core_state.db, thread_id)
+        assert states["call-web-old"].state == "TC6"
+        assert states["call-web-new"].state == "TC3"
+        messages = create_snapshot(core_state.db, thread_id)["messages"]
+        assert any(
+            message.get("role") == "tool"
+            and message.get("tool_call_id") == "call-web-old"
+            and "superseded" in str(message.get("content")).lower()
+            for message in messages
+        )
+        assert sum(
+            message.get("role") == "user" and message.get("content") == "Newest answer"
+            for message in messages
+        ) == 1
+
     def test_interrupt_cancels_active_get_user_wait_with_tool_result(self, client):
         """Web interrupt closes an active get-user wait with preserved turn semantics."""
         from eggthreads import append_message, build_tool_call_states, create_snapshot

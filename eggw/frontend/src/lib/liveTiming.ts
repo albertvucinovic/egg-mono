@@ -1,4 +1,5 @@
 import type { StreamingProviderRequest, StreamingToolOutput } from "./store";
+import { isGetUserMessageTool } from "./toolPresentation";
 
 export function shouldUpdateLiveTiming(
   isStreaming: boolean,
@@ -8,6 +9,6 @@ export function shouldUpdateLiveTiming(
   return isStreaming
     || Boolean(providerRequest)
     || Object.values(toolOutputs).some((tool) => (
-      !tool.finished && Boolean(tool.startedAtMs || tool.timeout)
+      !tool.finished && !isGetUserMessageTool(tool.name) && Boolean(tool.startedAtMs || tool.timeout)
     ));
 }

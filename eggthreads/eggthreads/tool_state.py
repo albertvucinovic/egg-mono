@@ -743,6 +743,7 @@ def _reduce_loaded_thread_events(
     records = [(ev, _payload(ev), _event_seq_value(ev)) for ev in events]
 
     skipped_msg_ids: set[str] = set()
+    preserved_msg_ids: set[str] = set()
     consumed_user_msg_ids: set[str] = set()
     msg_seq_by_id: Dict[str, int] = {}
     user_seqs: list[int] = []
@@ -755,6 +756,8 @@ def _reduce_loaded_thread_events(
             msg_id = ev.get("msg_id")
             if msg_id and payload.get("skipped_on_continue"):
                 skipped_msg_ids.add(str(msg_id))
+            if msg_id and payload.get("preserve_on_continue"):
+                preserved_msg_ids.add(str(msg_id))
             if msg_id and _is_consumed_get_user_message_edit(payload):
                 consumed_user_msg_ids.add(str(msg_id))
             continue
@@ -767,6 +770,8 @@ def _reduce_loaded_thread_events(
                 msg_seq_by_id.setdefault(str(msg_id), ev_seq)
             if payload.get("role") == "user":
                 user_seqs.append(ev_seq)
+
+    skipped_msg_ids.difference_update(preserved_msg_ids)
 
     continue_boundary_seq: Optional[int] = None
     continue_interrupt_seq: Optional[int] = None
@@ -803,6 +808,11 @@ def _reduce_loaded_thread_events(
             return False
         if tcid and tcid in states:
             tc = states[tcid]
+            # Lifecycle calls explicitly retained before continuation keep their
+            # exact events/results. Other calls after the rewind boundary retain
+            # the historical skip semantics.
+            if tc.parent_msg_id in preserved_msg_ids:
+                return False
             if tc.parent_event_seq >= continue_boundary_seq:
                 return True
         return False
@@ -1252,6 +1262,7 @@ def _last_stream_close_seq_uncached(db: ThreadsDB, thread_id: str) -> int:
 
     # First, collect msg_ids that have been marked as skipped
     skipped_msg_ids: set = set()
+    preserved_msg_ids: set = set()
     cur_edit = db.conn.execute(
         "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
         (thread_id,),
@@ -1264,6 +1275,10 @@ def _last_stream_close_seq_uncached(db: ThreadsDB, thread_id: str) -> int:
             payload = {}
         if payload.get('skipped_on_continue'):
             skipped_msg_ids.add(msg_id)
+        if payload.get('preserve_on_continue'):
+            preserved_msg_ids.add(msg_id)
+
+    skipped_msg_ids.difference_update(preserved_msg_ids)
 
     # Single pass over events in order: mark invoke_ids that have LLM
     # deltas, then record the last stream.close/control.interrupt for any
@@ -1401,6 +1416,7 @@ def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Itera
     """
     # First, collect msg_ids that have been marked as skipped/consumed.
     skipped_msg_ids: set = set()
+    preserved_msg_ids: set = set()
     consumed_user_msg_ids: set = set()
     cur_edit = db.conn.execute(
         "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
@@ -1414,8 +1430,12 @@ def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Itera
             payload = {}
         if payload.get('skipped_on_continue'):
             skipped_msg_ids.add(msg_id)
+        if payload.get('preserve_on_continue'):
+            preserved_msg_ids.add(msg_id)
         if _is_consumed_get_user_message_edit(payload):
             consumed_user_msg_ids.add(msg_id)
+
+    skipped_msg_ids.difference_update(preserved_msg_ids)
 
     cur = db.conn.execute(
         "SELECT * FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",

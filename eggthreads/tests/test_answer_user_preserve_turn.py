@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import eggthreads as ts
 from eggthreads.approval import APPROVAL_ALLOW, ApprovalRequest, create_approval_policy_registry
@@ -9,7 +10,6 @@ from eggthreads.command_catalog import CommandContext, create_default_command_re
 from eggthreads.runner import ThreadRunner
 from eggthreads.tool_state import AUTO_APPROVED_TOOL_NAMES
 from eggthreads.tools import ToolExecutionResult, ToolStreamContext, create_tool_registry
-
 
 GET_USER_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
 
@@ -30,7 +30,6 @@ def _tool_message(db, tid, tool_call_id):
         if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
             return msg
     return None
-
 
 async def _wait_for_message(db, tid, predicate, timeout=1.0):
     deadline = asyncio.get_running_loop().time() + timeout
@@ -198,6 +197,304 @@ def test_get_user_message_tool_returns_later_user_message_and_marks_it_consumed(
         assert edit_payload["consumed_by_tool_name"] == GET_USER_TOOL_NAME
 
     asyncio.run(run())
+
+
+def _declare_get_user_wait(db, tid, tool_call_id, note, invoke_id):
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [{
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": GET_USER_TOOL_NAME,
+                    "arguments": json.dumps({"assistant_note": note}),
+                },
+            }],
+        },
+    )
+    db.append_event(
+        f"started-{tool_call_id}",
+        tid,
+        "tool_call.execution_started",
+        {"tool_call_id": tool_call_id},
+        invoke_id=invoke_id,
+    )
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        note,
+        extra={
+            "answer_user_preserve_turn": True,
+            "source_tool_name": GET_USER_TOOL_NAME,
+            "tool_call_id": tool_call_id,
+            "awaiting_user_message_tool_call_id": tool_call_id,
+        },
+    )
+
+
+def test_new_wait_terminalizes_older_sibling_before_blocking(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    _declare_get_user_wait(db, tid, "call-get-user-older", "Older wait", "invoke-older")
+    registry = create_tool_registry()
+    cancelled = {"value": False}
+
+    async def run():
+        task = asyncio.create_task(
+            registry.execute_async(
+                GET_USER_TOOL_NAME,
+                {"assistant_note": "Newest wait"},
+                thread_id=tid,
+                db=db,
+                cancel_check=lambda: cancelled["value"],
+                stream=ToolStreamContext(
+                    db=db,
+                    thread_id=tid,
+                    invoke_id="invoke-newest",
+                    tool_call_id="call-get-user-newest",
+                    tool_name=GET_USER_TOOL_NAME,
+                ),
+                preserve_tool_result=True,
+            )
+        )
+        await _wait_for_message(
+            db,
+            tid,
+            lambda message: message.get("awaiting_user_message_tool_call_id") == "call-get-user-newest",
+        )
+        messages = _messages(db, tid)
+        old_result = next(
+            message for message in messages
+            if message.get("role") == "tool" and message.get("tool_call_id") == "call-get-user-older"
+        )
+        assert "superseded" in old_result["content"].lower()
+        assert ts.build_tool_call_states(db, tid)["call-get-user-older"].state == "TC6"
+        cancelled["value"] = True
+        result = await asyncio.wait_for(task, timeout=1)
+        assert isinstance(result, ToolExecutionResult)
+        assert result.reason == "interrupted"
+
+    asyncio.run(run())
+
+
+def test_new_get_user_wait_durably_supersedes_older_wait_and_owns_reply(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    invoke_id = "invoke-newest-get-user"
+    assert db.try_open_stream(tid, invoke_id, "2999-01-01 00:00:00", owner="test", purpose="tool")
+    _declare_get_user_wait(db, tid, "call-get-user-old", "Old question?", "invoke-old")
+    _declare_get_user_wait(db, tid, "call-get-user-new", "New question?", invoke_id)
+
+    retired = ts.terminalize_superseded_get_user_waits(
+        db,
+        tid,
+        authoritative_tool_call_id="call-get-user-new",
+    )
+
+    assert retired == ["call-get-user-old"]
+    states = ts.build_tool_call_states(db, tid)
+    assert states["call-get-user-old"].state == "TC6"
+    assert states["call-get-user-new"].state == "TC3"
+    old_result = _tool_message(db, tid, "call-get-user-old")
+    assert old_result is not None
+    assert old_result["content"] == (
+        "Wait superseded by a newer get_user_message_while_preserving_llm_turn call."
+    )
+    assert old_result["keep_user_turn"] is True
+    assert ts.get_active_get_user_message_waiting_note(db, tid)["tool_call_id"] == "call-get-user-new"
+
+    reply_id = ts.append_message(db, tid, "user", "Answer only the new question")
+    from eggthreads.builtin_plugins.answer_user import _claim_next_normal_user_message
+
+    assert _claim_next_normal_user_message(
+        db,
+        tid,
+        note_seq=states["call-get-user-old"].parent_event_seq,
+        tool_call_id="call-get-user-old",
+    ) is None
+    new_note = ts.get_active_get_user_message_waiting_note(db, tid)
+    assert new_note is None  # Reply exists but has not yet been claimed.
+    claimed = _claim_next_normal_user_message(
+        db,
+        tid,
+        note_seq=next(
+            int(row[0])
+            for row in db.conn.execute(
+                "SELECT event_seq FROM events WHERE thread_id=? AND type='msg.create' "
+                "AND json_extract(payload_json, '$.awaiting_user_message_tool_call_id')=?",
+                (tid, "call-get-user-new"),
+            )
+        ),
+        tool_call_id="call-get-user-new",
+    )
+    assert claimed == {"event_seq": claimed["event_seq"], "msg_id": reply_id, "content": "Answer only the new question"}
+    reply = next(message for message in _messages(db, tid) if message.get("msg_id") == reply_id)
+    assert reply["consumed_by_tool_call_id"] == "call-get-user-new"
+    assert sum(
+        1 for row in db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.edit' AND msg_id=?",
+            (tid, reply_id),
+        )
+        if json.loads(row[0]).get("consumed_by_tool_call_id")
+    ) == 1
+
+
+def test_concurrent_claimers_cannot_consume_one_reply_twice(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    invoke_id = "invoke-concurrent-claim"
+    assert db.try_open_stream(tid, invoke_id, "2999-01-01 00:00:00", owner="test", purpose="tool")
+    _declare_get_user_wait(db, tid, "call-get-user-old-race", "Old?", "invoke-old")
+    _declare_get_user_wait(db, tid, "call-get-user-new-race", "New?", invoke_id)
+    ts.terminalize_superseded_get_user_waits(
+        db,
+        tid,
+        authoritative_tool_call_id="call-get-user-new-race",
+    )
+    notes = {
+        json.loads(row["payload_json"])["awaiting_user_message_tool_call_id"]: int(row["event_seq"])
+        for row in db.conn.execute(
+            "SELECT event_seq, payload_json FROM events WHERE thread_id=? AND type='msg.create' "
+            "AND json_extract(payload_json, '$.awaiting_user_message_tool_call_id') IS NOT NULL",
+            (tid,),
+        )
+    }
+    reply_id = ts.append_message(db, tid, "user", "single reply")
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def claim(tool_call_id):
+        from eggthreads.builtin_plugins.answer_user import _claim_next_normal_user_message
+
+        worker_db = ts.ThreadsDB(db.path)
+        barrier.wait()
+        results[tool_call_id] = _claim_next_normal_user_message(
+            worker_db,
+            tid,
+            note_seq=notes[tool_call_id],
+            tool_call_id=tool_call_id,
+        )
+        worker_db.conn.close()
+
+    threads = [
+        threading.Thread(target=claim, args=("call-get-user-old-race",)),
+        threading.Thread(target=claim, args=("call-get-user-new-race",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+
+    assert results["call-get-user-old-race"] is None
+    assert results["call-get-user-new-race"]["msg_id"] == reply_id
+    claimed_edits = [
+        json.loads(row[0])
+        for row in db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.edit' AND msg_id=?",
+            (tid, reply_id),
+        )
+        if json.loads(row[0]).get("consumed_by_tool_call_id")
+    ]
+    assert [edit["consumed_by_tool_call_id"] for edit in claimed_edits] == ["call-get-user-new-race"]
+
+
+def test_thread_continue_terminalizes_wait_before_skipping_and_preserves_protocol(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    anchor = ts.append_message(db, tid, "user", "anchor")
+    _declare_get_user_wait(db, tid, "call-get-user-stale", "Waiting", "invoke-stale")
+
+    result = ts.continue_thread(db, tid, msg_id=anchor)
+
+    assert result.success is True
+    state = ts.build_tool_call_states(db, tid)["call-get-user-stale"]
+    assert state.state == "TC6"
+    snapshot = ts.create_snapshot(db, tid)
+    assert any(
+        message.get("role") == "assistant"
+        and any(call.get("id") == "call-get-user-stale" for call in message.get("tool_calls") or [])
+        for message in snapshot["messages"]
+    )
+    assert any(
+        message.get("role") == "tool"
+        and message.get("tool_call_id") == "call-get-user-stale"
+        and message.get("content") == "Wait superseded by thread continuation."
+        for message in snapshot["messages"]
+    )
+
+
+def test_terminalization_publishes_preexisting_tc5_decision_without_overwriting(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    _declare_get_user_wait(db, tid, "call-get-user-tc5", "Pending", "invoke-tc5")
+    state = ts.build_tool_call_states(db, tid)["call-get-user-tc5"]
+    ts.finalize_tool_output(
+        db,
+        tid,
+        "call-get-user-tc5",
+        decision="whole",
+        source="automatic_policy",
+        reason="existing",
+        expected_state=("TC3",),
+        expected_event_seq=state.state_event_seq,
+        publication_plan=ts.ToolOutputPublicationPlan(
+            decision="whole",
+            preview="Existing canonical result",
+            reason="existing",
+        ),
+    )
+
+    retired = ts.terminalize_superseded_get_user_waits(
+        db,
+        tid,
+        authoritative_tool_call_id=None,
+    )
+
+    assert retired == ["call-get-user-tc5"]
+    result = _tool_message(db, tid, "call-get-user-tc5")
+    assert result["content"] == "Existing canonical result"
+    approvals = list(db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.output_approval' "
+        "AND json_extract(payload_json, '$.tool_call_id')=?",
+        (tid, "call-get-user-tc5"),
+    ))
+    assert len(approvals) == 1
+
+
+def test_normal_user_input_terminalizes_orphan_wait_without_claiming_reply(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    _declare_get_user_wait(db, tid, "call-get-user-orphan", "Orphan?", "invoke-gone")
+
+    reply_id = ts.append_normal_user_message(db, tid, "Fresh user turn")
+
+    state = ts.build_tool_call_states(db, tid)["call-get-user-orphan"]
+    assert state.state == "TC6"
+    result = _tool_message(db, tid, "call-get-user-orphan")
+    assert result is not None
+    assert result["content"] == "Wait superseded because no active get-user owner remained."
+    reply = next(message for message in _messages(db, tid) if message.get("msg_id") == reply_id)
+    assert reply["role"] == "user"
+    assert reply.get("consumed_by_tool_call_id") is None
+
+
+def test_unrelated_tool_and_non_normal_user_input_do_not_change_get_user_owner(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    invoke_id = "invoke-get-user-owner"
+    assert db.try_open_stream(tid, invoke_id, "2999-01-01 00:00:00", owner="test", purpose="tool")
+    _declare_get_user_wait(db, tid, "call-get-user-owner", "Reply", invoke_id)
+    ts.append_message(
+        db,
+        tid,
+        "user",
+        "$ echo sibling",
+        extra={"tool_calls": [{"id": "call-bash", "type": "function", "function": {"name": "bash", "arguments": "{}"}}], "keep_user_turn": True},
+    )
+
+    note = ts.get_active_get_user_message_waiting_note(db, tid)
+    assert note is not None
+    assert note["tool_call_id"] == "call-get-user-owner"
+    assert ts.build_tool_call_states(db, tid)["call-get-user-owner"].state == "TC3"
 
 
 def test_answer_user_tool_call_publishes_hidden_keep_turn_result(tmp_path):

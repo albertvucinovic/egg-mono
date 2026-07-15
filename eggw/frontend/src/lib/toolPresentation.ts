@@ -39,6 +39,10 @@ export function toolDisplayName(name: unknown, id: unknown, fallback: "Tool call
 
 export const GET_USER_MESSAGE_TOOL_NAME = "get_user_message_while_preserving_llm_turn";
 
+export function isGetUserMessageTool(name: unknown): boolean {
+  return cleanedText(name) === GET_USER_MESSAGE_TOOL_NAME;
+}
+
 export function getUserAnswerToolCallId(message: Message): string {
   if (message.role !== "user") return "";
   if (message.consumed_by_tool_name !== GET_USER_MESSAGE_TOOL_NAME) return "";

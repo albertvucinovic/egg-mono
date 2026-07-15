@@ -4,6 +4,7 @@ import {
   correlateHiddenToolDetails,
   getUserAnswerToolCallId,
   getUserToolCallIds,
+  isGetUserMessageTool,
   resolveToolResultNames,
   toolDisplayName,
   type HiddenToolDetail,
@@ -93,6 +94,8 @@ describe("tool transcript presentation", () => {
   });
 
   it("recognizes get-user call and answer lifecycle only from durable identity metadata", () => {
+    expect(isGetUserMessageTool("get_user_message_while_preserving_llm_turn")).toBe(true);
+    expect(isGetUserMessageTool("wait")).toBe(false);
     expect(getUserToolCallIds({
       id: "calls",
       role: "assistant",

@@ -130,6 +130,82 @@ def test_send_message_to_child_answers_active_get_user_message_tool(tmp_path):
     asyncio.run(run())
 
 
+
+def test_send_message_to_child_supersedes_older_wait_and_answers_newest(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    invoke_id = "invoke-child-newest-wait"
+    assert db.try_open_stream(child, invoke_id, "2999-01-01 00:00:00", owner="test", purpose="tool")
+
+    def append_wait(tool_call_id, note, owner_invoke_id):
+        ts.append_message(
+            db,
+            child,
+            "assistant",
+            "",
+            extra={"tool_calls": [{
+                "id": tool_call_id,
+                "type": "function",
+                "function": {"name": GET_USER_TOOL_NAME, "arguments": json.dumps({"assistant_note": note})},
+            }]},
+        )
+        db.append_event(
+            event_id=f"start-{tool_call_id}",
+            thread_id=child,
+            type_="tool_call.execution_started",
+            payload={"tool_call_id": tool_call_id},
+            invoke_id=owner_invoke_id,
+        )
+        ts.append_message(
+            db,
+            child,
+            "assistant",
+            note,
+            extra={
+                "answer_user_preserve_turn": True,
+                "source_tool_name": GET_USER_TOOL_NAME,
+                "tool_call_id": tool_call_id,
+                "awaiting_user_message_tool_call_id": tool_call_id,
+            },
+        )
+
+    append_wait("call-child-old", "Old manager question", "invoke-child-old")
+    append_wait("call-child-new", "New manager question", invoke_id)
+
+    msg_id = ts.send_message_to_child_thread(db, parent, child, "Continue newest")
+
+    states = ts.build_tool_call_states(db, child)
+    assert states["call-child-old"].state == "TC6"
+    assert states["call-child-new"].state == "TC3"
+    old_result = next(
+        message for message in ts.create_snapshot(db, child)["messages"]
+        if message.get("role") == "tool" and message.get("tool_call_id") == "call-child-old"
+    )
+    assert "superseded" in old_result["content"].lower()
+
+    from eggthreads.builtin_plugins.answer_user import _claim_next_normal_user_message
+
+    new_note_seq = db.conn.execute(
+        "SELECT event_seq FROM events WHERE thread_id=? AND type='msg.create' "
+        "AND json_extract(payload_json, '$.awaiting_user_message_tool_call_id')='call-child-new'",
+        (child,),
+    ).fetchone()[0]
+    claimed = _claim_next_normal_user_message(
+        db,
+        child,
+        note_seq=int(new_note_seq),
+        tool_call_id="call-child-new",
+    )
+    assert claimed["msg_id"] == msg_id
+    manager_message = next(
+        message for message in ts.create_snapshot(db, child)["messages"]
+        if message.get("msg_id") == msg_id
+    )
+    assert manager_message["origin"] == "manager_message"
+    assert manager_message["from_thread_id"] == parent
+    assert manager_message["consumed_by_tool_call_id"] == "call-child-new"
+
 def test_send_message_to_child_api_rejects_non_descendant(tmp_path):
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")

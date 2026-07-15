@@ -34,6 +34,7 @@ from eggthreads import (  # type: ignore
     create_root_thread,
     create_child_thread,
     append_message,
+    append_normal_user_message,
     delete_thread,
     interrupt_thread,
     list_threads,
@@ -779,7 +780,7 @@ class EggDisplayApp(
             content = build_message_content_with_attachments(text, staged)
         else:
             content = text
-        append_message(self.db, self.current_thread, 'user', content)
+        append_normal_user_message(self.db, self.current_thread, content)
         if staged:
             clear_staged_attachments_for_thread(self, self.current_thread)
         create_snapshot(self.db, self.current_thread)

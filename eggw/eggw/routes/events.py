@@ -14,7 +14,7 @@ from eggthreads import (
     ThreadEventCursorError,
     ThreadEventFeed,
     ThreadEventFeedNotFound,
-    append_message,
+    append_normal_user_message,
     build_tool_call_states,
     approve_tool_calls_for_thread,
     finalize_tool_output,
@@ -193,7 +193,7 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
             if msg_type == "send_message":
                 content = data.get("content", "")
                 if content and core.db:
-                    append_message(core.db, thread_id, role="user", content=content)
+                    append_normal_user_message(core.db, thread_id, content)
                     await manager.broadcast(thread_id, {
                         "type": "message_sent",
                         "thread_id": thread_id,

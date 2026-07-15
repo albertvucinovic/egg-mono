@@ -287,39 +287,16 @@ class ApprovalMixin:
                     )
                 )
                 if get_user_wait_interrupted:
-                    content = 'User interrupted get_user_message_while_preserving_llm_turn.'
-                    finalize_tool_output(
+                    from eggthreads import terminalize_superseded_get_user_waits
+
+                    retired = terminalize_superseded_get_user_waits(
                         self.db,
                         self.current_thread,
-                        tool_call_id,
-                        decision='whole',
-                        source='user_cancel',
+                        authoritative_tool_call_id=None,
+                        content='User interrupted get_user_message_while_preserving_llm_turn.',
                         reason='Cancelled by user via Ctrl+C',
-                        expected_state=('TC3', 'TC4', 'TC5'),
-                        expected_event_seq=tc.state_event_seq,
-                        publication_plan=ToolOutputPublicationPlan(
-                            decision='whole',
-                            preview=content,
-                            reason='Cancelled by user via Ctrl+C',
-                        ),
                     )
-                    if getattr(tc, 'parent_role', None) == 'assistant':
-                        payload = {
-                            'role': 'tool',
-                            'content': content,
-                            'tool_call_id': tool_call_id,
-                            'name': name,
-                            'keep_user_turn': True,
-                        }
-                        self.db.append_event(
-                            event_id=os.urandom(10).hex(),
-                            thread_id=self.current_thread,
-                            type_='msg.create',
-                            msg_id=os.urandom(10).hex(),
-                            invoke_id=None,
-                            payload=payload,
-                        )
-                        any_tool_msg = True
+                    any_tool_msg = any_tool_msg or bool(retired)
                     continue
 
                 # TC1: needs approval -> deny execution entirely.

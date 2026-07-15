@@ -34,6 +34,7 @@ import {
   correlateHiddenToolDetails,
   getUserAnswerToolCallId,
   getUserToolCallIds,
+  isGetUserMessageTool,
   resolveToolResultNames,
   toolCallId,
   toolCallName,
@@ -1284,6 +1285,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     streamingProviderRequest,
   );
   const primaryToolTimeoutText = Object.values(visibleStreamingToolOutputs)
+    .filter((tool) => !isGetUserMessageTool(tool.name))
     .map((tool) => toolTimeoutCountdown(tool.timeout, nowMs))
     .find((text): text is string => Boolean(text));
   const providerTimeText = streamingKind === "llm"
@@ -1292,9 +1294,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const genericStreamingTimeText = streamingKind !== "llm"
     ? elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
     : null;
-  // Live execution is operational state, not historical transcript detail:
-  // always expose streamed tool arguments and output at every verbosity.
-  const streamingToolDetailsOpen = true;
+  // Ordinary live tools remain expanded at every verbosity. A get-user wait
+  // exposes its visible Assistant Note in the transcript and uses a compact,
+  // stable status row here; details remain expandable on demand.
 
   useEffect(() => {
     if (!shouldUpdateTiming) return;
@@ -1997,7 +1999,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                     {displayVerbosity !== "min" && streamingModelKey && (
                       <span className="eggw-message-meta">{streamingModelKey}</span>
                     )}
-                    {isStreaming && (
+                    {isStreaming && streamingKind !== "tool" && (
                       <StatusChip tone="info">Streaming…</StatusChip>
                     )}
                     {providerTimeText && (
@@ -2058,7 +2060,8 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                           return (
                             <details
                               key={tcId}
-                              open={streamingToolDetailsOpen}
+                              open={isGetUserMessageTool(tc.name) ? undefined : true}
+                              data-testid={isGetUserMessageTool(tc.name) ? "get-user-wait-call" : undefined}
                               className={clsx("eggw-detail-block eggw-role-tool-call", !showBorders && "eggw-detail-borderless")}
                             >
                               <summary className="eggw-detail-summary">
@@ -2066,7 +2069,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 <span className="eggw-message-meta font-mono">
                                   {tcId.slice(-8)}
                                 </span>
-                                <span className="eggw-streaming-label">{tc.finished ? "finished" : "streaming..."}</span>
+                                <span className="eggw-streaming-label">{tc.finished ? "finished" : isGetUserMessageTool(tc.name) ? "waiting for reply" : "streaming..."}</span>
                                 {displayVerbosity === "medium" && (
                                   <span
                                     ref={(element) => { streamingToolCallPreviewRefs.current[tcId] = element; }}
@@ -2098,12 +2101,14 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                       {Object.keys(visibleStreamingToolOutputs).length > 0 && (
                       <div className="mt-2 space-y-2">
                         {Object.entries(visibleStreamingToolOutputs).map(([toolId, tool]) => {
-                          const timeoutText = toolTimeoutCountdown(tool.timeout, nowMs);
-                          const elapsedText = !tool.finished && tool.startedAtMs ? elapsedSecondsText(tool.startedAtMs, nowMs, "running") : null;
+                          const isGetUserWait = isGetUserMessageTool(tool.name);
+                          const timeoutText = isGetUserWait ? null : toolTimeoutCountdown(tool.timeout, nowMs);
+                          const elapsedText = !isGetUserWait && !tool.finished && tool.startedAtMs ? elapsedSecondsText(tool.startedAtMs, nowMs, "running") : null;
                           return (
                             <details
                               key={toolId}
-                              open={streamingToolDetailsOpen}
+                              open={isGetUserWait ? undefined : true}
+                              data-testid={isGetUserWait ? "get-user-wait-output" : undefined}
                               className={clsx("eggw-detail-block eggw-role-tool", !showBorders && "eggw-detail-borderless")}
                             >
                               <summary className="eggw-detail-summary flex-wrap">
@@ -2111,10 +2116,10 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 <span className="eggw-message-meta font-mono">
                                   {toolId.slice(-8)}
                                 </span>
-                                <span className="eggw-streaming-label">{tool.finished ? "finished" : "streaming output..."}</span>
+                                <span className="eggw-streaming-label">{tool.finished ? "finished" : isGetUserWait ? "waiting for reply" : "streaming output..."}</span>
                                 {displayVerbosity === "medium" && (
                                   <span className="eggw-attachment-meta">
-                                    expand to inspect output
+                                    {isGetUserWait ? "expand to inspect" : "expand to inspect output"}
                                   </span>
                                 )}
                                 {elapsedText && (

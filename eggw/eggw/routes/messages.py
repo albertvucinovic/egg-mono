@@ -16,7 +16,7 @@ from eggthreads import (
     SnapshotBuilder,
     ToolOutputPublicationPlan,
     ThreadsDB,
-    append_message,
+    append_normal_user_message,
     build_tool_call_states,
     create_snapshot,
     finalize_tool_output,
@@ -114,57 +114,25 @@ def _image_generation_model_key(request: ImageGenerationRequest) -> str | None:
 
 
 def _cancel_active_get_user_wait(thread_id: str, waiting_note: dict | None) -> bool:
-    """Publish the terminal-equivalent interrupted result for an active get-user wait."""
+    """Publish the exact interrupted result through shared lifecycle authority."""
+
     if not core.db or not isinstance(waiting_note, dict):
         return False
     tool_call_id = str(waiting_note.get("tool_call_id") or "")
     if not tool_call_id:
         return False
+    from eggthreads import terminalize_superseded_get_user_waits
 
-    try:
-        tc = build_tool_call_states(core.db, thread_id).get(tool_call_id)
-    except Exception:
-        tc = None
-    if tc is None or getattr(tc, "published", False):
-        return False
-    name = str(getattr(tc, "name", "") or tool_call_id)
-    if name != GET_USER_MESSAGE_TOOL_NAME:
-        return False
-
-    finalize_tool_output(
+    retired = terminalize_superseded_get_user_waits(
         core.db,
         thread_id,
-        tool_call_id,
-        decision="whole",
-        source="user_cancel",
+        authoritative_tool_call_id=None,
+        content=GET_USER_INTERRUPT_CONTENT,
         reason="Cancelled by user via web interrupt",
-        expected_state=("TC3", "TC4", "TC5"),
-        expected_event_seq=tc.state_event_seq,
-        publication_plan=ToolOutputPublicationPlan(
-            decision="whole",
-            preview=GET_USER_INTERRUPT_CONTENT,
-            reason="Cancelled by user via web interrupt",
-        ),
     )
-
-    if getattr(tc, "parent_role", None) == "assistant":
-        core.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=thread_id,
-            type_="msg.create",
-            msg_id=os.urandom(10).hex(),
-            invoke_id=None,
-            payload={
-                "role": "tool",
-                "content": GET_USER_INTERRUPT_CONTENT,
-                "tool_call_id": tool_call_id,
-                "name": name,
-                "keep_user_turn": True,
-            },
-        )
+    if retired:
         create_snapshot(core.db, thread_id)
-
-    return True
+    return tool_call_id in retired
 
 
 def _compaction_marker_message(marker: dict, fallback_start_seq: int) -> MessageContent:
@@ -488,7 +456,7 @@ async def send_message(thread_id: str, request: SendMessageRequest):
         raise HTTPException(status_code=404, detail="Thread not found")
 
     # Append user message
-    msg_id = append_message(core.db, thread_id, role="user", content=request.content)
+    msg_id = append_normal_user_message(core.db, thread_id, request.content)
 
     # Ensure scheduler is running for this thread's root
     ensure_scheduler_for(thread_id)

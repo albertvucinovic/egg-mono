@@ -106,6 +106,44 @@ def _start_normal_tool_running(db: ts.ThreadsDB, tid: str) -> None:
     ts.create_snapshot(db, tid)
 
 
+
+def test_older_live_lease_does_not_reclaim_authority_from_newer_wait(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    _start_get_user_tool_waiting(db, tid, note="Older")
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "",
+        extra={"tool_calls": [{
+            "id": "call-get-user-newer",
+            "type": "function",
+            "function": {"name": GET_USER_TOOL_NAME, "arguments": json.dumps({"assistant_note": "Newer"})},
+        }]},
+    )
+    _append_event(
+        db,
+        tid,
+        "tool_call.execution_started",
+        {"tool_call_id": "call-get-user-newer"},
+        invoke_id="invoke-newer-without-lease",
+    )
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "Newer",
+        extra={
+            "answer_user_preserve_turn": True,
+            "source_tool_name": GET_USER_TOOL_NAME,
+            "tool_call_id": "call-get-user-newer",
+            "awaiting_user_message_tool_call_id": "call-get-user-newer",
+        },
+    )
+
+    assert ts.get_active_get_user_message_waiting_note(db, tid) is None
+
 def test_wait_for_threads_finishes_with_note_for_active_get_user_wait(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")

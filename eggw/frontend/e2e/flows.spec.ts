@@ -2435,6 +2435,76 @@ test.describe('Get-user lifecycle', () => {
     await expect(hiddenTools.filter({ hasText: 'bash' })).toHaveCount(2);
   });
 
+  test('keeps a 24-hour get-user wait compact and stable across verbosity and reload', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'compact-get-user-wait-thread';
+    const waitId = 'call-get-user-86400';
+    const bashId = 'call-live-bash-sibling';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'before-compact-wait', role: 'user', content: 'start' },
+        { id: 'compact-wait-note', role: 'assistant', content: 'Choose the next slice', answer_user_preserve_turn: true, tool_call_id: waitId },
+      ],
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200, headers: mockApiHeaders,
+      json: { state: 'waiting_user', streaming_kind: 'tool', streaming_invoke_id: 'invoke-compact-wait', live_replay_cursor: 0, active_get_user_wait: true },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      const oldTs = new Date(Date.now() - 2_243_000).toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `compact-wait-${eventSeq}`, event_seq: eventSeq, type, ts: oldTs, msg_id: null,
+        invoke_id: 'invoke-compact-wait', chunk_seq: null, payload,
+      });
+      const block = (eventSeq: number, type: string, payload: Record<string, unknown>) => [
+        `id: ${eventSeq}`, `event: ${type}`, `data: ${envelope(eventSeq, type, payload)}`, '',
+      ];
+      await route.fulfill({
+        status: 200, headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          ...block(1, 'stream.open', { stream_kind: 'tool' }),
+          ...block(2, 'tool_call.execution_started', {
+            tool_call_id: waitId, name: getUserTool,
+            arguments: '{"assistant_note":"Choose the next slice","timeout":86400}', timeout: 86400,
+          }),
+          ...block(3, 'tool_call.execution_started', {
+            tool_call_id: bashId, name: 'bash', arguments: '{"script":"sleep 60"}', timeout: 60,
+          }),
+          '',
+        ].join('\n'),
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    const select = page.locator('select[title="Transcript display verbosity"]');
+    for (const verbosity of ['max', 'medium', 'min'] as const) {
+      await select.selectOption(verbosity);
+      const waitCall = page.getByTestId('get-user-wait-call');
+      const waitOutput = page.getByTestId('get-user-wait-output');
+      await expect(waitCall).toContainText('waiting for reply');
+      await expect(waitOutput).toContainText('waiting for reply');
+      await expect(waitCall).not.toHaveAttribute('open', '');
+      await expect(waitOutput).not.toHaveAttribute('open', '');
+      await expect(chat).not.toContainText('86400s');
+      await expect(chat).not.toContainText('running 2243s');
+      await expect(chat).toContainText('Choose the next slice');
+      await expect(chat).toContainText('bash');
+      await expect(chat).toContainText('timeout in');
+    }
+
+    const waitBefore = await page.getByTestId('get-user-wait-output').innerText();
+    await page.waitForTimeout(1200);
+    expect(await page.getByTestId('get-user-wait-output').innerText()).toBe(waitBefore);
+    await page.reload();
+    await expect(page.getByTestId('get-user-wait-output')).toContainText('waiting for reply');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('86400s');
+  });
+
   test('stops only the answered live get-user card when canonical edit arrives', async ({ page }) => {
     await page.addInitScript(() => {
       window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));

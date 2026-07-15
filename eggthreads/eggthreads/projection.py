@@ -537,13 +537,18 @@ def _apply_events(
                 )
                 continue
             if event.payload.get("skipped_on_continue"):
-                states[event.msg_id] = replace(
-                    current,
-                    skipped_on_continue=True,
-                    last_event_seq=event.event_seq,
-                    last_event_id=event.event_id,
-                    updated_at=event.ts,
-                )
+                # A message can be explicitly retained by a prior lifecycle
+                # terminalization edit. Continue must not erase that durable
+                # declaration/note/result merely because the skip scan observed
+                # the original msg.create payload.
+                if not current.payload.get("preserve_on_continue"):
+                    states[event.msg_id] = replace(
+                        current,
+                        skipped_on_continue=True,
+                        last_event_seq=event.event_seq,
+                        last_event_id=event.event_id,
+                        updated_at=event.ts,
+                    )
                 continue
             updated_payload = copy.deepcopy(dict(current.payload))
             updated_payload.update(copy.deepcopy(dict(event.payload)))

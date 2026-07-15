@@ -1055,6 +1055,7 @@ class AutoCompactionThresholdResolution:
 
 def _compaction_skipped_and_deleted_msg_ids(db: ThreadsDB, thread_id: str) -> tuple[set[str], set[str]]:
     skipped: set[str] = set()
+    preserved: set[str] = set()
     deleted: set[str] = set()
     cur = db.conn.execute(
         "SELECT type, msg_id, payload_json FROM events WHERE thread_id=? AND type IN ('msg.edit', 'msg.delete')",
@@ -1072,6 +1073,9 @@ def _compaction_skipped_and_deleted_msg_ids(db: ThreadsDB, thread_id: str) -> tu
             payload = {}
         if isinstance(payload, dict) and payload.get('skipped_on_continue'):
             skipped.add(str(msg_id))
+        if isinstance(payload, dict) and payload.get('preserve_on_continue'):
+            preserved.add(str(msg_id))
+    skipped.difference_update(preserved)
     return skipped, deleted
 
 
@@ -2940,6 +2944,17 @@ def continue_thread(
     except Exception:
         pass
 
+    # Continuation supersedes every outstanding get-user owner. Terminalize
+    # each exact call before skip edits so its declaration/note/result can be
+    # retained as a valid, inspectable normal tool lifecycle.
+    terminalize_superseded_get_user_waits(
+        db,
+        thread_id,
+        authoritative_tool_call_id=None,
+        content="Wait superseded by thread continuation.",
+        reason="Superseded by thread continuation",
+    )
+
     # Determine the continue point
     diagnosis = None
     if msg_id is None:
@@ -2976,6 +2991,7 @@ def continue_thread(
 
     # First, collect msg_ids that have already been marked as skipped via msg.edit events
     already_skipped: set = set()
+    preserve_on_continue: set = set()
     cur_edit = db.conn.execute(
         "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
         (thread_id,),
@@ -2988,6 +3004,8 @@ def continue_thread(
             edit_payload = {}
         if edit_payload.get('skipped_on_continue'):
             already_skipped.add(edit_msg_id)
+        if edit_payload.get('preserve_on_continue'):
+            preserve_on_continue.add(edit_msg_id)
 
     # Find all messages after the continue point
     cur = db.conn.execute(
@@ -3005,7 +3023,7 @@ def continue_thread(
             continue
 
         # Skip already-skipped messages (check msg.edit events, not msg.create payload)
-        if row_msg_id in already_skipped:
+        if row_msg_id in already_skipped or row_msg_id in preserve_on_continue:
             continue
 
         try:
@@ -3215,6 +3233,42 @@ def append_message(db: ThreadsDB, thread_id: str, role: str, content: str | list
         msg_id=msg_id,
     )
     return msg_id
+
+
+def append_normal_user_message(
+    db: ThreadsDB,
+    thread_id: str,
+    content: str | list[dict[str, Any]],
+    *,
+    extra: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Append human/manager input under deterministic get-user ownership.
+
+    When a preserve-turn wait is active, its newest canonical note owns this
+    reply. Older unresolved waits receive durable terminal tool results before
+    the normal User message is appended. Non-chat user tool messages continue
+    to use ``append_message`` directly and cannot answer a wait.
+    """
+
+    waiting_note = _active_get_user_message_waiting_note(db, thread_id)
+    if waiting_note is not None:
+        terminalize_superseded_get_user_waits(
+            db,
+            thread_id,
+            authoritative_tool_call_id=str(waiting_note["tool_call_id"]),
+        )
+    else:
+        # A crashed/continued invocation can leave unresolved historical waits
+        # without a live owner. They cannot consume this new chat message, but
+        # must still become durable terminal lifecycles rather than stale cards.
+        terminalize_superseded_get_user_waits(
+            db,
+            thread_id,
+            authoritative_tool_call_id=None,
+            content="Wait superseded because no active get-user owner remained.",
+            reason="Superseded before a new user turn",
+        )
+    return append_message(db, thread_id, "user", content, extra=extra)
 
 
 def edit_message(db: ThreadsDB, thread_id: str, msg_id: str, new_content: str | list[dict[str, Any]], extra: Optional[Dict[str, Any]] = None) -> None:
@@ -4071,6 +4125,206 @@ def is_descendant_thread(db: ThreadsDB, ancestor_id: str, thread_id: str) -> boo
     return False
 
 
+GET_USER_MESSAGE_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
+GET_USER_MESSAGE_SUPERSEDED_CONTENT = (
+    "Wait superseded by a newer get_user_message_while_preserving_llm_turn call."
+)
+
+
+def _get_user_wait_notes(db: ThreadsDB, thread_id: str) -> list[Dict[str, Any]]:
+    """Return effective get-user notes in canonical event order."""
+
+    try:
+        skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    except Exception:
+        skipped, deleted = set(), set()
+    notes: list[Dict[str, Any]] = []
+    rows = db.conn.execute(
+        "SELECT event_seq, ts, msg_id, payload_json FROM events "
+        "WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+        (thread_id,),
+    ).fetchall()
+    for row in rows:
+        msg_id = str(row["msg_id"] or "")
+        if msg_id and (msg_id in skipped or msg_id in deleted):
+            continue
+        payload = _event_payload_from_row(row)
+        tool_call_id = str(payload.get("awaiting_user_message_tool_call_id") or "")
+        if (
+            payload.get("role") != "assistant"
+            or not payload.get("answer_user_preserve_turn")
+            or payload.get("source_tool_name") != GET_USER_MESSAGE_TOOL_NAME
+            or not tool_call_id
+        ):
+            continue
+        notes.append({
+            "event_seq": int(row["event_seq"]),
+            "ts": row["ts"],
+            "msg_id": msg_id,
+            "content": _message_content_text(payload.get("content")),
+            "tool_call_id": tool_call_id,
+        })
+    return notes
+
+
+def _append_get_user_terminal_result(
+    db: ThreadsDB,
+    thread_id: str,
+    tool_call_id: str,
+    content: str,
+    *,
+    reason: str,
+    keep_user_turn: bool,
+) -> bool:
+    """Terminalize one exact get-user call with normal durable lifecycle state."""
+
+    from .tool_output import ToolOutputPublicationPlan, ToolOutputStateConflict, finalize_tool_output
+    from .tool_state import build_tool_call_states
+
+    tc = build_tool_call_states(db, thread_id).get(str(tool_call_id))
+    if tc is not None and tc.state == "TC5" and not tc.published:
+        # A previously committed decision is already canonical; publish its
+        # exact preview instead of replacing it with a newer synthetic reason.
+        content = str((tc.last_output_approval_payload or {}).get("preview") or content)
+    if (
+        tc is None
+        or tc.name != GET_USER_MESSAGE_TOOL_NAME
+        or tc.parent_role != "assistant"
+        or tc.published
+        or tc.state not in {"TC2.1", "TC3", "TC4", "TC5"}
+        or (tc.state == "TC4" and tc.finished_reason != "interrupted")
+    ):
+        return False
+    try:
+        if tc.state != "TC5":
+            finalize_tool_output(
+                db,
+                thread_id,
+                tc.tool_call_id,
+                decision="whole",
+                source="system",
+                reason=reason,
+                expected_state=("TC2.1", "TC3", "TC4"),
+                expected_event_seq=tc.state_event_seq,
+                publication_plan=ToolOutputPublicationPlan(
+                    decision="whole",
+                    preview=content,
+                    reason=reason,
+                ),
+            )
+    except ToolOutputStateConflict:
+        # Another process may have answered or terminalized this exact call.
+        tc = build_tool_call_states(db, thread_id).get(str(tool_call_id))
+        if tc is None or tc.published or tc.output_decision is None:
+            return False
+
+    preserve_msg_ids = {str(tc.parent_msg_id or "")}
+    for note in _get_user_wait_notes(db, thread_id):
+        if str(note.get("tool_call_id") or "") == str(tool_call_id):
+            preserve_msg_ids.add(str(note.get("msg_id") or ""))
+    for msg_id in sorted(preserve_msg_ids):
+        if not msg_id:
+            continue
+        already_preserved = db.conn.execute(
+            """
+            SELECT 1 FROM events
+             WHERE thread_id=? AND type='msg.edit' AND msg_id=?
+               AND json_extract(payload_json, '$.preserve_on_continue')=1
+             LIMIT 1
+            """,
+            (thread_id, msg_id),
+        ).fetchone()
+        if already_preserved is None:
+            db.append_event(
+                event_id=_ulid_like(),
+                thread_id=thread_id,
+                type_="msg.edit",
+                msg_id=msg_id,
+                payload={"preserve_on_continue": True},
+            )
+
+    # The ordinary role=tool result is the provider-protocol completion. A
+    # transaction-local recheck prevents duplicate publication by competing UI,
+    # manager, and runner processes.
+    savepoint = f"publish_get_user_terminal_{os.urandom(8).hex()}"
+    db.conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        db.conn.execute(
+            "UPDATE threads SET status=status WHERE thread_id=?",
+            (thread_id,),
+        )
+        exists = db.conn.execute(
+            """
+            SELECT 1 FROM events
+             WHERE thread_id=? AND type='msg.create'
+               AND json_extract(payload_json, '$.role')='tool'
+               AND json_extract(payload_json, '$.tool_call_id')=?
+             LIMIT 1
+            """,
+            (thread_id, str(tool_call_id)),
+        ).fetchone()
+        if exists is not None:
+            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return False
+        payload: Dict[str, Any] = {
+            "role": "tool",
+            "content": content,
+            "tool_call_id": str(tool_call_id),
+            "name": GET_USER_MESSAGE_TOOL_NAME,
+            "preserve_on_continue": True,
+        }
+        if keep_user_turn:
+            payload["keep_user_turn"] = True
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_="msg.create",
+            msg_id=_ulid_like(),
+            payload=payload,
+        )
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return True
+    except Exception:
+        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+
+
+def terminalize_superseded_get_user_waits(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    authoritative_tool_call_id: str | None,
+    content: str = GET_USER_MESSAGE_SUPERSEDED_CONTENT,
+    reason: str = "Superseded by newer get-user wait",
+) -> list[str]:
+    """Durably retire obsolete waits while optionally retaining one answer owner.
+
+    ``authoritative_tool_call_id`` names the sole call that owns the next normal
+    User reply. Passing ``None`` terminalizes every unresolved wait, as thread
+    continuation has no surviving owner. Results stay inspectable and exact-ID
+    paired in canonical history instead of being hidden by either client.
+    """
+
+    owner_id = str(authoritative_tool_call_id or "")
+    retired: list[str] = []
+    for note in _get_user_wait_notes(db, thread_id):
+        tool_call_id = str(note["tool_call_id"])
+        if owner_id and tool_call_id == owner_id:
+            continue
+        terminal_reason = f"{reason} {owner_id}".rstrip()
+        if _append_get_user_terminal_result(
+            db,
+            thread_id,
+            tool_call_id,
+            content,
+            reason=terminal_reason,
+            keep_user_turn=True,
+        ):
+            retired.append(tool_call_id)
+    return retired
+
+
 def send_message_to_child_thread(
     db: ThreadsDB,
     manager_thread_id: str,
@@ -4117,10 +4371,9 @@ def send_message_to_child_thread(
     status = get_thread_status(db, child)
     if require_idle and status != "idle" and not active_get_user_wait:
         raise ValueError(f"target thread is not idle (status={status}); wait for it before sending guidance")
-    msg_id = append_message(
+    msg_id = append_normal_user_message(
         db,
         child,
-        "user",
         text,
         extra={
             "origin": "manager_message",
@@ -4642,24 +4895,11 @@ def _normal_user_reply_exists_after_note(db: ThreadsDB, thread_id: str, note_eve
 
 
 def _active_get_user_message_waiting_note(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
-    """Return the active get-user-message assistant note when it is waiting.
-
-    This is intentionally narrow: only an active non-expired tool stream whose
-    TC3 tool is ``get_user_message_while_preserving_llm_turn`` and whose
-    assistant note has been appended is treated as manager-visible
-    ``waiting_user``. If a normal user reply already exists after the note,
-    the tool is in-flight rather than still waiting for user input.
-    """
+    """Return the one canonical get-user wait that owns the next reply."""
 
     try:
         open_row = db.current_open(thread_id)
-    except Exception:
-        open_row = None
-    if open_row is None:
-        return None
-
-    try:
-        if str(open_row["lease_until"] or "") <= _utcnow_iso():
+        if open_row is None or str(open_row["lease_until"] or "") <= _utcnow_iso():
             return None
         if str(open_row["purpose"] or "") != "tool":
             return None
@@ -4670,64 +4910,34 @@ def _active_get_user_message_waiting_note(db: ThreadsDB, thread_id: str) -> Opti
         return None
 
     try:
-        from .tool_state import GET_USER_MESSAGE_TOOL_NAME, build_tool_call_states
+        from .tool_state import build_tool_call_states
 
-        active_tool = None
-        for tc in build_tool_call_states(db, thread_id).values():
-            if (
-                tc.name == GET_USER_MESSAGE_TOOL_NAME
-                and tc.state == "TC3"
-                and tc.owner_invoke_id == invoke_id
-            ):
-                active_tool = tc
-                break
+        states = build_tool_call_states(db, thread_id)
+        notes = _get_user_wait_notes(db, thread_id)
     except Exception:
-        active_tool = None
-    if active_tool is None:
         return None
-
-    try:
-        skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
-    except Exception:
-        skipped, deleted = set(), set()
-
-    note: Optional[Dict[str, Any]] = None
-    try:
-        cur = db.conn.execute(
-            "SELECT event_seq, ts, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
-            (thread_id,),
-        )
-        rows = cur.fetchall()
-    except Exception:
-        rows = []
-    for row in rows:
-        try:
-            msg_id = str(row["msg_id"] or "")
-            event_seq = int(row["event_seq"])
-        except Exception:
+    newest_unresolved_note: Optional[Dict[str, Any]] = None
+    newest_unresolved_tool = None
+    for note in reversed(notes):
+        tc = states.get(str(note["tool_call_id"]))
+        if tc is None or tc.name != GET_USER_MESSAGE_TOOL_NAME or tc.state != "TC3":
             continue
-        if msg_id and (msg_id in skipped or msg_id in deleted):
-            continue
-        payload = _event_payload_from_row(row)
-        if payload.get("role") != "assistant":
-            continue
-        if not payload.get("answer_user_preserve_turn"):
-            continue
-        if payload.get("awaiting_user_message_tool_call_id") != active_tool.tool_call_id:
-            continue
-        note = {
-            "event_seq": event_seq,
-            "ts": row["ts"],
-            "msg_id": msg_id,
-            "content": _message_content_text(payload.get("content")),
-            "tool_call_id": active_tool.tool_call_id,
-        }
-
-    if note is None:
+        newest_unresolved_note = note
+        newest_unresolved_tool = tc
+        break
+    if newest_unresolved_note is None or newest_unresolved_tool is None:
         return None
-    if _normal_user_reply_exists_after_note(db, thread_id, int(note["event_seq"])):
+    # The newest unresolved call is the sole authority. A lease belonging to an
+    # older call must not resurrect that older wait as an answer target.
+    if newest_unresolved_tool.owner_invoke_id != invoke_id:
         return None
-    return note
+    if _normal_user_reply_exists_after_note(
+        db,
+        thread_id,
+        int(newest_unresolved_note["event_seq"]),
+    ):
+        return None
+    return newest_unresolved_note
 
 
 def get_active_get_user_message_waiting_note(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
