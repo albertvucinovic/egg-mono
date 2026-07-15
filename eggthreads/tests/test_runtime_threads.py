@@ -111,3 +111,131 @@ def test_python_repl_tool_uses_runner_context_for_runtime_parent(tmp_path, monke
     assert runtime is not None
     assert runtime.runtime_thread_id in ts.list_children_ids(db, parent)
     assert ts.find_runtime_thread(db, "wrong-thread-id", language="python") is None
+
+
+def _legacy_runtime_fixture(db):
+    root = ts.create_root_thread(db, name="root")
+    session_id = ts.set_thread_session_config(
+        db,
+        root,
+        enabled=True,
+        provider="docker",
+        reason="auto:python_repl:python",
+    )
+    ordinary = ts.create_child_thread(db, root, name="ordinary")
+    runtime = ts.create_root_thread(db, name="@runtime:python")
+    db.append_event(
+        event_id="runtime-marker-legacy",
+        thread_id=runtime,
+        type_="runtime.thread",
+        payload={"parent_thread_id": ordinary, "language": "python", "name": "default"},
+    )
+    ts.append_runtime_config(
+        db, ordinary, runtime,
+        language="python", name="default", reason="legacy",
+    )
+    return root, ordinary, runtime, session_id
+
+
+def test_find_runtime_thread_legacy_repair_holds_inherited_session_guard(tmp_path):
+    import threading
+    import time
+
+    db = _make_db(tmp_path)
+    _root, ordinary, runtime, session_id = _legacy_runtime_fixture(db)
+    repaired = threading.Event()
+
+    def find_and_repair():
+        worker_db = ts.ThreadsDB(db.path)
+        try:
+            found = ts.find_runtime_thread(worker_db, ordinary, language="python")
+            assert found is not None and found.runtime_thread_id == runtime
+            repaired.set()
+        finally:
+            worker_db.conn.close()
+
+    from eggthreads import session
+
+    with session._session_activity_guard(db, session_id):
+        worker = threading.Thread(target=find_and_repair)
+        worker.start()
+        time.sleep(0.05)
+        assert not repaired.is_set()
+        assert runtime not in ts.list_children_ids(db, ordinary)
+    worker.join(2)
+
+    assert repaired.is_set()
+    assert runtime in ts.list_children_ids(db, ordinary)
+
+
+def test_reaper_scan_blocks_legacy_find_repair_before_stop(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from eggthreads import session
+
+    db = _make_db(tmp_path)
+    root, ordinary, runtime, session_id = _legacy_runtime_fixture(db)
+    cfg = ts.get_thread_session_config(db, root)
+    scan_complete = threading.Event()
+    allow_stop = threading.Event()
+    repaired = threading.Event()
+    stopped = []
+    original_refs = session._session_reference_thread_ids
+
+    def refs_then_pause(*args):
+        result = original_refs(*args)
+        scan_complete.set()
+        return result
+
+    def ready_status(*_args):
+        return session.SessionStatus(
+            True, "docker", session_id, "ready",
+            container_name="container", last_activity=1.0,
+            heartbeat_at=100.0, daemon_generation="generation",
+        )
+
+    def stop_captured(_db, _thread, captured, *, reason):
+        assert allow_stop.wait(2)
+        stopped.append(captured.session_id)
+        return session.SessionStatus(True, "docker", captured.session_id, "stopped")
+
+    monkeypatch.setattr(session, "_session_reference_thread_ids", refs_then_pause)
+    monkeypatch.setattr(session, "_session_status_for_config", ready_status)
+    monkeypatch.setattr(session, "_stop_captured_session", stop_captured)
+    result = []
+
+    def reap():
+        worker_db = ts.ThreadsDB(db.path)
+        try:
+            result.extend(ts.reap_idle_auto_docker_sessions(worker_db, idle_timeout_sec=10, now=100.0))
+        finally:
+            worker_db.conn.close()
+
+    reaper = threading.Thread(target=reap)
+    reaper.start()
+    assert scan_complete.wait(1)
+
+    def find_and_repair():
+        worker_db = ts.ThreadsDB(db.path)
+        try:
+            found = ts.find_runtime_thread(worker_db, ordinary, language="python")
+            assert found is not None
+            repaired.set()
+        finally:
+            worker_db.conn.close()
+
+    finder = threading.Thread(target=find_and_repair)
+    finder.start()
+    time.sleep(0.05)
+    assert not repaired.is_set()
+    assert runtime not in ts.list_children_ids(db, ordinary)
+    allow_stop.set()
+    reaper.join(2)
+    finder.join(2)
+
+    assert stopped == [session_id]
+    assert result[0]["reclaimed"] is True
+    assert repaired.is_set()
+    assert runtime in ts.list_children_ids(db, ordinary)
+    assert cfg.session_id == session_id

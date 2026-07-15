@@ -3976,7 +3976,9 @@ def find_runtime_thread(
         if db.get_thread(runtime_thread_id) is None:
             # Stale event referencing a deleted runtime thread; keep looking.
             continue
-        _ensure_runtime_thread_child_link(db, parent_thread_id, runtime_thread_id)
+        _ensure_runtime_thread_child_link_guarded(
+            db, parent_thread_id, runtime_thread_id,
+        )
         session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
         return RuntimeThreadConfig(
             parent_thread_id=parent_thread_id,
@@ -4066,7 +4068,9 @@ def _get_or_create_runtime_thread_unlocked(
 
     existing = find_runtime_thread(db, parent_thread_id, language=language, name=name)
     if existing is not None:
-        _ensure_runtime_thread_child_link(db, parent_thread_id, existing.runtime_thread_id)
+        _ensure_runtime_thread_child_link_guarded(
+            db, parent_thread_id, existing.runtime_thread_id,
+        )
         return existing.runtime_thread_id
 
     # Import lazily to avoid api <-> session import cycles at module import time.
@@ -4143,6 +4147,33 @@ def _prospective_runtime_inherited_docker_session_id(
         ).fetchone()
         current = str(parent[0]) if parent and parent[0] else None
     return None
+
+
+def _ensure_runtime_thread_child_link_guarded(
+    db: ThreadsDB,
+    parent_thread_id: str,
+    runtime_thread_id: str,
+) -> bool:
+    """Repair a legacy runtime edge under its prospective inheritance guard."""
+
+    while True:
+        inherited_session_id = _prospective_runtime_inherited_docker_session_id(
+            db, parent_thread_id,
+        )
+        guard = (
+            _session_activity_guard(db, inherited_session_id)
+            if inherited_session_id
+            else nullcontext(True)
+        )
+        with guard:
+            current_inherited_id = _prospective_runtime_inherited_docker_session_id(
+                db, parent_thread_id,
+            )
+            if current_inherited_id != inherited_session_id:
+                continue
+            return _ensure_runtime_thread_child_link(
+                db, parent_thread_id, runtime_thread_id,
+            )
 
 
 def get_or_create_runtime_thread(
