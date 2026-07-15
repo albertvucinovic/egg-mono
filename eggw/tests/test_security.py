@@ -25,10 +25,12 @@ def secured_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("EGG_DB_PATH", str(tmp_path / "threads.sqlite"))
     monkeypatch.setenv("EGGW_ALLOWED_ORIGINS", TEST_ORIGIN)
     monkeypatch.setenv("EGGW_FRONTEND_PORT", "3000")
-    if "eggw.main" in sys.modules:
-        main = importlib.reload(sys.modules["eggw.main"])
-    else:
-        from eggw import main
+    # Other EggW test modules deliberately remove only the fully-qualified
+    # module entry while Python leaves the package attribute behind. Importing
+    # with ``from eggw import main`` can then return that stale module without
+    # re-executing its environment-derived security configuration.
+    sys.modules.pop("eggw.main", None)
+    main = importlib.import_module("eggw.main")
     return main.app
 
 
