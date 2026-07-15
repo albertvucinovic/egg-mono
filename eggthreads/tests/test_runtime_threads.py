@@ -239,3 +239,39 @@ def test_reaper_scan_blocks_legacy_find_repair_before_stop(tmp_path, monkeypatch
     assert repaired.is_set()
     assert runtime in ts.list_children_ids(db, ordinary)
     assert cfg.session_id == session_id
+
+
+def test_find_runtime_thread_already_linked_fast_path_does_not_wait_for_session_guard(tmp_path):
+    import threading
+
+    from eggthreads import session
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    session_id = ts.set_thread_session_config(
+        db,
+        root,
+        enabled=True,
+        provider="docker",
+        reason="auto:python_repl:python",
+    )
+    runtime = ts.get_or_create_runtime_thread(db, root, language="python")
+    found = []
+    completed = threading.Event()
+
+    def lookup():
+        worker_db = ts.ThreadsDB(db.path)
+        try:
+            found.append(ts.find_runtime_thread(worker_db, root, language="python"))
+            completed.set()
+        finally:
+            worker_db.conn.close()
+
+    with session._session_activity_guard(db, session_id):
+        worker = threading.Thread(target=lookup)
+        worker.start()
+        assert completed.wait(1)
+    worker.join(2)
+
+    assert found and found[0].runtime_thread_id == runtime
+    assert runtime in ts.list_children_ids(db, root)

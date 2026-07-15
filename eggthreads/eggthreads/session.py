@@ -4149,12 +4149,45 @@ def _prospective_runtime_inherited_docker_session_id(
     return None
 
 
+def _runtime_thread_child_link_needs_repair(
+    db: ThreadsDB,
+    parent_thread_id: str,
+    runtime_thread_id: str,
+) -> bool:
+    """Return whether legacy reconciliation would mutate linkage or depth."""
+
+    try:
+        parent = db.get_thread(parent_thread_id)
+        runtime = db.get_thread(runtime_thread_id)
+        if parent is None or runtime is None:
+            return False
+        rows = db.conn.execute(
+            "SELECT parent_id FROM children WHERE child_id=?",
+            (runtime_thread_id,),
+        ).fetchall()
+        existing_parents = {str(row[0]) for row in rows if row and row[0]}
+        if existing_parents and parent_thread_id not in existing_parents:
+            return False
+        desired_depth = int(parent.depth or 0) + 1
+        return (
+            parent_thread_id not in existing_parents
+            or int(runtime.depth or 0) != desired_depth
+        )
+    except Exception:
+        return False
+
+
 def _ensure_runtime_thread_child_link_guarded(
     db: ThreadsDB,
     parent_thread_id: str,
     runtime_thread_id: str,
 ) -> bool:
     """Repair a legacy runtime edge under its prospective inheritance guard."""
+
+    if not _runtime_thread_child_link_needs_repair(
+        db, parent_thread_id, runtime_thread_id,
+    ):
+        return False
 
     while True:
         inherited_session_id = _prospective_runtime_inherited_docker_session_id(
@@ -4171,6 +4204,10 @@ def _ensure_runtime_thread_child_link_guarded(
             )
             if current_inherited_id != inherited_session_id:
                 continue
+            if not _runtime_thread_child_link_needs_repair(
+                db, parent_thread_id, runtime_thread_id,
+            ):
+                return False
             return _ensure_runtime_thread_child_link(
                 db, parent_thread_id, runtime_thread_id,
             )
