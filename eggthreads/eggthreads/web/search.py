@@ -37,7 +37,13 @@ _SEARCH_CACHE: OrderedDict[tuple[Any, ...], _SearchCacheEntry] = OrderedDict()
 
 
 class SearchOrchestrator:
-    """Run an ordered search provider fallback chain."""
+    """Run an ordered search provider fallback chain.
+
+    Same-provider retryability and permission to advance the configured chain
+    are separate provider-error properties. This orchestrator never retries a
+    provider itself; it only uses either property to decide whether a later
+    provider may run.
+    """
 
     def __init__(
         self,
@@ -80,14 +86,19 @@ class SearchOrchestrator:
         attempts: List[SearchAttempt] = []
         seen_urls: set[str] = set()
 
-        for provider in self.providers:
+        for index, provider in enumerate(self.providers):
             provider_name = getattr(provider, "name", provider.__class__.__name__)
             try:
                 response = provider.search_response(query, max_results=max_results)
             except WebBackendError as e:
                 attempts.append(_attempt_from_error(provider_name, e))
-                if e.retriable:
-                    continue
+                has_fallback = index < len(self.providers) - 1
+                if e.fallback_eligible:
+                    # A single-provider retryable failure still returns a
+                    # degraded response as before; quota-only fallback requires
+                    # an actual next provider and is terminal when pinned.
+                    if has_fallback or e.retriable:
+                        continue
                 if not collected and len(self.providers) == 1:
                     raise
                 break
@@ -197,6 +208,7 @@ def _response_for_cache(response: SearchResponse) -> SearchResponse:
                 success=attempt.success,
                 degraded=attempt.degraded,
                 retriable=attempt.retriable,
+                fallback_eligible=attempt.fallback_eligible,
                 message=bound_text(attempt.message, limit=500),
                 diagnostics=bound_diagnostics(attempt.diagnostics),
             )
@@ -215,6 +227,7 @@ def _attempt_from_error(provider_name: str, error: WebBackendError) -> SearchAtt
         success=False,
         degraded=True,
         retriable=error.retriable,
-        message=str(error),
+        fallback_eligible=error.fallback_eligible,
+        message=bound_text(error, limit=500),
         diagnostics=error.diagnostics,
     )

@@ -11,7 +11,67 @@ from .base import (
     SearchResult,
     WebBackend,
     WebBackendError,
+    bound_text,
 )
+
+
+_USAGE_LIMIT_MARKERS = (
+    "plan usage limit",
+    "usage limit exceeded",
+    "plan limit exceeded",
+    "monthly limit exceeded",
+    "quota exceeded",
+    "credit limit exceeded",
+    "insufficient credits",
+)
+_USAGE_LIMIT_JSON_KEYS = ("detail", "message", "error")
+
+
+def _response_detail(response: object) -> str:
+    """Extract one bounded human-readable Tavily failure detail."""
+
+    text = bound_text(getattr(response, "text", ""), limit=400)
+    try:
+        payload = response.json()  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return text
+    if isinstance(payload, dict):
+        for key in _USAGE_LIMIT_JSON_KEYS:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return bound_text(value, limit=400)
+            if isinstance(value, dict):
+                nested = value.get("message") or value.get("detail")
+                if isinstance(nested, str) and nested.strip():
+                    return bound_text(nested, limit=400)
+    return text
+
+
+def _is_usage_limit_detail(detail: str) -> bool:
+    normalized = " ".join(detail.lower().split())
+    return any(marker in normalized for marker in _USAGE_LIMIT_MARKERS)
+
+
+def _http_error(status_code: int, detail: str, *, provider: str) -> WebBackendError:
+    """Classify bounded Tavily HTTP failures for search and extract chains."""
+
+    quota_exhausted = status_code == 432 or _is_usage_limit_detail(detail)
+    retriable = not quota_exhausted and (status_code == 429 or status_code >= 500)
+    diagnostics = {
+        "status_code": status_code,
+        "response_detail": detail,
+    }
+    if quota_exhausted:
+        diagnostics["failure_kind"] = "quota_exhausted"
+    suffix = f": {detail}" if detail else ""
+    return WebBackendError(
+        f"Tavily API status {status_code}{suffix}",
+        provider=provider,
+        retriable=retriable,
+        fallback_eligible=quota_exhausted or retriable,
+        status_code=status_code,
+        diagnostics=diagnostics,
+    )
 
 
 class TavilyBackend(WebBackend):
@@ -56,12 +116,10 @@ class TavilyBackend(WebBackend):
                 retriable=True,
             ) from e
         if resp.status_code != 200:
-            retriable = resp.status_code == 429 or resp.status_code >= 500
-            raise WebBackendError(
-                f"Tavily API status {resp.status_code}: {resp.text[:400]}",
+            raise _http_error(
+                resp.status_code,
+                _response_detail(resp),
                 provider=self.name,
-                retriable=retriable,
-                status_code=resp.status_code,
             )
         try:
             data = resp.json() or {}
@@ -115,12 +173,10 @@ class TavilyBackend(WebBackend):
                 retriable=True,
             ) from e
         if resp.status_code != 200:
-            retriable = resp.status_code == 429 or resp.status_code >= 500
-            raise WebBackendError(
-                f"Tavily API status {resp.status_code}: {resp.text[:400]}",
+            raise _http_error(
+                resp.status_code,
+                _response_detail(resp),
                 provider=self.name,
-                retriable=retriable,
-                status_code=resp.status_code,
             )
         try:
             data = resp.json() or {}

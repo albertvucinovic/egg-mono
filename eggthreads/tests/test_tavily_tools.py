@@ -150,6 +150,75 @@ def test_tavily_backend_search_parses_results(monkeypatch):
     assert [r.url for r in results] == ['https://a.example', 'https://b.example']
 
 
+@pytest.mark.parametrize(
+    "status_code, detail",
+    [
+        (432, "Plan usage limit exceeded"),
+        (403, "Your plan usage limit has been exceeded"),
+    ],
+)
+def test_tavily_search_quota_failure_advances_chain_but_is_not_retryable(
+    monkeypatch, status_code, detail
+):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        return _MockResponse(status_code, text=detail)
+
+    import requests
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        TavilyBackend().search('x')
+
+    error = exc_info.value
+    assert error.status_code == status_code
+    assert error.retriable is False
+    assert error.fallback_eligible is True
+    assert error.diagnostics['failure_kind'] == 'quota_exhausted'
+    assert error.diagnostics['response_detail'] == detail
+
+
+def test_tavily_search_reads_quota_detail_from_json_error(monkeypatch):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        return _MockResponse(403, payload={
+            'detail': {'message': 'Plan usage limit exceeded for your account'},
+        }, text='Forbidden')
+
+    import requests
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        TavilyBackend().search('x')
+
+    error = exc_info.value
+    assert error.retriable is False
+    assert error.fallback_eligible is True
+    assert error.diagnostics['response_detail'] == 'Plan usage limit exceeded for your account'
+
+
+def test_tavily_extract_quota_failure_advances_only_configured_fetch_chain(monkeypatch):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        assert url == 'https://api.tavily.com/extract'
+        return _MockResponse(432, text='Plan usage limit exceeded')
+
+    import requests
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        TavilyBackend().fetch_response('https://example.com')
+
+    error = exc_info.value
+    assert error.status_code == 432
+    assert error.retriable is False
+    assert error.fallback_eligible is True
+    assert error.diagnostics['failure_kind'] == 'quota_exhausted'
+
+
 def test_tavily_backend_search_missing_key_raises():
     import os
     os.environ.pop('TAVILY_API_KEY', None)

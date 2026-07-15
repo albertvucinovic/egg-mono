@@ -1,6 +1,6 @@
 # Reliability and EggW Correctness Follow-up TODO
 
-Status: in progress (Phase 1 accepted and complete; Phase 2 not started)
+Status: in progress (Phases 1–2 complete; Phase 2 awaiting review)
 Created: 2026-07-15
 Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 
@@ -9,6 +9,8 @@ Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 Implement the user-reported reliability, lifecycle, synchronization, and presentation fixes from 2026-07-15 as small reviewed commits. Correct the canonical state/lifecycle authority before UI symptoms.
 
 - Preserve all invariants in `plans/analysis/invariants.md` and `plans/analysis/found-invariants.md`, especially INV-023/027, INV-083, INV-085/088/089/090/099.
+- No interactive request, UI, or event-loop path may do work proportional to total thread size, including threads above 5M tokens; scrolling, input, streaming, navigation, pagination, and live updates must remain responsive through bounded/incremental work.
+- Performance optimizations must preserve complete history reachability. Phases that affect transcript/UI paths require representative 5M-token or equivalent cost-shape validation; Phase 5 must explicitly prove scrolling, input, and streaming responsiveness.
 - A preserve-turn tool behaves like a normal durable tool call with explicit extra behavior; call/result pairing is exact-ID based.
 - Bounded transcript rendering must never reduce history reachability or erase already loaded pages.
 - Streaming follows the live edge only while the user remains there; programmatic scroll/timer updates must not create visual jumps.
@@ -29,13 +31,13 @@ Observed screenshot: two `get_user_message_while_preserving_llm_turn` cards are 
 
 ## Phase 2 — Web-search quota fallback
 
-Current diagnosis: default auto search builds Tavily → SearXNG when a Tavily key exists, but Tavily marks only HTTP 429/5xx retriable. HTTP 432 “plan usage limit exceeded” is non-retriable, so `SearchOrchestrator` stops before SearXNG. Therefore the reported 432 case does **not** currently fall back.
+Original diagnosis: default auto search built Tavily → SearXNG when a Tavily key existed, but Tavily marked only HTTP 429/5xx retriable. HTTP 432 “plan usage limit exceeded” was non-retriable, so `SearchOrchestrator` stopped before SearXNG. Phase 2 repairs that root cause.
 
-- [ ] Classify Tavily plan/quota exhaustion responses (including status 432 and bounded response detail) as fallback-eligible without treating them as same-provider retryable.
-- [ ] Preserve terminal behavior when Tavily is explicitly pinned as the only provider.
-- [ ] Prefer a clear distinction between “try next configured provider” and “retry this provider” if the existing `retriable` bit conflates them.
-- [ ] Add chain tests proving Tavily 432 falls through to SearXNG and diagnostics retain Tavily status/message.
-- [ ] Audit analogous Tavily extract behavior, but do not route fetch through SearXNG (which is search-only).
+- [x] Classify Tavily plan/quota exhaustion responses (including status 432 and bounded response detail) as fallback-eligible without treating them as same-provider retryable.
+- [x] Preserve terminal behavior when Tavily is explicitly pinned as the only provider.
+- [x] Prefer a clear distinction between “try next configured provider” and “retry this provider” if the existing `retriable` bit conflates them.
+- [x] Add chain tests proving Tavily 432 falls through to SearXNG and diagnostics retain Tavily status/message.
+- [x] Audit analogous Tavily extract behavior, but do not route fetch through SearXNG (which is search-only).
 
 ## Phase 3 — Egg launcher reload hang
 
@@ -99,8 +101,13 @@ Current root README opens as an AI self-assessment and comparison essay. The use
 - [ ] Full EggThreads, Egg, and EggW backend suites.
 - [ ] Frontend unit tests, TypeScript, production build, and relevant/full Playwright.
 - [ ] `git diff --check`, clean tracked worktree, and exact commit ledger below.
+- [ ] For transcript/UI phases, representative 5M-token or equivalent cost-shape validation proves bounded/incremental work without sacrificing history reachability; Phase 5 explicitly covers scrolling, input availability, streaming, pagination, and event-loop responsiveness.
 
 ## Status notes / commit ledger
+
+- 2026-07-15: Phase 2 implementation complete, awaiting review. `WebBackendError` and provider-attempt records now distinguish same-provider `retriable` from configured-chain `fallback_eligible`; existing retryable failures retain chain behavior, while Tavily HTTP 432 and bounded plan/quota/credit-limit details advance only an already configured chain and remain non-retryable. Explicitly pinned Tavily search/extract remains terminal. One shared Tavily HTTP classifier retains bounded status/detail diagnostics for search and extract. Search quota falls through Tavily → SearXNG; extract quota can use only its separately configured Tavily → direct-HTTP chain, never SearXNG search. Cache projections retain fallback semantics. Literal coverage includes explicit/auto search chains, pinned search, status 432 and usage-detail classification, bounded diagnostics, extract audit/chain/pinning, and cache round-trip. Phase 2 performs bounded work over the fixed provider chain and request detail only—no transcript/history/UI/event-loop access—so no synthetic 5M-token benchmark applies. Validation: focused web suites `120 passed`; full EggThreads `1365 passed`; full Egg `560 passed`; full EggW backend `228 passed, 1 skipped`; Python compile and `git diff --check` passed. No Phase 3 work started.
+
+- 2026-07-15: Phase 2 started with a new cross-cutting long-thread constraint: no interactive request/UI/event-loop path may scale with total thread size, including above 5M tokens, and bounded rendering/loading must preserve full history reachability. Transcript/UI phases require representative 5M-token or equivalent cost-shape validation; Phase 5 must prove scrolling, input, streaming, pagination, and event-loop responsiveness. Phase 2 is isolated to the bounded web provider chain and performs no transcript reconstruction, history scan, UI rendering, or event-loop work, so a synthetic 5M-token benchmark is not applicable; focused chain/cost-shape inspection is sufficient. No Phase 3 work started.
 
 - 2026-07-15: Final independent review PASSed Phase 1 at `2604de7` with no blockers. Reviewer validation passed 84 provider/sanitizer tests; 209 lifecycle, continuation, projection, and compaction tests; 38 Egg tests; 10 EggW tests; 11 normalization tests; 32 frontend tests; and Python `compileall`, `git diff --check`, and clean-worktree verification. Phase 1 is accepted and complete; Phase 2 has not started.
 

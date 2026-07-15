@@ -96,6 +96,38 @@ def test_degraded_empty_cache_can_use_short_zero_ttl():
     assert provider.calls == 2
 
 
+def test_cached_attempt_preserves_fallback_eligibility():
+    class FallbackOnlyProvider:
+        name = "fallback-only"
+
+        def __init__(self):
+            self.calls = 0
+
+        def search_response(self, query, max_results=5):
+            self.calls += 1
+            return SearchResponse(
+                results=[],
+                attempts=[SearchAttempt(
+                    provider=self.name,
+                    success=False,
+                    degraded=True,
+                    retriable=False,
+                    fallback_eligible=True,
+                    message="quota exhausted",
+                )],
+            )
+
+    provider = FallbackOnlyProvider()
+    orchestrator = SearchOrchestrator([provider], degraded_empty_cache_ttl_sec=60)
+
+    orchestrator.search_response("quota")
+    cached = orchestrator.search_response("quota")
+
+    assert provider.calls == 1
+    assert cached.attempts[0].fallback_eligible is True
+    assert cached.attempts[0].retriable is False
+
+
 def test_cached_attempt_diagnostics_are_bounded():
     provider = CountingProvider("degraded", degraded_empty=True)
     orchestrator = SearchOrchestrator([provider], degraded_empty_cache_ttl_sec=60)

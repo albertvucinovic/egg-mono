@@ -115,7 +115,7 @@ class FetchOrchestrator:
                 attempts.append(_attempt_from_error(provider_name, e))
                 last_error = e
                 has_fallback = index < len(self.providers) - 1
-                if e.retriable and has_fallback:
+                if e.fallback_eligible and has_fallback:
                     continue
                 if len(attempts) == 1:
                     raise
@@ -228,6 +228,7 @@ def _response_for_cache(response: FetchResponse) -> FetchResponse:
                 degraded=attempt.degraded,
                 retriable=attempt.retriable,
                 message=bound_text(attempt.message, limit=500),
+                fallback_eligible=attempt.fallback_eligible,
                 diagnostics=bound_diagnostics(attempt.diagnostics),
             )
             for attempt in response.attempts[:8]
@@ -373,6 +374,7 @@ def _attempt_from_error(provider_name: str, error: WebBackendError) -> FetchAtte
         retriable=error.retriable,
         message=str(error),
         diagnostics=error.diagnostics,
+        fallback_eligible=error.fallback_eligible,
     )
 
 
@@ -383,6 +385,7 @@ def _combined_fetch_error(attempts: list[FetchAttempt], error: WebBackendError) 
         f"fetch failed after provider fallback: {detail}",
         provider="fetch",
         retriable=any(attempt.retriable for attempt in attempts),
+        fallback_eligible=any(attempt.fallback_eligible for attempt in attempts),
         degraded=True,
         diagnostics={
             "attempts": [
@@ -390,6 +393,7 @@ def _combined_fetch_error(attempts: list[FetchAttempt], error: WebBackendError) 
                     "provider": attempt.provider,
                     "success": attempt.success,
                     "retriable": attempt.retriable,
+                    "fallback_eligible": attempt.fallback_eligible,
                     "message": attempt.message[:200],
                 }
                 for attempt in attempts[:5]

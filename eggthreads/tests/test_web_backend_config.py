@@ -193,6 +193,109 @@ def test_search_chain_falls_back_from_tavily_to_searxng(monkeypatch):
     assert [result.url for result in response.results] == ["https://searxng.example"]
 
 
+def test_search_chain_falls_back_on_tavily_quota_without_marking_retryable(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+    quota_detail = "Plan usage limit exceeded for this billing cycle " + ("x" * 1000)
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        calls.append(("post", url))
+        return _MockResponse(432, text=quota_detail)
+
+    def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
+        calls.append(("get", url, params["q"]))
+        return _MockResponse(200, {
+            "results": [
+                {"title": "S", "url": "https://searxng.example", "content": "fallback"},
+            ],
+        })
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = get_search_orchestrator().search_response("quota search", max_results=1)
+
+    assert calls == [
+        ("post", "https://api.tavily.com/search"),
+        ("get", "http://localhost:8888/search", "quota search"),
+    ]
+    assert [result.url for result in response.results] == ["https://searxng.example"]
+    assert response.degraded is True
+    assert "Tavily API status 432" in response.diagnostic_messages()[0]
+    tavily_attempt = response.attempts[0]
+    assert tavily_attempt.provider == "tavily"
+    assert tavily_attempt.success is False
+    assert tavily_attempt.retriable is False
+    assert tavily_attempt.fallback_eligible is True
+    assert "Tavily API status 432" in tavily_attempt.message
+    assert "Plan usage limit exceeded" in tavily_attempt.message
+    assert len(tavily_attempt.message) < 500
+    assert tavily_attempt.diagnostics == {
+        "status_code": 432,
+        "response_detail": quota_detail[:400] + "…",
+        "failure_kind": "quota_exhausted",
+    }
+
+
+def test_auto_search_falls_back_on_tavily_quota(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        calls.append(("post", url))
+        return _MockResponse(432, text="Plan usage limit exceeded")
+
+    def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
+        calls.append(("get", url))
+        return _MockResponse(200, {
+            "results": [
+                {"title": "S", "url": "https://searxng.example", "content": "fallback"},
+            ],
+        })
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = get_search_orchestrator().search_response("quota search", max_results=1)
+
+    assert calls == [
+        ("post", "https://api.tavily.com/search"),
+        ("get", "http://localhost:8888/search"),
+    ]
+    assert [attempt.provider for attempt in response.attempts] == ["tavily", "searxng"]
+    assert [result.url for result in response.results] == ["https://searxng.example"]
+
+
+def test_pinned_tavily_quota_failure_is_terminal(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_SEARCH_BACKEND", "tavily")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        return _MockResponse(432, text="Plan usage limit exceeded")
+
+    def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
+        raise AssertionError("SearXNG must not run for a pinned Tavily provider")
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        get_search_orchestrator().search_response("quota search", max_results=1)
+
+    error = exc_info.value
+    assert error.status_code == 432
+    assert error.retriable is False
+    assert error.fallback_eligible is True
+    assert "Plan usage limit exceeded" in str(error)
+
+
 def test_fetch_chain_falls_back_from_tavily_to_direct_http(monkeypatch):
     _clear_web_env(monkeypatch)
     monkeypatch.setenv("EGG_WEB_FETCH_CHAIN", "tavily,direct_http")
@@ -227,6 +330,90 @@ def test_fetch_chain_falls_back_from_tavily_to_direct_http(monkeypatch):
     ]
     assert [attempt.provider for attempt in response.attempts] == ["tavily", "direct_http"]
     assert response.content == "direct fallback"
+
+
+def test_search_chain_stops_on_non_fallback_tavily_client_error(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        return _MockResponse(401, text="invalid API key")
+
+    def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
+        raise AssertionError("permanent Tavily client errors must not advance the chain")
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = get_search_orchestrator().search_response("x", max_results=1)
+
+    assert response.results == []
+    assert len(response.attempts) == 1
+    assert response.attempts[0].retriable is False
+    assert response.attempts[0].fallback_eligible is False
+    assert response.attempts[0].diagnostics["status_code"] == 401
+
+
+def test_fetch_chain_falls_back_on_tavily_quota_to_direct_http_not_searxng(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_FETCH_CHAIN", "tavily,direct_http")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        calls.append(("post", url))
+        return _MockResponse(432, text="Plan usage limit exceeded")
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None, params=None):
+        calls.append(("get", url))
+        return _MockResponse(
+            200,
+            text="direct fallback",
+            url=url,
+            headers={"Content-Type": "text/plain"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = get_fetch_orchestrator().fetch_response("https://example.com/page")
+
+    assert calls == [
+        ("post", "https://api.tavily.com/extract"),
+        ("get", "https://example.com/page"),
+    ]
+    assert [attempt.provider for attempt in response.attempts] == ["tavily", "direct_http"]
+    assert response.attempts[0].retriable is False
+    assert response.attempts[0].fallback_eligible is True
+    assert response.attempts[0].diagnostics["failure_kind"] == "quota_exhausted"
+    assert response.content == "direct fallback"
+
+
+def test_pinned_tavily_extract_quota_failure_is_terminal(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_FETCH_BACKEND", "tavily")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        return _MockResponse(432, text="Plan usage limit exceeded")
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None, params=None):
+        raise AssertionError("Direct HTTP must not run for pinned Tavily extract")
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        get_fetch_orchestrator().fetch_response("https://example.com/page")
+
+    error = exc_info.value
+    assert error.status_code == 432
+    assert error.retriable is False
+    assert error.fallback_eligible is True
 
 
 def test_chain_env_overrides_split_and_global_backend(monkeypatch):

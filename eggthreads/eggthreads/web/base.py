@@ -20,6 +20,7 @@ class SearchAttempt:
     retriable: bool = False
     message: str = ""
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    fallback_eligible: bool = False
 
 
 @dataclass
@@ -62,6 +63,7 @@ class FetchAttempt:
     retriable: bool = False
     message: str = ""
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    fallback_eligible: bool = False
 
 
 @dataclass
@@ -147,12 +149,21 @@ def coerce_nonnegative_int(value: int | None, default: int) -> int:
 
 
 class WebBackendError(Exception):
+    """Structured provider failure with orthogonal recovery semantics.
+
+    ``retriable`` means the same provider operation may succeed when retried.
+    ``fallback_eligible`` means an ordered orchestrator may advance to a later
+    configured provider even when retrying this provider would not help. It is
+    permission to use an existing chain, not permission to invent a provider.
+    """
+
     def __init__(
         self,
         message: str,
         *,
         provider: str | None = None,
         retriable: bool = False,
+        fallback_eligible: bool | None = None,
         degraded: bool = False,
         status_code: int | None = None,
         diagnostics: dict[str, Any] | None = None,
@@ -160,6 +171,12 @@ class WebBackendError(Exception):
         super().__init__(message)
         self.provider = provider
         self.retriable = retriable
+        # Existing retryable provider errors were always eligible to advance a
+        # chain. Preserve that default while allowing quota failures to opt in
+        # without falsely claiming that retrying the same provider can help.
+        self.fallback_eligible = (
+            retriable if fallback_eligible is None else fallback_eligible
+        )
         self.degraded = degraded
         self.status_code = status_code
         self.diagnostics = diagnostics or {}
