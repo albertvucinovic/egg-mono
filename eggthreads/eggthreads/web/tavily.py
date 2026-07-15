@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import List
 
 from .base import (
@@ -15,47 +16,91 @@ from .base import (
 )
 
 
-_USAGE_LIMIT_MARKERS = (
-    "plan usage limit",
-    "usage limit exceeded",
-    "plan limit exceeded",
-    "monthly limit exceeded",
-    "quota exceeded",
-    "credit limit exceeded",
-    "insufficient credits",
+_ERROR_DETAIL_MAX_CHARS = 400
+_SEMANTIC_QUOTA_STATUSES = {402, 403}
+_PLAN_USAGE_LIMIT_RE = re.compile(
+    r"\b(?:this\s+request\s+)?exceeds?\s+your\s+plan(?:[’']s|s)?"
+    r"(?:\s+\w+){0,4}\s+usage\s+limit\b",
+    re.IGNORECASE,
 )
-_USAGE_LIMIT_JSON_KEYS = ("detail", "message", "error")
+_PROVIDER_QUOTA_RE = re.compile(
+    r"\b(?:your\s+)?plan(?:[’']s|s)?\s+(?:\w+\s+){0,3}"
+    r"(?:usage|credit)\s+limit\s+(?:has\s+been\s+)?exceeded\b"
+    r"|\b(?:usage|credit)\s+limit\s+(?:has\s+been\s+)?exceeded\b"
+    r"|\binsufficient\s+(?:plan\s+)?credits?\b",
+    re.IGNORECASE,
+)
+_JSON_DETAIL_RE = re.compile(
+    r'''["'](?:detail|message|error)["']\s*:\s*'''
+    r'''(?:\{[^{}]{0,200}?["'](?:message|detail)["']\s*:\s*)?'''
+    r'''(?P<quote>["'])(?P<value>.{1,400}?)(?P=quote)''',
+    re.IGNORECASE,
+)
 
 
-def _response_detail(response: object) -> str:
-    """Extract one bounded human-readable Tavily failure detail."""
+def _bounded_response_text(response: object) -> str:
+    """Read at most the diagnostic prefix; never decode the full JSON body."""
 
-    text = bound_text(getattr(response, "text", ""), limit=400)
     try:
-        payload = response.json()  # type: ignore[attr-defined]
-    except (AttributeError, TypeError, ValueError):
-        return text
-    if isinstance(payload, dict):
-        for key in _USAGE_LIMIT_JSON_KEYS:
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return bound_text(value, limit=400)
-            if isinstance(value, dict):
-                nested = value.get("message") or value.get("detail")
-                if isinstance(nested, str) and nested.strip():
-                    return bound_text(nested, limit=400)
-    return text
+        raw_text = getattr(response, "text", "")
+    except BaseException:
+        return ""
+    if not isinstance(raw_text, (str, bytes)):
+        return ""
+    if isinstance(raw_text, bytes):
+        raw_text = raw_text[:_ERROR_DETAIL_MAX_CHARS].decode("utf-8", errors="replace")
+    prefix = raw_text[:_ERROR_DETAIL_MAX_CHARS]
+    if len(raw_text) > _ERROR_DETAIL_MAX_CHARS:
+        return prefix.rstrip() + "…"
+    return bound_text(prefix, limit=_ERROR_DETAIL_MAX_CHARS)
 
 
-def _is_usage_limit_detail(detail: str) -> bool:
-    normalized = " ".join(detail.lower().split())
-    return any(marker in normalized for marker in _USAGE_LIMIT_MARKERS)
+def _response_detail(response: object) -> tuple[str, bool]:
+    """Return bounded detail and whether it came from a known error field."""
+
+    text = _bounded_response_text(response)
+    match = _JSON_DETAIL_RE.search(text)
+    if not match:
+        return text, False
+    return (
+        bound_text(match.group("value"), limit=_ERROR_DETAIL_MAX_CHARS),
+        True,
+    )
 
 
-def _http_error(status_code: int, detail: str, *, provider: str) -> WebBackendError:
-    """Classify bounded Tavily HTTP failures for search and extract chains."""
+def _is_usage_limit_detail(status_code: int, detail: str, *, structured: bool) -> bool:
+    if status_code not in _SEMANTIC_QUOTA_STATUSES:
+        return False
+    if _PLAN_USAGE_LIMIT_RE.search(detail):
+        return True
+    return structured and bool(_PROVIDER_QUOTA_RE.search(detail))
 
-    quota_exhausted = status_code == 432 or _is_usage_limit_detail(detail)
+
+def _http_error(response: object, *, provider: str) -> WebBackendError:
+    """Classify a Tavily HTTP failure without unbounded body parsing."""
+
+    try:
+        status_code = getattr(response, "status_code", None)
+    except BaseException:
+        status_code = None
+    if not isinstance(status_code, int):
+        status_code = 0
+
+    # Status 432 is provider-defined quota exhaustion. Establish recovery
+    # semantics before touching the response body so malformed/deep bodies can
+    # never suppress fallback. Detail extraction below is best-effort only.
+    quota_exhausted = status_code == 432
+    try:
+        detail, structured = _response_detail(response)
+    except BaseException:
+        detail, structured = "", False
+    if not quota_exhausted:
+        quota_exhausted = _is_usage_limit_detail(
+            status_code,
+            detail,
+            structured=structured,
+        )
+
     retriable = not quota_exhausted and (status_code == 429 or status_code >= 500)
     diagnostics = {
         "status_code": status_code,
@@ -116,11 +161,7 @@ class TavilyBackend(WebBackend):
                 retriable=True,
             ) from e
         if resp.status_code != 200:
-            raise _http_error(
-                resp.status_code,
-                _response_detail(resp),
-                provider=self.name,
-            )
+            raise _http_error(resp, provider=self.name)
         try:
             data = resp.json() or {}
         except ValueError as e:
@@ -173,11 +214,7 @@ class TavilyBackend(WebBackend):
                 retriable=True,
             ) from e
         if resp.status_code != 200:
-            raise _http_error(
-                resp.status_code,
-                _response_detail(resp),
-                provider=self.name,
-            )
+            raise _http_error(resp, provider=self.name)
         try:
             data = resp.json() or {}
         except ValueError as e:
