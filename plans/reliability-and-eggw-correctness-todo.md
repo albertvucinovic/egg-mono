@@ -1,6 +1,6 @@
 # Reliability and EggW Correctness Follow-up TODO
 
-Status: in progress (Phase 1 provider identity repair complete; awaiting re-review)
+Status: in progress (Phase 1 accepted and complete; Phase 2 not started)
 Created: 2026-07-15
 Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 
@@ -101,6 +101,8 @@ Current root README opens as an AI self-assessment and comparison essay. The use
 - [ ] `git diff --check`, clean tracked worktree, and exact commit ledger below.
 
 ## Status notes / commit ledger
+
+- 2026-07-15: Final independent review PASSed Phase 1 at `2604de7` with no blockers. Reviewer validation passed 84 provider/sanitizer tests; 209 lifecycle, continuation, projection, and compaction tests; 38 Egg tests; 10 EggW tests; 11 normalization tests; 32 frontend tests; and Python `compileall`, `git diff --check`, and clean-worktree verification. Phase 1 is accepted and complete; Phase 2 has not started.
 
 - 2026-07-15: Fourth-review provider identity follow-up complete. Get-user repair still selects only participating get-user IDs, but now counts each such ID across every assistant tool declaration regardless of tool name; a get-user/bash same-ID collision therefore removes both declarations and the sole result fail-closed in either declaration order, while unrelated distinct-ID turns remain repairable. Generic protocol enforcement now accepts only nonempty canonical top-level `tool_calls[].id` values and never substitutes `function.id`, matching the OpenAI Responses adapter. Literal full-production-sanitizer regressions cover both mixed-tool collision orders and a function-level-only ID with a matching result. Validation: full EggThreads `1354 passed`; full Egg `560 passed`; full EggW backend `228 passed, 1 skipped`; focused provider/get-user `62 passed`; projection/compaction `75 passed`; Python compile and `git diff --check` passed. No frontend files changed, all earlier Phase 1 fixes remain retained, and no Phase 2 work started.
 
