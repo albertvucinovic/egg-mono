@@ -123,7 +123,8 @@ def test_docker_status_reports_missing_ready_busy_and_unhealthy(tmp_path, monkey
     assert "Daemon generation: generation-a" in rendered
     assert "Active requests: 1" in rendered
 
-    _write_health(session_id, heartbeat_at=time.time() - session._DOCKER_HEARTBEAT_STALE_SEC - 1)
+    stale_at = time.time() - session._DOCKER_HEARTBEAT_STALE_SEC - 1
+    _write_health(session_id, heartbeat_at=stale_at, last_activity_at=stale_at - 1)
     unhealthy = ts.get_thread_session_status(db, thread_id)
     assert unhealthy.status == "unhealthy"
     assert "stale" in unhealthy.message
@@ -146,6 +147,54 @@ def test_docker_status_rejects_generation_mismatch(tmp_path, monkeypatch):
     assert status.status == "unhealthy"
     assert "generation" in status.message
     assert status.daemon_generation == "status-generation"
+
+
+def test_docker_status_rejects_malformed_authority_fields(tmp_path, monkeypatch):
+    db, thread_id, session_id = _configured_docker_session(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        session, "_docker_container_state",
+        lambda _name: session._DockerContainerState(True, True, "running"),
+    )
+    now = time.time()
+    malformed = [
+        {"heartbeat_at": True},
+        {"heartbeat_at": float("nan")},
+        {"heartbeat_at": 0},
+        {"last_activity_at": True},
+        {"last_activity_at": float("inf")},
+        {"last_activity_at": -1},
+        {"active_requests": ["not-an-object"]},
+        {"active_requests": [{}]},
+        {"active_requests": [{
+            "request_id": "req", "language": "python", "channel": "c", "state": "done",
+        }]},
+        {"channel_state": {"python:c": "ready"}},
+        {"channel_state": {"python:c": {"state": "unknown"}}},
+        {"channel_state": {"python:c": {"state": "busy", "queued_request_ids": "req"}}},
+    ]
+
+    for override in malformed:
+        _write_health(
+            session_id,
+            **{"heartbeat_at": now, "last_activity_at": now - 1, **override},
+        )
+        status = ts.get_thread_session_status(db, thread_id)
+        assert status.status == "unhealthy", override
+
+
+def test_docker_status_rejects_malformed_generation_authority(tmp_path, monkeypatch):
+    db, thread_id, session_id = _configured_docker_session(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        session, "_docker_container_state",
+        lambda _name: session._DockerContainerState(True, True, "running"),
+    )
+    bridge = _write_health(session_id)
+    generation_path = bridge / "sessiond_generation.json"
+    for raw in ("[]", "{}", "not json"):
+        generation_path.write_text(raw)
+        status = ts.get_thread_session_status(db, thread_id)
+        assert status.status == "unhealthy"
+        assert "generation" in status.message
 
 
 def test_docker_status_reports_stopped_from_observed_container_state(tmp_path, monkeypatch):

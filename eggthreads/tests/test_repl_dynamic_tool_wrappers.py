@@ -230,7 +230,22 @@ def test_docker_python_eval_refreshes_runtime_before_user_code(tmp_path, monkeyp
         mount_dir=str(tmp_path),
         workspace="/workspace",
     )
-    monkeypatch.setattr(session, "get_or_start_docker_session_handle", lambda *_args: handle)
+    cfg = session.SessionConfig(
+        enabled=True,
+        provider="docker",
+        session_id=handle.session_id,
+        workspace=handle.workspace,
+    )
+    monkeypatch.setattr(
+        session,
+        "_get_or_start_docker_session_locked",
+        lambda *_args: session.SessionStatus(
+            True, "docker", handle.session_id, "ready", container_name=handle.container_name,
+        ),
+    )
+    monkeypatch.setattr(session, "_session_bridge_dir", lambda *_args: Path(handle.bridge_dir))
+    monkeypatch.setattr(session, "_session_runtime_dir", lambda *_args: Path(handle.runtime_dir))
+    monkeypatch.setattr(session, "docker_session_mount_dir", lambda *_args: Path(handle.mount_dir))
     session._DOCKER_REFRESHED_PYTHON_RUNTIMES.clear()
     monkeypatch.setattr(
         session,
@@ -238,9 +253,10 @@ def test_docker_python_eval_refreshes_runtime_before_user_code(tmp_path, monkeyp
         lambda _db, _thread, _bridge, payload, _timeout, _cancel=None: calls.append(payload) or "--- The Python REPL executed successfully and produced no output ---",
     )
 
-    result = session._execute_python_docker(
+    result = session._execute_python_docker_captured(
         object(),
         "runtime-thread",
+        cfg,
         "this is invalid syntax !",
         repl_name="default",
         eval_token="token",
@@ -252,9 +268,10 @@ def test_docker_python_eval_refreshes_runtime_before_user_code(tmp_path, monkeyp
     assert "repl_refresh.py" in calls[0]["code"]
     assert calls[1]["code"] == "this is invalid syntax !"
 
-    session._execute_python_docker(
+    session._execute_python_docker_captured(
         object(),
         "runtime-thread",
+        cfg,
         "42",
         repl_name="default",
         eval_token="token",

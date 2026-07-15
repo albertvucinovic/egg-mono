@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import eggthreads as ts
@@ -71,11 +73,11 @@ def test_idle_policy_parses_duration_and_respects_threshold(monkeypatch, tmp_pat
     cfg = ts.get_thread_session_config(db, thread_id)
     monkeypatch.setattr(
         session,
-        "get_thread_session_status",
+        "_session_status_for_config",
         lambda *_a: _status(cfg, last_activity=951.0),
     )
     stops = []
-    monkeypatch.setattr(session, "stop_thread_session", lambda *_a, **_k: stops.append(True))
+    monkeypatch.setattr(session, "_stop_captured_session", lambda *_a, **_k: stops.append(True))
 
     assert ts.auto_session_idle_timeout_sec("2m") == 120.0
     result = ts.reap_idle_auto_docker_sessions(db, idle_timeout_sec="50s", now=1000.0)
@@ -91,7 +93,7 @@ def test_last_activity_not_container_creation_age_authorizes_reclamation(monkeyp
     cfg = ts.get_thread_session_config(db, thread_id)
     monkeypatch.setattr(
         session,
-        "get_thread_session_status",
+        "_session_status_for_config",
         lambda *_a: _status(cfg, last_activity=1.0),
     )
     monkeypatch.setattr(
@@ -101,7 +103,7 @@ def test_last_activity_not_container_creation_age_authorizes_reclamation(monkeyp
     )
     monkeypatch.setattr(
         session,
-        "stop_thread_session",
+        "_stop_captured_session",
         lambda *_a, **_k: session.SessionStatus(True, "docker", cfg.session_id, "stopped"),
     )
 
@@ -121,16 +123,16 @@ def test_only_auto_created_private_session_is_eligible(monkeypatch, tmp_path):
     shared_default_thread, _shared_default_id = _auto_session(db, share_with_children=True)
     stopped = []
 
-    def fake_status(_db, thread_id):
+    def fake_status(_db, thread_id, _cfg):
         return _status(ts.get_thread_session_config(db, thread_id), last_activity=1.0)
 
-    def fake_stop(_db, thread_id, *, reason):
+    def fake_stop(_db, thread_id, _cfg, *, reason):
         stopped.append((thread_id, reason))
         cfg = ts.get_thread_session_config(db, thread_id)
         return session.SessionStatus(True, "docker", cfg.session_id, "stopped")
 
-    monkeypatch.setattr(session, "get_thread_session_status", fake_status)
-    monkeypatch.setattr(session, "stop_thread_session", fake_stop)
+    monkeypatch.setattr(session, "_session_status_for_config", fake_status)
+    monkeypatch.setattr(session, "_stop_captured_session", fake_stop)
 
     result = ts.reap_idle_auto_docker_sessions(db, idle_timeout_sec=10, now=100.0)
 
@@ -146,7 +148,7 @@ def test_active_eval_and_host_activity_lock_protect_session(monkeypatch, tmp_pat
     cfg = ts.get_thread_session_config(db, thread_id)
     monkeypatch.setattr(
         session,
-        "get_thread_session_status",
+        "_session_status_for_config",
         lambda *_a: _status(
             cfg,
             state="ready",
@@ -155,7 +157,7 @@ def test_active_eval_and_host_activity_lock_protect_session(monkeypatch, tmp_pat
         ),
     )
     stops = []
-    monkeypatch.setattr(session, "stop_thread_session", lambda *_a, **_k: stops.append(True))
+    monkeypatch.setattr(session, "_stop_captured_session", lambda *_a, **_k: stops.append(True))
 
     active = ts.reap_idle_auto_docker_sessions(db, idle_timeout_sec=10, now=100.0)
     assert active[0]["reason"] == "active_requests"
@@ -197,11 +199,11 @@ def test_live_explicit_shared_reference_pins_auto_session(monkeypatch, tmp_path)
     cfg = ts.get_thread_session_config(db, auto_thread)
     monkeypatch.setattr(
         session,
-        "get_thread_session_status",
+        "_session_status_for_config",
         lambda *_a: _status(cfg, last_activity=1.0),
     )
     stops = []
-    monkeypatch.setattr(session, "stop_thread_session", lambda *_a, **_k: stops.append(True))
+    monkeypatch.setattr(session, "_stop_captured_session", lambda *_a, **_k: stops.append(True))
 
     result = ts.reap_idle_auto_docker_sessions(db, idle_timeout_sec=10, now=100.0)
 
@@ -215,12 +217,12 @@ def test_missing_stopped_busy_and_unhealthy_status_fail_closed(monkeypatch, tmp_
     thread_id, _session_id = _auto_session(db)
     cfg = ts.get_thread_session_config(db, thread_id)
     stops = []
-    monkeypatch.setattr(session, "stop_thread_session", lambda *_a, **_k: stops.append(True))
+    monkeypatch.setattr(session, "_stop_captured_session", lambda *_a, **_k: stops.append(True))
 
     for state in ("missing", "stopped", "busy", "unhealthy"):
         monkeypatch.setattr(
             session,
-            "get_thread_session_status",
+            "_session_status_for_config",
             lambda *_a, state=state: _status(cfg, state=state, last_activity=1.0),
         )
         result = ts.reap_idle_auto_docker_sessions(db, idle_timeout_sec=10, now=100.0)
@@ -258,11 +260,11 @@ def test_inherited_runtime_reference_pins_auto_session(monkeypatch, tmp_path):
     cfg = ts.get_thread_session_config(db, auto_thread)
     monkeypatch.setattr(
         session,
-        "get_thread_session_status",
+        "_session_status_for_config",
         lambda *_a: _status(cfg, last_activity=1.0),
     )
     stops = []
-    monkeypatch.setattr(session, "stop_thread_session", lambda *_a, **_k: stops.append(True))
+    monkeypatch.setattr(session, "_stop_captured_session", lambda *_a, **_k: stops.append(True))
 
     result = ts.reap_idle_auto_docker_sessions(db, idle_timeout_sec=10, now=100.0)
 
@@ -281,7 +283,7 @@ def test_reference_scan_failure_fails_closed(monkeypatch, tmp_path):
         lambda *_a: (_ for _ in ()).throw(RuntimeError("bad config")),
     )
     stops = []
-    monkeypatch.setattr(session, "stop_thread_session", lambda *_a, **_k: stops.append(True))
+    monkeypatch.setattr(session, "_stop_captured_session", lambda *_a, **_k: stops.append(True))
 
     result = ts.reap_idle_auto_docker_sessions(db, idle_timeout_sec=10, now=100.0)
 
@@ -310,7 +312,7 @@ def test_stale_missing_and_unhealthy_phase4_status_never_authorize_stop(monkeypa
         "channel_state": {},
     }))
     stops = []
-    monkeypatch.setattr(session, "stop_thread_session", lambda *_a, **_k: stops.append(True))
+    monkeypatch.setattr(session, "_stop_captured_session", lambda *_a, **_k: stops.append(True))
 
     stale = ts.reap_idle_auto_docker_sessions(db, idle_timeout_sec=10, now=100.0)
     assert stale[0]["reason"] == "session_unhealthy"
@@ -329,7 +331,7 @@ def test_successful_verified_stop_is_reported_and_records_idle_reason(monkeypatc
     monkeypatch.setattr(session, "docker_session_available", lambda: True)
     monkeypatch.setattr(
         session,
-        "get_thread_session_status",
+        "_session_status_for_config",
         lambda *_a: _status(cfg, last_activity=1.0),
     )
     states = iter([
@@ -366,7 +368,7 @@ def test_failed_unverified_stop_is_reported_not_reclaimed(monkeypatch, tmp_path)
     monkeypatch.setattr(session, "docker_session_available", lambda: True)
     monkeypatch.setattr(
         session,
-        "get_thread_session_status",
+        "_session_status_for_config",
         lambda *_a: _status(cfg, last_activity=1.0),
     )
     monkeypatch.setattr(
@@ -396,6 +398,122 @@ def test_failed_unverified_stop_is_reported_not_reclaimed(monkeypatch, tmp_path)
     assert lifecycle["verified_stopped"] is False
 
 
+
+def test_reaper_and_a_to_b_transition_are_serialized_and_b_is_not_stopped(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    thread_id, session_a = _auto_session(db)
+    cfg_a = ts.get_thread_session_config(db, thread_id)
+    session_b = "sess_explicit_b"
+    status_entered = threading.Event()
+    allow_stop = threading.Event()
+    transition_done = threading.Event()
+    stopped = []
+
+    def status_for_a(_db, _thread, captured):
+        assert captured.session_id == session_a
+        status_entered.set()
+        assert allow_stop.wait(2)
+        return _status(cfg_a, last_activity=1.0)
+
+    def stop_a(_db, _thread, captured, *, reason):
+        stopped.append(captured.session_id)
+        return session.SessionStatus(True, "docker", captured.session_id, "stopped")
+
+    monkeypatch.setattr(session, "_session_status_for_config", status_for_a)
+    monkeypatch.setattr(session, "_stop_captured_session", stop_a)
+    result = []
+    def run_reaper():
+        reaper_db = ts.ThreadsDB(db.path)
+        try:
+            result.extend(ts.reap_idle_auto_docker_sessions(reaper_db, idle_timeout_sec=10, now=100.0))
+        finally:
+            reaper_db.conn.close()
+
+    reaper = threading.Thread(target=run_reaper)
+    reaper.start()
+    assert status_entered.wait(1)
+
+    def transition():
+        writer_db = ts.ThreadsDB(db.path)
+        try:
+            ts.set_thread_session_config(
+                writer_db,
+            thread_id,
+            enabled=True,
+            provider="docker",
+            session_id=session_b,
+                reason="/sessionOn",
+            )
+        finally:
+            writer_db.conn.close()
+        transition_done.set()
+
+    writer = threading.Thread(target=transition)
+    writer.start()
+    time.sleep(0.05)
+    assert not transition_done.is_set()
+    allow_stop.set()
+    reaper.join(2)
+    writer.join(2)
+
+    assert stopped == [session_a]
+    assert result[0]["reclaimed"] is True
+    assert transition_done.is_set()
+    assert ts.get_thread_session_config(db, thread_id).session_id == session_b
+
+
+def test_runtime_reference_creation_blocks_behind_reaper_session_guard(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    parent, session_id = _auto_session(db)
+    created = threading.Event()
+    release = threading.Event()
+
+    def create_runtime():
+        worker_db = ts.ThreadsDB(db.path)
+        try:
+            ts.get_or_create_runtime_thread(worker_db, parent, language="python")
+            created.set()
+        finally:
+            worker_db.conn.close()
+
+    with session._session_activity_guard(session_id):
+        worker = threading.Thread(target=create_runtime)
+        worker.start()
+        time.sleep(0.05)
+        assert not created.is_set()
+    worker.join(2)
+    assert created.is_set()
+
+
+def test_cross_process_cadence_parallel_contenders_run_one_pass(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    canonical = session._canonical_database_path(db)
+    lock_path = tmp_path / "cadence.lock"
+    monkeypatch.setattr(session, "_idle_reaper_coordination_path", lambda _path: lock_path)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fake_reap(_db, now):
+        calls.append(now)
+        entered.set()
+        release.wait(2)
+
+    monkeypatch.setattr(session, "reap_idle_auto_docker_sessions", fake_reap)
+    results = []
+    first = threading.Thread(
+        target=lambda: results.append(session._run_coordinated_idle_reaper_pass(canonical, now=100.0))
+    )
+    first.start()
+    assert entered.wait(1)
+    second = session._run_coordinated_idle_reaper_pass(canonical, now=100.0)
+    release.set()
+    first.join(2)
+
+    assert second is False
+    assert results == [True]
+    assert calls == [100.0]
+
 def test_background_reaper_is_disabled_for_memory_db_and_duplicate_file_pass(monkeypatch, tmp_path):
     monkeypatch.setenv("EGG_RLM_AUTO_SESSION_IDLE_TIMEOUT", "1h")
     memory_db = ts.ThreadsDB(":memory:")
@@ -420,3 +538,182 @@ def test_background_reaper_is_disabled_for_memory_db_and_duplicate_file_pass(mon
         assert started[0][2] is True
     finally:
         session._IDLE_REAPER_DATABASES.clear()
+
+
+def test_nonblocking_guard_collision_releases_lock_bookkeeping(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    session_id = "sess_collision"
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with session._session_activity_guard(session_id):
+            entered.set()
+            release.wait(2)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert entered.wait(1)
+    try:
+        for _ in range(25):
+            with session._session_activity_guard(session_id, blocking=False) as acquired:
+                assert acquired is False
+        assert session._SESSION_ACTIVITY_LOCK_USERS[session_id] == 1
+    finally:
+        release.set()
+        holder.join(2)
+    assert session_id not in session._SESSION_ACTIVITY_LOCK_USERS
+    assert session_id not in session._SESSION_ACTIVITY_LOCKS
+
+
+def test_activity_lock_file_is_outside_read_only_worktree(monkeypatch, tmp_path):
+    read_only = tmp_path / "read-only"
+    read_only.mkdir()
+    monkeypatch.chdir(read_only)
+    monkeypatch.setattr(
+        session,
+        "_session_bridge_dir",
+        lambda *_a: (_ for _ in ()).throw(PermissionError("bridge unavailable")),
+    )
+
+    with session._session_activity_guard("sess_docker") as acquired:
+        assert acquired is True
+
+
+def test_memory_config_write_has_no_docker_bridge_filesystem_dependency(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="memory")
+    monkeypatch.setattr(
+        session,
+        "_session_bridge_dir",
+        lambda *_a: (_ for _ in ()).throw(PermissionError("bridge unavailable")),
+    )
+
+    session_id = ts.enable_thread_session(db, thread_id, provider="memory", reason="test")
+
+    assert session_id
+    assert ts.get_thread_session_config(db, thread_id).provider == "memory"
+
+
+def test_reaper_stops_captured_a_not_reresolved_b(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    thread_id, session_a = _auto_session(db)
+    cfg_a = ts.get_thread_session_config(db, thread_id)
+    session_b = "sess_explicit_b"
+    monkeypatch.setattr(
+        session,
+        "_session_status_for_config",
+        lambda *_a: _status(cfg_a, last_activity=1.0),
+    )
+    stopped = []
+
+    def stop_captured(_db, seen_thread, captured, *, reason):
+        assert seen_thread == thread_id
+        # Simulate a writer changing the thread after the reaper's final config
+        # check; captured stop must still target A, never re-resolve B.
+        session._set_thread_session_config_unlocked(
+            db,
+            thread_id,
+            enabled=True,
+            provider="docker",
+            session_id=session_b,
+            reason="/sessionOn",
+        )
+        stopped.append((captured.session_id, reason))
+        return session.SessionStatus(True, "docker", captured.session_id, "stopped")
+
+    monkeypatch.setattr(session, "_stop_captured_session", stop_captured)
+
+    result = ts.reap_idle_auto_docker_sessions(db, idle_timeout_sec=10, now=100.0)
+
+    assert result[0]["reclaimed"] is True
+    assert stopped == [(session_a, "idle_reap:10s")]
+    assert ts.get_thread_session_config(db, thread_id).session_id == session_b
+
+
+def test_config_transition_acquires_old_and_new_docker_ids_in_order(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    thread_id, session_a = _auto_session(db)
+    seen = []
+
+    @session.contextmanager
+    def fake_guards(ids):
+        seen.append(list(ids))
+        yield
+
+    monkeypatch.setattr(session, "_session_activity_guards", fake_guards)
+    session_b = "sess_b"
+    ts.set_thread_session_config(
+        db,
+        thread_id,
+        enabled=True,
+        provider="docker",
+        session_id=session_b,
+        reason="/sessionOn",
+    )
+
+    assert seen == [[session_a, session_b]]
+
+
+def test_runtime_inheritance_creation_holds_parent_session_guard(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    parent, session_id = _auto_session(db)
+    entered = []
+    original = session._session_activity_guard
+
+    @session.contextmanager
+    def recording_guard(seen_session_id, *, blocking=True):
+        entered.append(seen_session_id)
+        with original(seen_session_id, blocking=blocking) as acquired:
+            yield acquired
+
+    monkeypatch.setattr(session, "_session_activity_guard", recording_guard)
+
+    runtime = ts.get_or_create_runtime_thread(db, parent, language="python")
+
+    assert runtime
+    assert session_id in entered
+    assert ts.get_thread_session_config(db, runtime).session_id == session_id
+
+
+def test_cross_process_cadence_uses_canonical_db_and_skips_second_pass(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    canonical = session._canonical_database_path(db)
+    assert canonical == str((tmp_path / "threads.sqlite").resolve())
+    lock_path = tmp_path / "cadence.lock"
+    monkeypatch.setattr(session, "_idle_reaper_coordination_path", lambda _path: lock_path)
+    calls = []
+    monkeypatch.setattr(session, "reap_idle_auto_docker_sessions", lambda _db, now: calls.append(now))
+
+    assert session._run_coordinated_idle_reaper_pass(canonical, now=100.0) is True
+    assert session._run_coordinated_idle_reaper_pass(canonical, now=110.0) is False
+    assert session._run_coordinated_idle_reaper_pass(canonical, now=131.0) is True
+    assert calls == [100.0, 131.0]
+
+
+def test_canonical_database_identity_converges_relative_absolute_and_symlink(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    relative = ts.ThreadsDB(Path("same.sqlite"))
+    relative.init_schema()
+    absolute = ts.ThreadsDB((tmp_path / "same.sqlite").resolve())
+    link = tmp_path / "same-link.sqlite"
+    link.symlink_to(tmp_path / "same.sqlite")
+    symlinked = ts.ThreadsDB(link)
+
+    expected = str((tmp_path / "same.sqlite").resolve())
+    assert session._canonical_database_path(relative) == expected
+    assert session._canonical_database_path(absolute) == expected
+    assert session._canonical_database_path(symlinked) == expected
+
+
+def test_cross_process_cadence_lock_is_nonblocking(monkeypatch, tmp_path):
+    import fcntl
+
+    db = _make_db(tmp_path)
+    canonical = session._canonical_database_path(db)
+    lock_path = tmp_path / "cadence.lock"
+    monkeypatch.setattr(session, "_idle_reaper_coordination_path", lambda _path: lock_path)
+    lock_path.touch()
+    with lock_path.open("a+") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert session._run_coordinated_idle_reaper_pass(canonical, now=100.0) is False
