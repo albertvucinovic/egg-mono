@@ -246,7 +246,7 @@ def test_docker_python_eval_refreshes_runtime_before_user_code(tmp_path, monkeyp
     monkeypatch.setattr(session, "_session_bridge_dir", lambda *_args: Path(handle.bridge_dir))
     monkeypatch.setattr(session, "_session_runtime_dir", lambda *_args: Path(handle.runtime_dir))
     monkeypatch.setattr(session, "docker_session_mount_dir", lambda *_args: Path(handle.mount_dir))
-    session._DOCKER_REFRESHED_PYTHON_RUNTIMES.clear()
+    session._clear_python_runtime_refresh_cache()
     monkeypatch.setattr(
         session,
         "_run_docker_python_eval_request",

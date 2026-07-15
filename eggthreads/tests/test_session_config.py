@@ -416,7 +416,7 @@ def _docker_refresh_cache_test_setup(db):
     cfg = ts.get_thread_session_config(db, thread_id)
     runtime_dir = ts.eggthreads.session._session_runtime_dir(cfg.session_id)
     cache_key = (str(runtime_dir), "default", "runtime-hash")
-    ts.eggthreads.session._DOCKER_REFRESHED_PYTHON_RUNTIMES.add(cache_key)
+    ts.eggthreads.session._cache_python_runtime_refresh(cache_key)
     return thread_id, runtime_dir, cache_key
 
 
@@ -430,7 +430,7 @@ def test_running_docker_session_does_not_invalidate_python_refresh_cache(monkeyp
 
     ts.get_or_start_docker_session(db, thread_id)
 
-    assert cache_key in ts.eggthreads.session._DOCKER_REFRESHED_PYTHON_RUNTIMES
+    assert ts.eggthreads.session._python_runtime_refresh_cached(cache_key)
 
 
 def test_restarted_docker_session_invalidates_python_refresh_cache(monkeypatch, tmp_path):
@@ -443,7 +443,7 @@ def test_restarted_docker_session_invalidates_python_refresh_cache(monkeypatch, 
 
     ts.get_or_start_docker_session(db, thread_id)
 
-    assert cache_key not in ts.eggthreads.session._DOCKER_REFRESHED_PYTHON_RUNTIMES
+    assert not ts.eggthreads.session._python_runtime_refresh_cached(cache_key)
 
 
 def test_docker_session_mount_dir_uses_thread_working_directory(tmp_path, monkeypatch):
