@@ -129,7 +129,7 @@ def test_cleanup_is_dry_run_by_default_and_apply_is_bounded(monkeypatch, tmp_pat
     assert {item["name"]: item["action"] for item in applied} == {
         canonical: "skipped", legacy: "removed",
     }
-    assert calls == [["docker", "rm", legacy]]
+    assert calls == [["docker", "rm", f"id-{legacy}"]]
 
 
 def test_container_cleanup_protects_running_uncertain_unrelated_and_unlabeled(
@@ -457,22 +457,18 @@ def test_storage_owner_metadata_is_atomic_and_normal_start_writes_it(monkeypatch
     monkeypatch.setattr(session, "docker_session_mount_dir", lambda *_a: tmp_path)
     monkeypatch.setattr(session, "_write_runtime_files", lambda _path: None)
     monkeypatch.setattr(session, "_start_docker_container", lambda *_a, **_k: False)
-    atomic_calls = []
-    real_atomic = session._atomic_write_json
-    monkeypatch.setattr(
-        session, "_atomic_write_json",
-        lambda path, payload: atomic_calls.append((path, payload)) or real_atomic(path, payload),
-    )
-
     session._get_or_start_docker_session_locked(db, thread_id, cfg)
 
     root = session._bridge_root() / sid
     metadata = json.loads((root / session._SESSION_STORAGE_METADATA).read_text())
     assert metadata == session._session_storage_owner_payload(db, sid)
-    assert atomic_calls and atomic_calls[0][0].name == session._SESSION_STORAGE_METADATA
-    # Reattachment validates rather than rewriting ownership metadata.
+    info = os.lstat(root / session._SESSION_STORAGE_METADATA)
+    assert info.st_mode & 0o777 == 0o600
+    initial_identity = (info.st_dev, info.st_ino)
+    # Reattachment validates rather than replacing ownership metadata.
     session._write_session_storage_owner(db, sid)
-    assert len(atomic_calls) == 1
+    after = os.lstat(root / session._SESSION_STORAGE_METADATA)
+    assert (after.st_dev, after.st_ino) == initial_identity
 
 
 def test_storage_owner_scopes_cleanup_between_databases_in_shared_cwd(monkeypatch, tmp_path):
@@ -584,7 +580,7 @@ def test_apply_time_authority_root_replacement_is_rejected(monkeypatch, tmp_path
 
     monkeypatch.setattr(session, "_bridge_root_authority_matches", changed)
     report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("session_id") == sid)
-    assert report["reason"] == "artifact_root_changed"
+    assert report["reason"] in {"artifact_root_changed", "artifact_path_unsafe"}
     assert checks == [1]
     assert root.exists()
     assert original_authority[0] is not None
@@ -684,3 +680,244 @@ def test_unmarked_legacy_tree_with_associated_container_proof_is_diagnostic_only
     report = next(item for item in ts.cleanup_docker_sessions(db) if item.get("kind") == "artifact")
     assert report["reason"] == "associated_container_preserved"
     assert root.exists()
+
+
+def test_concurrent_owner_first_claim_has_one_stable_winner(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.chdir(tmp_path)
+    paths = [tmp_path / "claim-a.sqlite", tmp_path / "claim-b.sqlite"]
+    for path in paths:
+        db = ts.ThreadsDB(path); db.init_schema()
+    sid = "sess_claim_race"
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def claim(path):
+        db = ts.ThreadsDB(path)
+        barrier.wait(timeout=2)
+        try:
+            session._write_session_storage_owner(db, sid)
+            outcomes.append((path, "won"))
+        except RuntimeError:
+            outcomes.append((path, "lost"))
+
+    threads = [threading.Thread(target=claim, args=(path,)) for path in paths]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(3)
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(result for _db_value, result in outcomes) == ["lost", "won"]
+
+    winner_path = next(path for path, result in outcomes if result == "won")
+    winner = ts.ThreadsDB(winner_path)
+    marker = session._bridge_root() / sid / session._SESSION_STORAGE_METADATA
+    assert json.loads(marker.read_text()) == session._session_storage_owner_payload(winner, sid)
+    identity = (os.lstat(marker).st_dev, os.lstat(marker).st_ino)
+    session._write_session_storage_owner(winner, sid)
+    assert (os.lstat(marker).st_dev, os.lstat(marker).st_ino) == identity
+
+
+def test_owner_marker_symlink_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_marker_symlink"
+    root = session._bridge_root() / sid
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside-owner.json"; outside.write_text("{}")
+    (root / session._SESSION_STORAGE_METADATA).symlink_to(outside)
+
+    with pytest.raises(RuntimeError, match="metadata is unreadable"):
+        session._write_session_storage_owner(db, sid)
+    assert outside.read_text() == "{}"
+
+
+def test_structured_docker_mount_inventory_handles_escaped_paths(monkeypatch):
+    names = subprocess.CompletedProcess(["docker"], 0, "one\n", "")
+    source = "/tmp/a\tb\nwith|delimiters"
+    destination = "/inside\tpath"
+    inspect = subprocess.CompletedProcess(
+        ["docker"], 0,
+        json.dumps([{"Mounts": [
+            {"Type": "bind", "Source": source, "Destination": destination},
+            {"Type": "volume", "Source": "volume-name", "Destination": "/volume"},
+        ]}]) + "\n",
+        "",
+    )
+    responses = iter([names, inspect])
+    monkeypatch.setattr(session.subprocess, "run", lambda *_a, **_k: next(responses))
+
+    mounts, error = session._docker_all_bind_mounts()
+
+    assert error == ""
+    assert mounts == [{
+        "name": "one",
+        "source": str(Path(source).resolve()),
+        "destination": destination,
+    }]
+
+
+@pytest.mark.parametrize("payload", ["not-json", "{}", '[{"Mounts": {}}]', '[{"Mounts": [null]}]'])
+def test_structured_docker_mount_inventory_malformed_fails_closed(monkeypatch, payload):
+    responses = iter([
+        subprocess.CompletedProcess(["docker"], 0, "one\n", ""),
+        subprocess.CompletedProcess(["docker"], 0, payload, ""),
+    ])
+    monkeypatch.setattr(session.subprocess, "run", lambda *_a, **_k: next(responses))
+
+    mounts, error = session._docker_all_bind_mounts()
+
+    assert mounts is None
+    assert error
+
+
+def test_docker_rm_uses_captured_id_if_name_is_reassigned_before_command(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.chdir(tmp_path)
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_rm_id"
+    canonical = ts.docker_session_container_name(db, sid)
+    legacy = "legacy-rm-id"
+    inventory = [
+        _container(db, sid, canonical, running=False),
+        _container(db, sid, legacy, running=False),
+    ]
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: (inventory, ""))
+    _revalidate_from_inventory(monkeypatch, inventory)
+    original_id = inventory[1]["id"]
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        # The mutable name now resolves to a replacement only after authority
+        # checked the captured old ID. Removal must still target old ID.
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(session.subprocess, "run", fake_run)
+
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("name") == legacy)
+    assert report["action"] == "removed"
+    assert calls == [["docker", "rm", original_id]]
+
+
+def _replace_path_with_directory(path: Path, replacement: Path) -> Path:
+    moved = path.with_name(path.name + "-original")
+    path.rename(moved)
+    replacement.rename(path)
+    return moved
+
+
+def test_same_path_authority_root_replacement_preserves_both_trees(monkeypatch, tmp_path):
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_root_inode_swap"
+    root = _old_tree(monkeypatch, tmp_path, sid)
+    authority_root = session._bridge_root()
+    replacement_parent = tmp_path / "replacement-root"
+    replacement_target = replacement_parent / "external.txt"
+    replacement_parent.mkdir(); replacement_target.write_text("keep")
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+    real_match = session._bridge_root_authority_matches
+    swapped = []
+
+    def swap_then_match(expected):
+        if not swapped:
+            swapped.append(_replace_path_with_directory(authority_root, replacement_parent))
+        return real_match(expected)
+
+    monkeypatch.setattr(session, "_bridge_root_authority_matches", swap_then_match)
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("session_id") == sid)
+    assert report["reason"] in {"artifact_root_changed", "artifact_path_unsafe"}
+    assert (authority_root / "external.txt").read_text() == "keep"
+    assert (swapped[0] / sid).exists()
+    assert root != authority_root / sid or (swapped[0] / sid).exists()
+
+
+def test_same_path_candidate_replacement_preserves_replacement_and_original(
+    monkeypatch, tmp_path,
+):
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_candidate_inode_swap"
+    root = _old_tree(monkeypatch, tmp_path, sid)
+    replacement = tmp_path / "candidate-replacement"
+    replacement.mkdir(); (replacement / "external.txt").write_text("keep")
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+    real_pin = session._pin_session_candidate
+    pins = []
+    moved = []
+
+    def pin_and_swap(authority, value):
+        result = real_pin(authority, value)
+        pins.append(result)
+        if len(pins) == 2:
+            moved.append(_replace_path_with_directory(root, replacement))
+        return result
+
+    monkeypatch.setattr(session, "_pin_session_candidate", pin_and_swap)
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("session_id") == sid)
+    assert report["reason"] in {"artifact_root_changed", "artifact_path_unsafe"}
+    assert (root / "external.txt").read_text() == "keep"
+    assert moved[0].exists()
+
+
+def test_late_candidate_symlink_swap_preserves_external_tree(monkeypatch, tmp_path):
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_late_symlink"
+    root = _old_tree(monkeypatch, tmp_path, sid)
+    outside = tmp_path / "outside-late"; outside.mkdir()
+    external = outside / "external.txt"; external.write_text("keep")
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: ([], ""))
+    _safe_artifact_dependencies(monkeypatch)
+    real_pin = session._pin_session_candidate
+    moved = []
+    calls = []
+
+    def pin_and_symlink(authority, value):
+        calls.append(1)
+        result = real_pin(authority, value)
+        if len(calls) == 2:
+            moved_path = root.with_name(root.name + "-original")
+            root.rename(moved_path)
+            root.symlink_to(outside, target_is_directory=True)
+            moved.append(moved_path)
+        return result
+
+    monkeypatch.setattr(session, "_pin_session_candidate", pin_and_symlink)
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("session_id") == sid)
+    assert report["reason"] in {"artifact_root_changed", "artifact_path_unsafe"}
+    assert external.read_text() == "keep"
+    assert moved[0].exists()
+
+
+def test_duplicate_missing_id_at_apply_is_idempotent_disappearance(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db, _thread_id = _db(tmp_path)
+    sid = "sess_disappeared"
+    canonical = ts.docker_session_container_name(db, sid)
+    legacy = "legacy-disappeared"
+    inventory = [
+        _container(db, sid, canonical, running=False),
+        _container(db, sid, legacy, running=False),
+    ]
+    monkeypatch.setattr(session, "_docker_owned_session_inventory", lambda: (inventory, ""))
+    _revalidate_from_inventory(monkeypatch, inventory)
+    monkeypatch.setattr(
+        session, "_docker_existing_id",
+        lambda name: None if name == legacy else f"id-{name}",
+    )
+    original_state = session._docker_container_state
+    monkeypatch.setattr(
+        session, "_docker_container_state",
+        lambda name: session._DockerContainerState(False, False, "missing")
+        if name == legacy else original_state(name),
+    )
+    calls = []
+    monkeypatch.setattr(session.subprocess, "run", lambda argv, **_kwargs: calls.append(argv))
+
+    report = next(item for item in ts.cleanup_docker_sessions(db, dry_run=False) if item.get("name") == legacy)
+    assert report["action"] == "removed"
+    assert report["reason"] == "already_removed"
+    assert calls == []

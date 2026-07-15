@@ -10,7 +10,7 @@ thread used as the execution/audit container for programmatic REPL tool calls.
 import json
 import math
 import os
-import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -82,6 +82,14 @@ class _DockerContainerState:
     running: Optional[bool]
     status: str = "unknown"
     error: str = ""
+
+
+@dataclass(frozen=True)
+class _DirectoryAuthority:
+    lexical: Path
+    resolved: Path
+    device: int
+    inode: int
 
 
 @dataclass(frozen=True)
@@ -429,39 +437,56 @@ def _bridge_root() -> Path:
     return _bridge_root_lexical().resolve()
 
 
-def _bridge_root_authority() -> tuple[Optional[tuple[Path, Path]], str]:
-    """Return stable lexical/resolved roots only for real project directories."""
+def _directory_identity(value: os.stat_result) -> tuple[int, int]:
+    return int(value.st_dev), int(value.st_ino)
+
+
+def _open_directory_nofollow(path: Path, *, dir_fd: Optional[int] = None) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(path, flags, dir_fd=dir_fd)
+
+
+def _bridge_root_authority() -> tuple[Optional[_DirectoryAuthority], str]:
+    """Pin a lexical authority root to one real directory identity."""
 
     raw_project = Path(os.getcwd())
     project = Path(os.path.abspath(raw_project))
     egg = project / ".egg"
     lexical = _bridge_root_lexical()
+    root_fd: Optional[int] = None
     try:
         raw_parts = [raw_project.anchor] if raw_project.anchor else []
         raw_parts.extend(raw_project.parts[1:] if raw_project.anchor else raw_project.parts)
         current = Path(raw_parts[0]) if raw_parts else Path()
-        project_has_symlink = False
         for part in raw_parts[1:] if raw_parts else ():
             current /= part
             if current.is_symlink():
-                project_has_symlink = True
-                break
-        if project_has_symlink or project.is_symlink() or egg.is_symlink() or lexical.is_symlink():
+                return None, "session authority project path contains a symlink"
+        if project.is_symlink() or egg.is_symlink() or lexical.is_symlink():
             return None, "session authority root contains a symlink"
-        if not egg.exists() or not lexical.exists():
-            return None, "session authority root is missing"
-        if not egg.is_dir() or not lexical.is_dir():
+        lexical_stat = os.lstat(lexical)
+        if not stat.S_ISDIR(lexical_stat.st_mode):
             return None, "session authority root is not a directory"
+        root_fd = _open_directory_nofollow(lexical)
+        opened_stat = os.fstat(root_fd)
+        if _directory_identity(opened_stat) != _directory_identity(lexical_stat):
+            return None, "session authority root changed while opening"
         resolved_project = project.resolve()
         resolved = lexical.resolve()
         if not _is_relative_to(resolved, resolved_project):
             return None, "session authority root escapes the project"
+    except FileNotFoundError:
+        return None, "session authority root is missing"
     except Exception as e:
         return None, f"session authority root inspection failed: {type(e).__name__}: {e}"
-    return (lexical, resolved), ""
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+    device, inode = _directory_identity(lexical_stat)
+    return _DirectoryAuthority(lexical, resolved, device, inode), ""
 
 
-def _bridge_root_authority_matches(expected: tuple[Path, Path]) -> bool:
+def _bridge_root_authority_matches(expected: _DirectoryAuthority) -> bool:
     current, error = _bridge_root_authority()
     return not error and current == expected
 
@@ -885,6 +910,21 @@ def _session_storage_owner_payload(db: ThreadsDB, session_id: str) -> Dict[str, 
     }
 
 
+def _read_session_storage_owner_nofollow(path: Path) -> Dict[str, Any]:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("Docker session storage metadata is not a regular file")
+        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as handle:
+            payload = json.load(handle)
+    finally:
+        os.close(fd)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Docker session storage metadata is not a JSON object")
+    return payload
+
+
 def _write_session_storage_owner(db: ThreadsDB, session_id: str) -> None:
     storage = _session_storage_paths(session_id)
     if storage is None:
@@ -893,23 +933,48 @@ def _write_session_storage_owner(db: ThreadsDB, session_id: str) -> None:
     root.mkdir(parents=True, exist_ok=True)
     path = root / _SESSION_STORAGE_METADATA
     expected = _session_storage_owner_payload(db, session_id)
-    if path.exists():
+    encoded = json.dumps(expected, sort_keys=True).encode("utf-8")
+    try:
+        fd = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except FileExistsError:
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing = _read_session_storage_owner_nofollow(path)
         except Exception as e:
             raise RuntimeError(f"Docker session storage metadata is unreadable: {e}")
         if existing != expected:
             raise RuntimeError("Docker session storage belongs to a different database identity")
         return
-    _atomic_write_json(path, expected)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+        raise
+    finally:
+        os.close(fd)
 
 
 def _session_storage_owner_matches(db: ThreadsDB, session_root: Path) -> tuple[bool, str]:
     path = session_root / _SESSION_STORAGE_METADATA
-    if not path.exists():
-        return False, "ownership_unknown"
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False, "ownership_unknown"
+    except Exception:
+        return False, "ownership_invalid"
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        return False, "ownership_invalid"
+    try:
+        payload = _read_session_storage_owner_nofollow(path)
     except Exception:
         return False, "ownership_invalid"
     expected = _session_storage_owner_payload(db, session_root.name)
@@ -987,11 +1052,7 @@ def _docker_all_bind_mounts() -> tuple[Optional[List[Dict[str, str]]], str]:
     for name in [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]:
         try:
             inspected = subprocess.run(
-                [
-                    "docker", "inspect", "-f",
-                    "{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Source}}\t{{.Destination}}\n{{end}}{{end}}",
-                    name,
-                ],
+                ["docker", "inspect", name],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -1001,10 +1062,24 @@ def _docker_all_bind_mounts() -> tuple[Optional[List[Dict[str, str]]], str]:
         if inspected.returncode != 0:
             error = (inspected.stderr or inspected.stdout or "Docker mount inspect failed").strip()
             return None, f"{name}: {error}"
-        for line in (inspected.stdout or "").splitlines():
-            source, separator, destination = line.partition("\t")
-            if not separator or not source:
-                return None, f"Docker mount inspect returned malformed data for {name}"
+        try:
+            payload = json.loads(inspected.stdout or "")
+        except Exception as e:
+            return None, f"Docker mount inspect returned invalid JSON for {name}: {e}"
+        if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+            return None, f"Docker mount inspect returned invalid container data for {name}"
+        container_mounts = payload[0].get("Mounts")
+        if not isinstance(container_mounts, list):
+            return None, f"Docker mount inspect returned invalid Mounts for {name}"
+        for mount in container_mounts:
+            if not isinstance(mount, dict) or not isinstance(mount.get("Type"), str):
+                return None, f"Docker mount inspect returned malformed Mounts for {name}"
+            if mount["Type"] != "bind":
+                continue
+            source = mount.get("Source")
+            destination = mount.get("Destination")
+            if not isinstance(source, str) or not source or not isinstance(destination, str):
+                return None, f"Docker bind mount is malformed for {name}"
             mounts.append({
                 "name": name,
                 "source": str(Path(source).resolve()),
@@ -1059,6 +1134,94 @@ def _docker_containers_mounting_session_root(
         if _is_relative_to(Path(item["source"]), root)
     })
     return names, ""
+
+
+def _pin_session_candidate(
+    root_authority: _DirectoryAuthority,
+    session_id: str,
+) -> tuple[Optional[_DirectoryAuthority], str]:
+    root_fd: Optional[int] = None
+    candidate_fd: Optional[int] = None
+    try:
+        root_fd = _open_directory_nofollow(root_authority.lexical)
+        root_stat = os.fstat(root_fd)
+        if _directory_identity(root_stat) != (root_authority.device, root_authority.inode):
+            return None, "session authority root changed"
+        lexical = root_authority.lexical / session_id
+        lexical_stat = os.stat(session_id, dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(lexical_stat.st_mode):
+            return None, "session artifact root is not a real directory"
+        candidate_fd = _open_directory_nofollow(session_id, dir_fd=root_fd)
+        opened_stat = os.fstat(candidate_fd)
+        if _directory_identity(opened_stat) != _directory_identity(lexical_stat):
+            return None, "session artifact root changed while opening"
+        resolved = lexical.resolve()
+        if not _is_relative_to(resolved, root_authority.resolved):
+            return None, "session artifact root escapes authority"
+        device, inode = _directory_identity(opened_stat)
+        return _DirectoryAuthority(lexical, resolved, device, inode), ""
+    except Exception as e:
+        return None, f"session artifact pin failed: {type(e).__name__}: {e}"
+    finally:
+        if candidate_fd is not None:
+            os.close(candidate_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def _remove_directory_contents_fd(directory_fd: int) -> None:
+    for name in os.listdir(directory_fd):
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode):
+            raise RuntimeError(f"symlink appeared during cleanup: {name}")
+        if stat.S_ISDIR(info.st_mode):
+            child_fd = _open_directory_nofollow(name, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if _directory_identity(opened) != _directory_identity(info):
+                    raise RuntimeError(f"directory changed during cleanup: {name}")
+                _remove_directory_contents_fd(child_fd)
+            finally:
+                os.close(child_fd)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if _directory_identity(current) != _directory_identity(info):
+                raise RuntimeError(f"directory replaced during cleanup: {name}")
+            os.rmdir(name, dir_fd=directory_fd)
+        elif stat.S_ISREG(info.st_mode):
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if _directory_identity(current) != _directory_identity(info):
+                raise RuntimeError(f"file replaced during cleanup: {name}")
+            os.unlink(name, dir_fd=directory_fd)
+        else:
+            raise RuntimeError(f"unsupported file type during cleanup: {name}")
+
+
+def _remove_pinned_session_tree(
+    root_authority: _DirectoryAuthority,
+    candidate: _DirectoryAuthority,
+) -> None:
+    root_fd = _open_directory_nofollow(root_authority.lexical)
+    candidate_fd: Optional[int] = None
+    try:
+        root_stat = os.fstat(root_fd)
+        if _directory_identity(root_stat) != (root_authority.device, root_authority.inode):
+            raise RuntimeError("session authority root changed")
+        current = os.stat(candidate.lexical.name, dir_fd=root_fd, follow_symlinks=False)
+        if _directory_identity(current) != (candidate.device, candidate.inode):
+            raise RuntimeError("session artifact root changed")
+        candidate_fd = _open_directory_nofollow(candidate.lexical.name, dir_fd=root_fd)
+        opened = os.fstat(candidate_fd)
+        if _directory_identity(opened) != (candidate.device, candidate.inode):
+            raise RuntimeError("session artifact root changed while opening")
+        _remove_directory_contents_fd(candidate_fd)
+        current = os.stat(candidate.lexical.name, dir_fd=root_fd, follow_symlinks=False)
+        if _directory_identity(current) != (candidate.device, candidate.inode):
+            raise RuntimeError("session artifact root replaced before removal")
+        os.rmdir(candidate.lexical.name, dir_fd=root_fd)
+    finally:
+        if candidate_fd is not None:
+            os.close(candidate_fd)
+        os.close(root_fd)
 
 
 def _session_artifact_tree_error(session_root: Path) -> str:
@@ -1175,7 +1338,13 @@ def _docker_duplicate_cleanup_authority(
         return False, "ownership_label_invalid", None
     if _docker_existing_label(name, "egg.session_id") != session_id:
         return False, "session_identity_changed", None
-    if not expected_id or _docker_existing_id(name) != expected_id:
+    current_id = _docker_existing_id(name)
+    if not current_id:
+        state = _docker_container_state(name)
+        if state.exists is False:
+            return False, "already_removed", None
+        return False, "container_identity_changed", None
+    if not expected_id or current_id != expected_id:
         return False, "container_identity_changed", None
     if name == canonical_name:
         return False, "canonical_preserved", None
@@ -1325,7 +1494,10 @@ def cleanup_docker_sessions(
                             str(canonical["id"]),
                         )
                         if not authorized:
-                            report.update(action="skipped", reason=reason)
+                            if reason == "already_removed":
+                                report.update(action="removed", reason="already_removed")
+                            else:
+                                report.update(action="skipped", reason=reason)
                         elif container_age is not None and not isinstance(current_created_at, (int, float)):
                             report.update(action="skipped", reason="container_age_uncertain")
                         elif container_age is not None and now - float(current_created_at) < container_age:
@@ -1333,7 +1505,7 @@ def cleanup_docker_sessions(
                         else:
                             try:
                                 proc = subprocess.run(
-                                    ["docker", "rm", name],
+                                    ["docker", "rm", str(item["id"])],
                                     capture_output=True,
                                     text=True,
                                     timeout=20,
@@ -1362,7 +1534,7 @@ def cleanup_docker_sessions(
             "reason": "artifact_root_unsafe", "error": root_error,
         })
         return results
-    root_lexical, root = root_authority
+    root = root_authority.lexical
     all_mounts, mount_discovery_error = _docker_all_bind_mounts()
     try:
         candidates = sorted(root.iterdir(), key=lambda path: path.name)
@@ -1378,6 +1550,13 @@ def cleanup_docker_sessions(
         report = {"kind": "artifact", "name": str(session_root), "session_id": session_id}
         if _safe_session_storage_name(session_id) != session_id:
             report.update(action="skipped", reason="session_identity_invalid")
+            results.append(report)
+            continue
+        candidate_authority, candidate_error = _pin_session_candidate(
+            root_authority, session_id,
+        )
+        if candidate_authority is None:
+            report.update(action="skipped", reason="artifact_path_unsafe", error=candidate_error)
             results.append(report)
             continue
         owner_matches, owner_reason = _session_storage_owner_matches(db, session_root)
@@ -1476,7 +1655,17 @@ def cleanup_docker_sessions(
                     report.update(action="skipped", reason="artifact_root_changed")
                     results.append(report)
                     continue
-                final_root = root_lexical / session_id
+                final_candidate, candidate_error = _pin_session_candidate(
+                    root_authority, session_id,
+                )
+                if final_candidate is None or final_candidate != candidate_authority:
+                    report.update(
+                        action="skipped", reason="artifact_root_changed",
+                        error=candidate_error or "session artifact root identity changed",
+                    )
+                    results.append(report)
+                    continue
+                final_root = final_candidate.lexical
                 final_error = _session_artifact_tree_error(final_root)
                 final_owner, final_owner_reason = _session_storage_owner_matches(db, final_root)
                 if final_error:
@@ -1528,7 +1717,7 @@ def cleanup_docker_sessions(
                             report["error"] = final_protection_error
                     else:
                         try:
-                            shutil.rmtree(final_root)
+                            _remove_pinned_session_tree(root_authority, final_candidate)
                             report.update(action="removed", reason="stale_session_artifacts")
                         except Exception as e:
                             report.update(
