@@ -1,6 +1,6 @@
 # Reliability and EggW Correctness Follow-up TODO
 
-Status: in progress (Phase 1 accepted; Phase 2 trailing-data repair complete, awaiting re-review)
+Status: in progress (Phases 1–2 accepted and complete; Phase 3 not started)
 Created: 2026-07-15
 Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 
@@ -104,6 +104,8 @@ Current root README opens as an AI self-assessment and comparison essay. The use
 - [ ] For transcript/UI phases, representative 5M-token or equivalent cost-shape validation proves bounded/incremental work without sacrificing history reachability; Phase 5 explicitly covers scrolling, input availability, streaming, pagination, and event-loop responsiveness.
 
 ## Status notes / commit ledger
+
+- 2026-07-15: Final independent review PASSed Phase 2 at `bedbb65` with no blockers. Reviewer validation passed 209 focused web tests, 1454 EggThreads tests, 560 Egg tests, 228 passed + 1 skipped EggW tests, Python `compileall`, `git diff --check`, and clean-worktree verification. Accepted behavior includes strict 4097-byte wire / 4096-byte decoded / 400-character diagnostic bounds; trailing junk and concatenated compressed members fail closed; Tavily statuses 432/433 remain status-authoritative; fallback advances only through the configured target-specific search or fetch chain; explicitly pinned providers remain terminal; and the fixed-chain path is transcript-independent, satisfying the >5M-token bounded-work constraint without a synthetic transcript benchmark. Phase 2 is accepted and complete; Phase 3 has not started.
 
 - 2026-07-15: Encoded trailing-data Phase 2 repair complete, awaiting re-review. The bounded zlib decoder now requires decoder EOF, no decoded overflow, empty `unconsumed_tail`, empty `unused_data`, successful bounded flush, and complete bounded wire transport together. Any trailing junk, concatenated gzip member, or other ambiguous representation therefore fails closed for semantic 402/403 quota; status-authoritative 432/433 remains fallback-eligible regardless of body. Literal search and extract coverage includes gzip/x-gzip, zlib/raw deflate, trailing junk for every encoding, conflicting concatenated gzip, unsupported/multiple encodings, truncated/broken streams, compression bombs, bounded diagnostics/wire reads/decoded output, closure, configured chains, and pinned behavior. Validation: focused web suite `209 passed`; full EggThreads `1454 passed`; full Egg `560 passed`; full EggW backend `228 passed, 1 skipped`; Python compile and `git diff --check` passed. All prior Phase 1/2/invariant/>5M behavior remains retained; no Phase 3 work started.
 
