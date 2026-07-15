@@ -10,6 +10,7 @@ thread used as the execution/audit container for programmatic REPL tool calls.
 import json
 import math
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -72,6 +73,7 @@ class SessionStatus:
     last_activity: Optional[float] = None
     heartbeat_at: Optional[float] = None
     reason: Optional[str] = None
+    resource_limits: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,20 @@ class _DirectoryAuthority:
     resolved: Path
     device: int
     inode: int
+
+
+@dataclass(frozen=True)
+class _DockerSessionLimits:
+    memory_bytes: Optional[int] = None
+    pids_limit: Optional[int] = None
+
+    def policy(self) -> Dict[str, int]:
+        values: Dict[str, int] = {}
+        if self.memory_bytes is not None:
+            values["memory_bytes"] = self.memory_bytes
+        if self.pids_limit is not None:
+            values["pids_limit"] = self.pids_limit
+        return values
 
 
 @dataclass(frozen=True)
@@ -745,11 +761,140 @@ def _docker_existing_id(container_name: str) -> Optional[str]:
     return value or None
 
 
+def _docker_existing_resource_limits(container_name: str) -> tuple[Optional[Dict[str, int]], str]:
+    """Inspect immutable intent labels and the effective Docker HostConfig.
+
+    ``None`` means the inspection itself was not authoritative.  A dictionary
+    plus an error means Docker was inspected successfully, but an Egg limit
+    label was malformed or contradicted the effective HostConfig.  Keeping
+    those cases distinct lets reconciliation repair known policy drift without
+    deleting a container merely because Docker inspection was uncertain.
+    """
+
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", container_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as e:
+        return None, f"Could not inspect Docker session resource limits: {type(e).__name__}: {e}"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "Docker inspect failed").strip()
+        return None, f"Could not inspect Docker session resource limits: {detail}"
+    try:
+        payload = json.loads(proc.stdout or "")
+        if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+            raise ValueError("expected one container object")
+        config = payload[0].get("Config")
+        host_config = payload[0].get("HostConfig")
+        if not isinstance(config, dict) or not isinstance(host_config, dict):
+            raise ValueError("missing Config or HostConfig object")
+        labels = config.get("Labels")
+        if labels is None:
+            labels = {}
+        if not isinstance(labels, dict):
+            raise ValueError("Config.Labels is not an object")
+    except (TypeError, ValueError, json.JSONDecodeError) as e:
+        return None, f"Docker session resource-limit inspection was malformed: {e}"
+
+    values: Dict[str, int] = {}
+    for label, key, host_key in (
+        ("egg.session_memory_bytes", "memory_bytes", "Memory"),
+        ("egg.session_pids_limit", "pids_limit", "PidsLimit"),
+    ):
+        raw = labels.get(label)
+        effective = host_config.get(host_key)
+        if isinstance(effective, bool) or not isinstance(effective, (int, type(None))):
+            return None, f"Docker session HostConfig.{host_key} is invalid"
+        effective_value = effective if isinstance(effective, int) and effective > 0 else None
+        if raw is None:
+            if effective_value is not None:
+                values[key] = effective_value
+                return values, (
+                    f"Docker session effective HostConfig.{host_key} has no matching "
+                    f"Egg resource-limit label"
+                )
+            continue
+        try:
+            text = str(raw).strip()
+            if re.fullmatch(r"[0-9]+", text) is None:
+                raise ValueError
+            value = int(text)
+        except (TypeError, ValueError):
+            return values, f"Docker session resource-limit label {label} is invalid"
+        if value <= 0:
+            return values, f"Docker session resource-limit label {label} is invalid"
+        values[key] = value
+        if effective_value != value:
+            return values, (
+                f"Docker session resource-limit label {label} does not match "
+                f"effective HostConfig.{host_key}"
+            )
+    return values, ""
+
+
 def _configured_channel_idle_timeout_sec() -> Optional[float]:
     timeout = _parse_duration_seconds(os.environ.get("EGG_RLM_CHANNEL_IDLE_TIMEOUT"))
     if timeout is None or not math.isfinite(timeout) or timeout <= 0:
         return None
     return float(timeout)
+
+
+_DOCKER_MEMORY_MIN_BYTES = 6 * 1024 * 1024
+_DOCKER_MEMORY_MAX_BYTES = (1 << 63) - 1
+_DOCKER_PIDS_MAX = 4_194_304
+_LIMIT_DISABLED_VALUES = {"", "off", "none", "unlimited"}
+
+
+def _configured_docker_memory_bytes(value: Any = None) -> Optional[int]:
+    raw = os.environ.get("EGG_RLM_SESSION_MEMORY") if value is None else value
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise ValueError("EGG_RLM_SESSION_MEMORY must be a memory size, not a boolean")
+    text = str(raw).strip().lower()
+    if text in _LIMIT_DISABLED_VALUES:
+        return None
+    match = re.fullmatch(r"([0-9]+)(b|k|kib|m|mib|g|gib|t|tib)?", text)
+    if match is None:
+        raise ValueError(
+            "EGG_RLM_SESSION_MEMORY must be an integer byte count or integer plus b/k/m/g/t"
+        )
+    amount = int(match.group(1))
+    unit = match.group(2) or "b"
+    power = {"b": 0, "k": 1, "m": 2, "g": 3, "t": 4}[unit[0]]
+    normalized = amount * (1024 ** power)
+    if normalized < _DOCKER_MEMORY_MIN_BYTES:
+        raise ValueError("EGG_RLM_SESSION_MEMORY must be at least 6 MiB")
+    if normalized > _DOCKER_MEMORY_MAX_BYTES:
+        raise ValueError("EGG_RLM_SESSION_MEMORY exceeds Docker's signed 64-bit byte range")
+    return normalized
+
+
+def _configured_docker_pids_limit(value: Any = None) -> Optional[int]:
+    raw = os.environ.get("EGG_RLM_SESSION_PIDS_LIMIT") if value is None else value
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise ValueError("EGG_RLM_SESSION_PIDS_LIMIT must be an integer, not a boolean")
+    text = str(raw).strip().lower()
+    if text in _LIMIT_DISABLED_VALUES:
+        return None
+    if re.fullmatch(r"[0-9]+", text) is None:
+        raise ValueError("EGG_RLM_SESSION_PIDS_LIMIT must be a decimal integer")
+    normalized = int(text)
+    if normalized < 1 or normalized > _DOCKER_PIDS_MAX:
+        raise ValueError(f"EGG_RLM_SESSION_PIDS_LIMIT must be between 1 and {_DOCKER_PIDS_MAX}")
+    return normalized
+
+
+def _configured_docker_session_limits() -> _DockerSessionLimits:
+    return _DockerSessionLimits(
+        memory_bytes=_configured_docker_memory_bytes(),
+        pids_limit=_configured_docker_pids_limit(),
+    )
 
 
 def _docker_session_policy_hash_body(
@@ -787,10 +932,14 @@ def _docker_session_policy_hashes(
     db: ThreadsDB,
     runtime_thread_id: str,
     cfg: SessionConfig,
+    limits: Optional[_DockerSessionLimits] = None,
 ) -> tuple[str, set[str]]:
     """Return current policy hash and compatible one-upgrade legacy hashes."""
 
     body = _docker_session_policy_hash_body(db, runtime_thread_id, cfg)
+    configured_limits = limits or _configured_docker_session_limits()
+    if configured_limits.policy():
+        body["resource_limits"] = configured_limits.policy()
     timeout = _configured_channel_idle_timeout_sec()
     if timeout is None:
         current_hash = _docker_policy_hash(body)
@@ -813,12 +962,18 @@ def _docker_compatible_policy_hashes(
     db: ThreadsDB,
     runtime_thread_id: str,
     cfg: SessionConfig,
+    limits: Optional[_DockerSessionLimits] = None,
 ) -> set[str]:
-    return _docker_session_policy_hashes(db, runtime_thread_id, cfg)[1]
+    return _docker_session_policy_hashes(db, runtime_thread_id, cfg, limits)[1]
 
 
-def _docker_session_policy_hash(db: ThreadsDB, runtime_thread_id: str, cfg: SessionConfig) -> str:
-    return _docker_session_policy_hashes(db, runtime_thread_id, cfg)[0]
+def _docker_session_policy_hash(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    cfg: SessionConfig,
+    limits: Optional[_DockerSessionLimits] = None,
+) -> str:
+    return _docker_session_policy_hashes(db, runtime_thread_id, cfg, limits)[0]
 
 
 def _docker_container_created_at(container_name: str) -> Optional[float]:
@@ -2147,8 +2302,9 @@ def _start_docker_container(
     force_restart: bool = False,
 ) -> bool:
     """Ensure the session container runs; return whether its process restarted."""
-    expected_policy_hash = _docker_session_policy_hash(db, runtime_thread_id, cfg)
-    compatible_policy_hashes = _docker_compatible_policy_hashes(db, runtime_thread_id, cfg)
+    limits = _configured_docker_session_limits()
+    expected_policy_hash = _docker_session_policy_hash(db, runtime_thread_id, cfg, limits)
+    compatible_policy_hashes = _docker_compatible_policy_hashes(db, runtime_thread_id, cfg, limits)
     channel_idle_timeout = _configured_channel_idle_timeout_sec()
 
     if cfg.session_id:
@@ -2166,9 +2322,14 @@ def _start_docker_container(
     if existing_running is not None:
         policy = _docker_existing_mount_policy(container_name)
         policy_hash = _docker_existing_sandbox_policy_hash(container_name)
+        existing_limits, limit_error = _docker_existing_resource_limits(container_name)
+        if existing_limits is None:
+            raise RuntimeError(limit_error)
+        resource_limits_compatible = not limit_error and existing_limits == limits.policy()
         policy_compatible = (
             policy == _DOCKER_MOUNT_POLICY
             and policy_hash in compatible_policy_hashes
+            and resource_limits_compatible
         )
         if policy_compatible:
             if existing_running:
@@ -2232,10 +2393,23 @@ def _start_docker_container(
     except Exception:
         sandbox_effective = False
 
+    resource_limit_args: List[str] = []
+    if limits.memory_bytes is not None:
+        resource_limit_args.extend([
+            "--memory", f"{limits.memory_bytes}b",
+            "--label", f"egg.session_memory_bytes={limits.memory_bytes}",
+        ])
+    if limits.pids_limit is not None:
+        resource_limit_args.extend([
+            "--pids-limit", str(limits.pids_limit),
+            "--label", f"egg.session_pids_limit={limits.pids_limit}",
+        ])
+
     cmd = [
         "docker", "run", "-d", "--init",
         "--name", container_name,
         "--cpus", "4",
+        *resource_limit_args,
         "--user", f"{os.getuid()}",
         "--network", network,
         "--label", "egg.kind=rlm-session",
@@ -2256,7 +2430,6 @@ def _start_docker_container(
         cfg.image,
         "python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime",
     ]
-    channel_idle_timeout = _configured_channel_idle_timeout_sec()
     if channel_idle_timeout is not None:
         cmd.extend(["--channel-idle-timeout-sec", f"{channel_idle_timeout:g}"])
     _clear_docker_daemon_status(bridge_dir)
@@ -2820,6 +2993,8 @@ def ensure_thread_session_for_repl(
     - ``EGG_RLM_AUTO_SESSION`` (default: on)
     - ``EGG_RLM_SESSION_PROVIDER`` (default: docker)
     - ``EGG_RLM_SESSION_IMAGE`` (default: egg-rlm-session)
+    - ``EGG_RLM_SESSION_MEMORY`` (optional Docker bytes or b/k/m/g/t unit)
+    - ``EGG_RLM_SESSION_PIDS_LIMIT`` (optional positive Docker PID limit)
     """
 
     cfg = get_thread_session_config(db, runtime_thread_id)
@@ -2997,6 +3172,7 @@ def _get_or_start_docker_session_locked(
             True, cfg.provider, cfg.session_id, "unhealthy", str(e),
             status.container_name, cfg.share_repl,
             reason=status.reason or "start_failed",
+            resource_limits=status.resource_limits,
         )
 
     append_session_lifecycle_event(
@@ -3023,6 +3199,7 @@ def _get_or_start_docker_session_locked(
             status.container_name,
             _daemon,
             reason=(status.reason if status.status == "unhealthy" else ("reattach" if status.status == "stopped" else "start")),
+            resource_limits=status.resource_limits,
         )
     return _session_status_for_config(db, thread_id, cfg)
 
@@ -4515,6 +4692,7 @@ def _session_status_from_daemon(
     daemon: Dict[str, Any],
     *,
     reason: Optional[str],
+    resource_limits: Optional[Dict[str, int]] = None,
 ) -> SessionStatus:
     active = tuple(daemon.get("active_requests") or ())
     channel_state = dict(daemon.get("channel_state") or {})
@@ -4536,6 +4714,7 @@ def _session_status_from_daemon(
         last_activity=daemon.get("last_activity_at"),
         heartbeat_at=daemon.get("heartbeat_at"),
         reason="channel_containment_failure" if failed_channels else reason,
+        resource_limits=dict(resource_limits or {}),
     )
 
 
@@ -4549,11 +4728,19 @@ class DockerSessionProvider:
 
     def status(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
         name = docker_session_container_name(db, cfg.session_id or _session_id_for_thread(thread_id))
+        try:
+            configured_limits = _configured_docker_session_limits().policy()
+        except ValueError as e:
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "unhealthy", str(e),
+                name, cfg.share_repl, reason="resource_limit_invalid",
+            )
         if not self.available():
             return SessionStatus(
                 True, cfg.provider, cfg.session_id, "unhealthy",
                 "Docker daemon is not available", name, cfg.share_repl,
                 reason="docker_unavailable",
+                resource_limits=configured_limits,
             )
         container = _docker_container_state(name)
         lifecycle = _latest_session_lifecycle(db, thread_id, cfg.session_id) or {}
@@ -4563,18 +4750,29 @@ class DockerSessionProvider:
                 True, cfg.provider, cfg.session_id, "unhealthy",
                 container.error or "Could not inspect Docker session container",
                 name, cfg.share_repl, reason=lifecycle_reason or "inspect_failed",
+                resource_limits=configured_limits,
             )
         if container.exists is False:
             return SessionStatus(
                 True, cfg.provider, cfg.session_id, "missing",
                 "Docker session container has not been created",
                 name, cfg.share_repl, reason=lifecycle_reason,
+                resource_limits=configured_limits,
+            )
+        existing_limits, limit_error = _docker_existing_resource_limits(name)
+        if existing_limits is None or limit_error or existing_limits != configured_limits:
+            return SessionStatus(
+                True, cfg.provider, cfg.session_id, "unhealthy",
+                limit_error or "Docker session resource-limit policy does not match configuration",
+                name, cfg.share_repl, reason="resource_limit_mismatch",
+                resource_limits=configured_limits,
             )
         if container.running is not True:
             message = f"Docker session container is {container.status or 'stopped'}"
             return SessionStatus(
                 True, cfg.provider, cfg.session_id, "stopped", message,
                 name, cfg.share_repl, reason=lifecycle_reason,
+                resource_limits=configured_limits,
             )
 
         daemon, health_error = _docker_daemon_status(_session_bridge_dir(cfg.session_id or ""))
@@ -4589,12 +4787,14 @@ class DockerSessionProvider:
                 last_activity=(daemon or {}).get("last_activity_at"),
                 heartbeat_at=(daemon or {}).get("heartbeat_at"),
                 reason="daemon_unhealthy",
+                resource_limits=configured_limits,
             )
         return _session_status_from_daemon(
             cfg,
             name,
             daemon,
             reason=lifecycle_reason,
+            resource_limits=configured_limits,
         )
 
     def start(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:

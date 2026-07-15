@@ -111,6 +111,12 @@ def _append_session_health_details(lines: list[str], status: Any) -> None:
         lines.append(f"  Last activity: {status.last_activity}")
     if getattr(status, "reason", None):
         lines.append(f"  Reason: {status.reason}")
+    limits = getattr(status, "resource_limits", {})
+    if limits:
+        if limits.get("memory_bytes") is not None:
+            lines.append(f"  Memory limit: {limits['memory_bytes']} bytes")
+        if limits.get("pids_limit") is not None:
+            lines.append(f"  PID limit: {limits['pids_limit']}")
     if status.message:
         lines.append(f"  Message: {status.message}")
 

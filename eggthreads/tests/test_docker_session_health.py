@@ -24,6 +24,7 @@ def _configured_docker_session(tmp_path: Path, monkeypatch):
     thread_id = ts.create_root_thread(db, name="root")
     session_id = ts.enable_thread_session(db, thread_id, provider="docker")
     monkeypatch.setattr(session, "docker_session_available", lambda: True)
+    monkeypatch.setattr(session, "_docker_existing_resource_limits", lambda _name: ({}, ""))
     return db, thread_id, session_id
 
 

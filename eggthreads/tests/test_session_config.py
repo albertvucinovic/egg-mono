@@ -176,6 +176,7 @@ def test_docker_session_start_returns_verified_daemon_health(monkeypatch, tmp_pa
         ts.eggthreads.session._DockerContainerState(True, True, "running"),
     ])
     monkeypatch.setattr(ts.eggthreads.session, "_docker_container_state", lambda _name: next(states))
+    monkeypatch.setattr(ts.eggthreads.session, "_docker_existing_resource_limits", lambda _name: ({}, ""))
 
     status = ts.get_thread_session_status(db, tid)
     assert status.enabled is True
@@ -376,6 +377,7 @@ def test_start_docker_container_reconciles_even_when_target_is_already_running(m
         "_docker_existing_sandbox_policy_hash",
         lambda _name: session._docker_session_policy_hash(db, thread_id, cfg),
     )
+    monkeypatch.setattr(session, "_docker_existing_resource_limits", lambda _name: ({}, ""))
 
     restarted = session._start_docker_container(
         db,

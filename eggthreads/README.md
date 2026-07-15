@@ -174,6 +174,20 @@ wrapper image. To build only the session image:
 If the local image is missing, Docker sandboxing can fall back to a plain Python
 image, but the Egg image includes development tools used by tests and examples.
 
+Docker-backed persistent REPL sessions can opt into container resource limits:
+
+```bash
+export EGG_RLM_SESSION_MEMORY=512m
+export EGG_RLM_SESSION_PIDS_LIMIT=256
+```
+
+Memory accepts an integer byte count or an integer binary unit (`b`, `k`, `m`,
+`g`, `t`, with optional `iB` spelling), from 6 MiB through signed 64-bit bytes.
+The PID limit is an integer from 1 through 4,194,304. Unset, empty, `off`,
+`none`, or `unlimited` leaves the corresponding Docker limit disabled. Invalid
+values fail before session-container reconciliation; changing an enabled limit
+recreates the container because Docker stores these limits in `HostConfig`.
+
 ## Tests
 
 ```bash
