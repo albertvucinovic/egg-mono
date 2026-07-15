@@ -348,7 +348,7 @@ def test_auto_search_uses_tavily_then_searxng_when_key_is_configured(monkeypatch
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(('post', url))
         return _MockResponse(503, {'error': 'down'}, text='down')
 
@@ -377,7 +377,7 @@ def test_auto_search_skips_tavily_without_key(monkeypatch):
     monkeypatch.delenv('TAVILY_API_KEY', raising=False)
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(('post', url))
         raise AssertionError('Tavily should not be called without a key')
 
@@ -419,7 +419,7 @@ def test_explicit_searxng_search_is_pinned_without_tavily(monkeypatch):
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         raise AssertionError('Tavily should not be called when SearXNG is pinned')
 
     def mock_get(url, params=None, headers=None, timeout=None):
@@ -440,7 +440,7 @@ def test_explicit_tavily_search_is_pinned_without_searxng_fallback(monkeypatch):
     monkeypatch.setenv('EGG_WEB_BACKEND', 'tavily')
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(200, {'results': []})
 
     def mock_get(url, params=None, headers=None, timeout=None):

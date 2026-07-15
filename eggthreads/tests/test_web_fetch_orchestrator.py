@@ -46,7 +46,7 @@ def test_auto_fetch_uses_tavily_first_when_key_exists(monkeypatch, tools):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url, json, timeout))
         return _MockResponse(200, {
             "results": [
@@ -73,7 +73,7 @@ def test_auto_fetch_falls_back_to_direct_http_after_tavily_failed_result(monkeyp
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _MockResponse(200, {
             "results": [],
@@ -105,7 +105,7 @@ def test_auto_fetch_reports_concise_diagnostics_when_all_providers_fail(monkeypa
     monkeypatch.setenv("EGG_WEB_BACKEND", "auto")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(200, {
             "results": [],
             "failed_results": [{"url": "https://example.com", "error": "timeout"}],
@@ -129,7 +129,7 @@ def test_auto_fetch_reports_placeholder_when_all_providers_degraded(monkeypatch,
     monkeypatch.setenv("EGG_WEB_BACKEND", "auto")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(200, {
             "results": [],
             "failed_results": [{"url": "https://example.com", "error": "timeout"}],
@@ -165,7 +165,7 @@ def test_auto_fetch_without_tavily_key_uses_direct_http_only(monkeypatch, tools)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         raise AssertionError("Tavily should not be called without a key in auto mode")
 
     def mock_get(url, headers=None, timeout=None, allow_redirects=None):
@@ -192,7 +192,7 @@ def test_explicit_searxng_fetch_uses_direct_http_compatibility(monkeypatch, tool
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         raise AssertionError("Tavily should not be called when SearXNG is pinned")
 
     def mock_get(url, headers=None, timeout=None, allow_redirects=None):
@@ -522,7 +522,7 @@ def test_explicit_tavily_fetch_does_not_fallback_to_direct_http(monkeypatch, too
     monkeypatch.setenv("EGG_WEB_BACKEND", "tavily")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(200, {
             "results": [],
             "failed_results": [{"url": "https://bad.example.com", "error": "timeout"}],
@@ -638,7 +638,7 @@ def test_fetch_chain_falls_back_after_direct_http_429(monkeypatch):
         calls.append(("get", url))
         return _MockResponse(429, text="too many requests", url=url)
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _MockResponse(200, {
             "results": [
@@ -668,7 +668,7 @@ def test_fetch_chain_does_not_fallback_after_direct_http_403(monkeypatch):
     def mock_get(url, headers=None, timeout=None, allow_redirects=None):
         return _MockResponse(403, text="forbidden", url=url)
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         raise AssertionError("terminal 403 should not fall back to Tavily")
 
     import requests

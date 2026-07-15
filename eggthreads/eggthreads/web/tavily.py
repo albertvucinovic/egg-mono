@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import List
@@ -16,68 +17,131 @@ from .base import (
 )
 
 
+_ERROR_DETAIL_MAX_BYTES = 4096
 _ERROR_DETAIL_MAX_CHARS = 400
 _SEMANTIC_QUOTA_STATUSES = {402, 403}
-_PLAN_USAGE_LIMIT_RE = re.compile(
-    r"\b(?:this\s+request\s+)?exceeds?\s+your\s+plan(?:[’']s|s)?"
-    r"(?:\s+\w+){0,4}\s+usage\s+limit\b",
+_NEGATED_OR_QUALIFIED_RE = re.compile(
+    r"\b(?:nearly|almost|might|may|could|would|not|never|no\s+longer)\b",
+    re.IGNORECASE,
+)
+_REQUEST_PLAN_LIMIT_RE = re.compile(
+    r"^(?:this\s+)?request\s+exceeds?\s+your\s+plan(?:[’']s|s)?"
+    r"(?:\s+[a-z]+){0,4}\s+usage\s+limit"
+    r"(?:\.\s*please\s+upgrade\s+your\s+plan\.?)?$",
     re.IGNORECASE,
 )
 _PROVIDER_QUOTA_RE = re.compile(
-    r"\b(?:your\s+)?plan(?:[’']s|s)?\s+(?:\w+\s+){0,3}"
-    r"(?:usage|credit)\s+limit\s+(?:has\s+been\s+)?exceeded\b"
-    r"|\b(?:usage|credit)\s+limit\s+(?:has\s+been\s+)?exceeded\b"
-    r"|\binsufficient\s+(?:plan\s+)?credits?\b",
+    r"^(?:your\s+)?plan(?:[’']s|s)?\s+(?:[a-z]+\s+){0,3}"
+    r"(?:usage|credit)\s+limit\s+(?:has\s+been\s+)?exceeded(?:\s+for\s+your\s+account)?\.?$"
+    r"|^(?:usage|credit)\s+limit\s+(?:has\s+been\s+)?exceeded(?:\s+for\s+your\s+account)?\.?$"
+    r"|^insufficient\s+(?:plan\s+)?credits?\.?$",
     re.IGNORECASE,
 )
-_JSON_DETAIL_RE = re.compile(
-    r'''["'](?:detail|message|error)["']\s*:\s*'''
-    r'''(?:\{[^{}]{0,200}?["'](?:message|detail)["']\s*:\s*)?'''
-    r'''(?P<quote>["'])(?P<value>.{1,400}?)(?P=quote)''',
-    re.IGNORECASE,
-)
+def _read_error_prefix(response: object) -> bytes:
+    """Read and close at most one bounded prefix from a streamed response."""
+
+    prefix = bytearray()
+    raw = getattr(response, "raw", None)
+    read = getattr(raw, "read", None)
+    if callable(read):
+        chunk = read(_ERROR_DETAIL_MAX_BYTES)
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8", errors="replace")
+        if not isinstance(chunk, (bytes, bytearray)):
+            return b""
+        return bytes(chunk[:_ERROR_DETAIL_MAX_BYTES])
+
+    # Compatibility for small test doubles. Real requests use ``raw`` because
+    # Tavily calls set stream=True; never access requests.Response.text here.
+    content = getattr(response, "content", None)
+    if isinstance(content, str):
+        content = content.encode("utf-8", errors="replace")
+    if isinstance(content, (bytes, bytearray)):
+        return bytes(content[:_ERROR_DETAIL_MAX_BYTES])
+
+    text = getattr(response, "text", "")
+    if isinstance(text, bytes):
+        return text[:_ERROR_DETAIL_MAX_BYTES]
+    if isinstance(text, str):
+        return text.encode("utf-8", errors="replace")[:_ERROR_DETAIL_MAX_BYTES]
+    return b""
 
 
-def _bounded_response_text(response: object) -> str:
-    """Read at most the diagnostic prefix; never decode the full JSON body."""
-
+def _close_response(response: object) -> None:
     try:
-        raw_text = getattr(response, "text", "")
+        close = getattr(response, "close", None)
     except BaseException:
-        return ""
-    if not isinstance(raw_text, (str, bytes)):
-        return ""
-    if isinstance(raw_text, bytes):
-        raw_text = raw_text[:_ERROR_DETAIL_MAX_CHARS].decode("utf-8", errors="replace")
-    prefix = raw_text[:_ERROR_DETAIL_MAX_CHARS]
-    if len(raw_text) > _ERROR_DETAIL_MAX_CHARS:
-        return prefix.rstrip() + "…"
-    return bound_text(prefix, limit=_ERROR_DETAIL_MAX_CHARS)
+        return
+    if callable(close):
+        try:
+            close()
+        except BaseException:
+            pass
 
 
-def _response_detail(response: object) -> tuple[str, bool]:
-    """Return bounded detail and whether it came from a known error field."""
+def _decode_error_prefix(prefix: bytes) -> tuple[str, bool]:
+    text = prefix.decode("utf-8", errors="replace")
+    truncated = len(prefix) >= _ERROR_DETAIL_MAX_BYTES
+    return text, truncated
 
-    text = _bounded_response_text(response)
-    match = _JSON_DETAIL_RE.search(text)
-    if not match:
-        return text, False
-    return (
-        bound_text(match.group("value"), limit=_ERROR_DETAIL_MAX_CHARS),
-        True,
+
+def _collect_json_error_strings(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    out: list[str] = []
+    for key in ("detail", "message", "error"):
+        item = value.get(key)
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+        elif isinstance(item, dict):
+            for nested_key in ("detail", "message", "error"):
+                nested = item.get(nested_key)
+                if isinstance(nested, str) and nested.strip():
+                    out.append(nested.strip())
+    return out
+
+
+def _error_details(prefix: bytes) -> tuple[list[str], str]:
+    """Return all recognized JSON error values or one whole plain message."""
+
+    text, truncated = _decode_error_prefix(prefix)
+    diagnostic = bound_text(text, limit=_ERROR_DETAIL_MAX_CHARS - 1)
+    stripped = text.strip()
+    if not stripped:
+        return [], ""
+
+    if stripped.startswith(("{", "[")):
+        if truncated:
+            return [], diagnostic
+        try:
+            payload = json.loads(stripped)
+        except (ValueError, RecursionError, MemoryError):
+            return [], diagnostic
+        details = [
+            bound_text(item, limit=_ERROR_DETAIL_MAX_CHARS - 1)
+            for item in _collect_json_error_strings(payload)
+        ]
+        return details, details[0] if details else diagnostic
+
+    if truncated or stripped.startswith("<") or "\x00" in stripped:
+        return [], diagnostic
+    return [bound_text(stripped, limit=_ERROR_DETAIL_MAX_CHARS - 1)], diagnostic
+
+
+def _is_usage_limit_detail(status_code: int, detail: str) -> bool:
+    if status_code not in _SEMANTIC_QUOTA_STATUSES:
+        return False
+    normalized = " ".join(detail.strip().split())
+    if _NEGATED_OR_QUALIFIED_RE.search(normalized):
+        return False
+    return bool(
+        _REQUEST_PLAN_LIMIT_RE.fullmatch(normalized)
+        or _PROVIDER_QUOTA_RE.fullmatch(normalized)
     )
 
 
-def _is_usage_limit_detail(status_code: int, detail: str, *, structured: bool) -> bool:
-    if status_code not in _SEMANTIC_QUOTA_STATUSES:
-        return False
-    if _PLAN_USAGE_LIMIT_RE.search(detail):
-        return True
-    return structured and bool(_PROVIDER_QUOTA_RE.search(detail))
-
-
 def _http_error(response: object, *, provider: str) -> WebBackendError:
-    """Classify a Tavily HTTP failure without unbounded body parsing."""
+    """Classify one streamed Tavily HTTP failure with bounded body work."""
 
     try:
         status_code = getattr(response, "status_code", None)
@@ -86,29 +150,30 @@ def _http_error(response: object, *, provider: str) -> WebBackendError:
     if not isinstance(status_code, int):
         status_code = 0
 
-    # Status 432 is provider-defined quota exhaustion. Establish recovery
-    # semantics before touching the response body so malformed/deep bodies can
-    # never suppress fallback. Detail extraction below is best-effort only.
+    # Status 432 is provider-defined quota exhaustion before any body work.
     quota_exhausted = status_code == 432
     try:
-        detail, structured = _response_detail(response)
+        prefix = _read_error_prefix(response)
+        semantic_details, diagnostic = _error_details(prefix)
     except BaseException:
-        detail, structured = "", False
+        semantic_details, diagnostic = [], ""
+    finally:
+        _close_response(response)
+
     if not quota_exhausted:
-        quota_exhausted = _is_usage_limit_detail(
-            status_code,
-            detail,
-            structured=structured,
+        quota_exhausted = any(
+            _is_usage_limit_detail(status_code, detail)
+            for detail in semantic_details
         )
 
     retriable = not quota_exhausted and (status_code == 429 or status_code >= 500)
     diagnostics = {
         "status_code": status_code,
-        "response_detail": detail,
+        "response_detail": diagnostic,
     }
     if quota_exhausted:
         diagnostics["failure_kind"] = "quota_exhausted"
-    suffix = f": {detail}" if detail else ""
+    suffix = f": {diagnostic}" if diagnostic else ""
     return WebBackendError(
         f"Tavily API status {status_code}{suffix}",
         provider=provider,
@@ -153,6 +218,7 @@ class TavilyBackend(WebBackend):
                     "Authorization": f"Bearer {api_key}",
                 },
                 timeout=20,
+                stream=True,
             )
         except requests.RequestException as e:
             raise WebBackendError(
@@ -163,33 +229,36 @@ class TavilyBackend(WebBackend):
         if resp.status_code != 200:
             raise _http_error(resp, provider=self.name)
         try:
-            data = resp.json() or {}
-        except ValueError as e:
-            raise WebBackendError(
-                "Tavily returned non-JSON.",
-                provider=self.name,
-                retriable=True,
-            ) from e
-        raw = data.get("results") or data.get("data") or []
-        out: List[SearchResult] = []
-        for r in raw[:max_results]:
-            if not isinstance(r, dict):
-                continue
-            title = (r.get("title") or "").strip()
-            url = (r.get("url") or r.get("link") or "").strip()
-            snippet = (r.get("content") or r.get("snippet") or "").strip()
-            if title or url:
-                out.append(SearchResult(title=title, url=url, snippet=snippet))
-        return SearchResponse(
-            results=out,
-            attempts=[
-                SearchAttempt(
+            try:
+                data = resp.json() or {}
+            except ValueError as e:
+                raise WebBackendError(
+                    "Tavily returned non-JSON.",
                     provider=self.name,
-                    success=True,
-                    message=f"Tavily returned {len(out)} result(s).",
-                )
-            ],
-        )
+                    retriable=True,
+                ) from e
+            raw = data.get("results") or data.get("data") or []
+            out: List[SearchResult] = []
+            for r in raw[:max_results]:
+                if not isinstance(r, dict):
+                    continue
+                title = (r.get("title") or "").strip()
+                url = (r.get("url") or r.get("link") or "").strip()
+                snippet = (r.get("content") or r.get("snippet") or "").strip()
+                if title or url:
+                    out.append(SearchResult(title=title, url=url, snippet=snippet))
+            return SearchResponse(
+                results=out,
+                attempts=[
+                    SearchAttempt(
+                        provider=self.name,
+                        success=True,
+                        message=f"Tavily returned {len(out)} result(s).",
+                    )
+                ],
+            )
+        finally:
+            _close_response(resp)
 
     def fetch(self, url: str) -> str:
         return self.fetch_response(url).to_tool_output()
@@ -206,6 +275,7 @@ class TavilyBackend(WebBackend):
                     "Authorization": f"Bearer {api_key}",
                 },
                 timeout=30,
+                stream=True,
             )
         except requests.RequestException as e:
             raise WebBackendError(
@@ -216,66 +286,69 @@ class TavilyBackend(WebBackend):
         if resp.status_code != 200:
             raise _http_error(resp, provider=self.name)
         try:
-            data = resp.json() or {}
-        except ValueError as e:
-            raise WebBackendError(
-                "Tavily extract returned non-JSON.",
-                provider=self.name,
-                retriable=True,
-            ) from e
-        results = data.get("results") or []
-        failed = data.get("failed_results") or []
-        if results and isinstance(results[0], dict):
-            first = results[0]
-            result_url = str(first.get("url") or url).strip() or url
-            content = first.get("raw_content")
-            if not isinstance(content, str):
-                content = ""
-            content = content.strip()
-            if content:
-                return FetchResponse(
-                    final_url=result_url,
-                    content=content,
-                    content_type="text/markdown",
-                    attempts=[
-                        FetchAttempt(
-                            provider=self.name,
-                            success=True,
-                            message=f"Tavily extracted {result_url}.",
-                        )
-                    ],
+            try:
+                data = resp.json() or {}
+            except ValueError as e:
+                raise WebBackendError(
+                    "Tavily extract returned non-JSON.",
+                    provider=self.name,
+                    retriable=True,
+                ) from e
+            results = data.get("results") or []
+            failed = data.get("failed_results") or []
+            if results and isinstance(results[0], dict):
+                first = results[0]
+                result_url = str(first.get("url") or url).strip() or url
+                content = first.get("raw_content")
+                if not isinstance(content, str):
+                    content = ""
+                content = content.strip()
+                if content:
+                    return FetchResponse(
+                        final_url=result_url,
+                        content=content,
+                        content_type="text/markdown",
+                        attempts=[
+                            FetchAttempt(
+                                provider=self.name,
+                                success=True,
+                                message=f"Tavily extracted {result_url}.",
+                            )
+                        ],
+                    )
+                raise WebBackendError(
+                    f"Tavily extract returned empty content for {result_url}",
+                    provider=self.name,
+                    retriable=True,
+                    degraded=True,
                 )
+            if failed:
+                first = failed[0]
+                if isinstance(first, dict):
+                    failed_url = str(first.get("url") or url).strip() or url
+                    reason = str(
+                        first.get("error") or first.get("reason") or "fetch failed"
+                    ).strip()
+                    raise WebBackendError(
+                        f"failed to fetch {failed_url}: {reason}",
+                        provider=self.name,
+                        retriable=True,
+                        degraded=True,
+                        diagnostics={"failed_result": {"url": failed_url, "reason": reason[:200]}},
+                    )
+                s = str(first).strip()
+                if s:
+                    raise WebBackendError(
+                        f"failed to fetch {url}: {s}",
+                        provider=self.name,
+                        retriable=True,
+                        degraded=True,
+                    )
             raise WebBackendError(
-                f"Tavily extract returned empty content for {result_url}",
+                "Tavily extract returned no results.",
                 provider=self.name,
                 retriable=True,
                 degraded=True,
             )
-        if failed:
-            first = failed[0]
-            if isinstance(first, dict):
-                failed_url = str(first.get("url") or url).strip() or url
-                reason = str(
-                    first.get("error") or first.get("reason") or "fetch failed"
-                ).strip()
-                raise WebBackendError(
-                    f"failed to fetch {failed_url}: {reason}",
-                    provider=self.name,
-                    retriable=True,
-                    degraded=True,
-                    diagnostics={"failed_result": {"url": failed_url, "reason": reason[:200]}},
-                )
-            s = str(first).strip()
-            if s:
-                raise WebBackendError(
-                    f"failed to fetch {url}: {s}",
-                    provider=self.name,
-                    retriable=True,
-                    degraded=True,
-                )
-        raise WebBackendError(
-            "Tavily extract returned no results.",
-            provider=self.name,
-            retriable=True,
-            degraded=True,
-        )
+        finally:
+            _close_response(resp)

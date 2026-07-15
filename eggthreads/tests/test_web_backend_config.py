@@ -35,7 +35,7 @@ def test_search_split_backend_overrides_global_backend(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _MockResponse(200, {
             "results": [{"title": "T", "url": "https://tavily.example", "content": "ok"}],
@@ -62,7 +62,7 @@ def test_fetch_split_backend_overrides_global_backend(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         raise AssertionError("Tavily should not be called when EGG_WEB_FETCH_BACKEND=searxng")
 
     def mock_get(url, headers=None, timeout=None, allow_redirects=None, params=None):
@@ -167,7 +167,7 @@ def test_search_chain_falls_back_from_tavily_to_searxng(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _MockResponse(503, text="temporarily unavailable")
 
@@ -200,7 +200,7 @@ def test_search_chain_falls_back_on_tavily_quota_without_marking_retryable(monke
     calls = []
     quota_detail = "Plan usage limit exceeded for this billing cycle " + ("x" * 1000)
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _MockResponse(432, text=quota_detail)
 
@@ -235,7 +235,7 @@ def test_search_chain_falls_back_on_tavily_quota_without_marking_retryable(monke
     assert len(tavily_attempt.message) < 500
     assert tavily_attempt.diagnostics == {
         "status_code": 432,
-        "response_detail": quota_detail[:400] + "…",
+        "response_detail": quota_detail[:399] + "…",
         "failure_kind": "quota_exhausted",
     }
 
@@ -255,7 +255,7 @@ def test_search_chain_falls_back_on_reported_tavily_plan_limit_phrases(
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _MockResponse(403, text=f'{{"detail": "{quota_message}"}}')
 
@@ -294,6 +294,11 @@ def test_search_chain_falls_back_on_reported_tavily_plan_limit_phrases(
         (403, '{"detail": "forbidden"}'),
         (403, 'Invalid query echoed user text "quota exceeded"'),
         (403, '{"detail": "request mentions plan usage but no limit was exceeded"}'),
+        (403, '{"detail": "This request nearly exceeds your plan usage limit"}'),
+        (403, '{"detail": "This request no longer exceeds your plan usage limit"}'),
+        (403, '{"detail": "This request does not exceed your plan usage limit"}'),
+        (403, '{"query": "This request exceeds your plan usage limit"}'),
+        (403, '<html>Example: This request exceeds your plan usage limit</html>'),
         (403, '{"detail": "quota exceeded"}'),
         (404, '{"detail": "plan usage limit exceeded"}'),
     ],
@@ -305,7 +310,7 @@ def test_search_chain_does_not_fallback_on_nonquota_tavily_failures(
     monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(status_code, text=body)
 
     def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
@@ -324,12 +329,80 @@ def test_search_chain_does_not_fallback_on_nonquota_tavily_failures(
     assert response.attempts[0].diagnostics["status_code"] == status_code
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"message":"Forbidden","detail":{"error":"Your plan usage limit has been exceeded"}}',
+        '{"detail":{"error":"Your plan usage limit has been exceeded"},"message":"Forbidden"}',
+        '{"error":{"detail":"Your plan usage limit has been exceeded"},"message":"Forbidden"}',
+    ],
+)
+def test_search_chain_checks_all_recognized_error_fields_regardless_of_order(
+    monkeypatch, body
+):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        calls.append(("post", url))
+        return _MockResponse(403, text=body)
+
+    def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
+        calls.append(("get", url))
+        return _MockResponse(200, {
+            "results": [
+                {"title": "S", "url": "https://searxng.example", "content": "fallback"},
+            ],
+        })
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = get_search_orchestrator().search_response("x", max_results=1)
+
+    assert calls == [
+        ("post", "https://api.tavily.com/search"),
+        ("get", "http://localhost:8888/search"),
+    ]
+    assert response.attempts[0].fallback_eligible is True
+    assert response.attempts[0].retriable is False
+
+
+def test_search_chain_does_not_classify_truncated_json_prefix(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    body = (
+        '{"detail":"This request exceeds your plan usage limit",'
+        '"padding":"' + ("x" * 5000) + '"}'
+    )
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        return _MockResponse(403, text=body)
+
+    def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
+        raise AssertionError("incomplete JSON must not become provider error authority")
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = get_search_orchestrator().search_response("x", max_results=1)
+
+    assert response.results == []
+    assert response.attempts[0].fallback_eligible is False
+    assert len(response.attempts[0].diagnostics["response_detail"]) == 400
+
+
 def test_search_chain_uses_only_bounded_text_prefix_for_semantic_quota(monkeypatch):
     _clear_web_env(monkeypatch)
     monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(403, text=("x" * 5000) + " plan usage limit exceeded")
 
     def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
@@ -344,7 +417,7 @@ def test_search_chain_uses_only_bounded_text_prefix_for_semantic_quota(monkeypat
     assert response.results == []
     assert response.attempts[0].fallback_eligible is False
     detail = response.attempts[0].diagnostics["response_detail"]
-    assert len(detail) == 401
+    assert len(detail) == 400
     assert detail.endswith("…")
     assert "plan usage limit" not in detail
 
@@ -354,7 +427,7 @@ def test_auto_search_falls_back_on_tavily_quota(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _MockResponse(432, text="Plan usage limit exceeded")
 
@@ -385,7 +458,7 @@ def test_pinned_tavily_quota_failure_is_terminal(monkeypatch):
     monkeypatch.setenv("EGG_WEB_SEARCH_BACKEND", "tavily")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(432, text="Plan usage limit exceeded")
 
     def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
@@ -411,7 +484,7 @@ def test_fetch_chain_falls_back_from_tavily_to_direct_http(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _MockResponse(200, {
             "results": [],
@@ -446,7 +519,7 @@ def test_search_chain_stops_on_non_fallback_tavily_client_error(monkeypatch):
     monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(401, text="invalid API key")
 
     def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
@@ -482,7 +555,7 @@ def test_search_chain_falls_back_on_throwing_432_body(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _Throwing432Response()
 
@@ -541,7 +614,7 @@ def test_fetch_chain_falls_back_on_tavily_quota_to_direct_http_not_searxng(monke
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _MockResponse(432, text="Plan usage limit exceeded")
 
@@ -577,7 +650,7 @@ def test_fetch_chain_falls_back_on_throwing_432_body(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append(("post", url))
         return _Throwing432Response()
 
@@ -620,7 +693,7 @@ def test_pinned_tavily_extract_quota_failure_is_terminal(monkeypatch, response_f
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     response = response_factory()
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return response
 
     def mock_get(url, headers=None, timeout=None, allow_redirects=None, params=None):

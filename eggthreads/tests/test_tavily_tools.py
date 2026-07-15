@@ -12,6 +12,10 @@ class _MockResponse:
         self.status_code = status_code
         self._payload = payload
         self.text = text
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
     def json(self):
         if self._payload is None:
@@ -52,7 +56,7 @@ def test_tavily_backend_uses_simple_markdown_request(monkeypatch, tools):
 
     calls = []
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         calls.append({
             'url': url,
             'json': json,
@@ -89,10 +93,103 @@ def test_tavily_backend_uses_simple_markdown_request(monkeypatch, tools):
     assert 'Body text' in result
 
 
+@pytest.mark.parametrize("operation", ["search", "extract"])
+def test_tavily_success_requests_stream_and_close_response(monkeypatch, operation):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    calls = []
+    response = _MockResponse(
+        200,
+        {'results': ([
+            {'title': 'A', 'url': 'https://a.example', 'content': 'x'},
+        ] if operation == "search" else [
+            {'url': 'https://a.example', 'raw_content': 'body'},
+        ])},
+    )
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        calls.append((url, stream))
+        return response
+
+    import requests
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    if operation == "search":
+        TavilyBackend().search_response('x')
+        expected_url = TavilyBackend.SEARCH_URL
+    else:
+        TavilyBackend().fetch_response('https://a.example')
+        expected_url = TavilyBackend.EXTRACT_URL
+
+    assert calls == [(expected_url, True)]
+    assert response.closed is True
+
+
+class _CountingRaw:
+    def __init__(self, prefix: bytes, tail_size: int):
+        self.prefix = prefix
+        self.tail_size = tail_size
+        self.bytes_read = 0
+        self.calls = []
+
+    def read(self, size=-1):
+        self.calls.append(size)
+        if self.bytes_read:
+            return b""
+        # Simulate a huge body without allocating its unread tail.
+        chunk = (self.prefix + (b"x" * max(0, size - len(self.prefix))))[:size]
+        self.bytes_read += len(chunk)
+        return chunk
+
+
+class _StreamingErrorResponse:
+    def __init__(self, status_code: int, prefix: bytes, tail_size: int = 20_000_000):
+        self.status_code = status_code
+        self.raw = _CountingRaw(prefix, tail_size)
+        self.closed = False
+
+    @property
+    def text(self):
+        raise AssertionError("streamed error classification must not access response.text")
+
+    def json(self):
+        raise AssertionError("streamed error classification must not decode full JSON")
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+def test_tavily_error_reads_bounded_stream_prefix_and_closes(monkeypatch, operation):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    response = _StreamingErrorResponse(432, b'{"detail":"Plan usage limit exceeded"}')
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        assert stream is True
+        return response
+
+    import requests
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        if operation == "search":
+            TavilyBackend().search_response('x')
+        else:
+            TavilyBackend().fetch_response('https://a.example')
+
+    error = exc_info.value
+    assert error.status_code == 432
+    assert error.retriable is False
+    assert error.fallback_eligible is True
+    assert response.raw.bytes_read == 4096
+    assert response.raw.calls == [4096]
+    assert response.closed is True
+    assert len(error.diagnostics['response_detail']) <= 400
+
+
 def test_tavily_backend_formats_failed_result(monkeypatch, tools):
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(200, {
             'results': [],
             'failed_results': [
@@ -134,7 +231,7 @@ def test_tavily_tool_aliases_are_gone(tools):
 def test_tavily_backend_search_parses_results(monkeypatch):
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         assert url == 'https://api.tavily.com/search'
         return _MockResponse(200, {
             'results': [
@@ -166,7 +263,7 @@ def test_tavily_search_quota_failure_advances_chain_but_is_not_retryable(
 ):
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(status_code, text=body)
 
     import requests
@@ -186,7 +283,7 @@ def test_tavily_search_quota_failure_advances_chain_but_is_not_retryable(
 def test_tavily_search_reads_quota_detail_from_json_error(monkeypatch):
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return _MockResponse(
             403,
             text='{"detail": {"message": "Plan usage limit exceeded for your account"}}',
@@ -207,7 +304,7 @@ def test_tavily_search_reads_quota_detail_from_json_error(monkeypatch):
 def test_tavily_extract_quota_failure_advances_only_configured_fetch_chain(monkeypatch):
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         assert url == 'https://api.tavily.com/extract'
         return _MockResponse(432, text='Plan usage limit exceeded')
 
@@ -252,7 +349,7 @@ def test_tavily_432_body_failures_are_bounded_and_cannot_suppress_quota(
 
     response = response_factory()
 
-    def mock_post(url, json=None, headers=None, timeout=None):
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
         return response
 
     import requests
