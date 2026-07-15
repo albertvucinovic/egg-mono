@@ -619,6 +619,67 @@ def test_full_sanitizer_reused_get_user_id_is_fail_closed_without_fabrication() 
 
 
 @pytest.mark.parametrize(
+    "declarations",
+    [
+        [
+            _call_message(
+                "mixed-collision",
+                "get_user_message_while_preserving_llm_turn",
+            ),
+            _call_message("mixed-collision", "bash"),
+        ],
+        [
+            _call_message("mixed-collision", "bash"),
+            _call_message(
+                "mixed-collision",
+                "get_user_message_while_preserving_llm_turn",
+            ),
+        ],
+    ],
+    ids=["get-user-first", "unrelated-tool-first"],
+)
+def test_full_sanitizer_mixed_tool_id_collision_is_fail_closed(
+    declarations: List[Dict[str, Any]],
+) -> None:
+    messages = [
+        {"role": "user", "content": "before"},
+        *declarations,
+        _tool_result("mixed-collision", "SOLE RESULT"),
+        {"role": "user", "content": "after"},
+    ]
+
+    assert _sanitize(messages) == [
+        {"role": "user", "content": "before"},
+        {"role": "user", "content": "after"},
+    ]
+
+
+def test_full_sanitizer_rejects_function_level_only_tool_call_id() -> None:
+    messages = [
+        {"role": "user", "content": "before"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "type": "function",
+                "function": {
+                    "id": "nested-only",
+                    "name": "bash",
+                    "arguments": "{}",
+                },
+            }],
+        },
+        _tool_result("nested-only", "MATCHING RESULT"),
+        {"role": "user", "content": "after"},
+    ]
+
+    assert _sanitize(messages) == [
+        {"role": "user", "content": "before"},
+        {"role": "user", "content": "after"},
+    ]
+
+
+@pytest.mark.parametrize(
     "messages",
     [
         [

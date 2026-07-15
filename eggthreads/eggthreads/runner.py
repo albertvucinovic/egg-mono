@@ -2743,17 +2743,19 @@ class ThreadRunner:
         position, emits its unique exact results immediately afterward, and
         skips only those result rows at their old positions.
 
-        Identity accounting is restricted to get-user call IDs, so unrelated
-        valid tool turns cannot disable repair. Reused IDs across declarations,
-        duplicate IDs within a declaration, and duplicate exact-ID results are
-        removed fail-closed rather than choosing or copying an ambiguous result.
+        Identity accounting selects IDs from get-user calls, then counts those
+        IDs across every assistant tool declaration. Thus unrelated distinct-ID
+        turns cannot disable repair, while a get-user/unrelated-tool ID collision
+        fails closed. Reused IDs across declarations, duplicate IDs within a
+        declaration, and duplicate exact-ID results are removed fail-closed
+        rather than choosing or copying an ambiguous result.
         Mixed and incomplete declarations stay in their original shape for the
         generic protocol guard. Original assistant/tool-call objects are kept,
         preserving opaque top-level and per-call provider metadata.
         """
 
         get_user_name = "get_user_message_while_preserving_llm_turn"
-        declaration_occurrences: dict[str, list[int]] = {}
+        declarations_by_id: dict[str, list[int]] = {}
         get_user_ids_by_declaration: dict[int, list[str]] = {}
         repairable_declarations: dict[int, tuple[Dict[str, Any], list[str]]] = {}
 
@@ -2775,7 +2777,6 @@ class ThreadRunner:
                 if name == get_user_name:
                     if isinstance(call_id, str) and call_id:
                         get_user_ids.append(call_id)
-                        declaration_occurrences.setdefault(call_id, []).append(index)
                     else:
                         get_user_only = False
                 else:
@@ -2785,9 +2786,29 @@ class ThreadRunner:
             if get_user_only and len(get_user_ids) == len(calls):
                 repairable_declarations[index] = (message, get_user_ids)
 
-        participating_ids = set(declaration_occurrences)
+        participating_ids = {
+            call_id
+            for call_ids in get_user_ids_by_declaration.values()
+            for call_id in call_ids
+        }
         if not participating_ids:
             return messages
+
+        # Count each participating identity across every assistant declaration,
+        # regardless of tool name. A result cannot safely be attributed to a
+        # get-user call when an unrelated declaration reuses the same ID.
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            calls = message.get("tool_calls")
+            if not isinstance(calls, list):
+                continue
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                call_id = call.get("id")
+                if isinstance(call_id, str) and call_id in participating_ids:
+                    declarations_by_id.setdefault(call_id, []).append(index)
 
         results_by_id: dict[str, list[tuple[int, Dict[str, Any]]]] = {
             call_id: [] for call_id in participating_ids
@@ -2802,7 +2823,7 @@ class ThreadRunner:
         ambiguous_ids = {
             call_id
             for call_id in participating_ids
-            if len(declaration_occurrences.get(call_id, [])) != 1
+            if len(declarations_by_id.get(call_id, [])) != 1
             or len(results_by_id.get(call_id, [])) > 1
         }
         ambiguous_declaration_indices = {
@@ -2847,9 +2868,11 @@ class ThreadRunner:
         """Keep only complete one-to-one assistant/tool protocol blocks.
 
         Every assistant ``tool_calls`` declaration must contain unique,
-        non-empty IDs and be followed immediately by exactly one tool result for
-        each ID. Malformed declarations and all orphan/duplicate tool rows are
-        removed from provider context; canonical local history is untouched.
+        non-empty canonical top-level ``tool_calls[].id`` values and be followed
+        immediately by exactly one tool result for each ID. A nested
+        ``function.id`` is not a provider-visible substitute. Malformed
+        declarations and all orphan/duplicate tool rows are removed from
+        provider context; canonical local history is untouched.
         """
 
         if not messages:
@@ -2873,8 +2896,6 @@ class ThreadRunner:
                     valid_declaration = False
                     break
                 call_id = call.get("id")
-                if not call_id and isinstance(call.get("function"), dict):
-                    call_id = call["function"].get("id")
                 if not isinstance(call_id, str) or not call_id:
                     valid_declaration = False
                     break
