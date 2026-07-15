@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import gzip
+import zlib
+
 import pytest
 
 from eggthreads.tools import create_default_tools
@@ -180,8 +183,9 @@ def test_tavily_error_reads_bounded_stream_prefix_and_closes(monkeypatch, operat
     assert error.status_code == 432
     assert error.retriable is False
     assert error.fallback_eligible is True
-    assert response.raw.bytes_read == 4096
-    assert response.raw.calls == [4096]
+    assert response.raw.bytes_read == 4097
+    assert sum(response.raw.calls) <= 8194
+    assert response.raw.calls[0] == 4097
     assert response.closed is True
     assert len(error.diagnostics['response_detail']) <= 400
 
@@ -368,6 +372,214 @@ def test_tavily_432_body_failures_are_bounded_and_cannot_suppress_quota(
     assert error.diagnostics['failure_kind'] == 'quota_exhausted'
     assert len(error.diagnostics['response_detail']) <= 401
     assert len(str(error)) < 450
+
+
+class _BytesRaw:
+    def __init__(self, body: bytes):
+        self.body = body
+        self.offset = 0
+        self.calls = []
+        self.decode_content = True
+
+    def read(self, size=-1):
+        self.calls.append(size)
+        if size < 0:
+            size = len(self.body) - self.offset
+        chunk = self.body[self.offset:self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+
+class _EncodedErrorResponse:
+    def __init__(self, status_code: int, body: bytes, encoding: str):
+        self.status_code = status_code
+        self.raw = _BytesRaw(body)
+        self.headers = {"Content-Encoding": encoding}
+        self.closed = False
+
+    @property
+    def text(self):
+        raise AssertionError("encoded error handling must not access response.text")
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+@pytest.mark.parametrize("encoding", ["gzip", "deflate"])
+@pytest.mark.parametrize(
+    "detail, expected_fallback",
+    [
+        ("This request exceeds your plans usage limit", True),
+        ("permission denied", False),
+    ],
+)
+def test_tavily_encoded_error_body_is_bounded_classified_and_closed(
+    monkeypatch, operation, encoding, detail, expected_fallback
+):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    plain = ('{"detail":"' + detail + '"}').encode()
+    encoded = gzip.compress(plain) if encoding == "gzip" else zlib.compress(plain)
+    response = _EncodedErrorResponse(403, encoded, encoding)
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        assert stream is True
+        return response
+
+    import requests
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        if operation == "search":
+            TavilyBackend().search_response('x')
+        else:
+            TavilyBackend().fetch_response('https://example.com')
+
+    error = exc_info.value
+    assert error.retriable is False
+    assert error.fallback_eligible is expected_fallback
+    assert error.diagnostics['response_detail'] == detail
+    assert sum(response.raw.calls) <= 8194
+    assert response.raw.calls[0] == 4097
+    assert response.raw.offset <= 4097
+    assert response.raw.decode_content is False
+    assert response.closed is True
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+def test_tavily_compression_bomb_has_bounded_wire_and_decoded_work(monkeypatch, operation):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    plain = b'{"detail":"' + (b'x' * 100_000) + b'"}'
+    encoded = gzip.compress(plain)
+    response = _EncodedErrorResponse(403, encoded, "gzip")
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        return response
+
+    import requests
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        if operation == "search":
+            TavilyBackend().search_response('x')
+        else:
+            TavilyBackend().fetch_response('https://example.com')
+
+    error = exc_info.value
+    assert error.fallback_eligible is False
+    assert len(error.diagnostics['response_detail']) <= 400
+    assert sum(response.raw.calls) <= 8194
+    assert response.raw.calls[0] == 4097
+    assert response.closed is True
+
+
+def _json_body_of_exact_size(size: int) -> bytes:
+    prefix = b'{"detail":"This request exceeds your plans usage limit","padding":"'
+    suffix = b'"}'
+    assert size >= len(prefix) + len(suffix)
+    return prefix + (b"x" * (size - len(prefix) - len(suffix))) + suffix
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+@pytest.mark.parametrize(
+    "body_size, expected_fallback",
+    [(4095, True), (4096, True), (4097, False)],
+)
+def test_tavily_json_error_exact_wire_cap_completeness(
+    monkeypatch, operation, body_size, expected_fallback
+):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    body = _json_body_of_exact_size(body_size)
+    response = _StreamingErrorResponse(403, body)
+    # This raw returns the full available body up to the requested cap+1.
+    response.raw = _BytesRaw(body)
+    response.headers = {}
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        return response
+
+    import requests
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        if operation == "search":
+            TavilyBackend().search_response('x')
+        else:
+            TavilyBackend().fetch_response('https://example.com')
+
+    error = exc_info.value
+    assert error.fallback_eligible is expected_fallback
+    assert error.retriable is False
+    assert sum(response.raw.calls) <= 8194
+    assert response.raw.calls[0] == 4097
+    assert response.closed is True
+
+
+class _ChunkedUnknownLengthRaw:
+    def __init__(self, body: bytes, *, return_size: int):
+        self.body = body[:return_size]
+        self.offset = 0
+        self.calls = []
+        self.decode_content = True
+
+    def read(self, size=-1):
+        self.calls.append(size)
+        chunk = self.body[self.offset:self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+
+@pytest.mark.parametrize(
+    "return_size, expected_fallback",
+    [(4095, True), (4096, True), (4097, False)],
+)
+def test_tavily_unknown_length_transport_uses_cap_plus_one_eof_evidence(
+    monkeypatch, return_size, expected_fallback
+):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    body = _json_body_of_exact_size(return_size)
+    response = _StreamingErrorResponse(403, body)
+    response.raw = _ChunkedUnknownLengthRaw(body, return_size=return_size)
+    response.headers = {"Transfer-Encoding": "chunked"}
+
+    import requests
+    monkeypatch.setattr(
+        requests,
+        'post',
+        lambda *args, **kwargs: response,
+    )
+
+    with pytest.raises(WebBackendError) as exc_info:
+        TavilyBackend().search_response('x')
+
+    assert exc_info.value.fallback_eligible is expected_fallback
+    assert sum(response.raw.calls) <= 8194
+    assert response.raw.calls[0] == 4097
+    assert response.closed is True
+
+
+def test_tavily_utf8_boundary_is_bounded_and_does_not_create_quota(monkeypatch):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    # Split a four-byte UTF-8 code point at the cap boundary and leave quota-like
+    # content in the unread tail. Incomplete JSON must never classify.
+    prefix = b'{"detail":"permission denied","padding":"'
+    body = prefix + (b"x" * (4095 - len(prefix))) + "😀".encode() + b' plan usage limit exceeded"}'
+    response = _StreamingErrorResponse(403, body)
+    response.raw = _BytesRaw(body)
+    response.headers = {}
+
+    import requests
+    monkeypatch.setattr(requests, 'post', lambda *args, **kwargs: response)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        TavilyBackend().search_response('x')
+
+    error = exc_info.value
+    assert error.fallback_eligible is False
+    assert len(error.diagnostics['response_detail']) <= 400
+    assert sum(response.raw.calls) <= 8194
+    assert response.raw.calls[0] == 4097
+    assert response.closed is True
 
 
 def test_tavily_backend_search_missing_key_raises():

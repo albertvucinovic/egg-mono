@@ -549,6 +549,62 @@ class _Throwing432Response:
         raise RecursionError("deep JSON")
 
 
+@pytest.mark.parametrize("status_code", [432, 433])
+def test_search_chain_falls_back_on_tavily_reserved_quota_status(monkeypatch, status_code):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        calls.append(("post", url))
+        return _MockResponse(status_code, text="PayGo balance exhausted")
+
+    def mock_get(url, params=None, headers=None, timeout=None, allow_redirects=None):
+        calls.append(("get", url))
+        return _MockResponse(200, {
+            "results": [
+                {"title": "S", "url": "https://searxng.example", "content": "fallback"},
+            ],
+        })
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = get_search_orchestrator().search_response("x", max_results=1)
+
+    assert calls == [
+        ("post", "https://api.tavily.com/search"),
+        ("get", "http://localhost:8888/search"),
+    ]
+    assert response.attempts[0].retriable is False
+    assert response.attempts[0].fallback_eligible is True
+    assert response.attempts[0].diagnostics["status_code"] == status_code
+
+
+@pytest.mark.parametrize("status_code", [432, 433])
+def test_pinned_tavily_reserved_quota_status_is_terminal(monkeypatch, status_code):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_SEARCH_BACKEND", "tavily")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+
+    import requests
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *args, **kwargs: _MockResponse(status_code, text="PayGo exhausted"),
+    )
+
+    with pytest.raises(WebBackendError) as exc_info:
+        get_search_orchestrator().search_response("x", max_results=1)
+
+    error = exc_info.value
+    assert error.status_code == status_code
+    assert error.retriable is False
+    assert error.fallback_eligible is True
+
+
 def test_search_chain_falls_back_on_throwing_432_body(monkeypatch):
     _clear_web_env(monkeypatch)
     monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
@@ -644,6 +700,38 @@ def test_fetch_chain_falls_back_on_tavily_quota_to_direct_http_not_searxng(monke
     assert response.content == "direct fallback"
 
 
+@pytest.mark.parametrize("status_code", [432, 433])
+def test_fetch_chain_falls_back_on_tavily_reserved_quota_status(monkeypatch, status_code):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_FETCH_CHAIN", "tavily,direct_http")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        calls.append(("post", url))
+        return _MockResponse(status_code, text="PayGo balance exhausted")
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None, params=None):
+        calls.append(("get", url))
+        return _MockResponse(
+            200, text="direct", url=url, headers={"Content-Type": "text/plain"}
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = get_fetch_orchestrator().fetch_response("https://example.com/page")
+
+    assert calls == [
+        ("post", "https://api.tavily.com/extract"),
+        ("get", "https://example.com/page"),
+    ]
+    assert response.attempts[0].retriable is False
+    assert response.attempts[0].fallback_eligible is True
+    assert response.attempts[0].diagnostics["status_code"] == status_code
+
+
 def test_fetch_chain_falls_back_on_throwing_432_body(monkeypatch):
     _clear_web_env(monkeypatch)
     monkeypatch.setenv("EGG_WEB_FETCH_CHAIN", "tavily,direct_http")
@@ -683,9 +771,10 @@ def test_fetch_chain_falls_back_on_throwing_432_body(monkeypatch):
     "response_factory",
     [
         lambda: _MockResponse(432, text="Plan usage limit exceeded"),
+        lambda: _MockResponse(433, text="PayGo balance exhausted"),
         _Throwing432Response,
     ],
-    ids=["normal", "throwing-body"],
+    ids=["status-432", "status-433", "throwing-body"],
 )
 def test_pinned_tavily_extract_quota_failure_is_terminal(monkeypatch, response_factory):
     _clear_web_env(monkeypatch)
@@ -707,10 +796,10 @@ def test_pinned_tavily_extract_quota_failure_is_terminal(monkeypatch, response_f
         get_fetch_orchestrator().fetch_response("https://example.com/page")
 
     error = exc_info.value
-    assert error.status_code == 432
+    assert error.status_code in {432, 433}
     assert error.retriable is False
     assert error.fallback_eligible is True
-    assert len(error.diagnostics["response_detail"]) <= 401
+    assert len(error.diagnostics["response_detail"]) <= 400
 
 
 def test_chain_env_overrides_split_and_global_backend(monkeypatch):
