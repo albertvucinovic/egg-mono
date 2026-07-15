@@ -149,3 +149,43 @@ def test_get_user_coalescing_does_not_reorder_mixed_tool_declaration() -> None:
     ]
 
     assert runner._coalesce_get_user_tool_protocol(messages) == messages
+
+
+def test_duplicate_ids_within_one_assistant_declaration_are_dropped() -> None:
+    msgs = [
+        {"role": "user", "content": "before"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "dup", "function": {"name": "bash", "arguments": "{}"}},
+                {"id": "dup", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "dup", "content": "one"},
+        {"role": "user", "content": "after"},
+    ]
+
+    assert _enforce(msgs) == [
+        {"role": "user", "content": "before"},
+        {"role": "user", "content": "after"},
+    ]
+
+
+def test_duplicate_tool_results_for_one_id_are_dropped() -> None:
+    msgs = [
+        {"role": "user", "content": "before"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "tc", "function": {"name": "bash", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "tc", "content": "one"},
+        {"role": "tool", "tool_call_id": "tc", "content": "two"},
+        {"role": "user", "content": "after"},
+    ]
+
+    assert _enforce(msgs) == [
+        {"role": "user", "content": "before"},
+        {"role": "user", "content": "after"},
+    ]

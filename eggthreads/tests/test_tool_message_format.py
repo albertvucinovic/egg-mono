@@ -545,3 +545,174 @@ def test_get_user_protocol_coalescing_keeps_conflicting_metadata_on_separate_tur
         for message in projected
         if message.get("role") == "tool"
     ] == ["wait-one", "wait-two"]
+
+
+def _call_message(call_id: str, name: str) -> Dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": "{}"},
+        }],
+    }
+
+
+def _tool_result(call_id: str, content: str) -> Dict[str, Any]:
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+
+def test_full_sanitizer_repairs_waits_without_touching_unrelated_valid_tool_turn() -> None:
+    get_user = "get_user_message_while_preserving_llm_turn"
+    messages = [
+        {"role": "user", "content": "start"},
+        _call_message("bash-1", "bash"),
+        _tool_result("bash-1", "BASH RESULT"),
+        _call_message("wait-old", get_user),
+        _call_message("wait-new", get_user),
+        _tool_result("wait-old", "OLD ANSWER"),
+        _tool_result("wait-new", "NEWEST ANSWER"),
+        {"role": "user", "content": "after"},
+    ]
+
+    out = _sanitize(messages)
+
+    protocol = [
+        (
+            message.get("role"),
+            [call.get("id") for call in message.get("tool_calls") or []],
+            message.get("tool_call_id"),
+            message.get("content"),
+        )
+        for message in out
+    ]
+    assert protocol == [
+        ("user", [], None, "start"),
+        ("assistant", ["bash-1"], None, ""),
+        ("tool", [], "bash-1", "BASH RESULT"),
+        ("assistant", ["wait-old"], None, ""),
+        ("tool", [], "wait-old", "OLD ANSWER"),
+        ("assistant", ["wait-new"], None, ""),
+        ("tool", [], "wait-new", "NEWEST ANSWER"),
+        ("user", [], None, "after"),
+    ]
+
+
+def test_full_sanitizer_reused_get_user_id_is_fail_closed_without_fabrication() -> None:
+    get_user = "get_user_message_while_preserving_llm_turn"
+    messages = [
+        {"role": "user", "content": "before"},
+        _call_message("reused", get_user),
+        _call_message("reused", get_user),
+        _tool_result("reused", "ONLY RESULT"),
+        {"role": "user", "content": "after"},
+    ]
+
+    out = _sanitize(messages)
+
+    assert out == [
+        {"role": "user", "content": "before"},
+        {"role": "user", "content": "after"},
+    ]
+    assert not [message for message in out if message.get("content") == "ONLY RESULT"]
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "duplicate", "function": {"name": "get_user_message_while_preserving_llm_turn", "arguments": "{}"}},
+                    {"id": "duplicate", "function": {"name": "get_user_message_while_preserving_llm_turn", "arguments": "{}"}},
+                ],
+            },
+            _tool_result("duplicate", "one"),
+        ],
+        [
+            _call_message("duplicate-result", "get_user_message_while_preserving_llm_turn"),
+            _tool_result("duplicate-result", "one"),
+            _tool_result("duplicate-result", "two"),
+        ],
+    ],
+)
+def test_full_sanitizer_duplicate_get_user_identity_is_fail_closed(messages) -> None:
+    wrapped = [{"role": "user", "content": "before"}, *messages, {"role": "user", "content": "after"}]
+
+    assert _sanitize(wrapped) == [
+        {"role": "user", "content": "before"},
+        {"role": "user", "content": "after"},
+    ]
+
+
+def test_full_sanitizer_keeps_declaration_chronology_with_interleaved_user_system_messages() -> None:
+    get_user = "get_user_message_while_preserving_llm_turn"
+    messages = [
+        {"role": "user", "content": "u0"},
+        _call_message("A", get_user),
+        {"role": "user", "content": "u1"},
+        _call_message("B", get_user),
+        {"role": "system", "content": "S"},
+        _tool_result("A", "answer-A"),
+        {"role": "user", "content": "u2"},
+        _tool_result("B", "answer-B"),
+        {"role": "user", "content": "u3"},
+    ]
+
+    out = _sanitize(messages)
+
+    assert [
+        (
+            message.get("role"),
+            message.get("content"),
+            message.get("tool_call_id"),
+            [call.get("id") for call in message.get("tool_calls") or []],
+        )
+        for message in out
+    ] == [
+        ("user", "u0", None, []),
+        ("assistant", "", None, ["A"]),
+        ("tool", "answer-A", "A", []),
+        ("user", "u1", None, []),
+        ("assistant", "", None, ["B"]),
+        ("tool", "answer-B", "B", []),
+        ("system", "S", None, []),
+        ("user", "u2", None, []),
+        ("user", "u3", None, []),
+    ]
+
+
+def test_full_sanitizer_repairs_complete_multicall_wait_declaration_only_as_a_whole() -> None:
+    get_user = "get_user_message_while_preserving_llm_turn"
+    declaration = {
+        "role": "assistant",
+        "content": "",
+        "thought_signature": "multi-signature",
+        "tool_calls": [
+            {"id": "multi-a", "function": {"name": get_user, "arguments": "{}"}},
+            {"id": "multi-b", "function": {"name": get_user, "arguments": "{}"}},
+        ],
+    }
+    complete = _sanitize([
+        {"role": "user", "content": "before"},
+        declaration,
+        {"role": "system", "content": "interleaved"},
+        _tool_result("multi-a", "a"),
+        _tool_result("multi-b", "b"),
+    ])
+    assert complete[1]["thought_signature"] == "multi-signature"
+    assert [message.get("tool_call_id") for message in complete[2:4]] == ["multi-a", "multi-b"]
+
+    incomplete = _sanitize([
+        {"role": "user", "content": "before"},
+        declaration,
+        _tool_result("multi-a", "a"),
+        {"role": "user", "content": "after"},
+    ])
+    assert incomplete == [
+        {"role": "user", "content": "before"},
+        {"role": "user", "content": "after"},
+    ]

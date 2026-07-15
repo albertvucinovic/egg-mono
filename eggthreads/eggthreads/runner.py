@@ -2733,268 +2733,198 @@ class ThreadRunner:
 
 
     def _coalesce_get_user_tool_protocol(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Reorder completed get-user lifecycles into valid provider blocks.
+        """Place unique completed get-user results beside their declarations.
 
         Canonical event order can contain several assistant get-user
         declarations followed later by their exact results. Provider protocols
         require each declaration to be immediately followed by its result(s).
-        This provider-only projection moves each complete, get-user-only
-        declaration together with its exact results while retaining the entire
-        original assistant object.
+        This provider-only projection iterates canonical messages in place,
+        emits each unambiguous get-user-only declaration at its original
+        position, emits its unique exact results immediately afterward, and
+        skips only those result rows at their old positions.
 
-        Retaining separate assistant blocks is important: provider adapters can
-        persist opaque top-level fields such as encrypted ``reasoning_content``
-        or ``thought_signature`` on each declaration, and those fields cannot
-        be safely merged across turns. Per-tool-call provider fields likewise
-        remain attached to their original copied call. Mixed or incomplete
-        declarations are left unchanged for the generic protocol guard.
+        Identity accounting is restricted to get-user call IDs, so unrelated
+        valid tool turns cannot disable repair. Reused IDs across declarations,
+        duplicate IDs within a declaration, and duplicate exact-ID results are
+        removed fail-closed rather than choosing or copying an ambiguous result.
+        Mixed and incomplete declarations stay in their original shape for the
+        generic protocol guard. Original assistant/tool-call objects are kept,
+        preserving opaque top-level and per-call provider metadata.
         """
 
         get_user_name = "get_user_message_while_preserving_llm_turn"
-        results_by_id: dict[str, list[tuple[int, Dict[str, Any]]]] = {}
-        for index, message in enumerate(messages):
-            if not isinstance(message, dict) or message.get("role") != "tool":
-                continue
-            call_id = message.get("tool_call_id")
-            if isinstance(call_id, str) and call_id:
-                results_by_id.setdefault(call_id, []).append((index, message))
+        declaration_occurrences: dict[str, list[int]] = {}
+        get_user_ids_by_declaration: dict[int, list[str]] = {}
+        repairable_declarations: dict[int, tuple[Dict[str, Any], list[str]]] = {}
 
-        complete_groups: list[
-            tuple[int, Dict[str, Any], list[tuple[int, Dict[str, Any]]]]
-        ] = []
         for index, message in enumerate(messages):
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
             calls = message.get("tool_calls")
             if not isinstance(calls, list) or not calls:
                 continue
-            call_ids: list[str] = []
+            get_user_ids: list[str] = []
             get_user_only = True
             for call in calls:
                 if not isinstance(call, dict):
                     get_user_only = False
-                    break
+                    continue
                 function = call.get("function")
                 name = function.get("name") if isinstance(function, dict) else None
                 call_id = call.get("id")
-                if name != get_user_name or not isinstance(call_id, str) or not call_id:
+                if name == get_user_name:
+                    if isinstance(call_id, str) and call_id:
+                        get_user_ids.append(call_id)
+                        declaration_occurrences.setdefault(call_id, []).append(index)
+                    else:
+                        get_user_only = False
+                else:
                     get_user_only = False
-                    break
-                call_ids.append(call_id)
-            if not get_user_only or len(set(call_ids)) != len(call_ids):
-                continue
-            # Exactly one result per declared identity is required. Duplicates
-            # are malformed and cannot be repaired by choosing one arbitrarily.
-            if any(len(results_by_id.get(call_id, [])) != 1 for call_id in call_ids):
-                continue
-            group_results = [results_by_id[call_id][0] for call_id in call_ids]
-            complete_groups.append((index, message, group_results))
+            if get_user_ids:
+                get_user_ids_by_declaration[index] = get_user_ids
+            if get_user_only and len(get_user_ids) == len(calls):
+                repairable_declarations[index] = (message, get_user_ids)
 
-        if not complete_groups:
+        participating_ids = set(declaration_occurrences)
+        if not participating_ids:
             return messages
 
-        # A result used by a complete group must not also be referenced by an
-        # incomplete/malformed declaration. Ambiguous reused IDs are left for
-        # the generic fail-closed protocol guard.
-        complete_declaration_indices = {index for index, _message, _results in complete_groups}
-        for index, message in enumerate(messages):
-            if index in complete_declaration_indices or not isinstance(message, dict):
-                continue
-            calls = message.get("tool_calls") if message.get("role") == "assistant" else None
-            if not isinstance(calls, list):
-                continue
-            referenced_ids = {
-                call.get("id") for call in calls
-                if isinstance(call, dict) and isinstance(call.get("id"), str)
-            }
-            if any(result_id in referenced_ids for result_id in results_by_id):
-                return messages
-
-        removed_indices = {
-            index
-            for declaration_index, _message, group_results in complete_groups
-            for index in (declaration_index, *(result_index for result_index, _result in group_results))
+        results_by_id: dict[str, list[tuple[int, Dict[str, Any]]]] = {
+            call_id: [] for call_id in participating_ids
         }
-        first_index = min(removed_indices)
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict) or message.get("role") != "tool":
+                continue
+            call_id = message.get("tool_call_id")
+            if isinstance(call_id, str) and call_id in participating_ids:
+                results_by_id[call_id].append((index, message))
+
+        ambiguous_ids = {
+            call_id
+            for call_id in participating_ids
+            if len(declaration_occurrences.get(call_id, [])) != 1
+            or len(results_by_id.get(call_id, [])) > 1
+        }
+        ambiguous_declaration_indices = {
+            index
+            for index, call_ids in get_user_ids_by_declaration.items()
+            if any(call_id in ambiguous_ids for call_id in call_ids)
+        }
+        ambiguous_result_indices = {
+            result_index
+            for call_id in ambiguous_ids
+            for result_index, _result in results_by_id.get(call_id, [])
+        }
+
+        valid_groups: dict[int, list[tuple[int, Dict[str, Any]]]] = {}
+        used_result_indices: set[int] = set()
+        for index, (_message, call_ids) in repairable_declarations.items():
+            if index in ambiguous_declaration_indices or len(set(call_ids)) != len(call_ids):
+                continue
+            if any(len(results_by_id.get(call_id, [])) != 1 for call_id in call_ids):
+                # Incomplete declarations remain for the generic fail-closed
+                # guard; do not partly repair a multi-call declaration.
+                continue
+            group_results = [results_by_id[call_id][0] for call_id in call_ids]
+            if any(result_index <= index for result_index, _result in group_results):
+                continue
+            valid_groups[index] = group_results
+            used_result_indices.update(result_index for result_index, _result in group_results)
+
         rebuilt: List[Dict[str, Any]] = []
         for index, message in enumerate(messages):
-            if index == first_index:
-                for _declaration_index, declaration, group_results in complete_groups:
-                    rebuilt.append(declaration)
-                    rebuilt.extend(result for _result_index, result in group_results)
-            if index not in removed_indices:
-                rebuilt.append(message)
+            if index in ambiguous_declaration_indices or index in ambiguous_result_indices:
+                continue
+            if index in used_result_indices:
+                continue
+            rebuilt.append(message)
+            if index in valid_groups:
+                rebuilt.extend(result for _result_index, result in valid_groups[index])
         return rebuilt
 
 
     def _enforce_assistant_toolcall_protocol(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Ensure assistant tool_calls are followed by matching tool messages.
+        """Keep only complete one-to-one assistant/tool protocol blocks.
 
-        Provider APIs such as OpenAI require that an assistant message
-        with ``tool_calls`` is immediately followed by one or more
-        ``tool`` messages, each bearing a ``tool_call_id`` from that
-        assistant turn.  If other roles (user/system/assistant) are
-        interleaved before all tool_call_ids have received a response,
-        the provider will reject the request.
-
-        This helper walks the final, sanitized message list and:
-
-          * Keeps assistant tool_call turns whose immediately-following
-            tool messages form a complete, one-to-one response set for
-            their ``tool_call_id`` values.
-          * Drops assistant tool_call messages that do *not* have such
-            a contiguous tool-message block, and also drops any tool
-            messages whose ``tool_call_id`` does not belong to a kept
-            assistant turn.
-
-        The local event log remains untouched; this only affects what is
-        sent to the provider, allowing previously "broken" threads to
-        recover while preserving a faithful transcript for UIs.
+        Every assistant ``tool_calls`` declaration must contain unique,
+        non-empty IDs and be followed immediately by exactly one tool result for
+        each ID. Malformed declarations and all orphan/duplicate tool rows are
+        removed from provider context; canonical local history is untouched.
         """
 
         if not messages:
             return messages
 
         n = len(messages)
+        valid_blocks: dict[int, list[int]] = {}
+        claimed_tool_indices: set[int] = set()
 
-        # First pass: determine which assistant tool_call messages have
-        # a valid, contiguous block of tool responses immediately
-        # following them, and record the set of tool_call_ids that
-        # belong to such "good" turns.
-        good_assistant_idx = set()
-        good_tool_ids: set[str] = set()
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            calls = message.get("tool_calls")
+            if not isinstance(calls, list) or not calls:
+                continue
 
-        i = 0
-        while i < n:
-            m = messages[i]
-            if isinstance(m, dict) and m.get("role") == "assistant":
-                tcs = m.get("tool_calls") or []
-                if isinstance(tcs, list) and tcs:
-                    expected_ids: list[str] = []
-                    for tc in tcs:
-                        if not isinstance(tc, dict):
-                            continue
-                        # OpenAI-style tool calls: {"id": "...", "function": {...}}
-                        tcid = tc.get("id") or tc.get("tool_call_id")
-                        if not tcid and isinstance(tc.get("function"), dict):
-                            tcid = tc["function"].get("id")
-                        if isinstance(tcid, str) and tcid:
-                            expected_ids.append(tcid)
-                    if expected_ids:
-                        remaining = set(expected_ids)
-                        j = i + 1
-                        ok = True
-                        # Consume a contiguous block of tool messages
-                        # immediately following this assistant. Any
-                        # non-tool or unexpected tool_call_id breaks the
-                        # adjacency requirement.
-                        while j < n:
-                            mj = messages[j]
-                            if not isinstance(mj, dict) or mj.get("role") != "tool":
-                                break
-                            tcid2 = mj.get("tool_call_id")
-                            if not isinstance(tcid2, str) or not tcid2:
-                                ok = False
-                                break
-                            if tcid2 not in remaining:
-                                # Either duplicate or unmatched id;
-                                # treat this assistant turn as
-                                # malformed for provider purposes.
-                                ok = False
-                                break
-                            remaining.remove(tcid2)
-                            j += 1
-                        if ok and not remaining:
-                            good_assistant_idx.add(i)
-                            for tid in expected_ids:
-                                good_tool_ids.add(tid)
-                        # Skip over the tool block we just inspected
-                        i = j
-                        continue
-            i += 1
+            expected_ids: list[str] = []
+            valid_declaration = True
+            for call in calls:
+                if not isinstance(call, dict):
+                    valid_declaration = False
+                    break
+                call_id = call.get("id")
+                if not call_id and isinstance(call.get("function"), dict):
+                    call_id = call["function"].get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    valid_declaration = False
+                    break
+                expected_ids.append(call_id)
+            if not valid_declaration or len(set(expected_ids)) != len(expected_ids):
+                continue
 
-        # Second pass: rebuild messages, keeping only:
-        #   - non-tool, non-assistant-tool_call messages as-is
-        #   - assistant tool_call messages whose index is in
-        #     good_assistant_idx, plus their immediately-following tool
-        #     messages for good_tool_ids
-        #   - tool messages whose tool_call_id is in good_tool_ids and
-        #     which are not part of a malformed assistant turn.
+            expected = set(expected_ids)
+            seen: set[str] = set()
+            tool_indices: list[int] = []
+            cursor = index + 1
+            valid_results = True
+            while cursor < n:
+                candidate = messages[cursor]
+                if not isinstance(candidate, dict) or candidate.get("role") != "tool":
+                    break
+                result_id = candidate.get("tool_call_id")
+                if (
+                    not isinstance(result_id, str)
+                    or not result_id
+                    or result_id not in expected
+                    or result_id in seen
+                ):
+                    valid_results = False
+                    break
+                seen.add(result_id)
+                tool_indices.append(cursor)
+                cursor += 1
+
+            if valid_results and seen == expected and len(tool_indices) == len(expected_ids):
+                valid_blocks[index] = tool_indices
+                claimed_tool_indices.update(tool_indices)
+
         out: List[Dict[str, Any]] = []
-        i = 0
-        while i < n:
-            m = messages[i]
-            if not isinstance(m, dict):
-                out.append(m)
-                i += 1
+        for index, message in enumerate(messages):
+            if index in claimed_tool_indices:
                 continue
-
-            role = m.get("role")
-
-            if i in good_assistant_idx:
-                # Keep the assistant tool_call message and its
-                # contiguous block of tool responses that we
-                # already validated above.
-                out.append(m)
-                i += 1
-                while i < n:
-                    mj = messages[i]
-                    if not isinstance(mj, dict) or mj.get("role") != "tool":
-                        break
-                    tcid2 = mj.get("tool_call_id")
-                    if not isinstance(tcid2, str) or tcid2 not in good_tool_ids:
-                        break
-                    out.append(mj)
-                    i += 1
+            if not isinstance(message, dict):
+                out.append(message)
                 continue
-
-            if role == "assistant":
-                tcs = m.get("tool_calls") or []
-                if isinstance(tcs, list) and tcs:
-                    # Malformed assistant tool_call turn: drop the
-                    # assistant message itself and skip over any
-                    # immediately-following tool messages that belong
-                    # to its declared tool_call_ids. Any remaining
-                    # orphan tool messages for these ids will be
-                    # discarded by the generic tool-handling block
-                    # below.
-                    bad_ids: set[str] = set()
-                    for tc in tcs:
-                        if not isinstance(tc, dict):
-                            continue
-                        tcid = tc.get("id") or tc.get("tool_call_id")
-                        if not tcid and isinstance(tc.get("function"), dict):
-                            tcid = tc["function"].get("id")
-                        if isinstance(tcid, str) and tcid:
-                            bad_ids.add(tcid)
-                    i += 1
-                    while i < n:
-                        mj = messages[i]
-                        if not isinstance(mj, dict) or mj.get("role") != "tool":
-                            break
-                        tcid2 = mj.get("tool_call_id")
-                        if isinstance(tcid2, str) and tcid2 in bad_ids:
-                            # Skip tool message that belongs to this
-                            # malformed assistant turn.
-                            i += 1
-                            continue
-                        break
-                    continue
-
+            role = message.get("role")
+            calls = message.get("tool_calls")
+            if role == "assistant" and isinstance(calls, list) and calls:
+                if index in valid_blocks:
+                    out.append(message)
+                    out.extend(messages[tool_index] for tool_index in valid_blocks[index])
+                continue
             if role == "tool":
-                tcid = m.get("tool_call_id")
-                if isinstance(tcid, str) and tcid in good_tool_ids:
-                    out.append(m)
-                # Else: orphan or malformed tool message -> drop from
-                # provider view.
-                i += 1
                 continue
-
-            # All other messages (user/system/assistant without
-            # tool_calls) are passed through unchanged.
-            out.append(m)
-            i += 1
-
+            out.append(message)
         return out
 
 
