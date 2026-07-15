@@ -36,8 +36,9 @@ CHANNEL_ACTIVITY: Dict[str, Dict[str, Any]] = {}
 CHANNEL_REAPING: set[str] = set()
 CHANNEL_STARTING: Dict[str, int] = {}
 CHANNEL_PROCESS_META: Dict[str, Dict[str, int]] = {}
-CHANNEL_GENERATIONS: Dict[str, int] = {}
+CHANNEL_GENERATION_COUNTER = 0
 CHANNEL_IDLE_TIMEOUT_SEC: Optional[float] = None
+CHANNEL_REAPER_RUNTIME_VERSION = 2
 DAEMON_GENERATION = uuid.uuid4().hex
 DAEMON_STARTED_AT = time.time()
 LAST_ACTIVITY_AT = DAEMON_STARTED_AT
@@ -59,10 +60,10 @@ def _channel_key(language: str, channel: str) -> str:
     return f"{language}:{channel}"
 
 
-def _next_channel_generation_locked(channel_key: str) -> int:
-    generation = CHANNEL_GENERATIONS.get(channel_key, 0) + 1
-    CHANNEL_GENERATIONS[channel_key] = generation
-    return generation
+def _next_channel_generation_locked() -> int:
+    global CHANNEL_GENERATION_COUNTER
+    CHANNEL_GENERATION_COUNTER += 1
+    return CHANNEL_GENERATION_COUNTER
 
 
 def _channel_condition_locked(channel_key: str) -> threading.Condition:
@@ -92,10 +93,23 @@ def _derive_process_meta_locked(language: str, channel: str, process: Any) -> Op
         pgid = int(os.getpgid(pid))
     except Exception:
         pgid = pid
-    generation = _next_channel_generation_locked(key)
+    generation = _next_channel_generation_locked()
     meta = {"generation": generation, "pgid": pgid, "pid": pid}
     CHANNEL_PROCESS_META[key] = meta
     return dict(meta)
+
+
+def _proc_stat_state_and_pgid(text: str) -> tuple[str, int]:
+    """Parse /proc/PID/stat despite spaces/parentheses in comm."""
+
+    close = text.rfind(")")
+    if close < 0:
+        raise ValueError("invalid proc stat")
+    fields = text[close + 1:].strip().split()
+    # Suffix starts at field 3 (state); pgrp is field 5 => suffix index 2.
+    if len(fields) < 3:
+        raise ValueError("incomplete proc stat")
+    return fields[0], int(fields[2])
 
 
 def _process_group_has_live_members(pgid: int) -> bool:
@@ -104,8 +118,8 @@ def _process_group_has_live_members(pgid: int) -> bool:
         try:
             for stat_path in proc_root.glob("[0-9]*/stat"):
                 try:
-                    parts = stat_path.read_text().split()
-                    if len(parts) > 4 and int(parts[4]) == pgid and parts[2] != "Z":
+                    state, process_pgid = _proc_stat_state_and_pgid(stat_path.read_text())
+                    if process_pgid == pgid and state != "Z":
                         return True
                 except (FileNotFoundError, PermissionError, ValueError, IndexError):
                     continue
@@ -154,9 +168,53 @@ def _touch_channel_locked(
     key = _channel_key(language, channel)
     record = CHANNEL_ACTIVITY.setdefault(key, {})
     record["last_activity_at"] = float(time.time() if now is None else now)
-    if clear_reap:
+    # A containment failure is authoritative until teardown is subsequently
+    # verified.  Never clear only its reason (or silently admit a successor)
+    # merely because the still-running eval updates channel activity.
+    if clear_reap and record.get("reap_error") is None:
         record.pop("reaped_at", None)
         record.pop("reap_reason", None)
+
+
+def _ensure_channel_activity_locked(channel_key: str) -> Dict[str, Any]:
+    activity = CHANNEL_ACTIVITY.setdefault(channel_key, {})
+    activity.setdefault("last_activity_at", time.time())
+    return activity
+
+
+def _channel_teardown_error_locked(channel_key: str) -> Optional[str]:
+    activity = CHANNEL_ACTIVITY.get(channel_key, {})
+    error = activity.get("reap_error")
+    return str(error) if isinstance(error, str) and error else None
+
+
+def _mark_channel_teardown_failed_locked(channel_key: str, error: str) -> None:
+    activity = _ensure_channel_activity_locked(channel_key)
+    activity.pop("reaped_at", None)
+    activity["reap_reason"] = "teardown_failed"
+    activity["reap_error"] = error or "process group teardown was not verified"
+
+
+def _mark_channel_teardown_failed(channel_key: str, error: str) -> None:
+    with ACTIVE_EVALS_LOCK:
+        _mark_channel_teardown_failed_locked(channel_key, error)
+
+
+def _clear_channel_terminal_status_locked(channel_key: str) -> None:
+    activity = CHANNEL_ACTIVITY.get(channel_key)
+    if activity is None:
+        return
+    activity.pop("reaped_at", None)
+    activity.pop("reap_reason", None)
+    activity.pop("reap_error", None)
+
+
+def _raise_if_channel_quarantined_locked(channel_key: str) -> None:
+    error = _channel_teardown_error_locked(channel_key)
+    if error:
+        raise RuntimeError(
+            f"Channel is quarantined because process-group teardown failed: {error}"
+        )
 
 
 def touch_channel(language: str, channel: str, *, now: Optional[float] = None) -> None:
@@ -245,17 +303,51 @@ def _python_worker_loop(conn) -> None:
 def _get_python_worker(repl_name: str) -> tuple[mp.Process, Any]:
     key = _channel_key("python", repl_name)
     while True:
+        reserved: Optional[Dict[str, int]] = None
+        stale_existing = None
         with ACTIVE_EVALS_LOCK:
             _wait_for_channel_reap_locked(key)
-            existing = PY_WORKERS.get(repl_name)
-            if existing is not None and existing[0].is_alive():
-                return existing
+            _raise_if_channel_quarantined_locked(key)
             if key in CHANNEL_STARTING:
                 _channel_condition_locked(key).wait(0.05)
                 continue
-            generation = _next_channel_generation_locked(key)
-            CHANNEL_STARTING[key] = generation
-            break
+            existing = PY_WORKERS.get(repl_name)
+            if existing is not None and existing[0].is_alive():
+                return existing
+            meta = CHANNEL_PROCESS_META.get(key)
+            if meta is not None:
+                CHANNEL_REAPING.add(key)
+                reserved = dict(meta)
+                stale_existing = existing
+            else:
+                generation = _next_channel_generation_locked()
+                CHANNEL_STARTING[key] = generation
+                break
+        if reserved is not None:
+            proc = stale_existing[0] if stale_existing is not None else None
+            conn = stale_existing[1] if stale_existing is not None else None
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            ok, error = _kill_and_verify_process_group(int(reserved["pgid"]), proc)
+            with ACTIVE_EVALS_LOCK:
+                current = CHANNEL_PROCESS_META.get(key)
+                if current == reserved:
+                    if ok:
+                        PY_WORKERS.pop(repl_name, None)
+                        CHANNEL_PROCESS_META.pop(key, None)
+                        _clear_channel_terminal_status_locked(key)
+                    else:
+                        _mark_channel_teardown_failed_locked(key, error)
+                CHANNEL_REAPING.discard(key)
+                _channel_condition_locked(key).notify_all()
+            if not ok or current != reserved:
+                raise RuntimeError(
+                    "Python channel leader exited but its process group could not be contained: "
+                    + (error if not ok else "channel generation changed during teardown")
+                )
 
     parent_conn = child_conn = proc = None
     try:
@@ -278,6 +370,7 @@ def _get_python_worker(repl_name: str) -> tuple[mp.Process, Any]:
             PY_WORKERS[repl_name] = (proc, parent_conn)
             CHANNEL_PROCESS_META[key] = {"generation": generation, "pgid": pgid, "pid": proc.pid}
             CHANNEL_STARTING.pop(key, None)
+            _clear_channel_terminal_status_locked(key)
             _touch_channel_locked("python", repl_name)
             _channel_condition_locked(key).notify_all()
         return proc, parent_conn
@@ -299,21 +392,65 @@ def _get_python_worker(repl_name: str) -> tuple[mp.Process, Any]:
         raise
 
 
+def _reserve_channel_teardown_locked(
+    language: str,
+    channel: str,
+    process: Any,
+) -> tuple[Optional[Dict[str, int]], bool]:
+    key = _channel_key(language, channel)
+    meta = (
+        _derive_process_meta_locked(language, channel, process)
+        if process is not None
+        else CHANNEL_PROCESS_META.get(key)
+    )
+    if meta is None:
+        return None, False
+    own_reservation = key not in CHANNEL_REAPING
+    if own_reservation:
+        CHANNEL_REAPING.add(key)
+    return dict(meta), own_reservation
+
+
+def _finish_channel_teardown_locked(
+    language: str,
+    channel: str,
+    reserved_meta: Dict[str, int],
+    *,
+    ok: bool,
+    error: str,
+    own_reservation: bool,
+    preserve_activity: bool,
+) -> None:
+    key = _channel_key(language, channel)
+    current = CHANNEL_PROCESS_META.get(key)
+    if current is not None and current.get("generation") == reserved_meta.get("generation"):
+        if ok:
+            if language == "python":
+                PY_WORKERS.pop(channel, None)
+            else:
+                BASH_REPLS.pop(channel, None)
+            CHANNEL_PROCESS_META.pop(key, None)
+            _clear_channel_terminal_status_locked(key)
+            if not preserve_activity and not CHANNEL_QUEUES.get(key):
+                CHANNEL_ACTIVITY.pop(key, None)
+        else:
+            _mark_channel_teardown_failed_locked(key, error)
+    if own_reservation:
+        CHANNEL_REAPING.discard(key)
+        _channel_condition_locked(key).notify_all()
+
+
 def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> bool:
     key = _channel_key("python", repl_name)
     with ACTIVE_EVALS_LOCK:
         existing = PY_WORKERS.get(repl_name)
-        meta = _derive_process_meta_locked("python", repl_name, existing) if existing is not None else CHANNEL_PROCESS_META.get(key)
+        meta, own_reservation = _reserve_channel_teardown_locked(
+            "python", repl_name, existing,
+        )
         if meta is None:
             if not preserve_activity:
                 _forget_channel_if_reset("python", repl_name)
             return True
-        generation = int(meta["generation"])
-        if key not in CHANNEL_REAPING:
-            CHANNEL_REAPING.add(key)
-            own_reservation = True
-        else:
-            own_reservation = False
     proc = existing[0] if existing is not None else None
     conn = existing[1] if existing is not None else None
     if conn is not None:
@@ -323,20 +460,15 @@ def _kill_python_worker(repl_name: str, *, preserve_activity: bool = False) -> b
             pass
     ok, error = _kill_and_verify_process_group(int(meta["pgid"]), proc)
     with ACTIVE_EVALS_LOCK:
-        current = CHANNEL_PROCESS_META.get(key)
-        if current is not None and int(current.get("generation", -1)) == generation:
-            if ok:
-                PY_WORKERS.pop(repl_name, None)
-                CHANNEL_PROCESS_META.pop(key, None)
-                if not preserve_activity and not CHANNEL_QUEUES.get(key):
-                    CHANNEL_ACTIVITY.pop(key, None)
-            else:
-                activity = CHANNEL_ACTIVITY.setdefault(key, {})
-                activity["reap_error"] = error
-                activity["reap_reason"] = "teardown_failed"
-        if own_reservation:
-            CHANNEL_REAPING.discard(key)
-            _channel_condition_locked(key).notify_all()
+        _finish_channel_teardown_locked(
+            "python",
+            repl_name,
+            meta,
+            ok=ok,
+            error=error,
+            own_reservation=own_reservation,
+            preserve_activity=preserve_activity,
+        )
     return ok
 
 
@@ -382,10 +514,10 @@ def _daemon_status_payload(now: Optional[float] = None) -> Dict[str, Any]:
             activity = CHANNEL_ACTIVITY.get(channel_key, {})
             details: Dict[str, Any] = {
                 "state": (
-                    "reaping" if channel_key in CHANNEL_REAPING
+                    "reap_failed" if activity.get("reap_error")
                     else (
                         "busy" if queue
-                        else ("reaped" if activity.get("reaped_at") else ("reap_failed" if activity.get("reap_error") else "ready"))
+                        else ("reaping" if channel_key in CHANNEL_REAPING else ("reaped" if activity.get("reaped_at") else "ready"))
                     )
                 ),
                 "last_activity_at": activity.get("last_activity_at"),
@@ -406,6 +538,7 @@ def _daemon_status_payload(now: Optional[float] = None) -> Dict[str, Any]:
         "protocol_version": 2,
         "daemon_generation": DAEMON_GENERATION,
         "channel_reaping": {
+            "runtime_version": CHANNEL_REAPER_RUNTIME_VERSION,
             "enabled": CHANNEL_IDLE_TIMEOUT_SEC is not None,
             "idle_timeout_sec": CHANNEL_IDLE_TIMEOUT_SEC,
         },
@@ -610,6 +743,23 @@ def _execute_python_inline(
     return format_output(stdout.getvalue(), stderr.getvalue())
 
 
+def _channel_containment_failure_output(
+    language: str,
+    channel: str,
+    event: str,
+    error: Optional[str] = None,
+) -> str:
+    if error is None:
+        with ACTIVE_EVALS_LOCK:
+            error = _channel_teardown_error_locked(_channel_key(language.lower(), channel))
+    detail = error or "process group teardown was not verified"
+    return (
+        "--- CONTAINMENT FAILURE ---\n"
+        f"{language} REPL eval {event}, but its process group could not be stopped. "
+        f"The channel is quarantined and may still be running side effects: {detail}"
+    )
+
+
 def execute_python(
     code: str,
     repl_name: str,
@@ -652,7 +802,8 @@ def execute_python(
     start = time.monotonic()
     while True:
         if cancel_check is not None and cancel_check():
-            _kill_python_worker(repl_key)
+            if not _kill_python_worker(repl_key, preserve_activity=True):
+                return _channel_containment_failure_output("Python", repl_key, "cancelled")
             return "--- INTERRUPTED ---\nPython REPL eval was cancelled; this Python channel was reset."
         if conn.poll(0.05):
             try:
@@ -669,27 +820,52 @@ def execute_python(
             _kill_python_worker(repl_key)
             return "Error: Python worker exited before returning a result."
         if timeout is not None and (time.monotonic() - start) >= timeout:
-            _kill_python_worker(repl_key)
+            if not _kill_python_worker(repl_key, preserve_activity=True):
+                return _channel_containment_failure_output("Python", repl_key, "timed out")
             return f"--- TIMEOUT ---\nPython REPL timed out after {timeout} seconds"
 
 
 def _bash_proc(repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) -> subprocess.Popen:
     key = _channel_key("bash", repl_name)
     while True:
+        reserved: Optional[Dict[str, int]] = None
+        stale_proc = None
         with ACTIVE_EVALS_LOCK:
             _wait_for_channel_reap_locked(key)
+            _raise_if_channel_quarantined_locked(key)
+            if key in CHANNEL_STARTING:
+                _channel_condition_locked(key).wait(0.05)
+                continue
             existing = BASH_REPLS.get(repl_name)
             meta = CHANNEL_PROCESS_META.get(key)
             if existing is not None and existing.poll() is None:
                 return existing
-            if meta is not None and _process_group_has_live_members(int(meta["pgid"])):
-                raise RuntimeError("Bash channel leader exited while descendants remain")
-            if key in CHANNEL_STARTING:
-                _channel_condition_locked(key).wait(0.05)
-                continue
-            generation = _next_channel_generation_locked(key)
-            CHANNEL_STARTING[key] = generation
-            break
+            if meta is not None:
+                CHANNEL_REAPING.add(key)
+                reserved = dict(meta)
+                stale_proc = existing
+            else:
+                generation = _next_channel_generation_locked()
+                CHANNEL_STARTING[key] = generation
+                break
+        if reserved is not None:
+            ok, error = _kill_and_verify_process_group(int(reserved["pgid"]), stale_proc)
+            with ACTIVE_EVALS_LOCK:
+                current = CHANNEL_PROCESS_META.get(key)
+                if current == reserved:
+                    if ok:
+                        BASH_REPLS.pop(repl_name, None)
+                        CHANNEL_PROCESS_META.pop(key, None)
+                        _clear_channel_terminal_status_locked(key)
+                    else:
+                        _mark_channel_teardown_failed_locked(key, error)
+                CHANNEL_REAPING.discard(key)
+                _channel_condition_locked(key).notify_all()
+            if not ok or current != reserved:
+                raise RuntimeError(
+                    "Bash channel leader exited but its process group could not be contained: "
+                    + (error if not ok else "channel generation changed during teardown")
+                )
     proc = None
     try:
         env = os.environ.copy()
@@ -713,6 +889,7 @@ def _bash_proc(repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) 
             BASH_REPLS[repl_name] = proc
             CHANNEL_PROCESS_META[key] = {"generation": generation, "pgid": pgid, "pid": proc.pid}
             CHANNEL_STARTING.pop(key, None)
+            _clear_channel_terminal_status_locked(key)
             _touch_channel_locked("bash", repl_name)
             _channel_condition_locked(key).notify_all()
         return proc
@@ -762,10 +939,12 @@ def execute_bash(
     output = ""
     while True:
         if cancel_check is not None and cancel_check():
-            _terminate_bash_channel(repl_name)
+            if not _terminate_bash_channel(repl_name, preserve_activity=True):
+                return _channel_containment_failure_output("Bash", repl_name, "cancelled")
             return "--- INTERRUPTED ---\nBash REPL eval was cancelled; this Bash channel was reset."
         if timeout_sec is not None and (time.monotonic() - start) >= timeout_sec:
-            _terminate_bash_channel(repl_name)
+            if not _terminate_bash_channel(repl_name, preserve_activity=True):
+                return _channel_containment_failure_output("Bash", repl_name, "timed out")
             return f"--- TIMEOUT ---\nBash REPL timed out after {timeout_sec} seconds"
         ready, _, _ = select.select([proc.stdout], [], [], 0.05)
         if not ready:
@@ -831,24 +1010,42 @@ def _write_terminal_response(bridge_dir: Path, req_id: str, payload: Dict[str, A
             channel = str(request.get("channel") or request.get("repl_name") or payload.get("channel") or "default")
             cancel_reason = str(active.get("cancel_reason") or "interrupted")
             running = bool(active.get("running"))
-            if cancel_reason == "timeout":
-                reason = "timeout"
-                message = f"{language.title()} REPL eval timed out"
+            containment_error = active.get("containment_error")
+            if isinstance(containment_error, str) and containment_error:
+                payload = {
+                    "ok": False,
+                    "reason": "containment_failure",
+                    "error": containment_error,
+                    "output": _channel_containment_failure_output(
+                        language,
+                        channel,
+                        "timed out" if cancel_reason == "timeout" else "was cancelled",
+                        containment_error,
+                    ),
+                    "channel": channel,
+                    "language": language,
+                    "host_owner_id": str(request.get("host_owner_id") or ""),
+                }
+                containment_error = None
             else:
-                reason = "cancelled"
-                message = f"{language.title()} REPL eval was cancelled"
-            if running:
-                message += f"; this {language.title()} channel was reset."
-            else:
-                message += " before execution."
-            payload = {
-                "ok": True,
-                "reason": reason,
-                "output": f"--- {reason.upper()} ---\n{message}",
-                "channel": channel,
-                "language": language,
-                "host_owner_id": str(request.get("host_owner_id") or ""),
-            }
+                if cancel_reason == "timeout":
+                    reason = "timeout"
+                    message = f"{language.title()} REPL eval timed out"
+                else:
+                    reason = "cancelled"
+                    message = f"{language.title()} REPL eval was cancelled"
+                if running:
+                    message += f"; this {language.title()} channel was reset."
+                else:
+                    message += " before execution."
+                payload = {
+                    "ok": True,
+                    "reason": reason,
+                    "output": f"--- {reason.upper()} ---\n{message}",
+                    "channel": channel,
+                    "language": language,
+                    "host_owner_id": str(request.get("host_owner_id") or ""),
+                }
         atomic_write_json(res_path, {
             "protocol_version": 2,
             "request_id": req_id,
@@ -917,16 +1114,24 @@ def _run_claimed_eval(
             reason = "cancelled" if output.startswith("--- INTERRUPTED ---") else ("timeout" if output.startswith("--- TIMEOUT ---") else "success")
         else:
             raise ValueError(f"Unsupported language: {language}")
+        if output.startswith("--- CONTAINMENT FAILURE ---"):
+            reason = "containment_failure"
         _write_terminal_response(bridge_dir, req_id, {
-            "ok": True, "output": output, "reason": reason,
+            "ok": reason != "containment_failure", "output": output, "reason": reason,
+            "error": output if reason == "containment_failure" else None,
             "channel": channel, "language": language,
             "host_owner_id": str(payload.get("host_owner_id") or ""),
         })
     except Exception as e:
-        _write_terminal_response(bridge_dir, req_id, {
-            "ok": False, "reason": "error", "error": f"{type(e).__name__}: {e}",
-            "channel": channel, "language": language,
-        })
+        with ACTIVE_EVALS_LOCK:
+            containment_error = active.get("containment_error")
+        if isinstance(containment_error, str) and containment_error:
+            _write_terminal_response(bridge_dir, req_id, {})
+        else:
+            _write_terminal_response(bridge_dir, req_id, {
+                "ok": False, "reason": "error", "error": f"{type(e).__name__}: {e}",
+                "channel": channel, "language": language,
+            })
     finally:
         with ACTIVE_EVALS_LOCK:
             _touch_channel_locked(language, channel)
@@ -992,25 +1197,47 @@ def process_eval_request(req_path: Path, bridge_dir: Path, runtime_dir: Path) ->
     language = str(payload.get("language") or "python")
     channel = str(payload.get("channel") or payload.get("repl_name") or "default")
     channel_key = f"{language}:{channel}"
+    quarantine_response: Optional[Dict[str, Any]] = None
     with ACTIVE_EVALS_LOCK:
         _wait_for_channel_reap_locked(channel_key)
-        _touch_channel_locked(language, channel)
-        ACTIVE_EVALS[req_id] = {
-            "cancel": cancel_event,
-            "cancel_reason": None,
-            "payload": payload,
-            "running": False,
-            "terminal_written": False,
-        }
-        channel_condition = CHANNEL_CONDITIONS.setdefault(
-            channel_key,
-            threading.Condition(ACTIVE_EVALS_LOCK),
-        )
-        # Queue creation/removal is serialized by ACTIVE_EVALS_LOCK.  Mutations
-        # also take the channel condition so a finishing request cannot remove
-        # an apparently empty queue while a newly claimed request is appended.
-        with channel_condition:
-            CHANNEL_QUEUES.setdefault(channel_key, []).append(req_id)
+        quarantine_error = _channel_teardown_error_locked(channel_key)
+        if quarantine_error:
+            quarantine_response = {
+                "ok": False,
+                "reason": "containment_failure",
+                "error": quarantine_error,
+                "output": _channel_containment_failure_output(
+                    language.title(), channel, "was rejected", quarantine_error,
+                ),
+                "channel": channel,
+                "language": language,
+            }
+        else:
+            _touch_channel_locked(language, channel)
+            ACTIVE_EVALS[req_id] = {
+                "cancel": cancel_event,
+                "cancel_reason": None,
+                "payload": payload,
+                "running": False,
+                "terminal_written": False,
+            }
+            channel_condition = CHANNEL_CONDITIONS.setdefault(
+                channel_key,
+                threading.Condition(ACTIVE_EVALS_LOCK),
+            )
+            # Queue creation/removal is serialized by ACTIVE_EVALS_LOCK.  Mutations
+            # also take the channel condition so a finishing request cannot remove
+            # an apparently empty queue while a newly claimed request is appended.
+            with channel_condition:
+                CHANNEL_QUEUES.setdefault(channel_key, []).append(req_id)
+    if quarantine_response is not None:
+        _write_terminal_response(bridge_dir, req_id, quarantine_response)
+        try:
+            claimed.unlink()
+        except Exception:
+            pass
+        write_daemon_status(activity=True)
+        return
     write_daemon_status(activity=True)
     if _cancel_path(bridge_dir, req_id).exists():
         service_cancel_requests(bridge_dir)
@@ -1023,17 +1250,31 @@ def process_eval_request(req_path: Path, bridge_dir: Path, runtime_dir: Path) ->
     thread.start()
 
 
-def _cancel_active_channel(active: Dict[str, Any]) -> None:
+def _cancel_active_channel(active: Dict[str, Any]) -> bool:
     if not active.get("running"):
-        return
+        return True
     payload = active.get("payload") if isinstance(active.get("payload"), dict) else {}
     language = str(payload.get("language") or "python")
     channel = str(payload.get("channel") or payload.get("repl_name") or "default")
     if language == "python":
-        _kill_python_worker(channel)
-        return
-    if language == "bash":
-        _terminate_bash_channel(channel)
+        teardown = _kill_python_worker
+    elif language == "bash":
+        teardown = _terminate_bash_channel
+    else:
+        return True
+    try:
+        ok = teardown(channel, preserve_activity=True)
+    except Exception as exc:
+        error = f"teardown raised {type(exc).__name__}: {exc}"
+        _mark_channel_teardown_failed(_channel_key(language, channel), error)
+        ok = False
+    if not ok:
+        with ACTIVE_EVALS_LOCK:
+            active["containment_error"] = (
+                _channel_teardown_error_locked(_channel_key(language, channel))
+                or "process group teardown was not verified"
+            )
+    return ok
 
 
 def service_cancel_requests(bridge_dir: Path) -> None:
@@ -1092,36 +1333,26 @@ def service_cancel_requests(bridge_dir: Path) -> None:
 
 
 def _terminate_bash_channel(channel: str, *, preserve_activity: bool = False) -> bool:
-    key = _channel_key("bash", channel)
     with ACTIVE_EVALS_LOCK:
         proc = BASH_REPLS.get(channel)
-        meta = _derive_process_meta_locked("bash", channel, proc) if proc is not None else CHANNEL_PROCESS_META.get(key)
+        meta, own_reservation = _reserve_channel_teardown_locked(
+            "bash", channel, proc,
+        )
         if meta is None:
             if not preserve_activity:
                 _forget_channel_if_reset("bash", channel)
             return True
-        generation = int(meta["generation"])
-        if key not in CHANNEL_REAPING:
-            CHANNEL_REAPING.add(key)
-            own_reservation = True
-        else:
-            own_reservation = False
     ok, error = _kill_and_verify_process_group(int(meta["pgid"]), proc)
     with ACTIVE_EVALS_LOCK:
-        current = CHANNEL_PROCESS_META.get(key)
-        if current is not None and int(current.get("generation", -1)) == generation:
-            if ok:
-                BASH_REPLS.pop(channel, None)
-                CHANNEL_PROCESS_META.pop(key, None)
-                if not preserve_activity and not CHANNEL_QUEUES.get(key):
-                    CHANNEL_ACTIVITY.pop(key, None)
-            else:
-                activity = CHANNEL_ACTIVITY.setdefault(key, {})
-                activity["reap_error"] = error
-                activity["reap_reason"] = "teardown_failed"
-        if own_reservation:
-            CHANNEL_REAPING.discard(key)
-            _channel_condition_locked(key).notify_all()
+        _finish_channel_teardown_locked(
+            "bash",
+            channel,
+            meta,
+            ok=ok,
+            error=error,
+            own_reservation=own_reservation,
+            preserve_activity=preserve_activity,
+        )
     return ok
 
 
@@ -1185,7 +1416,7 @@ def reap_idle_channels(
             with ACTIVE_EVALS_LOCK:
                 current = CHANNEL_PROCESS_META.get(channel_key)
                 same_generation = current is not None and current.get("generation") == reserved_meta.get("generation")
-                activity = CHANNEL_ACTIVITY.setdefault(channel_key, {})
+                activity = _ensure_channel_activity_locked(channel_key)
                 activity["last_activity_at"] = completed_at
                 if success and same_generation:
                     if language == "python":
@@ -1203,9 +1434,10 @@ def reap_idle_channels(
                     activity["reap_reason"] = f"idle_timeout:{threshold:g}s"
                     reaped.append(channel_key)
                 else:
-                    activity.pop("reaped_at", None)
-                    activity["reap_reason"] = "teardown_failed"
-                    activity["reap_error"] = error or "process group teardown was not verified"
+                    _mark_channel_teardown_failed_locked(
+                        channel_key,
+                        error or "process group teardown was not verified",
+                    )
         finally:
             with ACTIVE_EVALS_LOCK:
                 CHANNEL_REAPING.discard(channel_key)

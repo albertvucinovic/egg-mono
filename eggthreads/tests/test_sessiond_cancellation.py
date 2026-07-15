@@ -4,6 +4,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,7 +34,7 @@ def _reset_sessiond_state() -> None:
     sessiond.CHANNEL_REAPING.clear()
     sessiond.CHANNEL_STARTING.clear()
     sessiond.CHANNEL_PROCESS_META.clear()
-    sessiond.CHANNEL_GENERATIONS.clear()
+    sessiond.CHANNEL_GENERATION_COUNTER = 0
     sessiond.CHANNEL_IDLE_TIMEOUT_SEC = None
 
 
@@ -325,3 +326,212 @@ def test_bash_timeout_resets_to_reusable_channel(tmp_path):
         "echo after", "shell", bridge, "token", runtime, timeout_sec=1,
     )
     assert "after" in after
+
+
+@pytest.mark.parametrize("language", ["python", "bash"])
+@pytest.mark.parametrize("cancel_reason", ["timeout", "interrupted"])
+def test_cancel_teardown_failure_is_truthful_and_blocks_successor(
+    monkeypatch, tmp_path, language, cancel_reason,
+):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    request_id = f"{language}-{cancel_reason}"
+    channel = "unsafe"
+    key = f"{language}:{channel}"
+    release = threading.Event()
+
+    def blocked_eval(*_args, cancel_check=None, **_kwargs):
+        while not (cancel_check and cancel_check()):
+            time.sleep(0.005)
+        release.wait(2)
+        return "should not become terminal success"
+
+    monkeypatch.setattr(
+        sessiond,
+        "execute_python" if language == "python" else "execute_bash",
+        blocked_eval,
+    )
+    monkeypatch.setattr(
+        sessiond,
+        "_kill_python_worker" if language == "python" else "_terminate_bash_channel",
+        lambda *_a, **_k: (
+            sessiond._mark_channel_teardown_failed(key, "permission denied") or False
+        ),
+    )
+
+    sessiond.process_eval_request(
+        _request(bridge, request_id, language=language, channel=channel, code="side_effect"),
+        bridge,
+        runtime,
+    )
+    _wait_until(lambda: sessiond.ACTIVE_EVALS.get(request_id, {}).get("running") is True)
+    (bridge / f"eval_{request_id}.cancel.json").write_text(json.dumps({
+        "host_owner_id": "host-a", "reason": cancel_reason,
+    }))
+
+    sessiond.service_cancel_requests(bridge)
+
+    response = json.loads((bridge / f"eval_{request_id}.res.json").read_text())
+    assert response["ok"] is False
+    assert response["reason"] == "containment_failure"
+    assert response["output"].startswith("--- CONTAINMENT FAILURE ---")
+    assert "channel was reset" not in response["output"]
+    status = sessiond._daemon_status_payload()
+    assert status["channel_state"][key]["state"] == "reap_failed"
+    assert status["channel_state"][key]["reap_reason"] == "teardown_failed"
+    assert status["channel_state"][key]["reap_error"] == "permission denied"
+
+    successor = _request(
+        bridge, f"next-{request_id}", language=language, channel=channel, code="successor",
+    )
+    sessiond.process_eval_request(successor, bridge, runtime)
+    successor_response = json.loads(
+        (bridge / f"eval_next-{request_id}.res.json").read_text()
+    )
+    assert successor_response["reason"] == "containment_failure"
+    assert "quarantined" in successor_response["output"]
+
+    release.set()
+    _wait_until(lambda: request_id not in sessiond.ACTIVE_EVALS)
+
+
+@pytest.mark.parametrize("language", ["python", "bash"])
+def test_execute_timeout_teardown_failure_reports_containment(monkeypatch, tmp_path, language):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    channel = "timeout-unsafe"
+    key = f"{language}:{channel}"
+
+    if language == "python":
+        class Conn:
+            def send(self, _payload):
+                pass
+            def poll(self, _timeout):
+                return False
+        proc = SimpleNamespace(is_alive=lambda: True)
+        monkeypatch.setattr(sessiond, "_get_python_worker", lambda _channel: (proc, Conn()))
+        monkeypatch.setattr(
+            sessiond,
+            "_kill_python_worker",
+            lambda *_a, **_k: (
+                sessiond._mark_channel_teardown_failed(key, "still alive") or False
+            ),
+        )
+        output = sessiond.execute_python(
+            "side_effect", channel, bridge, "token", runtime, timeout_sec=0.01,
+        )
+    else:
+        class Stdin:
+            def write(self, _value):
+                pass
+            def flush(self):
+                pass
+        proc = SimpleNamespace(stdin=Stdin(), stdout=object())
+        monkeypatch.setattr(sessiond, "_bash_proc", lambda *_a, **_k: proc)
+        monkeypatch.setattr(sessiond.select, "select", lambda *_a, **_k: ([], [], []))
+        monkeypatch.setattr(
+            sessiond,
+            "_terminate_bash_channel",
+            lambda *_a, **_k: (
+                sessiond._mark_channel_teardown_failed(key, "still alive") or False
+            ),
+        )
+        output = sessiond.execute_bash(
+            "side_effect", channel, bridge, "token", runtime, timeout_sec=0.01,
+        )
+
+    assert output.startswith("--- CONTAINMENT FAILURE ---")
+    assert "may still be running side effects" in output
+    assert sessiond.CHANNEL_ACTIVITY[key]["reap_reason"] == "teardown_failed"
+    assert sessiond.CHANNEL_ACTIVITY[key]["reap_error"] == "still alive"
+
+
+@pytest.mark.parametrize("language", ["python", "bash"])
+def test_execute_cancel_teardown_failure_reports_containment(monkeypatch, tmp_path, language):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    channel = "cancel-unsafe"
+    key = f"{language}:{channel}"
+
+    if language == "python":
+        conn = SimpleNamespace(send=lambda _payload: None, poll=lambda _timeout: False)
+        proc = SimpleNamespace(is_alive=lambda: True)
+        monkeypatch.setattr(sessiond, "_get_python_worker", lambda _channel: (proc, conn))
+        monkeypatch.setattr(
+            sessiond,
+            "_kill_python_worker",
+            lambda *_a, **_k: (
+                sessiond._mark_channel_teardown_failed(key, "still alive") or False
+            ),
+        )
+        output = sessiond.execute_python(
+            "side_effect", channel, bridge, "token", runtime,
+            cancel_check=lambda: True,
+        )
+    else:
+        stdin = SimpleNamespace(write=lambda _value: None, flush=lambda: None)
+        proc = SimpleNamespace(stdin=stdin, stdout=object())
+        monkeypatch.setattr(sessiond, "_bash_proc", lambda *_a, **_k: proc)
+        monkeypatch.setattr(
+            sessiond,
+            "_terminate_bash_channel",
+            lambda *_a, **_k: (
+                sessiond._mark_channel_teardown_failed(key, "still alive") or False
+            ),
+        )
+        output = sessiond.execute_bash(
+            "side_effect", channel, bridge, "token", runtime,
+            cancel_check=lambda: True,
+        )
+
+    assert output.startswith("--- CONTAINMENT FAILURE ---")
+    assert "cancelled" in output
+    assert sessiond.CHANNEL_ACTIVITY[key]["reap_error"] == "still alive"
+
+
+@pytest.mark.parametrize("language", ["python", "bash"])
+def test_real_eval_timeout_teardown_failure_leaves_channel_quarantined_until_verified_cleanup(
+    monkeypatch, tmp_path, language,
+):
+    bridge = tmp_path / "bridge"; bridge.mkdir()
+    runtime = tmp_path / "runtime"; runtime.mkdir()
+    channel = f"real-{language}-timeout"
+    key = f"{language}:{channel}"
+    real_teardown = sessiond._kill_and_verify_process_group
+    monkeypatch.setattr(
+        sessiond,
+        "_kill_and_verify_process_group",
+        lambda *_a, **_k: (False, "injected verification failure"),
+    )
+
+    if language == "python":
+        output = sessiond.execute_python(
+            "import time; time.sleep(10)", channel, bridge, "token", runtime,
+            timeout_sec=0.05,
+        )
+        assert sessiond.PY_WORKERS[channel][0].is_alive()
+        with pytest.raises(RuntimeError, match="quarantined"):
+            sessiond._get_python_worker(channel)
+    else:
+        output = sessiond.execute_bash(
+            "sleep 10", channel, bridge, "token", runtime, timeout_sec=0.05,
+        )
+        pgid = sessiond.CHANNEL_PROCESS_META[key]["pgid"]
+        assert sessiond._process_group_has_live_members(pgid)
+        with pytest.raises(RuntimeError, match="quarantined"):
+            sessiond._bash_proc(channel, bridge, "token", runtime)
+
+    assert output.startswith("--- CONTAINMENT FAILURE ---")
+    assert sessiond.CHANNEL_ACTIVITY[key]["reap_reason"] == "teardown_failed"
+    payload = sessiond._daemon_status_payload()
+    assert payload["channel_state"][key]["state"] == "reap_failed"
+
+    # Account for the intentionally live real process: only a later verified
+    # containment attempt clears quarantine and permits channel replacement.
+    monkeypatch.setattr(sessiond, "_kill_and_verify_process_group", real_teardown)
+    if language == "python":
+        assert sessiond._kill_python_worker(channel)
+    else:
+        assert sessiond._terminate_bash_channel(channel)
+    assert key not in sessiond.CHANNEL_PROCESS_META
+    assert key not in sessiond.CHANNEL_ACTIVITY

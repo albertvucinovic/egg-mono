@@ -28,7 +28,7 @@ def _reset_state() -> None:
     sessiond.CHANNEL_REAPING.clear()
     sessiond.CHANNEL_STARTING.clear()
     sessiond.CHANNEL_PROCESS_META.clear()
-    sessiond.CHANNEL_GENERATIONS.clear()
+    sessiond.CHANNEL_GENERATION_COUNTER = 0
     sessiond.CHANNEL_IDLE_TIMEOUT_SEC = None
     sessiond.STATUS_PATH = None
 
@@ -275,7 +275,8 @@ def _spawn_dead_leader_with_descendant(tmp_path: Path, name: str) -> tuple[int, 
     pid_file = tmp_path / f"{name}.pid"
     script = (
         "import os,subprocess; "
-        "p=subprocess.Popen(['sleep','99']); "
+        "p=subprocess.Popen(['python','-c',"
+        "\"import time; open('/proc/self/comm','w').write('egg worker name\\\\n'); time.sleep(99)\"]); "
         f"open({str(pid_file)!r},'w').write(str(p.pid)); "
         "os._exit(0)"
     )
@@ -286,8 +287,23 @@ def _spawn_dead_leader_with_descendant(tmp_path: Path, name: str) -> tuple[int, 
     while not pid_file.exists() and time.time() < deadline:
         time.sleep(0.01)
     descendant = int(pid_file.read_text())
+    while time.time() < deadline:
+        try:
+            if "egg worker name" in Path(f"/proc/{descendant}/stat").read_text():
+                break
+        except FileNotFoundError:
+            pass
+        time.sleep(0.01)
+    assert "egg worker name" in Path(f"/proc/{descendant}/stat").read_text()
     assert sessiond._process_group_has_live_members(pgid)
     return pgid, descendant
+
+
+def _wait_process_group_gone(pgid: int, timeout: float = 2.0) -> None:
+    deadline = time.time() + timeout
+    while sessiond._process_group_has_live_members(pgid) and time.time() < deadline:
+        time.sleep(0.01)
+    assert not sessiond._process_group_has_live_members(pgid)
 
 
 def test_reap_python_dead_leader_kills_live_group_descendant(tmp_path):
@@ -313,6 +329,70 @@ def test_reap_bash_dead_leader_kills_live_group_descendant(tmp_path):
     assert key not in sessiond.CHANNEL_PROCESS_META
 
 
+@pytest.mark.parametrize("language", ["python", "bash"])
+def test_dead_leader_descendant_is_contained_before_same_channel_successor(
+    language, tmp_path,
+):
+    pgid, _descendant = _spawn_dead_leader_with_descendant(tmp_path, f"successor-{language}")
+    channel = "same"
+    key = f"{language}:{channel}"
+    sessiond.CHANNEL_PROCESS_META[key] = {"generation": 1, "pgid": pgid, "pid": pgid}
+    sessiond.CHANNEL_ACTIVITY[key] = {"last_activity_at": time.time()}
+
+    if language == "python":
+        dead = SimpleNamespace(is_alive=lambda: False)
+        sessiond.PY_WORKERS[channel] = (dead, SimpleNamespace(close=lambda: None))
+        worker = sessiond._get_python_worker(channel)
+        assert worker[0].is_alive()
+    else:
+        sessiond.BASH_REPLS[channel] = SimpleNamespace(poll=lambda: 0)
+        worker = sessiond._bash_proc(channel, tmp_path, "token", tmp_path)
+        assert worker.poll() is None
+
+    _wait_process_group_gone(pgid)
+    assert sessiond.CHANNEL_PROCESS_META[key]["pgid"] != pgid
+
+
+def test_proc_stat_parser_handles_spaces_and_parentheses_in_comm():
+    state, pgid = sessiond._proc_stat_state_and_pgid(
+        "321 (worker name (with spaces)) S 111 222 333 0 0 0"
+    )
+    assert state == "S"
+    assert pgid == 222
+
+
+@pytest.mark.parametrize("language", ["python", "bash"])
+def test_dead_leader_teardown_failure_quarantines_successor(monkeypatch, language):
+    channel = "unsafe"
+    key = f"{language}:{channel}"
+    sessiond.CHANNEL_PROCESS_META[key] = {"generation": 1, "pgid": 7654, "pid": 7654}
+    sessiond.CHANNEL_ACTIVITY[key] = {"last_activity_at": 1.0}
+    monkeypatch.setattr(
+        sessiond, "_kill_and_verify_process_group",
+        lambda *_a, **_k: (False, "permission denied"),
+    )
+    if language == "python":
+        dead = SimpleNamespace(is_alive=lambda: False)
+        sessiond.PY_WORKERS[channel] = (dead, SimpleNamespace(close=lambda: None))
+        start = lambda: sessiond._get_python_worker(channel)
+    else:
+        sessiond.BASH_REPLS[channel] = SimpleNamespace(poll=lambda: 0)
+        start = lambda: sessiond._bash_proc(channel, Path("."), "token", Path("."))
+
+    with pytest.raises(RuntimeError, match="could not be contained"):
+        start()
+    with pytest.raises(RuntimeError, match="quarantined"):
+        start()
+
+    payload = sessiond._daemon_status_payload(now=100.0)
+    assert payload["channel_state"][key] == {
+        "state": "reap_failed",
+        "last_activity_at": 1.0,
+        "reap_reason": "teardown_failed",
+        "reap_error": "permission denied",
+    }
+
+
 def test_reap_kill_failure_is_truthful_and_retryable(monkeypatch):
     key = "python:failure"
     sessiond.CHANNEL_PROCESS_META[key] = {"generation": 1, "pgid": 4444, "pid": 4444}
@@ -329,6 +409,23 @@ def test_reap_kill_failure_is_truthful_and_retryable(monkeypatch):
     assert sessiond.CHANNEL_ACTIVITY[key]["reap_error"] == "permission denied"
     payload = sessiond._daemon_status_payload(now=101.0)
     assert payload["channel_state"][key]["state"] == "reap_failed"
+
+
+def test_touch_does_not_split_atomic_teardown_failure_state():
+    key = "python:unsafe"
+    sessiond.CHANNEL_ACTIVITY[key] = {
+        "last_activity_at": 1.0,
+        "reap_reason": "teardown_failed",
+        "reap_error": "permission denied",
+    }
+
+    sessiond.touch_channel("python", "unsafe", now=2.0)
+
+    assert sessiond.CHANNEL_ACTIVITY[key] == {
+        "last_activity_at": 2.0,
+        "reap_reason": "teardown_failed",
+        "reap_error": "permission denied",
+    }
 
 
 def test_timeout_and_cancel_remove_unique_channel_activity(monkeypatch, tmp_path):
@@ -394,7 +491,7 @@ def test_process_map_stress_creation_reset_and_reap(monkeypatch):
                 key = f"python:{channel}"
                 with sessiond.ACTIVE_EVALS_LOCK:
                     sessiond.PY_WORKERS[channel] = _fake_python_worker()
-                    generation = sessiond._next_channel_generation_locked(key)
+                    generation = sessiond._next_channel_generation_locked()
                     sessiond.CHANNEL_PROCESS_META[key] = {
                         "generation": generation, "pgid": 10000 + index, "pid": 10000 + index,
                     }
@@ -427,6 +524,31 @@ def test_process_map_stress_creation_reset_and_reap(monkeypatch):
         thread.join(5)
     assert all(not thread.is_alive() for thread in threads)
     assert errors == []
+
+
+def test_unique_channel_generation_churn_has_bounded_residual_state(monkeypatch):
+    monkeypatch.setattr(
+        sessiond, "_kill_and_verify_process_group",
+        lambda *_a, **_k: (True, ""),
+    )
+
+    for index in range(500):
+        channel = f"unique-{index}"
+        key = f"python:{channel}"
+        with sessiond.ACTIVE_EVALS_LOCK:
+            sessiond.PY_WORKERS[channel] = _fake_python_worker()
+            sessiond.CHANNEL_PROCESS_META[key] = {
+                "generation": sessiond._next_channel_generation_locked(),
+                "pgid": 20_000 + index,
+                "pid": 20_000 + index,
+            }
+            sessiond.CHANNEL_ACTIVITY[key] = {"last_activity_at": 1.0}
+        assert sessiond._kill_python_worker(channel)
+
+    assert sessiond.CHANNEL_PROCESS_META == {}
+    assert sessiond.CHANNEL_ACTIVITY == {}
+    assert not hasattr(sessiond, "CHANNEL_GENERATIONS")
+    assert sessiond.CHANNEL_GENERATION_COUNTER == 500
 
 
 def test_channel_status_truthfully_reports_ready_busy_reaping_and_reaped(tmp_path):

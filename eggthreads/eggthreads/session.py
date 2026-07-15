@@ -134,6 +134,7 @@ class SessionProvider(Protocol):
 
 
 _DOCKER_MOUNT_POLICY = "thread-workdir-mask-egg-sandbox-v2"
+_CHANNEL_REAPER_RUNTIME_VERSION = 2
 _SESSION_ACTIVITY_LOCKS: Dict[str, threading.RLock] = {}
 _SESSION_ACTIVITY_LOCK_USERS: Dict[str, int] = {}
 _SESSION_ACTIVITY_LOCKS_GUARD = threading.Lock()
@@ -626,6 +627,25 @@ def _docker_existing_sandbox_policy_hash(container_name: str) -> Optional[str]:
     return _docker_existing_label(container_name, "egg.sandbox_policy_hash")
 
 
+def _docker_existing_channel_reaper_version(container_name: str) -> Optional[int]:
+    raw = _docker_existing_label(container_name, "egg.channel_reaper_version")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _docker_status_channel_reaper_version(bridge_dir: Path) -> Optional[int]:
+    """Return a version only from a fresh, internally consistent daemon record."""
+
+    payload, error = _docker_daemon_status(bridge_dir)
+    if error or payload is None:
+        return None
+    policy = payload.get("channel_reaping")
+    value = policy.get("runtime_version") if isinstance(policy, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _docker_existing_label(container_name: str, label: str) -> Optional[str]:
     try:
         proc = subprocess.run(
@@ -649,9 +669,11 @@ def _configured_channel_idle_timeout_sec() -> Optional[float]:
     return float(timeout)
 
 
-def _docker_session_policy_hash(db: ThreadsDB, runtime_thread_id: str, cfg: SessionConfig) -> str:
-    """Return a stable hash of the security-relevant Docker session policy."""
-
+def _docker_session_policy_hash_body(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    cfg: SessionConfig,
+) -> Dict[str, Any]:
     body: Dict[str, Any] = {
         "mount_policy": _DOCKER_MOUNT_POLICY,
         "image": cfg.image,
@@ -659,11 +681,6 @@ def _docker_session_policy_hash(db: ThreadsDB, runtime_thread_id: str, cfg: Sess
         "network": cfg.network,
         "mount_dir": str(docker_session_mount_dir(db, runtime_thread_id, cfg).resolve()),
     }
-    channel_idle_timeout = _configured_channel_idle_timeout_sec()
-    if channel_idle_timeout is not None:
-        # Preserve the exact pre-feature canonical hash while disabled so an
-        # upgrade cannot restart and discard existing persistent REPL state.
-        body["channel_idle_timeout_sec"] = channel_idle_timeout
     try:
         from .sandbox import get_thread_sandbox_config
 
@@ -675,8 +692,50 @@ def _docker_session_policy_hash(db: ThreadsDB, runtime_thread_id: str, cfg: Sess
         }
     except Exception as e:
         body["sandbox_error"] = f"{type(e).__name__}: {e}"
+    return body
+
+
+def _docker_policy_hash(body: Dict[str, Any]) -> str:
     canon = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(canon).hexdigest()[:24]
+
+
+def _docker_session_policy_hashes(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    cfg: SessionConfig,
+) -> tuple[str, set[str]]:
+    """Return current policy hash and compatible one-upgrade legacy hashes."""
+
+    body = _docker_session_policy_hash_body(db, runtime_thread_id, cfg)
+    timeout = _configured_channel_idle_timeout_sec()
+    if timeout is None:
+        current_hash = _docker_policy_hash(body)
+        # 7b63314 briefly persisted an explicit null timeout while disabled.
+        legacy = dict(body)
+        legacy["channel_idle_timeout_sec"] = None
+        return current_hash, {current_hash, _docker_policy_hash(legacy)}
+
+    legacy = dict(body)
+    legacy["channel_idle_timeout_sec"] = timeout
+    current = dict(legacy)
+    current["channel_reaper_runtime_version"] = _CHANNEL_REAPER_RUNTIME_VERSION
+    current_hash = _docker_policy_hash(current)
+    # 7b63314's positive policy hash remains compatible, but its unversioned
+    # daemon is restarted once before it may continue serving requests.
+    return current_hash, {current_hash, _docker_policy_hash(legacy)}
+
+
+def _docker_compatible_policy_hashes(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    cfg: SessionConfig,
+) -> set[str]:
+    return _docker_session_policy_hashes(db, runtime_thread_id, cfg)[1]
+
+
+def _docker_session_policy_hash(db: ThreadsDB, runtime_thread_id: str, cfg: SessionConfig) -> str:
+    return _docker_session_policy_hashes(db, runtime_thread_id, cfg)[0]
 
 
 def _docker_container_created_at(container_name: str) -> Optional[float]:
@@ -1081,6 +1140,8 @@ def _start_docker_container(
 ) -> bool:
     """Ensure the session container runs; return whether its process restarted."""
     expected_policy_hash = _docker_session_policy_hash(db, runtime_thread_id, cfg)
+    compatible_policy_hashes = _docker_compatible_policy_hashes(db, runtime_thread_id, cfg)
+    channel_idle_timeout = _configured_channel_idle_timeout_sec()
 
     if cfg.session_id:
         _reconcile_docker_session_containers(
@@ -1094,27 +1155,38 @@ def _start_docker_container(
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False, timeout=20)
 
     existing_running = _docker_inspect_running(container_name)
-    if existing_running is True:
+    if existing_running is not None:
         policy = _docker_existing_mount_policy(container_name)
         policy_hash = _docker_existing_sandbox_policy_hash(container_name)
-        if policy == _DOCKER_MOUNT_POLICY and policy_hash == expected_policy_hash:
-            if not force_restart:
-                return False
+        policy_compatible = (
+            policy == _DOCKER_MOUNT_POLICY
+            and policy_hash in compatible_policy_hashes
+        )
+        if policy_compatible:
+            if existing_running:
+                reaper_version = _docker_existing_channel_reaper_version(container_name)
+                runtime_compatible = channel_idle_timeout is None or (
+                    reaper_version == _CHANNEL_REAPER_RUNTIME_VERSION
+                    or _docker_status_channel_reaper_version(bridge_dir)
+                    == _CHANNEL_REAPER_RUNTIME_VERSION
+                )
+                if runtime_compatible and not force_restart:
+                    return False
+                command = ["docker", "restart", container_name]
+                timeout = 30
+            else:
+                # A stopped compatible container loads the current bind-mounted
+                # runtime when started, even when its immutable legacy label is
+                # absent. Preserve its filesystem rather than recreating it.
+                command = ["docker", "start", container_name]
+                timeout = 20
             _clear_docker_daemon_status(bridge_dir)
             subprocess.run(
-                ["docker", "restart", container_name],
+                command,
                 capture_output=True,
                 check=True,
-                timeout=30,
+                timeout=timeout,
             )
-            return True
-        _remove_existing_container()
-    if existing_running is False:
-        policy = _docker_existing_mount_policy(container_name)
-        policy_hash = _docker_existing_sandbox_policy_hash(container_name)
-        if policy == _DOCKER_MOUNT_POLICY and policy_hash == expected_policy_hash:
-            _clear_docker_daemon_status(bridge_dir)
-            subprocess.run(["docker", "start", container_name], capture_output=True, check=True, timeout=20)
             return True
         _remove_existing_container()
 
@@ -1165,6 +1237,7 @@ def _start_docker_container(
         "--label", f"egg.db_hash={docker_session_db_hash(db)}",
         "--label", f"egg.mount_policy={_DOCKER_MOUNT_POLICY}",
         "--label", f"egg.sandbox_policy_hash={expected_policy_hash}",
+        "--label", f"egg.channel_reaper_version={_CHANNEL_REAPER_RUNTIME_VERSION}",
         "--label", f"egg.sandbox_mounts={'on' if sandbox_effective else 'off'}",
         "-v", f"{bridge_dir}:/egg-bridge",
         "-v", f"{runtime_dir}:/egg-runtime:ro",
@@ -2098,11 +2171,18 @@ def _docker_daemon_status(bridge_dir: Path) -> tuple[Optional[Dict[str, Any]], s
 
     reaping_policy = payload.get("channel_reaping")
     if reaping_policy is None:
+        channel_reaping_capable = False
         channel_reaping_enabled = False
     elif not isinstance(reaping_policy, dict) or not isinstance(reaping_policy.get("enabled"), bool):
         return payload, "Docker session daemon channel reaping capability is invalid"
     else:
+        channel_reaping_capable = True
+        runtime_version = reaping_policy.get("runtime_version")
         channel_reaping_enabled = reaping_policy["enabled"]
+        if runtime_version is not None and runtime_version != _CHANNEL_REAPER_RUNTIME_VERSION:
+            return payload, "Docker session daemon channel reaping runtime is incompatible"
+        if channel_reaping_enabled and runtime_version != _CHANNEL_REAPER_RUNTIME_VERSION:
+            return payload, "Docker session daemon channel reaping runtime is incompatible"
         policy_timeout = reaping_policy.get("idle_timeout_sec")
         if channel_reaping_enabled:
             if not isinstance(policy_timeout, (int, float)) or isinstance(policy_timeout, bool) or not math.isfinite(float(policy_timeout)) or float(policy_timeout) <= 0:
@@ -2142,7 +2222,7 @@ def _docker_daemon_status(bridge_dir: Path) -> tuple[Optional[Dict[str, Any]], s
         if not isinstance(channel, str) or not channel.strip() or not isinstance(details, dict):
             return payload, "Docker session daemon channel entry is invalid"
         state = details.get("state")
-        allowed_states = {"ready", "busy", "reaping", "reaped", "reap_failed"} if channel_reaping_enabled else {"ready", "busy"}
+        allowed_states = {"ready", "busy", "reaping", "reaped", "reap_failed"} if channel_reaping_capable else {"ready", "busy"}
         if state not in allowed_states:
             return payload, "Docker session daemon channel state is invalid"
         channel_last_activity = details.get("last_activity_at")
@@ -2158,11 +2238,17 @@ def _docker_daemon_status(bridge_dir: Path) -> tuple[Optional[Dict[str, Any]], s
         elif state == "reap_failed":
             if reaped_at is not None or reap_reason != "teardown_failed" or not isinstance(details.get("reap_error"), str) or not details["reap_error"]:
                 return payload, "Docker session daemon failed reap status is invalid"
+            if channel_last_activity is None:
+                return payload, "Docker session daemon failed reap activity is missing"
         elif reaped_at is not None or reap_reason is not None or details.get("reap_error") is not None:
             return payload, "Docker session daemon live channel has stale reap status"
-        if state in {"ready", "reaping", "reaped", "reap_failed"}:
+        if state in {"ready", "reaping", "reaped"}:
             if any(key in details for key in ("running_request_id", "queued_request_ids")):
                 return payload, "Docker session daemon non-busy channel contains request IDs"
+            continue
+        if state == "reap_failed" and not any(
+            key in details for key in ("running_request_id", "queued_request_ids")
+        ):
             continue
         running_id = details.get("running_request_id")
         queued_ids = details.get("queued_request_ids")
@@ -2333,7 +2419,7 @@ def _run_docker_eval_request(
                 if str(response.get("request_id") or req_id) != req_id:
                     continue
                 response_reason = str(response.get("reason") or "")
-                if response_reason in {"timeout", "cancelled", "daemon_restarted"}:
+                if response_reason in {"timeout", "cancelled", "daemon_restarted", "containment_failure"}:
                     _record_docker_eval_lifecycle(
                         db, runtime_thread_id,
                         action="docker_eval_terminal",
@@ -2344,6 +2430,8 @@ def _run_docker_eval_request(
                     )
                 if response.get("ok"):
                     return str(response.get("output") or "")
+                if response_reason == "containment_failure":
+                    return str(response.get("output") or response.get("error") or "Docker channel containment failed")
                 return f"Error: Docker REPL failed: {response.get('error') or 'unknown error'}"
             if cancel_check is not None and cancel_check():
                 cancel_reason = "cancelled"
@@ -3420,16 +3508,25 @@ def _session_status_from_daemon(
     reason: Optional[str],
 ) -> SessionStatus:
     active = tuple(daemon.get("active_requests") or ())
-    state = "busy" if active else "ready"
+    channel_state = dict(daemon.get("channel_state") or {})
+    failed_channels = [
+        channel for channel, details in channel_state.items()
+        if isinstance(details, dict) and details.get("state") == "reap_failed"
+    ]
+    state = "unhealthy" if failed_channels else ("busy" if active else "ready")
+    message = (
+        "Docker session channel containment failed: " + ", ".join(sorted(failed_channels))
+        if failed_channels else f"Docker session daemon is {state}"
+    )
     return SessionStatus(
         True, cfg.provider, cfg.session_id, state,
-        f"Docker session daemon is {state}", container_name, cfg.share_repl,
+        message, container_name, cfg.share_repl,
         daemon_generation=str(daemon.get("daemon_generation") or "") or None,
         active_requests=active,
-        channel_state=dict(daemon.get("channel_state") or {}),
+        channel_state=channel_state,
         last_activity=daemon.get("last_activity_at"),
         heartbeat_at=daemon.get("heartbeat_at"),
-        reason=reason,
+        reason="channel_containment_failure" if failed_channels else reason,
     )
 
 
