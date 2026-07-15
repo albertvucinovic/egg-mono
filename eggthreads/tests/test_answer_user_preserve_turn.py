@@ -900,16 +900,22 @@ def test_multiwait_provider_projection_keeps_exact_results_contiguous(tmp_path):
         [message for message in snapshot["messages"] if not message.get("no_api")],
         tools_cfg=type("Tools", (), {"allow_raw_tool_output": True})(),
     )
-    assistant_index = next(
-        index for index, msg in enumerate(provider)
-        if msg.get("role") == "assistant" and msg.get("tool_calls")
-    )
-    ids = [call["id"] for call in provider[assistant_index]["tool_calls"]]
-    assert ids == ["call-get-user-provider-old", "call-get-user-provider-new"]
-    assert [
-        provider[assistant_index + offset]["tool_call_id"] for offset in (1, 2)
-    ] == ids
-    assert provider[assistant_index + 2]["content"] == "new answer"
+    protocol = [
+        (
+            message.get("role"),
+            [call.get("id") for call in message.get("tool_calls") or []],
+            message.get("tool_call_id"),
+            message.get("content"),
+        )
+        for message in provider
+        if message.get("role") in {"assistant", "tool"}
+    ]
+    assert protocol == [
+        ("assistant", ["call-get-user-provider-old"], None, ""),
+        ("tool", [], "call-get-user-provider-old", "new answer"),
+        ("assistant", ["call-get-user-provider-new"], None, ""),
+        ("tool", [], "call-get-user-provider-new", "new answer"),
+    ]
 
 
 def test_failed_continue_does_not_mutate_wait_lifecycle(tmp_path):

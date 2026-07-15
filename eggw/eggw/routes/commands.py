@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from ..models import CommandLifecycleResponse, CommandRequest
 from .. import core
 from ..commands import dispatch_command
+from ..commands.thread import validate_continue_command_target
 
 router = APIRouter(prefix="/api/threads", tags=["commands"])
 
@@ -41,6 +42,29 @@ async def execute_command(thread_id: str, request: CommandRequest):
     command_name = _command_name(request.command)
     command_id = os.urandom(10).hex()
     started_at = datetime.now(timezone.utc)
+
+    # Explicit /continue targets are the exceptional fail-closed preflight:
+    # validate before even generic command-audit events so a rejected target
+    # leaves the thread event watermark, history, lease, and lifecycle intact.
+    # The handler validates again for direct callers and mutation-boundary
+    # safety. No-argument /continue passes through to normal auto-diagnosis.
+    if command_name == "continue":
+        parts = str(request.command or "").strip()[1:].split(None, 1)
+        command_arg = parts[1] if len(parts) > 1 else ""
+        target_validation = validate_continue_command_target(thread_id, command_arg)
+        if not target_validation.success:
+            finished_at = datetime.now(timezone.utc)
+            return CommandLifecycleResponse(
+                success=False,
+                message=target_validation.message,
+                data=None,
+                command_id=command_id,
+                command_name=command_name,
+                started_at=started_at,
+                finished_at=finished_at,
+                elapsed_sec=max(0.0, (finished_at - started_at).total_seconds()),
+            )
+
     try:
         core.db.append_event(
             event_id=os.urandom(10).hex(),

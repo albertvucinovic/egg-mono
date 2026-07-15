@@ -721,6 +721,35 @@ def test_thread_ui_continue_appends_recovery_notice(tmp_path) -> None:
     assert result.start_schedulers == (thread_id,)
 
 
+def test_thread_ui_delayed_continue_invalid_target_is_rejected_before_scheduling(tmp_path, monkeypatch) -> None:
+    from eggthreads import ThreadsDB, append_message, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, "root")
+    append_message(db, thread_id, "user", "anchor")
+    logs: list[str] = []
+    scheduled: list[object] = []
+
+    class Loop:
+        def create_task(self, coroutine):
+            scheduled.append(coroutine)
+            coroutine.close()
+
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: Loop())
+    before = db.max_event_seq(thread_id)
+    result = create_default_command_registry().execute(
+        "continue",
+        CommandContext(db=db, current_thread=thread_id, log_system=logs.append),
+        "missing wait=1",
+    )
+
+    assert result.clear_input is False
+    assert logs == ["/continue error: Message not found: missing"]
+    assert scheduled == []
+    assert db.max_event_seq(thread_id) == before
+
+
 def test_subagent_commands_are_registered_handlers(tmp_path, monkeypatch) -> None:
     from eggthreads import ThreadsDB, create_child_thread, create_root_thread, create_snapshot
 

@@ -18,6 +18,7 @@ from eggthreads import (
     duplicate_thread,
     duplicate_thread_up_to,
     continue_thread,
+    validate_continue_target,
     is_thread_continuable,
     interrupt_thread,
     parse_args,
@@ -374,6 +375,20 @@ async def cmd_duplicate_thread(thread_id: str, command_arg: str) -> CommandRespo
     )
 
 
+def parse_continue_command_args(command_arg: str) -> tuple[str | None, float | None]:
+    """Parse EggW /continue arguments identically for route and handler."""
+
+    args = parse_args(command_arg)
+    return args.named.get("msg_id") or args.positional_or(0), args.get_float("wait")
+
+
+def validate_continue_command_target(thread_id: str, command_arg: str):
+    """Side-effect-free EggW preflight for an explicit /continue target."""
+
+    msg_id, _delay_sec = parse_continue_command_args(command_arg)
+    return validate_continue_target(core.db, thread_id, msg_id)
+
+
 async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
     """Handle /continue command.
 
@@ -383,11 +398,16 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
         /continue wait=30            - delay 30s before applying continue (e.g., for API rate limits)
         /continue msg_id=<id> wait=<sec>  - named arguments
     """
-    args = parse_args(command_arg)
+    # Parse through the same helper used by the route-level preflight.
+    msg_id, delay_sec = parse_continue_command_args(command_arg)
 
-    # Extract arguments
-    msg_id = args.named.get('msg_id') or args.positional_or(0)
-    delay_sec = args.get_float('wait')
+    # Explicit targets must be proven before any command-layer mutation:
+    # interrupting a live lease, scheduling a delayed task, appending recovery
+    # notices, or restarting a scheduler. No-argument auto-diagnosis deliberately
+    # bypasses this preflight and keeps its existing semantics.
+    target_validation = validate_continue_target(core.db, thread_id, msg_id)
+    if not target_validation.success:
+        return CommandResponse(success=False, message=target_validation.message)
 
     # Auto-interrupt only if this exact thread is currently streaming.  A
     # running subtree scheduler is not the same thing as a live thread lease:

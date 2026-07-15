@@ -649,3 +649,52 @@ def test_duplicate_thread_up_to_ignores_compaction_after_watermark(tmp_path) -> 
 
     assert ts.latest_effective_thread_compaction(db, duplicate) is None
     assert _event_types(db, duplicate).count("thread.compaction") == 0
+
+
+def test_runner_persists_provider_metadata_on_get_user_tool_declaration(tmp_path) -> None:
+    """Supported provider streaming can attach opaque fields to get-user turns."""
+
+    import asyncio
+
+    db = _make_db(tmp_path, "get-user-provider-fields.sqlite")
+    thread_id = ts.create_root_thread(db, name="provider fields")
+    ts.append_message(db, thread_id, "user", "ask")
+    get_user = "get_user_message_while_preserving_llm_turn"
+
+    class ToolDeclarationLLM:
+        current_model_key = "encrypted-model"
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
+            yield {
+                "type": "done",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": {"opaque": "encrypted"},
+                    "thought_signature": "message-signature",
+                    "tool_calls": [{
+                        "id": "call-provider-get-user",
+                        "type": "function",
+                        "extra_content": {"google": {"thought_signature": "tool-signature"}},
+                        "function": {
+                            "name": get_user,
+                            "arguments": json.dumps({"assistant_note": "Reply"}),
+                        },
+                    }],
+                },
+            }
+
+    runner = ts.ThreadRunner(db, thread_id, llm=ToolDeclarationLLM())
+    runner._model_thinking_options = lambda _model: {
+        "thinking_content_policy": "send all encrypted gemini",
+        "thinking_content_key": "reasoning_content",
+    }
+
+    assert asyncio.run(runner.run_once()) is True
+    declaration = ts.create_snapshot(db, thread_id)["messages"][-1]
+    assert declaration["tool_calls"][0]["function"]["name"] == get_user
+    assert declaration["tool_calls"][0]["extra_content"] == {
+        "google": {"thought_signature": "tool-signature"}
+    }
+    assert declaration["reasoning_content"] == {"opaque": "encrypted"}
+    assert declaration["thought_signature"] == "message-signature"

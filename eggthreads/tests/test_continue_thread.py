@@ -24,6 +24,7 @@ from eggthreads import (
     continue_thread_manually,
     is_thread_continuable,
     wait_thread_settled,
+    validate_continue_target,
 )
 from eggthreads.api import append_continue_recovery_notice, append_recovery_notice, interrupt_thread, list_active_threads, collect_subtree, get_thread_recovery, set_thread_recovery
 from eggthreads.tool_state import discover_runner_actionable, _last_stream_close_seq
@@ -766,3 +767,41 @@ class TestLeaseTakeover:
         row = db.current_open(tid)
         assert row is not None
         assert row["invoke_id"] == "new-invoke"
+
+
+def test_validate_continue_target_is_side_effect_free_and_noarg_is_not_diagnosed(tmp_path):
+    db, _ = _make_temp_db(tmp_path)
+    tid = create_root_thread(db, name="validate")
+    msg_id = append_message(db, tid, "user", "anchor")
+    before = db.max_event_seq(tid)
+
+    valid = validate_continue_target(db, tid, msg_id)
+    missing = validate_continue_target(db, tid, "missing")
+    automatic = validate_continue_target(db, tid, None)
+
+    assert valid.success is True
+    assert valid.continue_from_msg_id == msg_id
+    assert missing.success is False
+    assert missing.message == "Message not found: missing"
+    assert automatic.success is True
+    assert automatic.continue_from_msg_id is None
+    assert automatic.diagnosis is None
+    assert db.max_event_seq(tid) == before
+
+
+def test_explicit_invalid_continue_preflight_beats_active_lease(tmp_path):
+    db, _ = _make_temp_db(tmp_path)
+    tid = create_root_thread(db, name="validate-live")
+    append_message(db, tid, "user", "anchor")
+    assert db.try_open_stream(
+        tid, "invoke-live-validation", "2999-01-01 00:00:00", owner="test", purpose="tool"
+    )
+    before = db.max_event_seq(tid)
+    lease = dict(db.current_open(tid))
+
+    result = continue_thread(db, tid, msg_id="missing")
+
+    assert result.success is False
+    assert result.message == "Message not found: missing"
+    assert db.max_event_seq(tid) == before
+    assert dict(db.current_open(tid)) == lease

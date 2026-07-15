@@ -333,7 +333,7 @@ def duplicate_thread_command(context: Any, arg: str):
 
 
 def continue_thread_command(context: Any, arg: str):
-    from ..api import continue_thread_manually, is_thread_continuable
+    from ..api import continue_thread_manually, is_thread_continuable, validate_continue_target
     from ..arg_parser import parse_args
     from ..command_catalog import CommandResult
 
@@ -344,6 +344,11 @@ def continue_thread_command(context: Any, arg: str):
     args = parse_args(arg or "")
     msg_id = args.named.get("msg_id") or args.positional_or(0)
     delay_sec = args.get_float("wait")
+
+    target_validation = validate_continue_target(db, current_thread, msg_id)
+    if not target_validation.success:
+        _log(context, f"/continue error: {target_validation.message}")
+        return CommandResult(clear_input=False)
 
     if not is_thread_continuable(db, current_thread):
         _log(context, "Thread cannot be continued (may be running or waiting for input)")

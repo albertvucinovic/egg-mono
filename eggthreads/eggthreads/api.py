@@ -732,6 +732,49 @@ def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Opt
     return row[0] if row else None
 
 
+def validate_continue_target(
+    db: ThreadsDB,
+    thread_id: str,
+    msg_id: Optional[str],
+) -> ContinueResult:
+    """Validate an explicit continue target without mutating thread state.
+
+    ``msg_id=None`` deliberately succeeds without diagnosis so no-argument
+    callers retain their existing auto-detection semantics. Command wrappers
+    use this before interrupting a lease or scheduling delayed continuation.
+    Core ``continue_thread`` reuses it at its own mutation boundary.
+    """
+
+    if db.get_thread(thread_id) is None:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message=f"Thread not found: {thread_id}",
+        )
+    if msg_id is None:
+        return ContinueResult(
+            success=True,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message="No explicit continue target to validate.",
+        )
+    normalized_msg_id = str(msg_id)
+    if _get_event_seq_for_msg_id(db, thread_id, normalized_msg_id) is None:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message=f"Message not found: {normalized_msg_id}",
+        )
+    return ContinueResult(
+        success=True,
+        continue_from_msg_id=normalized_msg_id,
+        skipped_msg_ids=[],
+        message=f"Continue target found: {normalized_msg_id}",
+    )
+
+
 def get_thread_recovery(db: ThreadsDB, thread_id: str) -> ThreadRecoverySettings:
     """Return effective recovery settings, inherited from nearest ancestor."""
 
@@ -2926,6 +2969,13 @@ def continue_thread(
             message=f"Thread not found: {thread_id}"
         )
 
+    # Explicit target validation is side-effect-free and precedes lease checks
+    # or lifecycle/history mutation. No-argument continuation remains governed
+    # by the existing auto-diagnosis path below.
+    target_validation = validate_continue_target(db, thread_id, msg_id)
+    if not target_validation.success:
+        return target_validation
+
     # Check if thread is running (has an active, non-expired lease)
     try:
         row = db.current_open(thread_id)
@@ -2970,14 +3020,16 @@ def continue_thread(
                 diagnosis=diagnosis,
             )
 
-    # Get the event_seq for the continue point
-    continue_seq = _get_event_seq_for_msg_id(db, thread_id, msg_id)
-    if continue_seq is None:
+    # Resolve the already-validated explicit target at the mutation boundary.
+    # Message create events are immutable, so this cannot disappear after the
+    # side-effect-free preflight above.
+    continue_seq = _get_event_seq_for_msg_id(db, thread_id, str(msg_id))
+    if continue_seq is None:  # Defensive: validation above established it.
         return ContinueResult(
             success=False,
             continue_from_msg_id=None,
             skipped_msg_ids=[],
-            message=f"Message not found: {msg_id}"
+            message=f"Message not found: {msg_id}",
         )
 
     # Continuation supersedes every outstanding get-user owner. This runs only

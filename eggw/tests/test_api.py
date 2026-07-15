@@ -2181,6 +2181,92 @@ class TestMessageOperations:
         assert notice_messages
         assert notice_messages[0]["recovery_notice"] is True
 
+    @pytest.mark.parametrize(
+        "command",
+        ["/continue missing-id", "/continue msg_id=missing-id wait=0.01"],
+    )
+    def test_web_continue_invalid_explicit_target_is_side_effect_free_with_live_lease(
+        self, client, command
+    ):
+        """Explicit validation precedes interrupt, delay scheduling, and notices."""
+        from eggthreads import append_message, build_tool_call_states, create_snapshot
+
+        create_resp = client.post("/api/threads", json={"name": "Invalid Continue Target"})
+        thread_id = create_resp.json()["id"]
+        append_message(core_state.db, thread_id, "user", "anchor")
+        invoke_id = "invoke-invalid-continue"
+        tool_call_id = "call-invalid-continue"
+        tool_name = "get_user_message_while_preserving_llm_turn"
+        assert core_state.db.try_open_stream(
+            thread_id, invoke_id, "2999-01-01 00:00:00", owner="test", purpose="tool"
+        )
+        append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "",
+            extra={"tool_calls": [{
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps({"assistant_note": "Waiting"}),
+                },
+            }]},
+        )
+        core_state.db.append_event(
+            "start-invalid-continue",
+            thread_id,
+            "tool_call.execution_started",
+            {"tool_call_id": tool_call_id},
+            invoke_id=invoke_id,
+        )
+        append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "Waiting",
+            extra={
+                "answer_user_preserve_turn": True,
+                "source_tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "awaiting_user_message_tool_call_id": tool_call_id,
+            },
+        )
+        create_snapshot(core_state.db, thread_id)
+        before_seq = core_state.db.max_event_seq(thread_id)
+        before_messages = create_snapshot(core_state.db, thread_id)["messages"]
+        before_state = build_tool_call_states(core_state.db, thread_id)[tool_call_id].state
+        before_lease = dict(core_state.db.current_open(thread_id))
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": command},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is False
+        assert payload["message"] == "Message not found: missing-id"
+        assert payload.get("data") is None
+        assert core_state.db.max_event_seq(thread_id) == before_seq
+        from eggw.commands.thread import cmd_continue
+
+        handler_before = core_state.db.max_event_seq(thread_id)
+        handler_result = asyncio.run(
+            cmd_continue(thread_id, command.removeprefix("/continue").strip())
+        )
+        assert handler_result.success is False
+        assert core_state.db.max_event_seq(thread_id) == handler_before
+        assert create_snapshot(core_state.db, thread_id)["messages"] == before_messages
+        assert build_tool_call_states(core_state.db, thread_id)[tool_call_id].state == before_state
+        assert dict(core_state.db.current_open(thread_id)) == before_lease
+        interrupts = core_state.db.conn.execute(
+            "SELECT 1 FROM events WHERE thread_id=? AND type='control.interrupt'",
+            (thread_id,),
+        ).fetchall()
+        assert interrupts == []
+
     def test_web_continue_does_not_interrupt_idle_scheduler_pending_ra1(self, client):
         """A resident scheduler is not a live stream and must not cancel pending RA1."""
         from eggthreads import append_message

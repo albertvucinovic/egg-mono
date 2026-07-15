@@ -2733,71 +2733,95 @@ class ThreadRunner:
 
 
     def _coalesce_get_user_tool_protocol(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Make completed get-user lifecycles one valid provider tool block.
+        """Reorder completed get-user lifecycles into valid provider blocks.
 
-        Each declaration remains exact-ID based. Only completed calls with one
-        durable result participate; malformed/unfinished calls are left for the
-        generic protocol guard to drop. Declarations containing unrelated tool
-        calls are deliberately left unchanged rather than split ambiguously.
+        Canonical event order can contain several assistant get-user
+        declarations followed later by their exact results. Provider protocols
+        require each declaration to be immediately followed by its result(s).
+        This provider-only projection moves each complete, get-user-only
+        declaration together with its exact results while retaining the entire
+        original assistant object.
+
+        Retaining separate assistant blocks is important: provider adapters can
+        persist opaque top-level fields such as encrypted ``reasoning_content``
+        or ``thought_signature`` on each declaration, and those fields cannot
+        be safely merged across turns. Per-tool-call provider fields likewise
+        remain attached to their original copied call. Mixed or incomplete
+        declarations are left unchanged for the generic protocol guard.
         """
 
         get_user_name = "get_user_message_while_preserving_llm_turn"
-        declarations: dict[str, tuple[int, Dict[str, Any], Dict[str, Any]]] = {}
-        results: dict[str, tuple[int, Dict[str, Any]]] = {}
+        results_by_id: dict[str, list[tuple[int, Dict[str, Any]]]] = {}
         for index, message in enumerate(messages):
-            if not isinstance(message, dict):
+            if not isinstance(message, dict) or message.get("role") != "tool":
                 continue
-            if message.get("role") == "assistant":
-                calls = message.get("tool_calls")
-                if not isinstance(calls, list) or not calls:
-                    continue
-                parsed: list[tuple[str, Dict[str, Any]]] = []
-                all_get_user = True
-                for call in calls:
-                    if not isinstance(call, dict):
-                        all_get_user = False
-                        break
-                    function = call.get("function")
-                    name = function.get("name") if isinstance(function, dict) else None
-                    call_id = call.get("id")
-                    if name != get_user_name or not isinstance(call_id, str) or not call_id:
-                        all_get_user = False
-                        break
-                    parsed.append((call_id, call))
-                if all_get_user:
-                    for call_id, call in parsed:
-                        declarations[call_id] = (index, message, call)
-            elif message.get("role") == "tool":
-                call_id = message.get("tool_call_id")
-                if isinstance(call_id, str) and call_id:
-                    results[call_id] = (index, message)
+            call_id = message.get("tool_call_id")
+            if isinstance(call_id, str) and call_id:
+                results_by_id.setdefault(call_id, []).append((index, message))
 
-        completed_ids = [
-            call_id
-            for call_id, (index, _message, _call) in sorted(
-                declarations.items(), key=lambda item: (item[1][0], item[0])
-            )
-            if call_id in results
-        ]
-        if not completed_ids:
+        complete_groups: list[
+            tuple[int, Dict[str, Any], list[tuple[int, Dict[str, Any]]]]
+        ] = []
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            calls = message.get("tool_calls")
+            if not isinstance(calls, list) or not calls:
+                continue
+            call_ids: list[str] = []
+            get_user_only = True
+            for call in calls:
+                if not isinstance(call, dict):
+                    get_user_only = False
+                    break
+                function = call.get("function")
+                name = function.get("name") if isinstance(function, dict) else None
+                call_id = call.get("id")
+                if name != get_user_name or not isinstance(call_id, str) or not call_id:
+                    get_user_only = False
+                    break
+                call_ids.append(call_id)
+            if not get_user_only or len(set(call_ids)) != len(call_ids):
+                continue
+            # Exactly one result per declared identity is required. Duplicates
+            # are malformed and cannot be repaired by choosing one arbitrarily.
+            if any(len(results_by_id.get(call_id, [])) != 1 for call_id in call_ids):
+                continue
+            group_results = [results_by_id[call_id][0] for call_id in call_ids]
+            complete_groups.append((index, message, group_results))
+
+        if not complete_groups:
             return messages
 
+        # A result used by a complete group must not also be referenced by an
+        # incomplete/malformed declaration. Ambiguous reused IDs are left for
+        # the generic fail-closed protocol guard.
+        complete_declaration_indices = {index for index, _message, _results in complete_groups}
+        for index, message in enumerate(messages):
+            if index in complete_declaration_indices or not isinstance(message, dict):
+                continue
+            calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+            if not isinstance(calls, list):
+                continue
+            referenced_ids = {
+                call.get("id") for call in calls
+                if isinstance(call, dict) and isinstance(call.get("id"), str)
+            }
+            if any(result_id in referenced_ids for result_id in results_by_id):
+                return messages
+
         removed_indices = {
-            declarations[call_id][0] for call_id in completed_ids
-        } | {
-            results[call_id][0] for call_id in completed_ids
+            index
+            for declaration_index, _message, group_results in complete_groups
+            for index in (declaration_index, *(result_index for result_index, _result in group_results))
         }
         first_index = min(removed_indices)
-        synthetic = {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [declarations[call_id][2] for call_id in completed_ids],
-        }
         rebuilt: List[Dict[str, Any]] = []
         for index, message in enumerate(messages):
             if index == first_index:
-                rebuilt.append(synthetic)
-                rebuilt.extend(results[call_id][1] for call_id in completed_ids)
+                for _declaration_index, declaration, group_results in complete_groups:
+                    rebuilt.append(declaration)
+                    rebuilt.extend(result for _result_index, result in group_results)
             if index not in removed_indices:
                 rebuilt.append(message)
         return rebuilt

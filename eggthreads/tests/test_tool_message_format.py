@@ -466,3 +466,82 @@ def test_missing_tools_policy_masks_secret_like_tool_output_by_default(tmp_path)
     out = runner._sanitize_messages_for_api(messages)
 
     assert out[-1]["content"] == "API_KEY=***"
+
+
+def test_get_user_protocol_coalescing_preserves_encrypted_provider_metadata() -> None:
+    """Get-user declarations can carry opaque provider fields and signatures."""
+
+    get_user = "get_user_message_while_preserving_llm_turn"
+    runner = _DummyRunner()
+    runner._model_thinking_options = lambda _model: {
+        "thinking_content_policy": "send all encrypted gemini",
+        "thinking_content_key": "reasoning_content",
+    }
+    messages = [
+        {"role": "user", "content": "start"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": {"opaque": "encrypted-thought"},
+            "thought_signature": "message-signature",
+            "tool_calls": [{
+                "id": "wait-one",
+                "type": "function",
+                "extra_content": {"google": {"thought_signature": "tool-signature-one"}},
+                "function": {"name": get_user, "arguments": "{}"},
+            }],
+        },
+        {"role": "assistant", "content": "interim note", "answer_user_preserve_turn": True},
+        {"role": "tool", "tool_call_id": "wait-one", "content": "answer"},
+    ]
+
+    out = runner._sanitize_messages_for_api(
+        messages,
+        model_key="encrypted-model",
+        tools_cfg=MagicMock(allow_raw_tool_output=True),
+    )
+
+    declaration = next(message for message in out if message.get("role") == "assistant")
+    assert declaration["reasoning_content"] == {"opaque": "encrypted-thought"}
+    assert declaration["thought_signature"] == "message-signature"
+    assert declaration["tool_calls"][0]["extra_content"] == {
+        "google": {"thought_signature": "tool-signature-one"}
+    }
+    assert out[out.index(declaration) + 1] == {
+        "role": "tool",
+        "tool_call_id": "wait-one",
+        "content": "answer",
+    }
+
+
+def test_get_user_protocol_coalescing_keeps_conflicting_metadata_on_separate_turns() -> None:
+    get_user = "get_user_message_while_preserving_llm_turn"
+    runner = _DummyRunner()
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "thought_signature": "signature-one",
+            "tool_calls": [{"id": "wait-one", "function": {"name": get_user, "arguments": "{}"}}],
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "thought_signature": "signature-two",
+            "tool_calls": [{"id": "wait-two", "function": {"name": get_user, "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "wait-one", "content": "one"},
+        {"role": "tool", "tool_call_id": "wait-two", "content": "two"},
+    ]
+
+    projected = runner._coalesce_get_user_tool_protocol(messages)
+    assert [
+        message.get("thought_signature")
+        for message in projected
+        if message.get("role") == "assistant"
+    ] == ["signature-one", "signature-two"]
+    assert [
+        message.get("tool_call_id")
+        for message in projected
+        if message.get("role") == "tool"
+    ] == ["wait-one", "wait-two"]

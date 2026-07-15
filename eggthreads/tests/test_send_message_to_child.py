@@ -302,6 +302,33 @@ def test_continue_subthread_tool_uses_current_thread_context(tmp_path, monkeypat
     assert "Previous error: LLM/runner error: provider exploded" in notices[0]["content"]
 
 
+def test_continue_subthread_invalid_explicit_target_is_side_effect_free(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(db, child, "user", "anchor")
+    before = db.max_event_seq(child)
+
+    out = create_default_tools().execute(
+        "continue_subthread",
+        {"child_thread_id": child, "msg_id": "missing"},
+        thread_id=parent,
+    )
+    payload = json.loads(out)
+
+    assert payload["success"] is False
+    assert payload["message"] == "Message not found: missing"
+    assert db.max_event_seq(child) == before
+    assert not [
+        row for row in db.conn.execute(
+            "SELECT 1 FROM events WHERE thread_id=? AND type='control.interrupt'",
+            (child,),
+        )
+    ]
+
+
 def test_continue_subthread_registered_and_exposed():
     tools = create_default_tools()
     names = {spec["function"]["name"] for spec in tools.tools_spec()}
