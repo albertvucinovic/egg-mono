@@ -112,7 +112,21 @@ def _bounded_decompress(data: bytes, *, wbits: int) -> tuple[bytes, bool]:
     decoder = zlib.decompressobj(wbits)
     out = decoder.decompress(data, _ERROR_DECODED_MAX_BYTES + 1)
     overflow = len(out) > _ERROR_DECODED_MAX_BYTES or bool(decoder.unconsumed_tail)
-    return out[:_ERROR_DECODED_MAX_BYTES], decoder.eof and not overflow
+    trailing_data = bool(decoder.unused_data)
+    if not decoder.eof or overflow or trailing_data:
+        return out[:_ERROR_DECODED_MAX_BYTES], False
+
+    # A complete decoder should have no buffered output after EOF. Keep flush
+    # bounded and reject any ambiguous extra representation output.
+    flushed = decoder.flush(_ERROR_DECODED_MAX_BYTES + 1 - len(out))
+    if flushed:
+        out += flushed
+    complete = (
+        len(out) <= _ERROR_DECODED_MAX_BYTES
+        and not decoder.unconsumed_tail
+        and not decoder.unused_data
+    )
+    return out[:_ERROR_DECODED_MAX_BYTES], complete
 
 
 def _decode_error_wire(

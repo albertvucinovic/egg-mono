@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+
 import pytest
 
 from eggthreads.web import WebBackendError, get_fetch_orchestrator, get_search_orchestrator
@@ -549,6 +551,19 @@ class _Throwing432Response:
         raise RecursionError("deep JSON")
 
 
+class _EncodedTrailingResponse:
+    def __init__(self, status_code, body, encoding):
+        from eggthreads.tests.test_tavily_tools import _BytesRaw
+
+        self.status_code = status_code
+        self.raw = _BytesRaw(body)
+        self.headers = {"Content-Encoding": encoding}
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 @pytest.mark.parametrize("status_code", [432, 433])
 def test_search_chain_falls_back_on_tavily_reserved_quota_status(monkeypatch, status_code):
     _clear_web_env(monkeypatch)
@@ -603,6 +618,65 @@ def test_pinned_tavily_reserved_quota_status_is_terminal(monkeypatch, status_cod
     assert error.status_code == status_code
     assert error.retriable is False
     assert error.fallback_eligible is True
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+def test_configured_chain_does_not_fallback_on_encoded_trailing_data(monkeypatch, operation):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    if operation == "search":
+        monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "tavily,searxng")
+    else:
+        monkeypatch.setenv("EGG_WEB_FETCH_CHAIN", "tavily,direct_http")
+    quota = gzip.compress(b'{"detail":"This request exceeds your plans usage limit"}')
+    response = _EncodedTrailingResponse(403, quota + b'junk', "gzip")
+
+    import requests
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: response)
+
+    def unexpected_fallback(*args, **kwargs):
+        raise AssertionError("ambiguous encoded data must not advance the chain")
+
+    monkeypatch.setattr(requests, "get", unexpected_fallback)
+
+    if operation == "search":
+        result = get_search_orchestrator().search_response("x", max_results=1)
+        assert result.results == []
+        attempt = result.attempts[0]
+    else:
+        with pytest.raises(WebBackendError) as exc_info:
+            get_fetch_orchestrator().fetch_response("https://example.com")
+        assert exc_info.value.fallback_eligible is False
+        assert response.closed is True
+        return
+    assert attempt.fallback_eligible is False
+    assert attempt.retriable is False
+    assert response.closed is True
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+def test_pinned_tavily_encoded_trailing_data_is_terminal(monkeypatch, operation):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    if operation == "search":
+        monkeypatch.setenv("EGG_WEB_SEARCH_BACKEND", "tavily")
+    else:
+        monkeypatch.setenv("EGG_WEB_FETCH_BACKEND", "tavily")
+    quota = gzip.compress(b'{"detail":"This request exceeds your plans usage limit"}')
+    permission = gzip.compress(b'{"detail":"permission denied"}')
+    response = _EncodedTrailingResponse(403, quota + permission, "gzip")
+
+    import requests
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: response)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        if operation == "search":
+            get_search_orchestrator().search_response("x", max_results=1)
+        else:
+            get_fetch_orchestrator().fetch_response("https://example.com")
+
+    assert exc_info.value.fallback_eligible is False
+    assert response.closed is True
 
 
 def test_search_chain_falls_back_on_throwing_432_body(monkeypatch):

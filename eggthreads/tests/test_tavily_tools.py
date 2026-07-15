@@ -473,6 +473,124 @@ def test_tavily_compression_bomb_has_bounded_wire_and_decoded_work(monkeypatch, 
     assert response.closed is True
 
 
+def _raw_deflate(data: bytes) -> bytes:
+    compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    return compressor.compress(data) + compressor.flush()
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+@pytest.mark.parametrize(
+    "encoding, encode",
+    [
+        ("gzip", gzip.compress),
+        ("x-gzip", gzip.compress),
+        ("deflate", zlib.compress),
+        ("deflate", _raw_deflate),
+    ],
+    ids=["gzip", "x-gzip", "zlib-deflate", "raw-deflate"],
+)
+def test_tavily_encoded_trailing_junk_fails_closed(monkeypatch, operation, encoding, encode):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    quota = b'{"detail":"This request exceeds your plans usage limit"}'
+    response = _EncodedErrorResponse(403, encode(quota) + b'trailing-junk', encoding)
+
+    import requests
+    monkeypatch.setattr(requests, 'post', lambda *args, **kwargs: response)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        if operation == "search":
+            TavilyBackend().search_response('x')
+        else:
+            TavilyBackend().fetch_response('https://example.com')
+
+    error = exc_info.value
+    assert error.retriable is False
+    assert error.fallback_eligible is False
+    assert response.closed is True
+    assert response.raw.offset <= 4097
+    assert len(error.diagnostics['response_detail']) <= 400
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+def test_tavily_concatenated_conflicting_gzip_members_fail_closed(monkeypatch, operation):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    quota = gzip.compress(b'{"detail":"This request exceeds your plans usage limit"}')
+    permission = gzip.compress(b'{"detail":"permission denied"}')
+    response = _EncodedErrorResponse(403, quota + permission, "gzip")
+
+    import requests
+    monkeypatch.setattr(requests, 'post', lambda *args, **kwargs: response)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        if operation == "search":
+            TavilyBackend().search_response('x')
+        else:
+            TavilyBackend().fetch_response('https://example.com')
+
+    assert exc_info.value.fallback_eligible is False
+    assert response.closed is True
+    assert response.raw.offset <= 4097
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+@pytest.mark.parametrize(
+    "encoding, body",
+    [
+        ("br", b"not-brotli"),
+        ("gzip, br", gzip.compress(b'{"detail":"This request exceeds your plans usage limit"}')),
+        ("gzip", gzip.compress(b'{"detail":"This request exceeds your plans usage limit"}')[:-3]),
+        ("deflate", zlib.compress(b'{"detail":"This request exceeds your plans usage limit"}')[:-2]),
+        ("x-gzip", b"broken-gzip"),
+    ],
+    ids=["unsupported", "multiple", "truncated-gzip", "truncated-deflate", "broken-x-gzip"],
+)
+def test_tavily_ambiguous_or_broken_encodings_fail_closed(
+    monkeypatch, operation, encoding, body
+):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    response = _EncodedErrorResponse(403, body, encoding)
+
+    import requests
+    monkeypatch.setattr(requests, 'post', lambda *args, **kwargs: response)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        if operation == "search":
+            TavilyBackend().search_response('x')
+        else:
+            TavilyBackend().fetch_response('https://example.com')
+
+    error = exc_info.value
+    assert error.retriable is False
+    assert error.fallback_eligible is False
+    assert len(error.diagnostics['response_detail']) <= 400
+    assert response.closed is True
+    assert response.raw.offset <= 4097
+
+
+@pytest.mark.parametrize("operation", ["search", "extract"])
+def test_tavily_reserved_quota_status_remains_authoritative_with_trailing_gzip(
+    monkeypatch, operation
+):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+    encoded = gzip.compress(b'{"detail":"permission denied"}') + b'junk'
+    response = _EncodedErrorResponse(433, encoded, "gzip")
+
+    import requests
+    monkeypatch.setattr(requests, 'post', lambda *args, **kwargs: response)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        if operation == "search":
+            TavilyBackend().search_response('x')
+        else:
+            TavilyBackend().fetch_response('https://example.com')
+
+    error = exc_info.value
+    assert error.status_code == 433
+    assert error.retriable is False
+    assert error.fallback_eligible is True
+    assert response.closed is True
+
+
 def _json_body_of_exact_size(size: int) -> bytes:
     prefix = b'{"detail":"This request exceeds your plans usage limit","padding":"'
     suffix = b'"}'
