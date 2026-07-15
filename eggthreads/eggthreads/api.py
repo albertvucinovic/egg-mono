@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from .db import ThreadsDB, ThreadRow
+from .db import LeaseLost, ThreadsDB, ThreadRow
 
 try:
     from eggllm.config import load_models_config
@@ -2944,18 +2944,9 @@ def continue_thread(
     except Exception:
         pass
 
-    # Continuation supersedes every outstanding get-user owner. Terminalize
-    # each exact call before skip edits so its declaration/note/result can be
-    # retained as a valid, inspectable normal tool lifecycle.
-    terminalize_superseded_get_user_waits(
-        db,
-        thread_id,
-        authoritative_tool_call_id=None,
-        content="Wait superseded by thread continuation.",
-        reason="Superseded by thread continuation",
-    )
-
-    # Determine the continue point
+    # Determine and validate the continue point before any durable mutation.
+    # A failed explicit target (or healthy/no-op diagnosis) must leave wait
+    # lifecycles and history byte-for-byte unchanged.
     diagnosis = None
     if msg_id is None:
         # Run diagnosis to understand thread state and auto-detect continue point
@@ -2988,6 +2979,17 @@ def continue_thread(
             skipped_msg_ids=[],
             message=f"Message not found: {msg_id}"
         )
+
+    # Continuation supersedes every outstanding get-user owner. This runs only
+    # after target validation and repairs legacy skipped declarations/notes
+    # through preserve edits plus exact-ID ordinary tool results.
+    terminalize_superseded_get_user_waits(
+        db,
+        thread_id,
+        authoritative_tool_call_id=None,
+        content="Wait superseded by thread continuation.",
+        reason="Superseded by thread continuation",
+    )
 
     # First, collect msg_ids that have already been marked as skipped via msg.edit events
     already_skipped: set = set()
@@ -3242,34 +3244,74 @@ def append_normal_user_message(
     *,
     extra: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Append human/manager input under deterministic get-user ownership.
+    """Atomically append and assign one normal reply to its wait owner.
 
-    When a preserve-turn wait is active, its newest canonical note owns this
-    reply. Older unresolved waits receive durable terminal tool results before
-    the normal User message is appended. Non-chat user tool messages continue
-    to use ``append_message`` directly and cannot answer a wait.
+    The first eligible message claims the newest live get-user call in the same
+    SQLite writer transaction as ``msg.create``. Later quick submissions see
+    that durable claim and remain ordinary user turns; they cannot supersede or
+    ambiguously answer the already-claimed call.
     """
 
-    waiting_note = _active_get_user_message_waiting_note(db, thread_id)
-    if waiting_note is not None:
-        terminalize_superseded_get_user_waits(
-            db,
-            thread_id,
-            authoritative_tool_call_id=str(waiting_note["tool_call_id"]),
+    validated_content = _validate_append_message_content(content)
+    payload_extra: Dict[str, Any] = dict(extra or {})
+    msg_id = _ulid_like()
+    savepoint = f"append_normal_user_{os.urandom(8).hex()}"
+    db.conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        locked = db.conn.execute(
+            "UPDATE threads SET status=status WHERE thread_id=?",
+            (thread_id,),
         )
-    else:
-        # A crashed/continued invocation can leave unresolved historical waits
-        # without a live owner. They cannot consume this new chat message, but
-        # must still become durable terminal lifecycles rather than stale cards.
-        terminalize_superseded_get_user_waits(
-            db,
-            thread_id,
-            authoritative_tool_call_id=None,
-            content="Wait superseded because no active get-user owner remained.",
-            reason="Superseded before a new user turn",
-        )
-    return append_message(db, thread_id, "user", content, extra=extra)
+        if locked.rowcount != 1:
+            raise ValueError(f"Thread not found: {thread_id}")
 
+        owner = _live_get_user_owner(db, thread_id, include_claimed=True)
+        if owner is None:
+            # No live lease-backed owner can consume this message. Recover all
+            # orphaned candidates first; a previously claimed orphan publishes
+            # its exact claimed answer rather than synthetic content.
+            terminalize_superseded_get_user_waits(
+                db,
+                thread_id,
+                authoritative_tool_call_id=None,
+                content="Wait superseded because no active get-user owner remained.",
+                reason="Superseded before a new user turn",
+            )
+        else:
+            terminalize_superseded_get_user_waits(
+                db,
+                thread_id,
+                authoritative_tool_call_id=str(owner.tool_call_id),
+            )
+
+        reply_seq = db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_="msg.create",
+            payload={**payload_extra, "role": "user", "content": validated_content},
+            msg_id=msg_id,
+        )
+        if owner is not None and not owner.claimed_user_msg_id:
+            db.append_event(
+                event_id=_ulid_like(),
+                thread_id=thread_id,
+                type_="msg.edit",
+                msg_id=msg_id,
+                payload={
+                    "content": validated_content,
+                    "no_api": True,
+                    "keep_user_turn": True,
+                    "consumed_by_tool_call_id": str(owner.tool_call_id),
+                    "consumed_by_tool_name": GET_USER_MESSAGE_TOOL_NAME,
+                    "consumed_user_event_seq": int(reply_seq),
+                },
+            )
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return msg_id
+    except Exception:
+        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
 
 def edit_message(db: ThreadsDB, thread_id: str, msg_id: str, new_content: str | list[dict[str, Any]], extra: Optional[Dict[str, Any]] = None) -> None:
     """Edit an existing message's content.
@@ -4131,104 +4173,26 @@ GET_USER_MESSAGE_SUPERSEDED_CONTENT = (
 )
 
 
-def _get_user_wait_notes(db: ThreadsDB, thread_id: str) -> list[Dict[str, Any]]:
-    """Return effective get-user notes in canonical event order."""
+def _get_user_wait_candidates(db: ThreadsDB, thread_id: str):
+    """Return the reducer's bounded get-user recovery candidates."""
 
-    try:
-        skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
-    except Exception:
-        skipped, deleted = set(), set()
-    notes: list[Dict[str, Any]] = []
-    rows = db.conn.execute(
-        "SELECT event_seq, ts, msg_id, payload_json FROM events "
-        "WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
-        (thread_id,),
-    ).fetchall()
-    for row in rows:
-        msg_id = str(row["msg_id"] or "")
-        if msg_id and (msg_id in skipped or msg_id in deleted):
-            continue
-        payload = _event_payload_from_row(row)
-        tool_call_id = str(payload.get("awaiting_user_message_tool_call_id") or "")
-        if (
-            payload.get("role") != "assistant"
-            or not payload.get("answer_user_preserve_turn")
-            or payload.get("source_tool_name") != GET_USER_MESSAGE_TOOL_NAME
-            or not tool_call_id
-        ):
-            continue
-        notes.append({
-            "event_seq": int(row["event_seq"]),
-            "ts": row["ts"],
-            "msg_id": msg_id,
-            "content": _message_content_text(payload.get("content")),
-            "tool_call_id": tool_call_id,
-        })
-    return notes
+    from .tool_state import get_user_wait_candidates
+
+    return get_user_wait_candidates(db, thread_id)
 
 
-def _append_get_user_terminal_result(
+def _preserve_get_user_message_ids(
     db: ThreadsDB,
     thread_id: str,
-    tool_call_id: str,
-    content: str,
-    *,
-    reason: str,
-    keep_user_turn: bool,
-) -> bool:
-    """Terminalize one exact get-user call with normal durable lifecycle state."""
+    msg_ids: set[str],
+) -> None:
+    """Lazily undo legacy continue skips for one exact lifecycle."""
 
-    from .tool_output import ToolOutputPublicationPlan, ToolOutputStateConflict, finalize_tool_output
-    from .tool_state import build_tool_call_states
-
-    tc = build_tool_call_states(db, thread_id).get(str(tool_call_id))
-    if tc is not None and tc.state == "TC5" and not tc.published:
-        # A previously committed decision is already canonical; publish its
-        # exact preview instead of replacing it with a newer synthetic reason.
-        content = str((tc.last_output_approval_payload or {}).get("preview") or content)
-    if (
-        tc is None
-        or tc.name != GET_USER_MESSAGE_TOOL_NAME
-        or tc.parent_role != "assistant"
-        or tc.published
-        or tc.state not in {"TC2.1", "TC3", "TC4", "TC5"}
-        or (tc.state == "TC4" and tc.finished_reason != "interrupted")
-    ):
-        return False
-    try:
-        if tc.state != "TC5":
-            finalize_tool_output(
-                db,
-                thread_id,
-                tc.tool_call_id,
-                decision="whole",
-                source="system",
-                reason=reason,
-                expected_state=("TC2.1", "TC3", "TC4"),
-                expected_event_seq=tc.state_event_seq,
-                publication_plan=ToolOutputPublicationPlan(
-                    decision="whole",
-                    preview=content,
-                    reason=reason,
-                ),
-            )
-    except ToolOutputStateConflict:
-        # Another process may have answered or terminalized this exact call.
-        tc = build_tool_call_states(db, thread_id).get(str(tool_call_id))
-        if tc is None or tc.published or tc.output_decision is None:
-            return False
-
-    preserve_msg_ids = {str(tc.parent_msg_id or "")}
-    for note in _get_user_wait_notes(db, thread_id):
-        if str(note.get("tool_call_id") or "") == str(tool_call_id):
-            preserve_msg_ids.add(str(note.get("msg_id") or ""))
-    for msg_id in sorted(preserve_msg_ids):
-        if not msg_id:
-            continue
+    for msg_id in sorted(value for value in msg_ids if value):
         already_preserved = db.conn.execute(
             """
             SELECT 1 FROM events
-             WHERE thread_id=? AND type='msg.edit' AND msg_id=?
+             WHERE thread_id=? AND msg_id=? AND type='msg.edit'
                AND json_extract(payload_json, '$.preserve_on_continue')=1
              LIMIT 1
             """,
@@ -4243,51 +4207,175 @@ def _append_get_user_terminal_result(
                 payload={"preserve_on_continue": True},
             )
 
-    # The ordinary role=tool result is the provider-protocol completion. A
-    # transaction-local recheck prevents duplicate publication by competing UI,
-    # manager, and runner processes.
-    savepoint = f"publish_get_user_terminal_{os.urandom(8).hex()}"
-    db.conn.execute(f"SAVEPOINT {savepoint}")
-    try:
-        db.conn.execute(
-            "UPDATE threads SET status=status WHERE thread_id=?",
-            (thread_id,),
-        )
-        exists = db.conn.execute(
-            """
-            SELECT 1 FROM events
-             WHERE thread_id=? AND type='msg.create'
-               AND json_extract(payload_json, '$.role')='tool'
-               AND json_extract(payload_json, '$.tool_call_id')=?
-             LIMIT 1
-            """,
-            (thread_id, str(tool_call_id)),
-        ).fetchone()
-        if exists is not None:
-            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+def _append_get_user_terminal_result(
+    db: ThreadsDB,
+    thread_id: str,
+    tc: Any,
+    content: str,
+    *,
+    reason: str,
+    keep_user_turn: bool,
+) -> bool:
+    """Terminalize one exact get-user call with normal durable lifecycle state."""
+
+    from .tool_output import ToolOutputPublicationPlan, ToolOutputStateConflict, finalize_tool_output
+    from .tool_state import build_tool_call_states
+
+    tool_call_id = str(tc.tool_call_id)
+    if tc.name != GET_USER_MESSAGE_TOOL_NAME or tc.parent_role != "assistant":
+        return False
+
+    legacy_hidden = bool(
+        tc.parent_skipped_on_continue
+        or tc.waiting_note_skipped_on_continue
+        or tc.result_skipped_on_continue
+    )
+    preserve_msg_ids = {
+        str(tc.parent_msg_id or ""),
+        str(tc.waiting_note_msg_id or ""),
+        str(tc.result_msg_id or ""),
+    }
+    _preserve_get_user_message_ids(db, thread_id, preserve_msg_ids)
+    if legacy_hidden:
+        # Preservation changes effective replay. Reload the same exact call so
+        # pre-repair lifecycle events/results become authoritative again.
+        refreshed = build_tool_call_states(db, thread_id).get(tool_call_id)
+        if refreshed is None:
             return False
-        payload: Dict[str, Any] = {
-            "role": "tool",
-            "content": content,
-            "tool_call_id": str(tool_call_id),
-            "name": GET_USER_MESSAGE_TOOL_NAME,
-            "preserve_on_continue": True,
-        }
-        if keep_user_turn:
-            payload["keep_user_turn"] = True
+        tc = refreshed
+        if tc.published:
+            return True
+
+    if tc.published or tc.state not in {"TC2.1", "TC3", "TC4", "TC5"}:
+        return False
+
+    # A claimed reply is already canonical output authority. If its runner
+    # vanished before writing tool_call.finished, recover that exact text rather
+    # than replacing it with a synthetic supersession message.
+    if tc.claimed_user_msg_id and tc.state in {"TC2.1", "TC3"}:
+        content = str(tc.claimed_user_content or "")
         db.append_event(
             event_id=_ulid_like(),
             thread_id=thread_id,
-            type_="msg.create",
-            msg_id=_ulid_like(),
-            payload=payload,
+            type_="tool_call.finished",
+            payload={
+                "tool_call_id": tool_call_id,
+                "reason": "success",
+                "output": content,
+                "recovered_from_claimed_user_message": tc.claimed_user_msg_id,
+            },
         )
-        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-        return True
+        # The next reducer call tail-applies this one exact lifecycle event.
+        refreshed = next(
+            (candidate for candidate in _get_user_wait_candidates(db, thread_id)
+             if candidate.tool_call_id == tool_call_id),
+            None,
+        )
+        if refreshed is None:
+            return False
+        tc = refreshed
+    elif tc.state == "TC4" and str(tc.finished_reason or "").lower() == "success":
+        content = str(tc.finished_output or "")
+    elif tc.state == "TC5":
+        # A previously committed decision is canonical; publish its exact
+        # preview instead of replacing it with a later synthetic reason.
+        content = str((tc.last_output_approval_payload or {}).get("preview") or content)
+
+    try:
+        if tc.state != "TC5":
+            finalize_tool_output(
+                db,
+                thread_id,
+                tool_call_id,
+                decision="whole",
+                source="system",
+                reason=reason,
+                expected_state=("TC2.1", "TC3", "TC4"),
+                expected_event_seq=tc.state_event_seq,
+                publication_plan=ToolOutputPublicationPlan(
+                    decision="whole",
+                    preview=content,
+                    reason=reason,
+                ),
+            )
+    except ToolOutputStateConflict:
+        refreshed = next(
+            (candidate for candidate in _get_user_wait_candidates(db, thread_id)
+             if candidate.tool_call_id == tool_call_id),
+            None,
+        )
+        if refreshed is None or refreshed.published or refreshed.output_decision is None:
+            return False
+        tc = refreshed
+        content = str((tc.last_output_approval_payload or {}).get("preview") or content)
+
+    # A result discovered during repair is exact-ID authority; never append a
+    # duplicate even if malformed legacy ordering kept it unpublished.
+    if tc.result_msg_id:
+        return legacy_hidden
+
+    payload: Dict[str, Any] = {
+        "role": "tool",
+        "content": content,
+        "tool_call_id": tool_call_id,
+        "name": GET_USER_MESSAGE_TOOL_NAME,
+        "preserve_on_continue": True,
+    }
+    if keep_user_turn:
+        payload["keep_user_turn"] = True
+    db.append_event(
+        event_id=_ulid_like(),
+        thread_id=thread_id,
+        type_="msg.create",
+        msg_id=_ulid_like(),
+        payload=payload,
+    )
+    return True
+
+
+def _live_get_user_owner(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    include_claimed: bool,
+):
+    """Return the sole lease-backed newest get-user owner, if any."""
+
+    try:
+        open_row = db.current_open(thread_id)
+        if (
+            open_row is None
+            or str(open_row["lease_until"] or "") <= _utcnow_iso()
+            or str(open_row["purpose"] or "") != "tool"
+        ):
+            return None
+        invoke_id = str(open_row["invoke_id"] or "")
     except Exception:
-        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-        raise
+        return None
+    if not invoke_id:
+        return None
+
+    newest = next(
+        (
+            tc
+            for tc in reversed(_get_user_wait_candidates(db, thread_id))
+            if (
+                tc.state == "TC3"
+                and tc.waiting_note_event_seq is not None
+                and not tc.parent_skipped_on_continue
+                and not tc.waiting_note_skipped_on_continue
+            )
+        ),
+        None,
+    )
+    # Never fall back to an older lease owner: a newer unresolved declaration
+    # is authoritative evidence that the older invocation is stale.
+    if newest is None or newest.owner_invoke_id != invoke_id:
+        return None
+    if not include_claimed and newest.claimed_user_msg_id:
+        return None
+    return newest
 
 
 def terminalize_superseded_get_user_waits(
@@ -4298,32 +4386,147 @@ def terminalize_superseded_get_user_waits(
     content: str = GET_USER_MESSAGE_SUPERSEDED_CONTENT,
     reason: str = "Superseded by newer get-user wait",
 ) -> list[str]:
-    """Durably retire obsolete waits while optionally retaining one answer owner.
+    """Durably retire obsolete waits while optionally retaining one owner.
 
-    ``authoritative_tool_call_id`` names the sole call that owns the next normal
-    User reply. Passing ``None`` terminalizes every unresolved wait, as thread
-    continuation has no surviving owner. Results stay inspectable and exact-ID
-    paired in canonical history instead of being hidden by either client.
+    A non-null owner is accepted only when it is the current newest exact call
+    behind the thread's live tool lease. This prevents a stale invocation from
+    manufacturing authority and retiring a newer live wait.
     """
 
     owner_id = str(authoritative_tool_call_id or "")
-    retired: list[str] = []
-    for note in _get_user_wait_notes(db, thread_id):
-        tool_call_id = str(note["tool_call_id"])
-        if owner_id and tool_call_id == owner_id:
-            continue
-        terminal_reason = f"{reason} {owner_id}".rstrip()
-        if _append_get_user_terminal_result(
+    savepoint = f"terminalize_get_user_{os.urandom(8).hex()}"
+    db.conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        locked = db.conn.execute(
+            "UPDATE threads SET status=status WHERE thread_id=?",
+            (thread_id,),
+        )
+        if locked.rowcount != 1:
+            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return []
+
+        candidates = _get_user_wait_candidates(db, thread_id)
+        if owner_id:
+            live_owner = _live_get_user_owner(db, thread_id, include_claimed=True)
+            if live_owner is None or str(live_owner.tool_call_id) != owner_id:
+                db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return []
+
+        retired: list[str] = []
+        for tc in candidates:
+            tool_call_id = str(tc.tool_call_id)
+            if owner_id and tool_call_id == owner_id:
+                continue
+            terminal_reason = f"{reason} {owner_id}".rstrip()
+            if _append_get_user_terminal_result(
+                db,
+                thread_id,
+                tc,
+                content,
+                reason=terminal_reason,
+                keep_user_turn=True,
+            ):
+                retired.append(tool_call_id)
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return retired
+    except Exception:
+        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+
+
+def start_get_user_message_wait(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    invoke_id: str,
+    tool_call_id: str,
+    assistant_note: str,
+    model_key: str | None = None,
+) -> Dict[str, Any]:
+    """Lease-fenced atomic boundary for starting one preserve-turn wait."""
+
+    normalized_invoke_id = str(invoke_id or "")
+    normalized_tool_call_id = str(tool_call_id or "")
+    if not normalized_invoke_id or not normalized_tool_call_id:
+        raise LeaseLost(thread_id, normalized_invoke_id, "start_get_user_message_wait")
+
+    savepoint = f"start_get_user_wait_{os.urandom(8).hex()}"
+    db.conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        locked = db.conn.execute(
+            "UPDATE threads SET status=status WHERE thread_id=?",
+            (thread_id,),
+        )
+        if locked.rowcount != 1:
+            raise LeaseLost(thread_id, normalized_invoke_id, "start_get_user_message_wait")
+
+        candidates = _get_user_wait_candidates(db, thread_id)
+        current = next(
+            (candidate for candidate in candidates
+             if str(candidate.tool_call_id) == normalized_tool_call_id),
+            None,
+        )
+        lease = db.conn.execute(
+            """
+            SELECT 1 FROM open_streams
+             WHERE thread_id=? AND invoke_id=? AND purpose='tool'
+               AND lease_until>datetime('now')
+            """,
+            (thread_id, normalized_invoke_id),
+        ).fetchone()
+        if (
+            lease is None
+            or current is None
+            or current.state != "TC3"
+            or current.owner_invoke_id != normalized_invoke_id
+            or current.claimed_user_msg_id
+        ):
+            raise LeaseLost(thread_id, normalized_invoke_id, "start_get_user_message_wait")
+
+        if current.waiting_note_event_seq is not None:
+            note = {
+                "event_seq": int(current.waiting_note_event_seq),
+                "msg_id": str(current.waiting_note_msg_id or ""),
+                "tool_call_id": normalized_tool_call_id,
+            }
+        else:
+            note_msg_id = _ulid_like()
+            payload: Dict[str, Any] = {
+                "role": "assistant",
+                "content": assistant_note,
+                "answer_user_preserve_turn": True,
+                "source_tool_name": GET_USER_MESSAGE_TOOL_NAME,
+                "tool_call_id": normalized_tool_call_id,
+                "awaiting_user_message_tool_call_id": normalized_tool_call_id,
+            }
+            if model_key:
+                payload["model_key"] = model_key
+            note_seq = db.append_event_with_lease(
+                event_id=_ulid_like(),
+                thread_id=thread_id,
+                invoke_id=normalized_invoke_id,
+                type_="msg.create",
+                msg_id=note_msg_id,
+                payload=payload,
+            )
+            note = {
+                "event_seq": int(note_seq),
+                "msg_id": note_msg_id,
+                "tool_call_id": normalized_tool_call_id,
+            }
+
+        terminalize_superseded_get_user_waits(
             db,
             thread_id,
-            tool_call_id,
-            content,
-            reason=terminal_reason,
-            keep_user_turn=True,
-        ):
-            retired.append(tool_call_id)
-    return retired
-
+            authoritative_tool_call_id=normalized_tool_call_id,
+        )
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return note
+    except Exception:
+        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
 
 def send_message_to_child_thread(
     db: ThreadsDB,
@@ -4865,80 +5068,19 @@ def _active_assistant_notes(db: ThreadsDB, thread_id: str, *, limit: int = 5) ->
     return notes[-limit:]
 
 
-def _normal_user_reply_exists_after_note(db: ThreadsDB, thread_id: str, note_event_seq: int) -> bool:
-    try:
-        skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
-    except Exception:
-        skipped, deleted = set(), set()
-    try:
-        cur = db.conn.execute(
-            "SELECT event_seq, ts, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
-            (thread_id, int(note_event_seq)),
-        )
-        rows = cur.fetchall()
-    except Exception:
-        rows = []
-    for row in rows:
-        try:
-            msg_id = str(row["msg_id"] or "")
-        except Exception:
-            msg_id = ""
-        if msg_id and (msg_id in skipped or msg_id in deleted):
-            continue
-        payload = _event_payload_from_row(row)
-        if payload.get("role") != "user":
-            continue
-        if payload.get("tool_calls") or payload.get("no_api") or payload.get("keep_user_turn"):
-            continue
-        return True
-    return False
-
-
 def _active_get_user_message_waiting_note(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
-    """Return the one canonical get-user wait that owns the next reply."""
+    """Return the sole canonical unclaimed get-user owner for status/UI."""
 
-    try:
-        open_row = db.current_open(thread_id)
-        if open_row is None or str(open_row["lease_until"] or "") <= _utcnow_iso():
-            return None
-        if str(open_row["purpose"] or "") != "tool":
-            return None
-        invoke_id = str(open_row["invoke_id"] or "")
-    except Exception:
+    tc = _live_get_user_owner(db, thread_id, include_claimed=False)
+    if tc is None:
         return None
-    if not invoke_id:
-        return None
-
-    try:
-        from .tool_state import build_tool_call_states
-
-        states = build_tool_call_states(db, thread_id)
-        notes = _get_user_wait_notes(db, thread_id)
-    except Exception:
-        return None
-    newest_unresolved_note: Optional[Dict[str, Any]] = None
-    newest_unresolved_tool = None
-    for note in reversed(notes):
-        tc = states.get(str(note["tool_call_id"]))
-        if tc is None or tc.name != GET_USER_MESSAGE_TOOL_NAME or tc.state != "TC3":
-            continue
-        newest_unresolved_note = note
-        newest_unresolved_tool = tc
-        break
-    if newest_unresolved_note is None or newest_unresolved_tool is None:
-        return None
-    # The newest unresolved call is the sole authority. A lease belonging to an
-    # older call must not resurrect that older wait as an answer target.
-    if newest_unresolved_tool.owner_invoke_id != invoke_id:
-        return None
-    if _normal_user_reply_exists_after_note(
-        db,
-        thread_id,
-        int(newest_unresolved_note["event_seq"]),
-    ):
-        return None
-    return newest_unresolved_note
-
+    return {
+        "event_seq": int(tc.waiting_note_event_seq),
+        "ts": tc.waiting_note_ts,
+        "msg_id": str(tc.waiting_note_msg_id or ""),
+        "content": str(tc.waiting_note_content or ""),
+        "tool_call_id": str(tc.tool_call_id),
+    }
 
 def get_active_get_user_message_waiting_note(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
     """Return active get-user waiting note metadata for status/UI callers."""

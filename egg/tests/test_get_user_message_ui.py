@@ -108,7 +108,7 @@ def test_input_panel_marks_active_get_user_answer_mode_and_restores_after_reply(
     assert egg_app.input_panel.title == "Message Input (get answer tool)"
     assert egg_app.input_panel.style.border_style != normal_border
 
-    ts.append_message(egg_app.db, egg_app.current_thread, "user", "The Practical Guide")
+    ts.append_normal_user_message(egg_app.db, egg_app.current_thread, "The Practical Guide")
     ts.create_snapshot(egg_app.db, egg_app.current_thread)
     egg_app._refresh_get_user_message_input_mode()
     egg_app.update_panels()

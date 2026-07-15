@@ -1283,6 +1283,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     isStreaming,
     visibleStreamingToolOutputs,
     streamingProviderRequest,
+    streamingKind,
   );
   const primaryToolTimeoutText = Object.values(visibleStreamingToolOutputs)
     .filter((tool) => !isGetUserMessageTool(tool.name))
@@ -1291,7 +1292,12 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const providerTimeText = streamingKind === "llm"
     ? providerTimingText(streamingProviderRequest, nowMs) || elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
     : null;
-  const genericStreamingTimeText = streamingKind !== "llm"
+  const waitOnlyToolStream = streamingKind === "tool"
+    && Object.values(visibleStreamingToolOutputs).some((tool) => !tool.finished)
+    && Object.values(visibleStreamingToolOutputs)
+      .filter((tool) => !tool.finished)
+      .every((tool) => isGetUserMessageTool(tool.name));
+  const genericStreamingTimeText = streamingKind !== "llm" && !waitOnlyToolStream
     ? elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
     : null;
   // Ordinary live tools remain expanded at every verbosity. A get-user wait

@@ -244,6 +244,18 @@ def _tool_state_signature(tc):
         "summary": tc.summary,
         "published": tc.published,
         "last_output_approval_payload": tc.last_output_approval_payload,
+        "owner_invoke_id": tc.owner_invoke_id,
+        "parent_skipped_on_continue": tc.parent_skipped_on_continue,
+        "waiting_note_msg_id": tc.waiting_note_msg_id,
+        "waiting_note_event_seq": tc.waiting_note_event_seq,
+        "waiting_note_ts": tc.waiting_note_ts,
+        "waiting_note_content": tc.waiting_note_content,
+        "waiting_note_skipped_on_continue": tc.waiting_note_skipped_on_continue,
+        "claimed_user_msg_id": tc.claimed_user_msg_id,
+        "claimed_user_event_seq": tc.claimed_user_event_seq,
+        "claimed_user_content": tc.claimed_user_content,
+        "result_msg_id": tc.result_msg_id,
+        "result_skipped_on_continue": tc.result_skipped_on_continue,
         "state": tc.state,
     }
 
@@ -275,6 +287,7 @@ def _reduction_signature(reduced):
         },
         "next_runner_actionable": _ra_signature(reduced.next_runner_actionable),
         "coarse_thread_state_without_lease": reduced.coarse_thread_state_without_lease,
+        "get_user_wait_tool_call_ids": tuple(reduced.get_user_wait_tool_call_ids),
     }
 
 

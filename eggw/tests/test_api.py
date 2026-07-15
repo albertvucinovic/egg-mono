@@ -805,6 +805,27 @@ class TestMessageOperations:
         assert data["status"] == "sent"
         assert "message_id" in data
 
+    def test_websocket_send_message_restarts_scheduler(self, client, monkeypatch):
+        create_resp = client.post("/api/threads", json={"name": "WebSocket Thread"})
+        thread_id = create_resp.json()["id"]
+        ensured = []
+        monkeypatch.setattr("eggw.routes.events.ensure_scheduler_for", ensured.append)
+
+        with client.websocket_connect(
+            f"/ws/{thread_id}",
+            headers={"Authorization": client.headers["Authorization"]},
+            subprotocols=["eggw"],
+        ) as websocket:
+            websocket.send_json({"type": "send_message", "content": "from websocket"})
+            assert websocket.receive_json() == {
+                "type": "message_sent",
+                "thread_id": thread_id,
+            }
+
+        assert ensured == [thread_id]
+        snapshot = __import__("eggthreads").create_snapshot(core_state.db, thread_id)
+        assert snapshot["messages"][-1]["content"] == "from websocket"
+
     def test_get_messages(self, client):
         """Test retrieving messages."""
         # Create thread and send message

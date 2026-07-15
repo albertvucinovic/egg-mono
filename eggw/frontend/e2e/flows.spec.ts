@@ -2505,6 +2505,67 @@ test.describe('Get-user lifecycle', () => {
     await expect(page.getByTestId('chat-panel')).not.toContainText('86400s');
   });
 
+  test('keeps a real wait-only tool stream timer-free', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+      const originalSetInterval = window.setInterval.bind(window);
+      (window as typeof window & { __eggwIntervals?: number }).__eggwIntervals = 0;
+      window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        if (timeout === 1000) {
+          (window as typeof window & { __eggwIntervals?: number }).__eggwIntervals =
+            ((window as typeof window & { __eggwIntervals?: number }).__eggwIntervals || 0) + 1;
+        }
+        return originalSetInterval(handler, timeout, ...args);
+      }) as typeof window.setInterval;
+    });
+    const threadId = 'wait-only-no-timer-thread';
+    const waitId = 'call-get-user-only';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'before-wait-only', role: 'user', content: 'start' },
+        { id: 'wait-only-note', role: 'assistant', content: 'Choose one', answer_user_preserve_turn: true, tool_call_id: waitId },
+      ],
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200, headers: mockApiHeaders,
+      json: { state: 'waiting_user', streaming_kind: 'tool', streaming_invoke_id: 'invoke-wait-only', live_replay_cursor: 0, active_get_user_wait: true },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      const oldTs = new Date(Date.now() - 2_243_000).toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `wait-only-${eventSeq}`, event_seq: eventSeq, type, ts: oldTs, msg_id: null,
+        invoke_id: 'invoke-wait-only', chunk_seq: null, payload,
+      });
+      const block = (eventSeq: number, type: string, payload: Record<string, unknown>) => [
+        `id: ${eventSeq}`, `event: ${type}`, `data: ${envelope(eventSeq, type, payload)}`, '',
+      ];
+      await route.fulfill({
+        status: 200, headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          ...block(1, 'stream.open', { stream_kind: 'tool' }),
+          ...block(2, 'tool_call.execution_started', {
+            tool_call_id: waitId, name: getUserTool,
+            arguments: '{"assistant_note":"Choose one","timeout":86400}', timeout: 86400,
+          }),
+          '',
+        ].join('\n'),
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await expect(page.getByTestId('get-user-wait-output')).toContainText('waiting for reply');
+    await expect(page.getByTestId('chat-panel')).not.toContainText(/streaming \d+s/i);
+    const intervalsAfterWaitMounted = await page.evaluate(() => (
+      (window as typeof window & { __eggwIntervals?: number }).__eggwIntervals || 0
+    ));
+    await page.waitForTimeout(1200);
+    expect(await page.evaluate(() => (
+      (window as typeof window & { __eggwIntervals?: number }).__eggwIntervals || 0
+    ))).toBe(intervalsAfterWaitMounted);
+  });
+
   test('stops only the answered live get-user card when canonical edit arrives', async ({ page }) => {
     await page.addInitScript(() => {
       window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));

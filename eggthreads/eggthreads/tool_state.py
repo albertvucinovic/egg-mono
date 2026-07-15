@@ -70,6 +70,20 @@ class ToolCallState:
     # publishing the final tool message.
     last_output_approval_payload: Optional[Dict[str, Any]] = None
     owner_invoke_id: Optional[str] = None
+    # Preserve-turn wait metadata is folded into the canonical lifecycle
+    # reduction. Hot reply/start boundaries can therefore inspect only the
+    # unresolved candidates instead of rescanning every historical message.
+    parent_skipped_on_continue: bool = False
+    waiting_note_msg_id: Optional[str] = None
+    waiting_note_event_seq: Optional[int] = None
+    waiting_note_ts: Optional[str] = None
+    waiting_note_content: Optional[str] = None
+    waiting_note_skipped_on_continue: bool = False
+    claimed_user_msg_id: Optional[str] = None
+    claimed_user_event_seq: Optional[int] = None
+    claimed_user_content: Optional[str] = None
+    result_msg_id: Optional[str] = None
+    result_skipped_on_continue: bool = False
     # Event watermark of the latest lifecycle event applied to this call, and
     # the event that currently owns the authoritative output decision.
     state_event_seq: int = -1
@@ -120,6 +134,7 @@ class _ThreadEventReduction:
     tool_call_states: Dict[str, ToolCallState]
     next_runner_actionable: Optional[RunnerActionable]
     coarse_thread_state_without_lease: str
+    get_user_wait_tool_call_ids: Tuple[str, ...] = ()
     _messages_after_records: List[Tuple[Dict[str, Any], Dict[str, Any], int]] = field(default_factory=list)
     _llm_invokes: set[str] = field(default_factory=set)
     _last_llm_stream_boundary_seq: int = -1
@@ -183,7 +198,9 @@ def _latest_cached_reduction_before(
 
 def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any]) -> bool:
     ev_type = ev.get("type")
-    if ev_type in {"msg.edit", "msg.delete"}:
+    if ev_type == "msg.edit":
+        return _is_consumed_get_user_message_edit(payload)
+    if ev_type == "msg.delete":
         return False
     if ev_type == "msg.create":
         raw_tool_calls = payload.get("tool_calls")
@@ -194,7 +211,15 @@ def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any])
         if raw_tool_calls:
             return False
         if payload.get("tool_call_id") is not None:
-            return payload.get("role") == "tool"
+            return bool(
+                payload.get("role") == "tool"
+                or (
+                    payload.get("role") == "assistant"
+                    and payload.get("answer_user_preserve_turn")
+                    and payload.get("source_tool_name") == GET_USER_MESSAGE_TOOL_NAME
+                    and payload.get("awaiting_user_message_tool_call_id")
+                )
+            )
         return True
     if ev_type in {"stream.open", "stream.delta", "stream.close", "provider_request.started"}:
         return True
@@ -468,10 +493,36 @@ def _try_reduce_thread_events_incrementally(
     )
     messages_after_boundary = [ev for ev, _payload_obj, _ev_seq in messages_after_records]
     tool_call_states = dict(previous.tool_call_states)
+    get_user_wait_ids = set(previous.get_user_wait_tool_call_ids)
+    touched_get_user_ids: set[str] = set()
     closed_invokes: set[str] = set()
     interrupted_invokes: set[str] = set()
     for ev, payload, ev_seq in records:
         ev_type = ev.get("type")
+        if ev_type == "msg.edit" and _is_consumed_get_user_message_edit(payload):
+            tcid = str(payload.get("consumed_by_tool_call_id") or "")
+            tc = tool_call_states.get(tcid)
+            if tc is None or tc.name != GET_USER_MESSAGE_TOOL_NAME:
+                return None
+            msg_id = str(ev.get("msg_id") or "")
+            try:
+                reply_seq = int(payload.get("consumed_user_event_seq"))
+            except (TypeError, ValueError):
+                row = db.conn.execute(
+                    "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=? "
+                    "AND type='msg.create' ORDER BY event_seq ASC LIMIT 1",
+                    (thread_id, msg_id),
+                ).fetchone()
+                reply_seq = int(row[0]) if row is not None else -1
+            consumed_user_msg_ids.add(msg_id)
+            tool_call_states[tcid] = replace(
+                tc,
+                claimed_user_msg_id=msg_id or tc.claimed_user_msg_id,
+                claimed_user_event_seq=reply_seq if reply_seq >= 0 else tc.claimed_user_event_seq,
+                claimed_user_content=str(payload.get("content") or ""),
+            )
+            touched_get_user_ids.add(tcid)
+            continue
         if ev_type == "control.interrupt":
             old_inv = payload.get("old_invoke_id")
             if isinstance(old_inv, str) and old_inv:
@@ -554,12 +605,44 @@ def _try_reduce_thread_events_incrementally(
             if isinstance(summary, str):
                 tool_call_states[tcid] = replace(tc, summary=summary, state_event_seq=ev_seq)
         elif ev_type == "msg.create":
+            if (
+                payload.get("role") == "assistant"
+                and payload.get("answer_user_preserve_turn")
+                and payload.get("source_tool_name") == GET_USER_MESSAGE_TOOL_NAME
+            ):
+                note_tcid = str(payload.get("awaiting_user_message_tool_call_id") or "")
+                note_tc = tool_call_states.get(note_tcid)
+                if note_tc is None or note_tc.name != GET_USER_MESSAGE_TOOL_NAME:
+                    return None
+                tool_call_states[note_tcid] = replace(
+                    note_tc,
+                    waiting_note_msg_id=str(ev.get("msg_id") or "") or None,
+                    waiting_note_event_seq=ev_seq,
+                    waiting_note_ts=str(ev.get("ts") or "") or None,
+                    waiting_note_content=str(payload.get("content") or ""),
+                    waiting_note_skipped_on_continue=False,
+                )
+                touched_get_user_ids.add(note_tcid)
+                continue
             if payload.get("role") != "tool" or payload.get("tool_call_id") is None:
                 continue
             msg_id = ev.get("msg_id")
             if msg_id and str(msg_id) in skipped_msg_ids:
+                tool_call_states[tcid] = replace(
+                    tc,
+                    result_msg_id=str(msg_id),
+                    result_skipped_on_continue=True,
+                )
+                touched_get_user_ids.add(str(tcid))
                 continue
-            tool_call_states[tcid] = replace(tc, published=True, state_event_seq=ev_seq)
+            tool_call_states[tcid] = replace(
+                tc,
+                published=True,
+                result_msg_id=str(msg_id or "") or None,
+                result_skipped_on_continue=False,
+                state_event_seq=ev_seq,
+            )
+            touched_get_user_ids.add(str(tcid))
         elif ev_type == "tool_call.approval":
             decision = payload.get("decision")
             if decision == "global_approval":
@@ -657,6 +740,22 @@ def _try_reduce_thread_events_incrementally(
                 "--- INTERRUPTED ---\n"
                 "Tool execution stream closed before the tool reported a result.",
             )
+    for ev, payload, _ev_seq in records:
+        raw_tcid = payload.get("tool_call_id") or payload.get("awaiting_user_message_tool_call_id")
+        if raw_tcid:
+            touched_get_user_ids.add(str(raw_tcid))
+        raw_calls = payload.get("tool_calls")
+        if isinstance(raw_calls, list):
+            for raw_call in raw_calls:
+                if isinstance(raw_call, dict) and raw_call.get("id"):
+                    touched_get_user_ids.add(str(raw_call["id"]))
+    for touched_id in touched_get_user_ids:
+        touched = tool_call_states.get(touched_id)
+        if touched is not None and touched.name == GET_USER_MESSAGE_TOOL_NAME and not touched.published:
+            get_user_wait_ids.add(touched_id)
+        else:
+            get_user_wait_ids.discard(touched_id)
+
     next_runner_actionable = _next_runner_actionable_from_reduction(
         thread_id,
         tool_call_states,
@@ -682,6 +781,15 @@ def _try_reduce_thread_events_incrementally(
         tool_call_states=tool_call_states,
         next_runner_actionable=next_runner_actionable,
         coarse_thread_state_without_lease=coarse_state,
+        get_user_wait_tool_call_ids=tuple(sorted(
+            get_user_wait_ids,
+            key=lambda candidate_id: (
+                tool_call_states[candidate_id].waiting_note_event_seq
+                if tool_call_states[candidate_id].waiting_note_event_seq is not None
+                else tool_call_states[candidate_id].parent_event_seq,
+                candidate_id,
+            ),
+        )),
         _messages_after_records=messages_after_records,
         _llm_invokes=llm_invokes,
         _last_llm_stream_boundary_seq=last_llm_stream_boundary_seq,
@@ -790,12 +898,14 @@ def _reduce_loaded_thread_events(
         if ev.get("type") != "msg.create":
             continue
         msg_id = ev.get("msg_id") or ""
-        if msg_id and str(msg_id) in skipped_msg_ids:
-            continue
         declared = _tool_call_states_from_declaration(thread_id, ev, payload, ev_seq)
         if not declared:
             continue
-        states.update(declared)
+        parent_skipped = bool(msg_id and str(msg_id) in skipped_msg_ids)
+        for tcid, tc in declared.items():
+            if parent_skipped and tc.name != GET_USER_MESSAGE_TOOL_NAME:
+                continue
+            states[tcid] = replace(tc, parent_skipped_on_continue=parent_skipped)
 
     global_auto_approval = False
     global_intervals: list[tuple[int, Optional[int]]] = []
@@ -908,6 +1018,43 @@ def _reduce_loaded_thread_events(
                 if ev_seq > tc.parent_event_seq:
                     tc.published = True
                     tc.state_event_seq = ev_seq
+
+    # Fold preserve-turn note/reply/result identity once. This metadata is
+    # durable recovery authority even when old /continue edits skipped the
+    # declaration or note before this lifecycle repair existed.
+    for ev, payload, ev_seq in records:
+        ev_type = ev.get("type")
+        msg_id = str(ev.get("msg_id") or "")
+        if ev_type == "msg.create":
+            if (
+                payload.get("role") == "assistant"
+                and payload.get("answer_user_preserve_turn")
+                and payload.get("source_tool_name") == GET_USER_MESSAGE_TOOL_NAME
+            ):
+                tcid = str(payload.get("awaiting_user_message_tool_call_id") or "")
+                tc = states.get(tcid)
+                if tc is not None and tc.name == GET_USER_MESSAGE_TOOL_NAME:
+                    tc.waiting_note_msg_id = msg_id or None
+                    tc.waiting_note_event_seq = ev_seq
+                    tc.waiting_note_ts = str(ev.get("ts") or "") or None
+                    tc.waiting_note_content = str(payload.get("content") or "")
+                    tc.waiting_note_skipped_on_continue = bool(msg_id and msg_id in skipped_msg_ids)
+            elif payload.get("role") == "tool":
+                tcid = str(payload.get("tool_call_id") or "")
+                tc = states.get(tcid)
+                if tc is not None:
+                    tc.result_msg_id = msg_id or None
+                    tc.result_skipped_on_continue = bool(msg_id and msg_id in skipped_msg_ids)
+        elif ev_type == "msg.edit" and _is_consumed_get_user_message_edit(payload):
+            tcid = str(payload.get("consumed_by_tool_call_id") or "")
+            tc = states.get(tcid)
+            if tc is not None and tc.name == GET_USER_MESSAGE_TOOL_NAME:
+                tc.claimed_user_msg_id = msg_id or None
+                try:
+                    tc.claimed_user_event_seq = int(payload.get("consumed_user_event_seq"))
+                except (TypeError, ValueError):
+                    tc.claimed_user_event_seq = msg_seq_by_id.get(msg_id)
+                tc.claimed_user_content = str(payload.get("content") or "")
 
     if global_auto_approval and current_global_start is not None:
         global_intervals.append((current_global_start, None))
@@ -1026,6 +1173,22 @@ def _reduce_loaded_thread_events(
         tool_call_states=states,
         next_runner_actionable=next_runner_actionable,
         coarse_thread_state_without_lease=coarse_state,
+        get_user_wait_tool_call_ids=tuple(
+            tc.tool_call_id
+            for tc in sorted(
+                (
+                    candidate
+                    for candidate in states.values()
+                    if candidate.name == GET_USER_MESSAGE_TOOL_NAME and not candidate.published
+                ),
+                key=lambda candidate: (
+                    candidate.waiting_note_event_seq
+                    if candidate.waiting_note_event_seq is not None
+                    else candidate.parent_event_seq,
+                    candidate.tool_call_id,
+                ),
+            )
+        ),
         _messages_after_records=messages_after_records,
         _llm_invokes=llm_invokes,
         _last_llm_stream_boundary_seq=last_llm_stream_boundary_seq,
@@ -1204,6 +1367,23 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
 
     states = _reduce_thread_events(db, thread_id).tool_call_states
     return {tcid: deepcopy(tc) for tcid, tc in states.items()}
+
+
+def get_user_wait_candidates(db: ThreadsDB, thread_id: str) -> List[ToolCallState]:
+    """Return bounded unresolved/recoverable get-user lifecycles in order.
+
+    The reducer performs one event fold (incremental on hot paths) and records
+    candidate identity. Callers receive defensive copies just like
+    :func:`build_tool_call_states`.
+    """
+
+    reduction = _reduce_thread_events(db, thread_id)
+    return [
+        deepcopy(reduction.tool_call_states[tool_call_id])
+        for tool_call_id in reduction.get_user_wait_tool_call_ids
+        if tool_call_id in reduction.tool_call_states
+    ]
+
 
 def list_tool_calls_for_message(db: ThreadsDB, thread_id: str, msg_id: str) -> List[ToolCallState]:
 

@@ -3,15 +3,11 @@ from __future__ import annotations
 """Built-in interim user-facing assistant answer tool and /btw command."""
 
 import asyncio
-import json
-import os
-import sqlite3
 from dataclasses import dataclass
 from typing import Any, Dict
 
 from ..plugins import PluginContext
 from ..tools import ToolContext, ToolExecutionResult, ToolRegistry
-from ..content_parts import content_to_plain_text
 
 
 TOOL_NAME = "answer_user_while_preserving_llm_turn"
@@ -57,36 +53,6 @@ def _context_tool_call_id(ctx: ToolContext) -> str:
     return ""
 
 
-def _message_create_event_seq(db: Any, thread_id: str, msg_id: str) -> int:
-    row = db.conn.execute(
-        """
-        SELECT event_seq FROM events
-         WHERE thread_id=? AND msg_id=? AND type='msg.create'
-         ORDER BY event_seq ASC LIMIT 1
-        """,
-        (thread_id, msg_id),
-    ).fetchone()
-    return int(row[0]) if row else -1
-
-
-def _event_payload(row: Any) -> Dict[str, Any]:
-    try:
-        raw = row["payload_json"]
-        payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
-    except Exception:
-        payload = {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _normal_user_message(payload: Dict[str, Any]) -> bool:
-    return bool(
-        payload.get("role") == "user"
-        and not payload.get("tool_calls")
-        and not payload.get("no_api")
-        and not payload.get("keep_user_turn")
-    )
-
-
 def _claim_next_normal_user_message(
     db: Any,
     thread_id: str,
@@ -94,124 +60,35 @@ def _claim_next_normal_user_message(
     note_seq: int,
     tool_call_id: str,
 ) -> Dict[str, Any] | None:
-    """Atomically claim the next eligible reply for exactly one waiting call.
+    """Read the append-boundary claim for one exact waiting call.
 
-    A reply belongs to the newest get-user note that existed when the reply was
-    appended. Older concurrent waits are terminalized by the runner after this
-    exact-ID claim. The SQLite write reservation makes competing processes
-    observe one consumed-by winner rather than both returning the same message.
+    Normal user append owns mutation. The tool poller is now a wake/read path
+    only, so a second client submission cannot interleave before ownership is
+    durable. The ``note_seq`` argument remains for compatibility and validates
+    that this invocation is observing its own note.
     """
 
     if not tool_call_id:
         return None
-    savepoint = f"claim_get_user_reply_{os.urandom(8).hex()}"
-    db.conn.execute(f"SAVEPOINT {savepoint}")
-    try:
-        # Acquire SQLite's single-writer reservation before selecting a reply.
-        locked = db.conn.execute(
-            "UPDATE threads SET status=status WHERE thread_id=?",
-            (thread_id,),
-        )
-        if locked.rowcount != 1:
-            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-            return None
+    from ..tool_state import get_user_wait_candidates
 
-        from ..api import _get_user_wait_notes
-        from ..tool_state import build_tool_call_states
-
-        states = build_tool_call_states(db, thread_id)
-        if tool_call_id in states:
-            newest_unresolved_id = next(
-                (
-                    str(note["tool_call_id"])
-                    for note in reversed(_get_user_wait_notes(db, thread_id))
-                    if (
-                        (state := states.get(str(note["tool_call_id"]))) is not None
-                        and state.state == "TC3"
-                    )
-                ),
-                "",
-            )
-            if newest_unresolved_id != tool_call_id:
-                db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-                return None
-
-        rows = db.conn.execute(
-            """
-            SELECT event_seq, msg_id, payload_json FROM events
-             WHERE thread_id=? AND type='msg.create' AND event_seq>?
-             ORDER BY event_seq ASC
-            """,
-            (thread_id, note_seq),
-        ).fetchall()
-        for row in rows:
-            payload = _event_payload(row)
-            if not _normal_user_message(payload):
-                continue
-            reply_seq = int(row["event_seq"])
-            msg_id = str(row["msg_id"] or "")
-            if not msg_id:
-                continue
-
-            newer_note = db.conn.execute(
-                """
-                SELECT 1 FROM events
-                 WHERE thread_id=? AND type='msg.create'
-                   AND event_seq>? AND event_seq<?
-                   AND json_extract(payload_json, '$.answer_user_preserve_turn')=1
-                   AND json_extract(payload_json, '$.source_tool_name')=?
-                   AND COALESCE(json_extract(payload_json, '$.awaiting_user_message_tool_call_id'), '')<>''
-                 LIMIT 1
-                """,
-                (thread_id, note_seq, reply_seq, GET_USER_MESSAGE_TOOL_NAME),
-            ).fetchone()
-            if newer_note is not None:
-                db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-                return None
-
-            already_claimed = db.conn.execute(
-                """
-                SELECT 1 FROM events
-                 WHERE thread_id=? AND type='msg.edit' AND msg_id=?
-                   AND json_extract(payload_json, '$.consumed_by_tool_name')=?
-                   AND COALESCE(json_extract(payload_json, '$.consumed_by_tool_call_id'), '')<>''
-                 LIMIT 1
-                """,
-                (thread_id, msg_id, GET_USER_MESSAGE_TOOL_NAME),
-            ).fetchone()
-            if already_claimed is not None:
-                db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-                return None
-
-            content = content_to_plain_text(payload.get("content"))
-            db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=thread_id,
-                type_="msg.edit",
-                msg_id=msg_id,
-                payload={
-                    "content": payload.get("content", ""),
-                    "no_api": True,
-                    "keep_user_turn": True,
-                    "consumed_by_tool_call_id": tool_call_id,
-                    "consumed_by_tool_name": GET_USER_MESSAGE_TOOL_NAME,
-                },
-            )
-            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-            return {"event_seq": reply_seq, "msg_id": msg_id, "content": content}
-
-        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    tc = next(
+        (candidate for candidate in get_user_wait_candidates(db, thread_id)
+         if candidate.tool_call_id == tool_call_id),
+        None,
+    )
+    if (
+        tc is None
+        or tc.waiting_note_event_seq != int(note_seq)
+        or not tc.claimed_user_msg_id
+        or tc.claimed_user_event_seq is None
+    ):
         return None
-    except sqlite3.OperationalError as exc:
-        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
-            return None
-        raise
-    except Exception:
-        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-        raise
+    return {
+        "event_seq": int(tc.claimed_user_event_seq),
+        "msg_id": str(tc.claimed_user_msg_id),
+        "content": str(tc.claimed_user_content or ""),
+    }
 
 
 async def get_user_message_while_preserving_llm_turn_tool(args: Dict[str, Any], ctx: ToolContext) -> str | ToolExecutionResult:
@@ -227,29 +104,20 @@ async def get_user_message_while_preserving_llm_turn_tool(args: Dict[str, Any], 
 
     try:
         from .compaction import _context_db
-        from ..api import append_message, create_snapshot
+        from ..api import create_snapshot, start_get_user_message_wait
 
         db = _context_db(ctx)
         tool_call_id = _context_tool_call_id(ctx)
-        extra: Dict[str, Any] = {
-            PRESERVE_TURN_FLAG: True,
-            "source_tool_name": GET_USER_MESSAGE_TOOL_NAME,
-        }
-        if ctx.initial_model_key:
-            extra["model_key"] = ctx.initial_model_key
-        if tool_call_id:
-            extra["tool_call_id"] = tool_call_id
-            extra["awaiting_user_message_tool_call_id"] = tool_call_id
-
-        note_msg_id = append_message(db, thread_id, "assistant", assistant_note, extra=extra)
-        note_seq = _message_create_event_seq(db, thread_id, note_msg_id)
-        from ..api import terminalize_superseded_get_user_waits
-
-        terminalize_superseded_get_user_waits(
+        invoke_id = str(ctx.invoke_id or (ctx.stream.invoke_id if ctx.stream is not None else "") or "")
+        started = start_get_user_message_wait(
             db,
             thread_id,
-            authoritative_tool_call_id=tool_call_id,
+            invoke_id=invoke_id,
+            tool_call_id=tool_call_id,
+            assistant_note=assistant_note,
+            model_key=ctx.initial_model_key,
         )
+        note_seq = int(started["event_seq"])
         create_snapshot(db, thread_id)
     except Exception as e:
         return f"Error: failed to append user-message prompt: {e}"

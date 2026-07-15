@@ -2714,6 +2714,13 @@ class ThreadRunner:
 
             out.append(m2)
 
+        # Preserve-turn get-user calls may be separately declared while their
+        # exact results are durably published later at the event-log tail. Fold
+        # those lifecycle messages into one synthetic contiguous assistant/tool
+        # block before the generic protocol safety net. This is provider-only
+        # projection: the inspectable canonical transcript remains unchanged.
+        out = self._coalesce_get_user_tool_protocol(out)
+
         # As a final safety net, enforce the OpenAI tools protocol
         # invariant that every assistant message with ``tool_calls`` is
         # immediately followed by tool-role messages responding to each
@@ -2723,6 +2730,77 @@ class ThreadRunner:
         # turns can proceed instead of failing with a persistent
         # "tool_calls must be followed by tool messages" error.
         return self._enforce_assistant_toolcall_protocol(out)
+
+
+    def _coalesce_get_user_tool_protocol(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Make completed get-user lifecycles one valid provider tool block.
+
+        Each declaration remains exact-ID based. Only completed calls with one
+        durable result participate; malformed/unfinished calls are left for the
+        generic protocol guard to drop. Declarations containing unrelated tool
+        calls are deliberately left unchanged rather than split ambiguously.
+        """
+
+        get_user_name = "get_user_message_while_preserving_llm_turn"
+        declarations: dict[str, tuple[int, Dict[str, Any], Dict[str, Any]]] = {}
+        results: dict[str, tuple[int, Dict[str, Any]]] = {}
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") == "assistant":
+                calls = message.get("tool_calls")
+                if not isinstance(calls, list) or not calls:
+                    continue
+                parsed: list[tuple[str, Dict[str, Any]]] = []
+                all_get_user = True
+                for call in calls:
+                    if not isinstance(call, dict):
+                        all_get_user = False
+                        break
+                    function = call.get("function")
+                    name = function.get("name") if isinstance(function, dict) else None
+                    call_id = call.get("id")
+                    if name != get_user_name or not isinstance(call_id, str) or not call_id:
+                        all_get_user = False
+                        break
+                    parsed.append((call_id, call))
+                if all_get_user:
+                    for call_id, call in parsed:
+                        declarations[call_id] = (index, message, call)
+            elif message.get("role") == "tool":
+                call_id = message.get("tool_call_id")
+                if isinstance(call_id, str) and call_id:
+                    results[call_id] = (index, message)
+
+        completed_ids = [
+            call_id
+            for call_id, (index, _message, _call) in sorted(
+                declarations.items(), key=lambda item: (item[1][0], item[0])
+            )
+            if call_id in results
+        ]
+        if not completed_ids:
+            return messages
+
+        removed_indices = {
+            declarations[call_id][0] for call_id in completed_ids
+        } | {
+            results[call_id][0] for call_id in completed_ids
+        }
+        first_index = min(removed_indices)
+        synthetic = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [declarations[call_id][2] for call_id in completed_ids],
+        }
+        rebuilt: List[Dict[str, Any]] = []
+        for index, message in enumerate(messages):
+            if index == first_index:
+                rebuilt.append(synthetic)
+                rebuilt.extend(results[call_id][1] for call_id in completed_ids)
+            if index not in removed_indices:
+                rebuilt.append(message)
+        return rebuilt
 
 
     def _enforce_assistant_toolcall_protocol(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

@@ -130,3 +130,22 @@ def test_orphan_tool_is_dropped() -> None:
         {"role": "user", "content": "before"},
         {"role": "user", "content": "after"},
     ]
+
+
+
+def test_get_user_coalescing_does_not_reorder_mixed_tool_declaration() -> None:
+    runner = _DummyRunner()
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "wait", "function": {"name": "get_user_message_while_preserving_llm_turn", "arguments": "{}"}},
+                {"id": "bash", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "wait", "content": "answer"},
+        {"role": "tool", "tool_call_id": "bash", "content": "done"},
+    ]
+
+    assert runner._coalesce_get_user_tool_protocol(messages) == messages

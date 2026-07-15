@@ -200,14 +200,14 @@ def test_normal_active_tool_stream_stays_running_and_unfinished(tmp_path):
     assert status.state == "running"
 
 
-def test_user_reply_before_consumption_is_running_not_waiting(tmp_path, monkeypatch):
+def test_atomic_user_reply_claim_is_running_not_waiting(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = ts.ThreadsDB()
     db.init_schema()
     parent = ts.create_root_thread(db, name="parent")
     child = ts.create_child_thread(db, parent, name="child")
     _start_get_user_tool_waiting(db, child, note="What title should I use?")
-    ts.append_message(db, child, "user", "The title")
+    ts.append_normal_user_message(db, child, "The title")
     ts.create_snapshot(db, child)
 
     wait_result = ts.wait_for_threads(db, [child], timeout_sec=0)[child]

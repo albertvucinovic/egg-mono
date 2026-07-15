@@ -555,6 +555,9 @@ def _apply_events(
             states[event.msg_id] = replace(
                 current,
                 payload=updated_payload,
+                skipped_on_continue=(
+                    False if event.payload.get("preserve_on_continue") else current.skipped_on_continue
+                ),
                 last_event_seq=event.event_seq,
                 last_event_id=event.event_id,
                 updated_at=event.ts,

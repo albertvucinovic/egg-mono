@@ -22,7 +22,7 @@ from eggthreads import (
 )
 
 from .. import core
-from ..core import get_thread_root_id
+from ..core import ensure_scheduler_for, get_thread_root_id
 from ..core.scheduler import scheduler_running
 
 router = APIRouter(tags=["events"])
@@ -194,6 +194,7 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
                 content = data.get("content", "")
                 if content and core.db:
                     append_normal_user_message(core.db, thread_id, content)
+                    ensure_scheduler_for(thread_id)
                     await manager.broadcast(thread_id, {
                         "type": "message_sent",
                         "thread_id": thread_id,
