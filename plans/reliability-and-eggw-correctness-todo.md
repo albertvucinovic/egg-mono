@@ -1,6 +1,6 @@
 # Reliability and EggW Correctness Follow-up TODO
 
-Status: in progress (Phases 1–2 accepted and complete; Phase 3 not started)
+Status: in progress (Phases 1–3 complete; Phase 3 awaiting review)
 Created: 2026-07-15
 Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 
@@ -43,11 +43,11 @@ Original diagnosis: default auto search built Tavily → SearXNG when a Tavily k
 
 CI failure: `test_egg_wrapper_preserves_argv_across_reload` timed out after 15s while invoking `egg/egg.sh` with quoted arguments. Local success alone is insufficient.
 
-- [ ] Reproduce or identify the CI-only hang from launcher process/env semantics.
-- [ ] Audit recursive `exec "$SCRIPT_DIR/egg.sh"`, reload-state cleanup, inherited reload variables, venv activation, `.env`, and child process ownership.
-- [ ] Replace recursion/ambiguous inherited state with a bounded, explicit reload loop if that is the root cause, preserving exact argv and cwd.
-- [ ] Add deterministic tests for one reload, repeated reload bounds/failure, quoting, cleanup, and no leaked temp file/process.
-- [ ] Run the full Egg test suite.
+- [x] Reproduce or identify the CI-only hang from launcher process/env semantics.
+- [x] Audit recursive `exec "$SCRIPT_DIR/egg.sh"`, reload-state cleanup, inherited reload variables, venv activation, `.env`, and child process ownership.
+- [x] Replace recursion/ambiguous inherited state with a bounded, explicit reload loop if that is the root cause, preserving exact argv and cwd.
+- [x] Add deterministic tests for one reload, repeated reload bounds/failure, quoting, cleanup, and no leaked temp file/process.
+- [x] Run the full Egg test suite.
 
 ## Phase 4 — Auto-continue error policy
 
@@ -104,6 +104,10 @@ Current root README opens as an AI self-assessment and comparison essay. The use
 - [ ] For transcript/UI phases, representative 5M-token or equivalent cost-shape validation proves bounded/incremental work without sacrificing history reachability; Phase 5 explicitly covers scrolling, input availability, streaming, pagination, and event-loop responsiveness.
 
 ## Status notes / commit ledger
+
+- 2026-07-15: Phase 3 implementation complete, awaiting review. The exact quoted-argv CI test passed locally in 0.05s, so history/process audit—not timeout inflation—identified the environment-sensitive root: `/reload` recursively `exec`ed a fresh `egg.sh`, transferring no explicit lifecycle owner while inheriting reload variables, recreating state files, re-sourcing venv/`.env`, and allowing unbounded reload generations; cleanup and signal/process ownership depended on whichever wrapper generation remained. One wrapper now owns one temp file, caller cwd, original argv, traps, and a bounded explicit loop (default 8 reloads, validated override); each generation truncates the same state file, launches Python in a dedicated process group where `setsid` exists, preserves stdin/TTY and direct-restart thread identity, forwards HUP/INT/TERM to the child group, preserves ordinary exit status, and cleans on success/failure/signal. Literal subprocess tests cover the exact `Tell`, `me a story`, `quote "inside"` case plus empty/newline args and cwd, direct-restart inherited thread with new state ownership, bounded repeated reload failure, invalid bounds, missing state, non-reload failure status, signal cleanup, descendant process termination, and no leaked files/processes. Focused reload/quick-start/command suite `14 passed`, 100 repeated launcher-suite iterations passed, full Egg `566 passed`, full EggThreads `1454 passed`, shell syntax, Python compile, and `git diff --check` passed. The wrapper performs constant per-generation process work and no transcript/thread loading, so it is independent of >5M-token thread size; no synthetic transcript benchmark applies. No Phase 4 work started.
+
+- 2026-07-15: Phase 3 investigation started from a clean `759d83b`. Canonical long-thread performance remains governing, but launcher reload is transcript-independent process control: it must do bounded per-reload work, preserve immediate interactive input/TTY ownership, and never hang CI or leak processes/files. Relevant discovered constraints were verified narrowly: INV-016 requires this bounded slice, INV-053 supports non-freezing input/process behavior, and INV-098/099 require literal failure semantics and subprocess tests; no stale discovered launcher architecture was found. Exact failing quoted-argv test passes locally in 0.05s, confirming CI-only/environment sensitivity. History shows `/reload` added recursive shell `exec` in `70225ba`, while quick-start `89f71b8` added the literal subprocess test and `EGG_PYTHON_BIN`. Current wrapper creates one temp state file, launches Python in a subshell, then recursively execs a fresh wrapper; inherited `EGG_RELOAD_THREAD_ID`, `EGG_RELOAD_STATE_FILE`, and reload exit state make lifecycle ownership implicit, repeatedly reactivate/source environment, and provide no explicit reload bound or parent cleanup owner. Phase 3 will replace this with one bounded wrapper-owned loop and deterministic cleanup/signal behavior; no Phase 4 work started.
 
 - 2026-07-15: Final independent review PASSed Phase 2 at `bedbb65` with no blockers. Reviewer validation passed 209 focused web tests, 1454 EggThreads tests, 560 Egg tests, 228 passed + 1 skipped EggW tests, Python `compileall`, `git diff --check`, and clean-worktree verification. Accepted behavior includes strict 4097-byte wire / 4096-byte decoded / 400-character diagnostic bounds; trailing junk and concatenated compressed members fail closed; Tavily statuses 432/433 remain status-authoritative; fallback advances only through the configured target-specific search or fetch chain; explicitly pinned providers remain terminal; and the fixed-chain path is transcript-independent, satisfying the >5M-token bounded-work constraint without a synthetic transcript benchmark. Phase 2 is accepted and complete; Phase 3 has not started.
 
