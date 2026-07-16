@@ -14,6 +14,8 @@ from ..tools import ToolCapabilities, ToolContext, ToolExecutionResult, ToolRegi
 
 _BASH_TIMEOUT_TERM_GRACE_SEC = 2.0
 _BASH_TIMEOUT_FORCE_GRACE_SEC = 1.0
+_BASH_CAPTURE_MAX_CHARS = 10_000_000
+_BASH_TIMEOUT_OUTPUT_MAX_CHARS = 100_000
 
 
 def _called_from_different_thread(db: Any) -> bool:
@@ -63,6 +65,21 @@ def _sanitize_combined_output(text: str) -> str:
     if not text:
         return ""
     return sanitize_terminal_text(text.strip()) if looks_like_terminal_control_text(text) else text.strip()
+
+
+def _truncate_middle(text: str, max_chars: int, *, label: str) -> str:
+    """Bound partial diagnostic text while preserving both head and tail."""
+
+    if not isinstance(text, str) or len(text) <= max_chars:
+        return text
+    max_chars = max(1, int(max_chars))
+    marker = f"\n\n--- {label} TRUNCATED ---\nOmitted {len(text) - max_chars} middle characters.\n\n"
+    if len(marker) >= max_chars:
+        return text[:max_chars]
+    remaining = max_chars - len(marker)
+    head = remaining // 2
+    tail = remaining - head
+    return f"{text[:head]}{marker}{text[-tail:]}"
 
 
 def _sandboxed_argv(
@@ -331,6 +348,59 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
     start = time.monotonic()
     stop_requested_at: float | None = None
 
+    def _request_process_stop(now: float | None = None, *, force: bool = False) -> None:
+        """Ask the subprocess group/container to stop, escalating when needed."""
+
+        nonlocal terminate_sent, kill_sent, stop_requested_at
+        now = time.monotonic() if now is None else now
+        if stop_requested_at is None:
+            stop_requested_at = now
+        if force:
+            if not kill_sent:
+                kill_sent = True
+                _kill_process_and_container(force=True)
+            return
+        if not terminate_sent:
+            terminate_sent = True
+            _kill_process_and_container()
+        elif not kill_sent and (now - stop_requested_at) >= _BASH_TIMEOUT_TERM_GRACE_SEC:
+            kill_sent = True
+            _kill_process_and_container(force=True)
+
+    def _observe_stop_condition() -> bool:
+        """Return True after noticing timeout/cancellation and signalling stop.
+
+        High-volume stdout/stderr can keep reader tasks continuously runnable.  If
+        timeout enforcement lives only in a separate watcher task, those readers
+        can starve the watcher while Egg keeps draining output and the UI sits at
+        ``timeout in 0s``.  Make each active reader enforce the same deadline too.
+        """
+
+        nonlocal timed_out, interrupted
+        now = time.monotonic()
+        cancel_requested = False
+        if ctx.cancel_check:
+            try:
+                cancel_requested = bool(ctx.cancel_check())
+            except Exception:
+                cancel_requested = False
+        if timeout and (now - start) >= timeout:
+            timed_out = True
+            _request_process_stop(now)
+            if cancel_requested:
+                # The registry's authoritative deadline has also fired.  Return
+                # a rich bash timeout result before the registry's short cleanup
+                # grace detaches this coroutine and replaces it with a generic
+                # timeout message.
+                _request_process_stop(now, force=True)
+            return True
+        if cancel_requested:
+            interrupted = True
+            already_stopping = stop_requested_at is not None or terminate_sent
+            _request_process_stop(now, force=already_stopping)
+            return True
+        return timed_out or interrupted
+
     def _kill_process_and_container(*, force: bool = False) -> None:
         if sandbox_container_name and sandbox_provider == "docker":
             try:
@@ -352,36 +422,15 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                 pass
 
     async def _watcher() -> None:
-        nonlocal timed_out, interrupted, terminate_sent, kill_sent, stop_requested_at
+        nonlocal timed_out, interrupted
         while proc.returncode is None:
             await _asyncio.sleep(0.1)
-            now = time.monotonic()
-            if timeout and (now - start) >= timeout:
-                timed_out = True
-                if stop_requested_at is None:
-                    stop_requested_at = now
-                if not terminate_sent:
-                    terminate_sent = True
-                    _kill_process_and_container()
-                elif not kill_sent and (now - stop_requested_at) >= _BASH_TIMEOUT_TERM_GRACE_SEC:
-                    kill_sent = True
-                    _kill_process_and_container(force=True)
-            if ctx.cancel_check and ctx.cancel_check():
-                if timeout and (now - start) >= timeout:
-                    timed_out = True
-                else:
-                    interrupted = True
-                if stop_requested_at is None:
-                    stop_requested_at = now
-                if not terminate_sent:
-                    terminate_sent = True
-                    _kill_process_and_container()
-                elif not kill_sent:
-                    kill_sent = True
-                    _kill_process_and_container(force=True)
+            _observe_stop_condition()
 
     stdout_buf: list[str] = []
     stderr_buf: list[str] = []
+    captured_chars = 0
+    output_truncated = False
     stream_buf: list[str] = []
     stream_buf_chars = 0
     stream_last_flush = 0.0
@@ -416,31 +465,53 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
             stream_buf_chars += len(text)
         return await _flush_stream()
 
+    def _append_captured(buf: list[str], text: str) -> None:
+        """Append decoded subprocess output without unbounded memory growth."""
+
+        nonlocal captured_chars, output_truncated
+        if not text:
+            return
+        remaining = _BASH_CAPTURE_MAX_CHARS - captured_chars
+        if remaining <= 0:
+            output_truncated = True
+            return
+        if len(text) > remaining:
+            buf.append(text[:remaining])
+            captured_chars += remaining
+            output_truncated = True
+            return
+        buf.append(text)
+        captured_chars += len(text)
+
     async def _reader(stream, is_stdout: bool) -> None:
         nonlocal interrupted, last_reader_activity
         header_emitted = False
         prefix = "--- STDOUT ---\n" if is_stdout else "--- STDERR ---\n"
         while True:
+            if _observe_stop_condition():
+                break
             try:
                 chunk = await stream.read(64 * 1024)
             except Exception:
                 break
             if not chunk:
                 break
+            if _observe_stop_condition():
+                break
             last_reader_activity = time.monotonic()
             text = chunk.decode(errors="replace")
             if not header_emitted:
                 if is_stdout:
-                    stdout_buf.append(prefix)
+                    _append_captured(stdout_buf, prefix)
                 else:
-                    stderr_buf.append(prefix)
+                    _append_captured(stderr_buf, prefix)
                 header_emitted = True
                 if not await _queue_stream(prefix):
                     break
             if is_stdout:
-                stdout_buf.append(text)
+                _append_captured(stdout_buf, text)
             else:
-                stderr_buf.append(text)
+                _append_captured(stderr_buf, text)
             if not await _queue_stream(text):
                 break
             await _asyncio.sleep(0)
@@ -503,14 +574,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                 break
             if timed_out or interrupted:
                 now = time.monotonic()
-                if stop_requested_at is None:
-                    stop_requested_at = now
-                if not terminate_sent:
-                    terminate_sent = True
-                    _kill_process_and_container()
-                if not kill_sent and (now - stop_requested_at) >= _BASH_TIMEOUT_TERM_GRACE_SEC:
-                    kill_sent = True
-                    _kill_process_and_container(force=True)
+                _request_process_stop(now)
                 if kill_sent and (now - stop_requested_at) >= (_BASH_TIMEOUT_TERM_GRACE_SEC + _BASH_TIMEOUT_FORCE_GRACE_SEC):
                     # The process did not report exit even after SIGKILL/container
                     # kill.  Do not leave the runner/tool stream stuck forever;
@@ -550,15 +614,38 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
             await watcher
         except BaseException:
             pass
+        try:
+            transport = getattr(proc, "_transport", None)
+            close_transport = getattr(transport, "close", None)
+            if callable(close_transport):
+                close_transport()
+                await _asyncio.sleep(0)
+        except BaseException:
+            pass
 
     full_result = _sanitize_combined_output("".join(stdout_buf) + "".join(stderr_buf)) or "--- The command executed successfully and produced no output ---"
+    if output_truncated:
+        full_result += (
+            "\n\n--- OUTPUT TRUNCATED ---\n"
+            f"Captured first {_BASH_CAPTURE_MAX_CHARS} characters; discarded additional output."
+        )
     if timed_out:
+        full_result = _truncate_middle(
+            full_result,
+            _BASH_TIMEOUT_OUTPUT_MAX_CHARS,
+            label="TIMEOUT OUTPUT",
+        )
         full_result = f"--- TIMEOUT ---\nCommand timed out after {timeout} seconds.\n\n" + full_result
         return ToolExecutionResult(full_result, reason="timeout", streamed=ctx.stream is not None)
     elif interrupted and timeout and (time.monotonic() - start) >= timeout:
         # The registry owns the same deadline and sets the composed cancellation
         # signal first.  Preserve captured output while classifying that race as
         # a timeout rather than a user/lease interruption.
+        full_result = _truncate_middle(
+            full_result,
+            _BASH_TIMEOUT_OUTPUT_MAX_CHARS,
+            label="TIMEOUT OUTPUT",
+        )
         full_result = f"--- TIMEOUT ---\nCommand timed out after {timeout} seconds.\n\n" + full_result
         return ToolExecutionResult(full_result, reason="timeout", streamed=ctx.stream is not None)
     elif interrupted:

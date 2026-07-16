@@ -108,3 +108,37 @@ def test_bash_tool_streams_live_output_through_tool_context(tmp_path, monkeypatc
     assert "--- STDOUT ---" in streamed
     assert "stream-through-context" in streamed
     assert streamed.count("stream-through-context") == 1
+
+
+def test_runner_times_out_high_volume_bash_after_preview_suppressed(tmp_path, monkeypatch):
+    """Suppressed live preview must not let a noisy bash command overrun timeout."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_SANDBOX_MODE", "off")
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    tcid = ts.enqueue_user_tool_call(
+        db,
+        tid,
+        "bash",
+        {"script": "yes x", "timeout": 0.5},
+        auto_approve=True,
+        hidden=True,
+    )
+
+    async def run() -> None:
+        runner = ts.ThreadRunner(db, tid, llm=object(), config=RunnerConfig())
+        assert await asyncio.wait_for(runner.run_once(), timeout=3.0) is True
+
+    asyncio.run(run())
+
+    states = ts.build_tool_call_states(db, tid)
+    output = states[tcid].finished_output or ""
+    assert states[tcid].finished_reason == "timeout"
+    assert "TIMEOUT" in output
+    assert len(output) < 150_000
+
+    rows = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='stream.delta' ORDER BY event_seq",
+        (tid,),
+    ).fetchall()
+    assert any(json.loads(row[0]).get("tool", {}).get("suppressed") is True for row in rows)
