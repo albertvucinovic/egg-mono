@@ -54,6 +54,21 @@ class _ProcessOwner:
             raise RuntimeError("invalid Linux /proc child ownership data") from exc
 
     @staticmethod
+    def _process_state(pid: int) -> str | None:
+        try:
+            fields = (
+                Path(f"/proc/{pid}/stat")
+                .read_text(encoding="ascii")
+                .rsplit(") ", 1)[1]
+                .split()
+            )
+        except FileNotFoundError:
+            return None
+        except (IndexError, OSError) as exc:
+            raise RuntimeError(f"cannot inspect Linux process {pid}") from exc
+        return fields[0]
+
+    @staticmethod
     def _group_has_live_member(pgid: int) -> bool:
         try:
             process_paths = list(Path("/proc").iterdir())
@@ -87,12 +102,16 @@ class _ProcessOwner:
             except ChildProcessError:
                 continue
 
-    def _linux_remaining(self, leader_pid: int) -> tuple[list[int], bool]:
+    def _linux_remaining(
+        self, leader_pid: int, *, leader_exited: bool
+    ) -> tuple[list[int], bool, bool]:
         self._reap_adopted(leader_pid)
         adopted = [pid for pid in self._direct_children() if pid != leader_pid]
-        return adopted, self._group_has_live_member(leader_pid)
+        leader_state = self._process_state(leader_pid)
+        leader_alive = not leader_exited and leader_state not in (None, "Z")
+        return adopted, self._group_has_live_member(leader_pid), leader_alive
 
-    def quiesce(self, leader_pid: int) -> None:
+    def quiesce(self, leader_pid: int, *, leader_exited: bool) -> None:
         """Boundedly terminate one generation and every observable descendant."""
 
         _signal_group(leader_pid, signal.SIGCONT)
@@ -107,8 +126,10 @@ class _ProcessOwner:
 
         deadline = time.monotonic() + _GRACE_SECONDS
         while time.monotonic() < deadline:
-            adopted, group_alive = self._linux_remaining(leader_pid)
-            if not adopted and not group_alive:
+            adopted, group_alive, leader_alive = self._linux_remaining(
+                leader_pid, leader_exited=leader_exited
+            )
+            if not adopted and not group_alive and not leader_alive:
                 return
             for pid in adopted:
                 _signal_pid(pid, signal.SIGCONT)
@@ -122,8 +143,13 @@ class _ProcessOwner:
         while time.monotonic() < deadline:
             _signal_group(leader_pid, signal.SIGCONT)
             _signal_group(leader_pid, signal.SIGKILL)
-            adopted, group_alive = self._linux_remaining(leader_pid)
-            if not adopted and not group_alive:
+            if not leader_exited:
+                _signal_pid(leader_pid, signal.SIGCONT)
+                _signal_pid(leader_pid, signal.SIGKILL)
+            adopted, group_alive, leader_alive = self._linux_remaining(
+                leader_pid, leader_exited=leader_exited
+            )
+            if not adopted and not group_alive and not leader_alive:
                 return
             for pid in adopted:
                 _signal_pid(pid, signal.SIGCONT)
@@ -212,11 +238,11 @@ def _spawn(argv: Sequence[str], cwd: str) -> int:
 
 
 class _SignalRelay:
-    """One signal/deadline authority spanning spawn, handoff, and wait."""
+    """One latched termination/deadline authority across the whole lifecycle."""
 
     def __init__(self) -> None:
         self.child_pid: int | None = None
-        self.pending: list[int] = []
+        self.termination_signal = 0
         self.kill_deadline: float | None = None
         self.previous = {
             signum: signal.getsignal(signum) for signum in _FORWARDED_SIGNALS
@@ -231,18 +257,24 @@ class _SignalRelay:
             signal.signal(signum, handler)
 
     def handle(self, signum: int, _frame: object) -> None:
-        self.pending.append(signum)
+        if signum in _TERMINATING_SIGNALS and not self.termination_signal:
+            self.termination_signal = signum
+            self.kill_deadline = time.monotonic() + _GRACE_SECONDS
         if self.child_pid is not None:
             _signal_group(self.child_pid, signum)
-        if signum in _TERMINATING_SIGNALS and self.kill_deadline is None:
-            self.kill_deadline = time.monotonic() + _GRACE_SECONDS
 
     def terminating(self) -> int:
-        return _termination_signal(self.pending)
+        return self.termination_signal
 
-    def clear(self) -> None:
-        self.pending.clear()
-        self.kill_deadline = None
+    def attach_child(self, child_pid: int) -> None:
+        self.child_pid = child_pid
+        # A termination can be latched before a child is published. Never erase
+        # it: immediately apply it to any generation that appears afterward.
+        if self.termination_signal:
+            _signal_group(child_pid, self.termination_signal)
+
+    def detach_child(self) -> None:
+        self.child_pid = None
 
     def escalate_if_due(self) -> None:
         if (
@@ -308,13 +340,6 @@ def _read_reload_thread(state_file: Path) -> str:
         return ""
 
 
-def _termination_signal(pending_signals: Sequence[int]) -> int:
-    return next(
-        (signum for signum in pending_signals if signum in _TERMINATING_SIGNALS),
-        0,
-    )
-
-
 def supervise(
     child_argv: Sequence[str],
     *,
@@ -325,7 +350,7 @@ def supervise(
 ) -> int:
     if not child_argv:
         raise ValueError("missing child argv")
-    owner = _ProcessOwner()
+    owner: _ProcessOwner | None = None
     own_pgrp = os.getpgrp()
     tty_fd = _controlling_tty_fd()
     # Respect the invoking shell. Only a foreground job may transfer terminal
@@ -334,17 +359,19 @@ def supervise(
     reload_count = 0
     child_pid: int | None = None
     relay = _SignalRelay()
-    relay.install()
 
     try:
+        relay.install()
+        # Initialization belongs inside state-file finalization. Linux procfs or
+        # prctl failure therefore restores handlers and unlinks shell state.
+        owner = _ProcessOwner()
         while True:
             terminating = relay.terminating()
             if terminating:
                 return 128 + terminating
-            relay.clear()
             state_file.write_text("", encoding="utf-8")
             child_pid = _spawn(child_argv, cwd)
-            relay.child_pid = child_pid
+            relay.attach_child(child_pid)
             if owns_foreground:
                 _set_foreground_pgrp(tty_fd, child_pid)
             # The same installed relay owns spawn, foreground handoff, and
@@ -359,14 +386,16 @@ def supervise(
             if owns_foreground:
                 _set_foreground_pgrp(tty_fd, own_pgrp)
             try:
-                owner.quiesce(child_pid)
+                if owner is None:
+                    raise RuntimeError("process owner was not initialized")
+                owner.quiesce(child_pid, leader_exited=True)
             except BaseException:
                 # Mark this generation as already cleanup-attempted; the outer
                 # finalizer still restores handlers and unlinks state without
                 # recursively invoking a second failing quiescence pass.
                 failed_pid = child_pid
                 child_pid = None
-                relay.child_pid = None
+                relay.detach_child()
                 try:
                     os.waitpid(failed_pid, os.WNOHANG)
                 except ChildProcessError:
@@ -376,10 +405,9 @@ def supervise(
             if waited_pid != child_pid:
                 raise ChildProcessError(f"lost generation leader {child_pid}")
             child_pid = None
-            relay.child_pid = None
+            relay.detach_child()
 
             terminating = relay.terminating()
-            relay.clear()
             if terminating:
                 return 128 + terminating
             status = _wait_exit_code(wait_status)
@@ -402,9 +430,9 @@ def supervise(
                 _set_foreground_pgrp(tty_fd, own_pgrp)
             except BaseException as exc:
                 cleanup_error = exc
-        if child_pid is not None:
+        if child_pid is not None and owner is not None:
             try:
-                owner.quiesce(child_pid)
+                owner.quiesce(child_pid, leader_exited=False)
             except BaseException as exc:
                 cleanup_error = cleanup_error or exc
             finally:
@@ -412,7 +440,7 @@ def supervise(
                     os.waitpid(child_pid, 0)
                 except ChildProcessError:
                     pass
-        relay.child_pid = None
+        relay.detach_child()
         relay.restore()
         try:
             state_file.unlink()

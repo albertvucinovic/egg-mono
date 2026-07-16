@@ -1,6 +1,6 @@
 # Reliability and EggW Correctness Follow-up TODO
 
-Status: in progress (Phases 1–2 accepted; Phase 3 signal-relay follow-up awaiting review)
+Status: in progress (Phases 1–2 accepted; Phase 3 third repair complete, awaiting independent review)
 Created: 2026-07-15
 Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 
@@ -43,11 +43,11 @@ Original diagnosis: default auto search built Tavily → SearXNG when a Tavily k
 
 CI failure: `test_egg_wrapper_preserves_argv_across_reload` timed out after 15s while invoking `egg/egg.sh` with quoted arguments. Local success alone is insufficient.
 
-- [ ] Reproduce or identify the CI-only hang from launcher process/env semantics.
-- [ ] Audit recursive `exec "$SCRIPT_DIR/egg.sh"`, reload-state cleanup, inherited reload variables, venv activation, `.env`, and child process ownership.
-- [ ] Replace recursion/ambiguous inherited state with a bounded, explicit reload loop if that is the root cause, preserving exact argv and cwd.
-- [ ] Add deterministic tests for one reload, repeated reload bounds/failure, quoting, cleanup, and no leaked temp file/process.
-- [ ] Run the full Egg test suite.
+- [x] Reproduce or identify the CI-only hang from launcher process/env semantics.
+- [x] Audit recursive `exec "$SCRIPT_DIR/egg.sh"`, reload-state cleanup, inherited reload variables, venv activation, `.env`, and child process ownership.
+- [x] Replace recursion/ambiguous inherited state with a bounded, explicit reload loop if that is the root cause, preserving exact argv and cwd.
+- [x] Add deterministic tests for one reload, repeated reload bounds/failure, quoting, cleanup, and no leaked temp file/process.
+- [x] Run the full Egg test suite.
 
 ## Phase 4 — Auto-continue error policy
 
@@ -104,6 +104,10 @@ Current root README opens as an AI self-assessment and comparison essay. The use
 - [ ] For transcript/UI phases, representative 5M-token or equivalent cost-shape validation proves bounded/incremental work without sacrificing history reachability; Phase 5 explicitly covers scrolling, input availability, streaming, pagination, and event-loop responsiveness.
 
 ## Status notes / commit ledger
+
+- 2026-07-16: Phase 3 third-review repair complete, awaiting independent review. Signal lifecycle now uses one latched `_SignalRelay`: the first termination is never cleared, its original TERM→KILL deadline persists, any subsequently attached live child immediately receives the latched signal, and the same authority spans spawn, foreground handoff, wait, post-wait, and final restoration. Real bounded regressions inject TERM at the prior generation-start check/clear boundary and exact wait-entry boundary with TERM-ignoring children, and at the prior post-wait check/clear boundary; all return 143 without spawning/retaining work. Linux cleanup now distinguishes `leader_exited=True` after wait observation from a pre-exit finalizer, reads the leader state under procfs, and repeatedly SIGKILLs a live TERM-ignoring leader while retaining its unreaped PID/PGID identity fence; a real no-descendant leader regression completes boundedly. Signal relay installation and `_ProcessOwner()` initialization are inside the outer state finalizer, and a supervise-level owner-init failure regression proves handler restoration and state unlink. All prior shell job-control, provisioning, `.env`, cascade, portability, SIGSTOP, argv/cwd/status/reload, and timeout-harness fixes remain passing. Validation: launcher `43 passed`; focused reload/quick-start/command `142 passed`; 20 externally bounded blocker-test repetitions passed with no matching process/state leak; full Egg `602 passed`; full EggThreads `1454 passed`; Bash syntax, Python compile, and `git diff --check` passed; `shellcheck` unavailable. No Phase 4 work started.
+
+- 2026-07-16: Third review rejected Phase 3 with three remaining authority/finalization blockers beyond the already repaired wait-entry race. Signal state still used list check+clear, so TERM could be appended after a termination check but erased by the following clear at generation start or post-wait. Linux final cleanup excluded the leader from liveness, which is valid after exit observation but can return early in an outer finalizer while a live TERM-ignoring leader remains, then hang in blocking `waitpid`. `_ProcessOwner()` initialization occurred before the supervise finalizer, so procfs/prctl fail-closed startup could leak the shell-created state file. Repair must latch termination without destructive clears, continuously retain its deadline whenever a live child exists, distinguish pre-exit leader liveness and KILL it boundedly while retaining the identity fence, and put owner initialization inside guaranteed state unlink/handler restoration. Exact bounded regressions for both signal check/clear boundaries, live leader, and supervise-level owner initialization failure are required; all prior fixes must remain; no Phase 4 work started.
 
 - 2026-07-16: The remaining spawn→wait race is repaired, pending fresh review. One `_SignalRelay` is installed before any generation spawn and remains the sole handler, pending-termination record, child-forwarder, and TERM→KILL deadline owner through spawn, foreground handoff, `_wait_generation`, and final restoration; `_wait_generation` no longer swaps handlers or initializes a new deadline, so a TERM delivered exactly at function entry retains its original escalation deadline. A real TERM-ignoring infinite child regression monkeypatches only the wait entry boundary, delivers TERM after the child readiness marker and before the original wait body, and asserts status 143, KILL completion under 1.5s, state unlink, and PID disappearance; the test is externally bounded. Focused launcher suite `39 passed`; 20 externally bounded exact-boundary repetitions passed with no matching child or new state file; Python compile and `git diff --check` passed. Phase 3 checklist remains reopened pending independent review; no Phase 4 work started.
 

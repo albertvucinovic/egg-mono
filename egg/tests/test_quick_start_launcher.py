@@ -919,7 +919,7 @@ def test_process_owner_non_linux_uses_best_effort_group_cleanup(monkeypatch):
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
 
     owner = module._ProcessOwner()
-    owner.quiesce(123)
+    owner.quiesce(123, leader_exited=False)
 
     assert owner.strong is False
     assert calls == [
@@ -963,7 +963,7 @@ def test_supervisor_cleanup_error_still_restores_handlers_and_unlinks_state(
     old_handler = signal.getsignal(signal.SIGTERM)
 
     class Owner:
-        def quiesce(self, _pid: int) -> None:
+        def quiesce(self, _pid: int, *, leader_exited: bool) -> None:
             raise RuntimeError("cleanup exploded")
 
     monkeypatch.setattr(module, "_ProcessOwner", Owner)
@@ -1250,3 +1250,141 @@ while True:
     assert elapsed < 1.5
     assert not state.exists()
     _assert_pid_gone(int(ready.read_text(encoding="utf-8")))
+
+
+def _load_launcher_supervisor(name: str):
+    import importlib.util
+
+    path = _egg_wrapper().parent / "egg" / "launcher_supervisor.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("boundary", ["generation-start", "post-wait"])
+def test_supervisor_latched_term_cannot_be_erased_at_old_clear_boundaries(
+    monkeypatch, tmp_path: Path, boundary: str
+):
+    module = _load_launcher_supervisor(f"test_launcher_latched_{boundary}")
+    state = tmp_path / "state"
+    state.write_text("", encoding="utf-8")
+    ready = tmp_path / "ready"
+    child = _write_executable(
+        tmp_path / "term-ignoring-child",
+        """#!/usr/bin/env python3
+import os, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(os.environ["EGG_TEST_READY"], "w", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()))
+while True:
+    time.sleep(1)
+""",
+    )
+    monkeypatch.setenv("EGG_TEST_READY", str(ready))
+
+    if boundary == "generation-start":
+        original_spawn = module._spawn
+
+        def inject_after_initial_check(*args, **kwargs):
+            # In the rejected list implementation this signal landed after the
+            # top-of-loop check and was erased by the immediately following clear.
+            os.kill(os.getpid(), signal.SIGTERM)
+            return original_spawn(*args, **kwargs)
+
+        monkeypatch.setattr(module, "_spawn", inject_after_initial_check)
+    else:
+        original_waitpid = module.os.waitpid
+
+        def inject_after_post_wait_check(pid, options):
+            result = original_waitpid(pid, options)
+            if options == 0:
+                # Use an already exited first generation and latch TERM at the
+                # old post-wait check/clear boundary before another can spawn.
+                os.kill(os.getpid(), signal.SIGTERM)
+            return result
+
+        monkeypatch.setattr(module.os, "waitpid", inject_after_post_wait_check)
+        # The post-wait boundary does not need an ignoring child; generation one
+        # exits normally and the assertion is that no generation two is started.
+        child = _write_executable(
+            tmp_path / "one-shot-child",
+            """#!/usr/bin/env python3
+import os
+with open(os.environ["EGG_TEST_READY"], "w", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()))
+""",
+        )
+
+    started = time.monotonic()
+    status = module.supervise(
+        [str(child)],
+        cwd=str(tmp_path),
+        state_file=state,
+        reload_exit_code=75,
+        max_reloads=1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert status == 143
+    assert elapsed < 1.5
+    assert not state.exists()
+    _assert_pid_gone(int(ready.read_text(encoding="utf-8")))
+
+
+def test_process_owner_finalizer_kills_live_term_ignoring_leader(tmp_path: Path):
+    module = _load_launcher_supervisor("test_launcher_live_leader")
+    owner = module._ProcessOwner()
+    ready = tmp_path / "ready"
+    child = _write_executable(
+        tmp_path / "live-leader",
+        """#!/usr/bin/env python3
+import os, signal, time
+os.setpgid(0, 0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(os.environ["EGG_TEST_READY"], "w", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()))
+while True:
+    time.sleep(1)
+""",
+    )
+    env = {**os.environ, "EGG_TEST_READY": str(ready)}
+    proc = subprocess.Popen([str(child)], env=env)
+    try:
+        _wait_for_path(ready)
+        started = time.monotonic()
+        owner.quiesce(proc.pid, leader_exited=False)
+        assert time.monotonic() - started < 1.5
+        assert proc.wait(timeout=2) == -signal.SIGKILL
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_supervisor_owner_initialization_failure_unlinks_state_and_restores_handlers(
+    monkeypatch, tmp_path: Path
+):
+    module = _load_launcher_supervisor("test_launcher_owner_init")
+    state = tmp_path / "state"
+    state.write_text("", encoding="utf-8")
+    old_handler = signal.getsignal(signal.SIGTERM)
+
+    class BrokenOwner:
+        def __init__(self) -> None:
+            raise RuntimeError("owner init failed")
+
+    monkeypatch.setattr(module, "_ProcessOwner", BrokenOwner)
+
+    with pytest.raises(RuntimeError, match="owner init failed"):
+        module.supervise(
+            ["child"],
+            cwd=str(tmp_path),
+            state_file=state,
+            reload_exit_code=75,
+            max_reloads=1,
+        )
+
+    assert not state.exists()
+    assert signal.getsignal(signal.SIGTERM) is old_handler
