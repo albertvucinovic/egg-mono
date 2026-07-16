@@ -7,6 +7,7 @@ export interface EggwPerformanceCounters {
   streamingToolOutputFlushes: number;
   streamingToolArgumentFlushes: number;
   streamingToolPreviewFlushes: number;
+  liveTimingCommits: number;
 }
 
 declare global {
@@ -24,6 +25,7 @@ const EMPTY_COUNTERS: EggwPerformanceCounters = {
   streamingToolOutputFlushes: 0,
   streamingToolArgumentFlushes: 0,
   streamingToolPreviewFlushes: 0,
+  liveTimingCommits: 0,
 };
 
 function counters(): EggwPerformanceCounters | null {
@@ -32,15 +34,17 @@ function counters(): EggwPerformanceCounters | null {
   return window.__EGGW_PERFORMANCE__;
 }
 
-export function recordReactCommit(id: "ChatPanel" | "StaticTranscript", durationMs: number): void {
+export function recordReactCommit(id: "ChatPanel" | "StaticTranscript" | "LiveTiming", durationMs: number): void {
   const current = counters();
   if (!current) return;
   if (id === "ChatPanel") {
     current.chatPanelCommits += 1;
     current.chatPanelCommitDurationMs += durationMs;
-  } else {
+  } else if (id === "StaticTranscript") {
     current.transcriptCommits += 1;
     current.transcriptCommitDurationMs += durationMs;
+  } else {
+    current.liveTimingCommits += 1;
   }
 }
 

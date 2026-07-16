@@ -6,6 +6,9 @@ import {
   flattenTranscript,
   mergeMessagesByTimestamp,
   reconcileTranscriptTail,
+  invalidateTranscriptAuthoritatively,
+  mergeOlderTranscriptPage,
+  mergeRefreshedTranscriptTail,
   removeClientTranscriptMessage,
   replaceClientTranscriptMessage,
   transcriptQueryKey,
@@ -35,6 +38,165 @@ describe("thread-keyed transcript cache", () => {
     const flattened = flattenTranscript(transcript);
     expect(flattened.map((message) => message.id)).toEqual(["oldest", "overlap", "newest"]);
     expect(flattened[1].content).toBe("authoritative overlap");
+  });
+
+  it("retains every loaded page when an ordinary refresh returns a shorter chain", () => {
+    const previous = data([
+      page(["tail-old"], 10, "cursor-1"),
+      page(["middle"], 8, "cursor-2"),
+      page(["oldest"], 6),
+    ]);
+    const fetched = page(["tail-fresh"], 12, null);
+
+    const retained = mergeRefreshedTranscriptTail(fetched, previous);
+
+    expect(retained.pages.map((entry) => entry.items[0]?.id)).toEqual([
+      "tail-fresh", "tail-old", "middle", "oldest",
+    ]);
+    expect(retained.pages[1].retained_tail_bridge).toBe(true);
+    expect(retained.pages[2]).toBe(previous.pages[1]);
+    expect(retained.pages[3]).toBe(previous.pages[2]);
+    expect(retained.pages[0].next_before).toBe("cursor-1");
+    expect(retained.pageParams).toEqual([null, "retained-tail:tail-old", "before-1", "before-2"]);
+  });
+
+  it("treats equal-cursor snapshots as one authority instead of retaining phantom history", () => {
+    const previous = data([page(["old-projection"], 10, null)]);
+    const fetched = page(["new-projection"], 10, null);
+
+    const retained = mergeRefreshedTranscriptTail(fetched, previous);
+
+    expect(retained.pages).toHaveLength(1);
+    expect(flattenTranscript(retained).map((message) => message.id)).toEqual(["new-projection"]);
+  });
+
+  it("moves only the displaced prefix into retained bridge pages on overlap", () => {
+    const previous = data([
+      page(["old-0", "old-1", "overlap", "old-tail"], 10, "old-0"),
+      page(["older-page"], 8),
+    ]);
+    const fetched = page(["overlap", "old-tail", "new-tail"], 11, "old-0");
+
+    const retained = mergeRefreshedTranscriptTail(fetched, previous);
+
+    expect(retained.pages[0].items.map((message) => message.id)).toEqual(["overlap", "old-tail", "new-tail"]);
+    expect(retained.pages[1]).toMatchObject({ retained_tail_bridge: true });
+    expect(retained.pages[1].items.map((message) => message.id)).toEqual(["old-0", "old-1"]);
+    expect(flattenTranscript(retained).map((message) => message.id)).toEqual([
+      "older-page", "old-0", "old-1", "overlap", "old-tail", "new-tail",
+    ]);
+  });
+
+  it("bounds retained displaced tail pages while preserving all history", () => {
+    const previousTail = page(
+      Array.from({ length: 300 }, (_, index) => `old-${index}`),
+      10,
+      "old-0",
+    );
+    const first = mergeRefreshedTranscriptTail(page(["new-0"], 11, "old-0"), data([previousTail]));
+    const second = mergeRefreshedTranscriptTail(page(["new-1"], 12, "old-0"), first);
+
+    expect(second.pages.every((entry) => entry.items.length <= 300)).toBe(true);
+    expect(flattenTranscript(second)).toHaveLength(302);
+    expect(flattenTranscript(second).map((message) => message.id)).toEqual([
+      ...previousTail.items.map((message) => message.id), "new-0", "new-1",
+    ]);
+  });
+
+  it("uses optimistic operation identity as refresh overlap without duplicating it", () => {
+    const optimistic: Message = {
+      id: "temp-send",
+      role: "user",
+      content: "hello",
+      client_only: "optimistic",
+      client_operation_id: "send-op",
+    };
+    const previous = page(["before"], 10, "before");
+    previous.items.push(optimistic, { id: "event-after", role: "assistant", event_seq: 11 });
+    const fetched = page(["persisted-send", "event-after"], 12, "before");
+    fetched.items[0].client_only = "optimistic";
+    fetched.items[0].client_operation_id = "send-op";
+
+    const retained = mergeRefreshedTranscriptTail(fetched, data([previous]));
+
+    expect(flattenTranscript(retained).map((message) => message.id)).toEqual([
+      "before", "persisted-send", "event-after",
+    ]);
+  });
+
+  it("discards loaded pages only through explicit destructive authority", () => {
+    const client = new QueryClient();
+    client.setQueryData(transcriptQueryKey("thread-a"), data([
+      page(["tail"], 2, "cursor"),
+      page(["old"], 1),
+    ]));
+
+    invalidateTranscriptAuthoritatively(client, "thread-a");
+
+    expect(client.getQueryData(transcriptQueryKey("thread-a"))).toBeUndefined();
+  });
+
+  it("rejects a stale tail cursor without changing any loaded page", () => {
+    const previous = data([
+      page(["new-tail"], 20, "cursor-1"),
+      page(["old"], 10),
+    ]);
+    expect(mergeRefreshedTranscriptTail(page(["stale-tail"], 19), previous)).toBe(previous);
+  });
+
+  it("does bounded page-metadata work without reading 5M-token-equivalent message bodies", () => {
+    const bodyReads = { count: 0 };
+    const guardedMessage = (id: string): Message => {
+      const message: Message = { id, role: "user" };
+      Object.defineProperty(message, "content", {
+        enumerable: true,
+        get: () => {
+          bodyReads.count += 1;
+          throw new Error("retention must not inspect message content");
+        },
+      });
+      return message;
+    };
+    const previous: TranscriptData = {
+      pages: Array.from({ length: 128 }, (_, index) => ({
+        items: [guardedMessage(`page-${index}`)],
+        snapshot_cursor: 1,
+        next_before: index < 127 ? `cursor-${index + 1}` : null,
+      })),
+      pageParams: Array.from({ length: 128 }, (_, index) => index ? `cursor-${index}` : null),
+    };
+    const fetched = data([page(["fresh-tail"], 2, "cursor-1")]);
+
+    const retained = mergeRefreshedTranscriptTail(fetched.pages[0], previous);
+
+    expect(retained.pages).toHaveLength(129);
+    expect(bodyReads.count).toBe(0);
+    expect(retained.pages.at(-1)?.items[0].id).toBe("page-127");
+  });
+
+  it("preserves backend pagination beyond retained bridge pages", () => {
+    const previous = data([page(["old-tail"], 10, "backend-cursor")]);
+
+    const retained = mergeRefreshedTranscriptTail(page(["fresh-tail"], 11, null), previous);
+
+    expect(retained.pages[1]).toMatchObject({
+      retained_tail_bridge: true,
+      next_before: "backend-cursor",
+    });
+  });
+
+  it("appends one older page only at the current authoritative frontier", () => {
+    const current = data([
+      page(["tail"], 10, "cursor-1"),
+      { ...page(["bridge"], 10, "cursor-2"), retained_tail_bridge: true },
+    ]);
+    const fetched = page(["older"], 10, null);
+
+    const merged = mergeOlderTranscriptPage(current, "cursor-2", fetched)!;
+
+    expect(merged.pages.map((entry) => entry.items[0]?.id)).toEqual(["tail", "bridge", "older"]);
+    expect(merged.pageParams).toEqual([null, "before-1", "cursor-2"]);
+    expect(mergeOlderTranscriptPage(current, "stale-cursor", fetched)).toBe(current);
   });
 
   it("keeps independently paginated thread histories isolated", () => {

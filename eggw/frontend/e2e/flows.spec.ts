@@ -1382,6 +1382,104 @@ test.describe('Scroll intent state machines', () => {
     await expect(chat).toContainText('overlap newest');
   });
 
+  test('keeps a displaced 300-message tail reachable after a full fresh tail arrives', async ({ page }) => {
+    const threadId = 'monotonic-displaced-tail';
+    const initialTail = Array.from({ length: 300 }, (_, index) => ({
+      id: `displaced-old-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: index === 0 ? 'OLDEST DISPLACED TAIL ENTRY' : `old tail ${index}`,
+    }));
+    const replacementTail = Array.from({ length: 300 }, (_, index) => ({
+      id: `displaced-new-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `new tail ${index}`,
+    }));
+    let request = 0;
+    await mockThreadShell(page, threadId);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200, headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'llm', streaming_invoke_id: 'displaced-tail-invoke', live_replay_cursor: 0 },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), (route) => {
+      const envelope = JSON.stringify({
+        event_id: 'displaced-tail-open', event_seq: 1, type: 'stream.open', ts: new Date().toISOString(),
+        msg_id: null, invoke_id: 'displaced-tail-invoke', chunk_seq: null, payload: { stream_kind: 'llm' },
+      });
+      return route.fulfill({
+        status: 200, headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: `id: 1\nevent: stream.open\ndata: ${envelope}\n\n`,
+      });
+    });
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      request += 1;
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: {
+        items: request === 1 ? initialTail : replacementTail,
+        snapshot_cursor: request,
+        next_before: 'older-cursor',
+      } });
+    });
+
+    await page.goto(`/${threadId}`);
+    await expect.poll(() => request).toBeGreaterThanOrEqual(2);
+    await expect(page.getByText(/Chat Messages · 600 loaded/)).toBeVisible();
+    for (let reveal = 0; reveal < 9; reveal += 1) {
+      await page.getByTestId('show-more-loaded-messages').click();
+    }
+    await expect(page.getByTestId('chat-panel')).toContainText('OLDEST DISPLACED TAIL ENTRY');
+    await expect(page.getByTestId('chat-panel')).toContainText('new tail 299');
+  });
+
+  test('retains loaded pages across a shorter tail refresh and route return', async ({ page }) => {
+    const threadId = 'monotonic-page-refresh';
+    const otherThread = 'monotonic-page-refresh-other';
+    let tailRequests = 0;
+    await mockThreadShell(page, threadId);
+    await mockThreadShell(page, otherThread, { messages: [{ id: 'other-only', role: 'user', content: 'other route' }] });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/children`);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/children`, (route) => route.fulfill({
+      status: 200, headers: mockApiHeaders,
+      json: [{ id: otherThread, name: 'Other monotonic route', parent_id: threadId, has_children: false }],
+    }));
+    await page.unroute(`${TEST_API_BASE}/api/threads/${otherThread}`);
+    await page.route(`${TEST_API_BASE}/api/threads/${otherThread}`, (route) => route.fulfill({
+      status: 200, headers: mockApiHeaders,
+      json: { id: otherThread, name: otherThread, parent_id: threadId, has_children: false },
+    }));
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      const before = new URL(request.url()).searchParams.get('before_id');
+      if (before) {
+        await route.fulfill({ status: 200, headers: mockApiHeaders, json: {
+          items: [{ id: 'monotonic-old', role: 'user', content: 'OLDER PAGE MUST REMAIN' }],
+          snapshot_cursor: 4,
+          next_before: null,
+        } });
+        return;
+      }
+      tailRequests += 1;
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: {
+        items: [{ id: `monotonic-tail-${tailRequests}`, role: 'assistant', content: `fresh tail ${tailRequests}` }],
+        snapshot_cursor: 4 + tailRequests,
+        // The second snapshot is deliberately stale/short and incorrectly says exhausted.
+        next_before: tailRequests === 1 ? 'monotonic-tail-1' : null,
+      } });
+    });
+
+    await page.goto(`/${threadId}`);
+    await page.getByTestId('load-older-messages').click();
+    await expect(page.getByTestId('chat-panel')).toContainText('OLDER PAGE MUST REMAIN');
+    await page.getByRole('button', { name: /Other monotonic route/ }).click();
+    await expect(page.getByTestId('chat-panel')).toContainText('other route');
+    await page.getByRole('button', { name: /Parent/ }).click();
+    await expect.poll(() => tailRequests).toBeGreaterThanOrEqual(2);
+    await expect(page.getByTestId('chat-panel')).toContainText('OLDER PAGE MUST REMAIN');
+    await expect(page.getByTestId('chat-panel')).toContainText(`fresh tail ${tailRequests}`);
+    await expect(page.getByText(new RegExp(`Chat Messages · ${tailRequests + 1} loaded`))).toBeVisible();
+  });
+
   test('keeps following through rapid canonical tool-result reconciliation and lets user-up win', async ({ page }) => {
     const threadId = 'scroll-rapid-tool-results';
     const initialMessages = Array.from({ length: 12 }, (_, index) => ({
@@ -1441,6 +1539,16 @@ test.describe('Scroll intent state machines', () => {
       top: element.scrollTop,
       distance: element.scrollHeight - element.scrollTop - element.clientHeight,
     }));
+    await chat.evaluate((element) => {
+      const trace: number[] = [];
+      let frames = 0;
+      const sample = () => {
+        trace.push(element.scrollHeight - element.scrollTop - element.clientHeight);
+        if ((frames += 1) < 240) requestAnimationFrame(sample);
+      };
+      (window as typeof window & { __eggwLiveEdgeTrace?: number[] }).__eggwLiveEdgeTrace = trace;
+      requestAnimationFrame(sample);
+    });
     await chat.focus();
     await page.keyboard.press('End');
     await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
@@ -1448,6 +1556,12 @@ test.describe('Scroll intent state machines', () => {
     releaseResults();
     await expect(chat).toContainText('RESULT B', { timeout: 5000 });
     await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+    const liveEdgeTrace = await page.evaluate(() => (
+      (window as typeof window & { __eggwLiveEdgeTrace?: number[] }).__eggwLiveEdgeTrace || []
+    ));
+    expect(liveEdgeTrace.length).toBeGreaterThan(0);
+    // No painted frame may expose a transient up-jump while FOLLOWING owns the edge.
+    expect(Math.max(0, ...liveEdgeTrace)).toBeLessThanOrEqual(16);
     await page.getByTestId('chat-panel-content').evaluate((element) => {
       const later = document.createElement('div');
       later.style.height = '400px';
@@ -1850,6 +1964,70 @@ test.describe('Live Tool Streaming', () => {
       await expect(page.getByText('bash', { exact: true }).last()).toBeVisible();
       await expect(page.getByText('python', { exact: true }).last()).toBeVisible();
     }
+  });
+
+  test('countdown ticks keep transcript geometry stable and do not commit the page owner', async ({ page }) => {
+    const threadId = 'stable-countdown-geometry';
+    const toolId = 'call-stable-countdown';
+    await mockThreadShell(page, threadId, {
+      messages: Array.from({ length: 18 }, (_, index) => ({
+        id: `countdown-message-${index}`,
+        role: index % 2 ? 'assistant' : 'user',
+        content: `${index}: ${'stable transcript height '.repeat(16)}`,
+      })),
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200, headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'countdown-invoke', live_replay_cursor: 0 },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      const oldTs = new Date(Date.now() - 98_000).toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `countdown-${eventSeq}`, event_seq: eventSeq, type, ts: oldTs,
+        msg_id: null, invoke_id: 'countdown-invoke', chunk_seq: null, payload,
+      });
+      const block = (eventSeq: number, type: string, payload: Record<string, unknown>) => [
+        `id: ${eventSeq}`, `event: ${type}`, `data: ${envelope(eventSeq, type, payload)}`, '',
+      ];
+      await route.fulfill({ status: 200, headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' }, body: [
+        ...block(1, 'stream.open', { stream_kind: 'tool' }),
+        ...block(2, 'tool_call.execution_started', { tool_call_id: toolId, name: 'bash', timeout: 120 }),
+        '',
+      ].join('\n') });
+    });
+
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    const timer = page.getByTestId('streaming-tool-timeout-summary');
+    await expect(timer).toContainText('timeout in');
+    await chat.hover();
+    await page.mouse.wheel(0, -700);
+    await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(100);
+    const before = await page.evaluate(() => ({
+      top: document.querySelector<HTMLElement>('[data-testid="chat-panel"]')!.scrollTop,
+      height: document.querySelector<HTMLElement>('[data-testid="chat-panel"]')!.scrollHeight,
+      pageCommits: window.__EGGW_PERFORMANCE__?.chatPanelCommits || 0,
+      transcriptCommits: window.__EGGW_PERFORMANCE__?.transcriptCommits || 0,
+      timingCommits: window.__EGGW_PERFORMANCE__?.liveTimingCommits || 0,
+    }));
+    const timerBefore = await timer.innerText();
+    await expect.poll(() => timer.innerText(), { timeout: 3_000 }).not.toBe(timerBefore);
+    const after = await page.evaluate(() => ({
+      top: document.querySelector<HTMLElement>('[data-testid="chat-panel"]')!.scrollTop,
+      height: document.querySelector<HTMLElement>('[data-testid="chat-panel"]')!.scrollHeight,
+      pageCommits: window.__EGGW_PERFORMANCE__?.chatPanelCommits || 0,
+      transcriptCommits: window.__EGGW_PERFORMANCE__?.transcriptCommits || 0,
+      timingCommits: window.__EGGW_PERFORMANCE__?.liveTimingCommits || 0,
+    }));
+    expect(after.top).toBeCloseTo(before.top, 0);
+    expect(after.height).toBe(before.height);
+    expect(after.timingCommits).toBeGreaterThan(before.timingCommits);
+    expect(after.transcriptCommits).toBe(before.transcriptCommits);
+    // Timing commits are isolated to the leaf; geometry is unchanged. The page
+    // owner may still commit unrelated background query state.
+    await expect(timer).toHaveCSS('font-variant-numeric', 'tabular-nums');
   });
 
   test('terminalizes only the exact timed-out wait card and refreshes its durable transcript', async ({ page }) => {

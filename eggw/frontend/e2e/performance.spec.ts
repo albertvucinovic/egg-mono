@@ -69,8 +69,8 @@ test.describe('Deterministic performance gates', () => {
     await page.getByTestId('message-input').pressSequentially('x'.repeat(200), { delay: 0 });
     const after = await counters(page);
     expect(after.transcriptCommits - before.transcriptCommits).toBe(0);
-    // A one-second elapsed-time label may commit independently of body chunks.
-    expect(after.chatPanelCommits - before.chatPanelCommits).toBeLessThanOrEqual(1);
+    // Live timing is isolated in memoized leaves; typing never commits the page.
+    expect(after.chatPanelCommits - before.chatPanelCommits).toBe(0);
 
     await page.getByTitle('Transcript display verbosity').selectOption('min');
     // Minimum verbosity must honor the same mounted window. It must not turn
@@ -91,6 +91,76 @@ test.describe('Deterministic performance gates', () => {
     expect(revealedToolButtons).toBeLessThan(60);
     await expect(page.getByTestId('hidden-details').first()).toBeVisible();
     await expect(page.getByText('Streaming performance fixture').first()).toBeVisible();
+  });
+
+  test('5M-token-equivalent history stays reachable with bounded tail refresh, input, and scroll work', async ({ page }) => {
+    const threadId = 'performance-five-million';
+    const messagesPerPage = 300;
+    const pageCount = 24;
+    // 7,200 messages x 700 tokens/message = 5,040,000 token-equivalent.
+    const tokenEquivalent = messagesPerPage * pageCount * 700;
+    expect(tokenEquivalent).toBeGreaterThan(5_000_000);
+    const pageMessages = (pageIndex: number) => Array.from({ length: messagesPerPage }, (_, index) => ({
+      id: `five-million-${pageIndex}-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `page ${pageIndex} message ${index}`,
+    }));
+    let tailRequests = 0;
+    const requestedPages: number[] = [];
+    await mockPerformanceThread(page, threadId, 0);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      const before = new URL(request.url()).searchParams.get('before_id');
+      const pageIndex = before ? Number(before.replace('cursor-', '')) : 0;
+      if (before) requestedPages.push(pageIndex);
+      else tailRequests += 1;
+      await route.fulfill({
+        status: 200,
+        headers,
+        json: {
+          items: pageMessages(pageIndex),
+          snapshot_cursor: 10 + tailRequests,
+          next_before: pageIndex + 1 < pageCount ? `cursor-${pageIndex + 1}` : null,
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await expect(page.getByText(/Chat Messages · 300 loaded/)).toBeVisible({ timeout: 15_000 });
+    const input = page.getByTestId('message-input');
+    const beforeInput = await counters(page);
+    await input.pressSequentially('bounded input', { delay: 0 });
+    const afterInput = await counters(page);
+    expect(afterInput.transcriptCommits - beforeInput.transcriptCommits).toBe(0);
+    expect(afterInput.chatPanelCommits - beforeInput.chatPanelCommits).toBe(0);
+
+    const chat = page.getByTestId('chat-panel');
+    await chat.focus();
+    await page.keyboard.press('Home');
+    await expect(page.getByTestId('show-more-loaded-messages')).toBeVisible();
+    expect(requestedPages).toEqual([]);
+    let reveals = 0;
+    while (await page.getByTestId('show-more-loaded-messages').isVisible()) {
+      await page.getByTestId('show-more-loaded-messages').click();
+      reveals += 1;
+      expect(reveals).toBeLessThanOrEqual(5);
+    }
+    expect(reveals).toBe(3);
+    expect(requestedPages).toEqual([]);
+    await expect(page.getByTestId('load-older-messages')).toBeVisible();
+    await page.getByTestId('load-older-messages').click();
+    await expect.poll(() => requestedPages).toEqual([1]);
+    await expect(page.getByText(/Chat Messages · 600 loaded/)).toBeVisible();
+    await expect(page.locator('[data-message-id="five-million-1-0"]')).toHaveCount(0);
+    await page.getByTestId('show-more-loaded-messages').click();
+    await expect(page.locator('[data-message-id="five-million-1-240"]')).toBeVisible();
+
+    // Every interactive path above touched at most the visible tail or one
+    // explicitly requested page. Complete history remains reachable one cursor
+    // at a time; no hidden 5M-token body was scanned or mounted.
+    expect(tailRequests).toBeLessThanOrEqual(2);
+    expect(requestedPages).toEqual([1]);
+    await expect(page.getByText(/Chat Messages · 600 loaded/)).toBeVisible();
   });
 
   test('1,100 delta burst bypasses React commits and bounds tool previews', async ({ page }) => {
@@ -168,7 +238,8 @@ test.describe('Deterministic performance gates', () => {
     await page.waitForTimeout(150);
     const after = await counters(page);
     expect(after.transcriptCommits - before.transcriptCommits).toBe(0);
-    // A one-second elapsed-time label may commit independently of body chunks.
+    // Stream metadata may publish one semantic panel transition; body chunks
+    // and timing leaves do not add page-owner commits.
     expect(after.chatPanelCommits - before.chatPanelCommits).toBeLessThanOrEqual(1);
     expect(after.streamingTextFlushes - before.streamingTextFlushes).toBeLessThanOrEqual(2);
     expect(after.streamingToolOutputFlushes - before.streamingToolOutputFlushes).toBeLessThanOrEqual(2);

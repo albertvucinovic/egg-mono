@@ -10,7 +10,7 @@ import { messageFromCreateEvent } from "@/lib/messageEvents";
 import { cleanUpEvictedLiveTools, clearLiveToolsForThread, hasRetainedLiveToolsForThread, liveToolRegistryForThread } from "@/lib/liveToolContinuity";
 import { useQueryClient } from "@tanstack/react-query";
 import { createThreadEventSyncState, reduceThreadEvent, type ThreadEventSyncState } from "@/lib/eventSync";
-import { patchTranscriptMessage, transcriptInfiniteQueryOptions, transcriptQueryKey, transcriptSnapshotCursor, upsertTranscriptTailMessage } from "@/lib/transcript";
+import { invalidateTranscriptAuthoritatively, patchTranscriptMessage, refreshTranscriptTail, transcriptInfiniteQueryOptions, transcriptQueryKey, transcriptSnapshotCursor, upsertTranscriptTailMessage, type TranscriptData } from "@/lib/transcript";
 import { emptyThreadStreamingState } from "@/lib/store";
 import { canEvictThreadEphemeralState } from "@/lib/threadEphemeral";
 
@@ -140,7 +140,9 @@ export function useSSE(threadId: string | null) {
 
   const refreshMessagesNow = useCallback(() => {
     if (!threadId) return;
-    queryClient.invalidateQueries({ queryKey: transcriptQueryKey(threadId) });
+    void refreshTranscriptTail(queryClient, threadId).catch((error) => {
+      console.error("Failed to refresh transcript tail:", error);
+    });
   }, [queryClient, threadId]);
 
   const evictInactiveThreadState = useCallback((protectedThreadId: string | null = threadId) => {
@@ -184,16 +186,17 @@ export function useSSE(threadId: string | null) {
     // Close existing connection
     closeOwnedEventSource();
 
-    // Establish the durable transcript snapshot first. React Query deduplicates
-    // this with ChatPanel; /state then resolves a distinct live replay cursor
-    // from that exact snapshot cursor before transport initialization.
+    // Establish a durable bounded tail first. A cached route refreshes only that
+    // tail while preserving loaded history; /state then resolves a distinct live
+    // replay cursor from the exact committed snapshot before transport starts.
     let snapshotCursor = -1;
     let replayCursor = -1;
     let activeInvokeId: string | null = null;
     try {
-      const snapshot = await queryClient.ensureInfiniteQueryData(
-        transcriptInfiniteQueryOptions(threadId, queryClient),
-      );
+      const cachedSnapshot = queryClient.getQueryData<TranscriptData>(transcriptQueryKey(threadId));
+      const snapshot = cachedSnapshot
+        ? await refreshTranscriptTail(queryClient, threadId)
+        : await queryClient.ensureInfiniteQueryData(transcriptInfiniteQueryOptions(threadId, queryClient));
       snapshotCursor = transcriptSnapshotCursor(snapshot);
       if (!ownsSetup()) return null;
       const threadState = await fetchThreadState(threadId, snapshotCursor);
@@ -249,7 +252,9 @@ export function useSSE(threadId: string | null) {
       // Refresh durable messages independently. Neither their projection cursor
       // nor /state may acknowledge queued transport frames; Last-Event-ID and
       // reducer sequence advance only inside the ordered listener below.
-      void queryClient.refetchQueries({ queryKey: transcriptQueryKey(threadId), type: "active" });
+      void refreshTranscriptTail(queryClient, threadId).catch((error) => {
+        console.error("Failed to refresh transcript tail after reconnect:", error);
+      });
       // Invocation reconciliation also stays frame-ordered: a replacement is
       // adopted only when its stream.open arrives through the listener below.
     };
@@ -394,6 +399,15 @@ export function useSSE(threadId: string | null) {
       } catch (err) {
         console.error("Failed to parse msg.edit:", err);
       }
+    });
+
+    // Destructive canonical events are the only authority allowed to discard
+    // loaded pages. Remove the cache before rebuilding so ordinary refreshes
+    // remain monotonic while explicit deletion is reflected immediately.
+    addThreadEventListener("msg.delete", () => {
+      invalidateTranscriptAuthoritatively(queryClient, threadId);
+      refreshMessagesNow();
+      queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
     });
 
     // Handle tool_call.execution_started

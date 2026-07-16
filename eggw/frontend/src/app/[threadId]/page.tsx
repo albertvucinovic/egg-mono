@@ -16,7 +16,7 @@ import { useMutation } from "@tanstack/react-query";
 import { CircleHelp, PanelRight, SlidersHorizontal } from "lucide-react";
 import clsx from "clsx";
 import { formatTokenCount } from "@/lib/tps";
-import { transcriptQueryKey } from "@/lib/transcript";
+import { refreshTranscriptTail } from "@/lib/transcript";
 import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { createClientOperationId } from "@/lib/messageOperations";
 import { clearLiveToolsForThread } from "@/lib/liveToolContinuity";
@@ -229,7 +229,9 @@ export default function ThreadPage() {
           streamingBufferForThread(threadId).clear();
           clearLiveToolsForThread(threadId);
           // Refetch messages to get the saved partial content from backend
-          queryClient.invalidateQueries({ queryKey: transcriptQueryKey(threadId) });
+          void refreshTranscriptTail(queryClient, threadId).catch((error) => {
+            console.error("Failed to refresh interrupted transcript tail:", error);
+          });
           queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
           queryClient.invalidateQueries({ queryKey: ["threadSettings", threadId] });
           queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });

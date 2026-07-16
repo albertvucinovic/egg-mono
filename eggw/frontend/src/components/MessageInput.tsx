@@ -10,7 +10,7 @@ import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttac
 import { useAppStore } from "@/lib/store";
 import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { clearLiveToolsForThread } from "@/lib/liveToolContinuity";
-import { appendClientTranscriptMessage, transcriptQueryKey } from "@/lib/transcript";
+import { appendClientTranscriptMessage, refreshTranscriptTail } from "@/lib/transcript";
 import { AutocompleteRequestCoordinator, isAutocompleteEligible } from "@/lib/autocomplete";
 import { ComposerDraftBuffer, restoreFailedDraft } from "@/lib/composerDraft";
 import { beginOptimisticSend, completeOptimisticSend, createClientOperationId, rollbackOptimisticSend, type SendMessageOperation } from "@/lib/messageOperations";
@@ -100,6 +100,11 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   const pendingImageOpsRef = useRef(new Map<string, number>());
   const router = useRouter();
   const queryClient = useQueryClient();
+  const refreshMessages = useCallback((targetThreadId: string) => {
+    void refreshTranscriptTail(queryClient, targetThreadId).catch((error) => {
+      console.error("Failed to refresh transcript tail:", error);
+    });
+  }, [queryClient]);
   const currentThreadId = threadId;
   const storedInput = useAppStore((state) => state.composerDraftByThread[threadId] || "");
   const setComposerDraft = useAppStore((state) => state.setComposerDraft);
@@ -237,7 +242,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         setShowImageForm(false);
         queryClient.invalidateQueries({ queryKey: ["threadState", variables.threadId] });
       }
-      queryClient.invalidateQueries({ queryKey: transcriptQueryKey(variables.threadId) });
+      refreshMessages(variables.threadId);
       const count = result.artifactCount;
       addSystemLog(
         `Generated ${count || "image"} artifact${count === 1 ? "" : "s"}; appended result to transcript`,
@@ -261,7 +266,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       streamingBufferForThread(operation.threadId).clear();
       clearLiveToolsForThread(operation.threadId);
       // Refetch messages to get the saved partial content from backend
-      queryClient.invalidateQueries({ queryKey: transcriptQueryKey(operation.threadId) });
+      refreshMessages(operation.threadId);
       queryClient.invalidateQueries({ queryKey: ["threadState", operation.threadId] });
       queryClient.invalidateQueries({ queryKey: ["threadSettings", operation.threadId] });
       queryClient.invalidateQueries({ queryKey: ["toolCalls", operation.threadId] });
@@ -411,19 +416,19 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         } else if (response.data?.action === "clear_staged_attachments") {
           setStagedAttachments(variables.threadId, []);
         } else if (response.data?.action === "image_generation") {
-          queryClient.invalidateQueries({ queryKey: transcriptQueryKey(variables.threadId) });
+          refreshMessages(variables.threadId);
           queryClient.invalidateQueries({ queryKey: ["threadState", variables.threadId] });
         }
 
         if (response.data?.reload) {
           // Command requests a full refresh (e.g., /continue)
-          queryClient.invalidateQueries({ queryKey: transcriptQueryKey(variables.threadId) });
+          refreshMessages(variables.threadId);
           queryClient.invalidateQueries({ queryKey: ["toolCalls", variables.threadId] });
         }
 
         if (response.data?.tool_call_id) {
           // Shell command - refresh messages and tools
-          queryClient.invalidateQueries({ queryKey: transcriptQueryKey(variables.threadId) });
+          refreshMessages(variables.threadId);
           queryClient.invalidateQueries({ queryKey: ["toolCalls", variables.threadId] });
         } else if (response.data?.name !== undefined) {
           // Thread renamed - refresh thread data

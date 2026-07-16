@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, Profiler, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type TouchEvent, type WheelEvent } from "react";
+import { memo, Profiler, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type TouchEvent, type WheelEvent } from "react";
 import Link from "next/link";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -11,7 +11,7 @@ import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
 import { attachmentUrl, createEditAnswerDraft, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
-import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
+import { useAppStore, type Message, type DisplayVerbosity, type StreamingProviderRequest, type StreamingToolOutput } from "@/lib/store";
 import { ProtectedFileLink, ProtectedImage } from "@/components/ProtectedFileLink";
 import {
   artifactFilename,
@@ -29,7 +29,7 @@ import {
   type ContentPart,
 } from "@/lib/contentParts";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
-import { shouldUpdateLiveTiming } from "@/lib/liveTiming";
+import { liveTimingSnapshot, shouldUpdateLiveTiming, type LiveTimingSnapshot } from "@/lib/liveTiming";
 import {
   correlateHiddenToolDetails,
   getUserAnswerToolCallId,
@@ -42,7 +42,7 @@ import {
   type HiddenToolDetail,
   type HiddenDetailKind,
 } from "@/lib/toolPresentation";
-import { flattenTranscript, transcriptInfiniteQueryOptions } from "@/lib/transcript";
+import { fetchOlderTranscriptPage, flattenTranscript, refreshTranscriptTail, transcriptInfiniteQueryOptions } from "@/lib/transcript";
 import { AnimationFrameCoalescer, IntervalCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
 import { recordReactCommit, recordStreamingFlush } from "@/lib/performanceInstrumentation";
 import { expandedTranscriptStartId, transcriptWindow, TRANSCRIPT_WINDOW_MESSAGES } from "@/lib/transcriptWindow";
@@ -144,37 +144,53 @@ function toolStreamSavingText(name: string, frames: number = 0): string {
   return `${glyph} tool${name ? ` ${name}` : ""}: preview limit reached; saving output only`;
 }
 
-function toolTimeoutCountdown(timeout: StreamingToolTimeout | undefined, nowMs: number): string | null {
-  if (!timeout) return null;
-  const limit = Number(timeout.timeoutSec);
-  const startedAtMs = Number(timeout.startedAtMs);
-  if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(startedAtMs) || startedAtMs <= 0) return null;
-  const elapsedSec = Math.max(0, (nowMs - startedAtMs) / 1000);
-  const remainingSec = Math.max(0, limit - elapsedSec);
-  return `timeout in ${remainingSec.toFixed(0)}s (limit ${limit.toFixed(0)}s)`;
-}
-
-function elapsedSecondsText(startedAtMs: number | null | undefined, nowMs: number, label = "streaming"): string | null {
-  const started = Number(startedAtMs);
-  if (!Number.isFinite(started) || started <= 0) return null;
-  const elapsedSec = Math.max(0, (nowMs - started) / 1000);
-  return `${label} ${elapsedSec.toFixed(0)}s`;
-}
-
-function providerTimingText(
-  request: { startedAtMs: number; timeoutSec?: number } | null | undefined,
-  nowMs: number,
-): string | null {
-  if (!request) return null;
-  const started = Number(request.startedAtMs);
-  if (!Number.isFinite(started) || started <= 0) return null;
-  const elapsedSec = Math.max(0, (nowMs - started) / 1000);
-  const limit = Number(request.timeoutSec || 0);
-  if (Number.isFinite(limit) && limit > 0) {
-    return `streaming ${elapsedSec.toFixed(0)}s (limit ${limit.toFixed(0)}s)`;
-  }
-  return `streaming ${elapsedSec.toFixed(0)}s`;
-}
+const LiveTimingText = memo(function LiveTimingText({
+  kind,
+  toolId,
+  isStreaming,
+  streamingKind,
+  streamingStartedAtMs,
+  providerRequest,
+  toolOutputs,
+  testId,
+  className = "eggw-message-meta",
+}: {
+  kind: "provider" | "generic" | "toolElapsed" | "toolTimeout";
+  toolId?: string;
+  isStreaming: boolean;
+  streamingKind: string | null;
+  streamingStartedAtMs: number | null;
+  providerRequest: StreamingProviderRequest | null;
+  toolOutputs: Record<string, StreamingToolOutput>;
+  testId?: string;
+  className?: string;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  useEffect(() => {
+    const read = (snapshot: LiveTimingSnapshot) => {
+      if (kind === "provider") return snapshot.provider;
+      if (kind === "generic") return snapshot.generic;
+      if (kind === "toolElapsed") return toolId ? snapshot.tools[toolId]?.elapsed || null : null;
+      return toolId ? snapshot.tools[toolId]?.timeout || null : null;
+    };
+    const update = () => setText(read(liveTimingSnapshot(
+      Date.now(), isStreaming, streamingKind, streamingStartedAtMs, providerRequest, toolOutputs,
+    )));
+    update();
+    if (!shouldUpdateLiveTiming(isStreaming, toolOutputs, providerRequest, streamingKind)) return;
+    const intervalId = window.setInterval(update, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [kind, toolId, isStreaming, streamingKind, streamingStartedAtMs, providerRequest, toolOutputs]);
+  const content = text
+    ? <span data-testid={testId} className={clsx(className, "eggw-live-timing")}>{text}</span>
+    : null;
+  if (process.env.NODE_ENV === "production") return content;
+  return (
+    <Profiler id="LiveTiming" onRender={(id, _phase, duration) => recordReactCommit(id as "LiveTiming", duration)}>
+      {content}
+    </Profiler>
+  );
+});
 
 type HiddenDetail = HiddenToolDetail;
 
@@ -1250,7 +1266,6 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     fallbackHeight: number;
     operation: number;
   } | null>(null);
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [renderStartMessageId, setRenderStartMessageId] = useState<string | null>(null);
 
@@ -1279,37 +1294,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const visibleStreamingToolOutputs = streamingToolOutputs || {};
   const hasLiveTools = Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0;
   const showLiveCard = isStreaming || hasLiveTools;
-  const shouldUpdateTiming = shouldUpdateLiveTiming(
-    isStreaming,
-    visibleStreamingToolOutputs,
-    streamingProviderRequest,
-    streamingKind,
-  );
-  const primaryToolTimeoutText = Object.values(visibleStreamingToolOutputs)
-    .filter((tool) => !isGetUserMessageTool(tool.name))
-    .map((tool) => toolTimeoutCountdown(tool.timeout, nowMs))
-    .find((text): text is string => Boolean(text));
-  const providerTimeText = streamingKind === "llm"
-    ? providerTimingText(streamingProviderRequest, nowMs) || elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
-    : null;
-  const waitOnlyToolStream = streamingKind === "tool"
-    && Object.values(visibleStreamingToolOutputs).some((tool) => !tool.finished)
-    && Object.values(visibleStreamingToolOutputs)
-      .filter((tool) => !tool.finished)
-      .every((tool) => isGetUserMessageTool(tool.name));
-  const genericStreamingTimeText = streamingKind !== "llm" && !waitOnlyToolStream
-    ? elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
-    : null;
-  // Ordinary live tools remain expanded at every verbosity. A get-user wait
-  // exposes its visible Assistant Note in the transcript and uses a compact,
-  // stable status row here; details remain expandable on demand.
-
-  useEffect(() => {
-    if (!shouldUpdateTiming) return;
-    setNowMs(Date.now());
-    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(intervalId);
-  }, [shouldUpdateTiming]);
+  // Ordinary live tools remain expanded at every verbosity. Timing owns its
+  // one-second updates in memoized leaves, so transcript/layout ownership never
+  // re-renders merely because countdown text changed.
 
   // Live-edge following is owned by explicit user intent. Scroll/layout events
   // never infer provenance from a coordinate that can become stale mid-commit.
@@ -1332,20 +1319,16 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
   }, []);
 
-  // Keep pumping until current layout converges. ResizeObserver restarts this
-  // pump if a later React commit/image/tool result grows the tail again.
+  // Coalesce follow requests into one frame. React-owned geometry is corrected
+  // synchronously by the layout effect below; this frame covers direct DOM
+  // streaming writes and later image/font ResizeObserver callbacks.
   const scrollToBottom = useCallback(() => {
     if (liveEdgeStateRef.current !== "following" || rafIdRef.current !== null) return;
-    const converge = () => {
+    rafIdRef.current = requestAnimationFrame(() => {
       rafIdRef.current = null;
-      if (liveEdgeStateRef.current !== "following") return;
       scrollToBottomNow();
-      if (distanceFromBottom() > 1) {
-        rafIdRef.current = requestAnimationFrame(converge);
-      }
-    };
-    rafIdRef.current = requestAnimationFrame(converge);
-  }, [distanceFromBottom, scrollToBottomNow]);
+    });
+  }, [scrollToBottomNow]);
 
   const detachFromBottom = useCallback(() => {
     liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, { type: "user_toward_history" });
@@ -1443,8 +1426,8 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     const operation = historyOperationRef.current + 1;
     historyOperationRef.current = operation;
     try {
-      const result = await transcriptQuery.fetchNextPage();
-      const updatedMessages = flattenTranscript(result.data);
+      const updated = await fetchOlderTranscriptPage(queryClient, threadId);
+      const updatedMessages = flattenTranscript(updated);
       const previousStartId = renderedTranscript.messages[0]?.id || null;
       const previousStartIndex = previousStartId
         ? updatedMessages.findIndex((message) => message.id === previousStartId)
@@ -1467,7 +1450,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       console.error("Failed to load older messages:", error);
       settleHistoryDemand(operation);
     }
-  }, [captureHistoryAnchor, detachFromBottom, renderedTranscript.messages, restoreHistoryAnchor, settleHistoryDemand, transcriptQuery.fetchNextPage, transcriptQuery.hasNextPage]);
+  }, [captureHistoryAnchor, detachFromBottom, renderedTranscript.messages, restoreHistoryAnchor, settleHistoryDemand, queryClient, threadId, transcriptQuery.hasNextPage]);
 
   const runHistoryDemand = useCallback(() => {
     if (historyDemandRef.current.phase === "revealing") {
@@ -1841,9 +1824,15 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     }
   }, [showLiveCard]);
 
-  const { isLoading, isError, refetch } = transcriptQuery;
+  const { isLoading, isError } = transcriptQuery;
+  const retryTranscript = useCallback(() => {
+    void refreshTranscriptTail(queryClient, threadId).catch((error) => {
+      console.error("Failed to retry transcript tail:", error);
+    });
+  }, [queryClient, threadId]);
 
-  // Reset scroll state and scroll to bottom when thread changes
+  // Reset intent/history ownership when the route changes. The layout effect
+  // below performs the initial live-edge correction before the browser paints.
   useEffect(() => {
     liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, { type: "thread_changed" });
     historyDemandRef.current = reduceHistoryDemand(historyDemandRef.current, { type: "reset" }, { canReveal: false, canFetch: false });
@@ -1859,32 +1848,25 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     }
     setRenderStartMessageId(null);
     setIsLoadingOlder(false);
-    requestAnimationFrame(() => {
-      scrollToBottomNow();
-    });
+    scrollToBottomNow();
   }, [currentThreadId, scrollToBottomNow]);
 
-  // Scroll to bottom when streaming starts (assistant header appears)
-  useEffect(() => {
-    if (isStreaming) {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          scrollToBottom();
-        });
-      });
-    }
-  }, [isStreaming, scrollToBottom]);
-
-  // Scroll to bottom when new streaming tool calls or tool outputs appear (tool headers)
-  useEffect(() => {
-    if ((Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0) && liveEdgeStateRef.current === "following") {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          scrollToBottomNow();
-        });
-      });
-    }
-  }, [scrollToBottomNow, streamingToolCalls, streamingToolOutputs]);
+  // React can remove live cards and install several durable results in one
+  // commit. Correct the following viewport in that commit's layout phase so no
+  // transient scroll-up frame is painted before the eventual bottom follow.
+  useLayoutEffect(() => {
+    if (pendingHistoryAnchorRef.current || loadingOlderRef.current || revealingLoadedRef.current) return;
+    scrollToBottomNow();
+  }, [
+    currentThreadId,
+    isStreaming,
+    messages.length,
+    renderedTranscript.startIndex,
+    showLiveCard,
+    streamingToolCalls,
+    streamingToolOutputs,
+    scrollToBottomNow,
+  ]);
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -1923,8 +1905,6 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       <div className={clsx("eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0", showBorders && "border-b border-[var(--border-default)]")}>
         <span>
               Chat Messages · {messages.length.toLocaleString()} loaded{transcriptQuery.hasNextPage ? " · scroll up for older" : ""}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
-          {isStreaming && providerTimeText ? ` | ${providerTimeText}` : ""}
-          {isStreaming && !providerTimeText && genericStreamingTimeText ? ` | ${genericStreamingTimeText}` : ""}
         </span>
       </div>
       <div
@@ -1950,7 +1930,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
               <div>Failed to load messages</div>
               <Button
                 variant="danger"
-                onClick={() => refetch()}
+                onClick={retryTranscript}
               >
                 Retry
               </Button>
@@ -2008,17 +1988,14 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                     {isStreaming && streamingKind !== "tool" && (
                       <StatusChip tone="info">Streaming…</StatusChip>
                     )}
-                    {providerTimeText && (
-                      <span className="eggw-message-meta">{providerTimeText}</span>
-                    )}
-                    {!providerTimeText && genericStreamingTimeText && (
-                      <span className="eggw-message-meta">{genericStreamingTimeText}</span>
-                    )}
-                    {streamingKind === "tool" && primaryToolTimeoutText && (
-                      <span data-testid="streaming-tool-timeout-header" className="eggw-message-meta ml-2">
-                        {primaryToolTimeoutText}
-                      </span>
-                    )}
+                    <LiveTimingText
+                      kind={streamingKind === "llm" ? "provider" : "generic"}
+                      isStreaming={isStreaming}
+                      streamingKind={streamingKind}
+                      streamingStartedAtMs={streamingStartedAtMs}
+                      providerRequest={streamingProviderRequest}
+                      toolOutputs={visibleStreamingToolOutputs}
+                    />
                   </div>
 
                   <>
@@ -2108,8 +2085,6 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                       <div className="mt-2 space-y-2">
                         {Object.entries(visibleStreamingToolOutputs).map(([toolId, tool]) => {
                           const isGetUserWait = isGetUserMessageTool(tool.name);
-                          const timeoutText = isGetUserWait ? null : toolTimeoutCountdown(tool.timeout, nowMs);
-                          const elapsedText = !isGetUserWait && !tool.finished && tool.startedAtMs ? elapsedSecondsText(tool.startedAtMs, nowMs, "running") : null;
                           return (
                             <details
                               key={toolId}
@@ -2128,34 +2103,32 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                     {isGetUserWait ? "expand to inspect" : "expand to inspect output"}
                                   </span>
                                 )}
-                                {elapsedText && (
-                                  <span data-testid="streaming-tool-elapsed-summary" className="eggw-message-meta">
-                                    {elapsedText}
-                                  </span>
+                                {!isGetUserWait && !tool.finished && (
+                                  <LiveTimingText
+                                    kind="toolElapsed"
+                                    toolId={toolId}
+                                    isStreaming={isStreaming}
+                                    streamingKind={streamingKind}
+                                    streamingStartedAtMs={streamingStartedAtMs}
+                                    providerRequest={streamingProviderRequest}
+                                    toolOutputs={visibleStreamingToolOutputs}
+                                    testId="streaming-tool-elapsed-summary"
+                                  />
                                 )}
-                                {timeoutText && (
-                                  <span data-testid="streaming-tool-timeout-summary" className="eggw-message-meta">
-                                    {timeoutText}
-                                  </span>
+                                {!isGetUserWait && !tool.finished && (
+                                  <LiveTimingText
+                                    kind="toolTimeout"
+                                    toolId={toolId}
+                                    isStreaming={isStreaming}
+                                    streamingKind={streamingKind}
+                                    streamingStartedAtMs={streamingStartedAtMs}
+                                    providerRequest={streamingProviderRequest}
+                                    toolOutputs={visibleStreamingToolOutputs}
+                                    testId="streaming-tool-timeout-summary"
+                                  />
                                 )}
                               </summary>
                               <div className="px-2 pb-2">
-                                {elapsedText && (
-                                  <div
-                                    data-testid="streaming-tool-elapsed"
-                                    className="eggw-message-meta mb-2"
-                                  >
-                                    {elapsedText}
-                                  </div>
-                                )}
-                                {timeoutText && (
-                                  <div
-                                    data-testid="streaming-tool-timeout"
-                                    className="eggw-message-meta mb-2"
-                                  >
-                                    {timeoutText}
-                                  </div>
-                                )}
                                 {tool.summary && (
                                   <div
                                     data-testid="streaming-tool-summary"

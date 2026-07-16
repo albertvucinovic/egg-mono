@@ -1252,6 +1252,15 @@ code {
   color: var(--border-strong);
 }
 
+/* Numeric live labels reserve their widest expected line. Countdown updates
+   therefore neither wrap the summary nor change transcript geometry. */
+.eggw-live-timing {
+  display: inline-block;
+  min-width: 20ch;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .eggw-message-id {
   min-height: 1.5rem;
   display: inline-flex;
