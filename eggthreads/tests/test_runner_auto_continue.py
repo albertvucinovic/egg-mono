@@ -394,11 +394,20 @@ def test_toggle_off_disables_auto_continue(tmp_path):
     assert ts.discover_runner_actionable(db, tid) is None
 
 
+OPENAI_RESPONSES_SERVER_ERROR = (
+    "Responses API error (server_error): "
+    "An error occurred while processing your request. "
+    "You can retry your request, or contact us through our help center at "
+    "help.openai.com if the error persists. Please include the request ID "
+    "553755af-e48c-412a-b824-beee36624640 in your message."
+)
+
+
 @pytest.mark.parametrize(
     "error, category, expected_delay",
     [
         (
-            "An error occurred while processing your request. You can retry. retry after 0 seconds",
+            OPENAI_RESPONSES_SERVER_ERROR + "\nRetry-After: 0",
             "server_error",
             0.0,
         ),
@@ -429,6 +438,9 @@ def test_phase4_transient_errors_schedule_apply_and_retry_once(
         assert notice["decision_category"] == category
         assert notice["decision_reason"]
         assert notice["source_detail"] == f"LLM/runner error: {error}"
+        if category == "server_error":
+            assert "Responses API error (server_error)" in notice["source_detail"]
+            assert "553755af-e48c-412a-b824-beee36624640" in notice["source_detail"]
         assert notice["trigger_msg_id"] == user_msg_id
         assert notice["delay_sec"] == expected_delay
         assert error in notice["content"]
@@ -437,10 +449,7 @@ def test_phase4_transient_errors_schedule_apply_and_retry_once(
 def test_phase4_processing_retry_attempt_cap_stops_second_failure(tmp_path):
     db = _make_db(tmp_path)
     tid, user_msg_id = _make_thread(db)
-    error = (
-        "An error occurred while processing your request. You can retry. "
-        "retry after 0 seconds"
-    )
+    error = OPENAI_RESPONSES_SERVER_ERROR + "\nRetry-After: 0"
     llm = _BoomLLM(error, error)
     runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
 
@@ -466,8 +475,24 @@ def test_phase4_processing_retry_attempt_cap_stops_second_failure(tmp_path):
 @pytest.mark.parametrize(
     "error, category",
     [
-        ("An error occurred while processing your request.", "unknown"),
-        ("An error occurred while processing your request. You cannot retry.", "unknown"),
+        (
+            OPENAI_RESPONSES_SERVER_ERROR.replace("server_error", "invalid_request_error", 1),
+            "invalid_request",
+        ),
+        (
+            OPENAI_RESPONSES_SERVER_ERROR.replace("help.openai.com", "support.example.com"),
+            "unknown",
+        ),
+        (
+            OPENAI_RESPONSES_SERVER_ERROR.replace("You can retry your request, or ", ""),
+            "unknown",
+        ),
+        (
+            OPENAI_RESPONSES_SERVER_ERROR.replace(
+                "553755af-e48c-412a-b824-beee36624640", "missing-request-id"
+            ),
+            "unknown",
+        ),
         ("upstream rejected invalid request", "invalid_request"),
         ("remote connection refused: invalid api key", "auth"),
     ],

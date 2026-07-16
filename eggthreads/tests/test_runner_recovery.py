@@ -190,28 +190,26 @@ def test_format_recovery_decision_notice_for_retry_and_stop() -> None:
     assert "Stop reason:" in stop_notice
 
 
+OPENAI_RESPONSES_SERVER_ERROR = (
+    "Responses API error (server_error): "
+    "An error occurred while processing your request. "
+    "You can retry your request, or contact us through our help center at "
+    "help.openai.com if the error persists. Please include the request ID "
+    "553755af-e48c-412a-b824-beee36624640 in your message."
+)
+
+
 def test_phase4_transient_classifier_table() -> None:
     cases = [
+        (OPENAI_RESPONSES_SERVER_ERROR, True, "server_error", 5.0),
         (
-            "An error occurred while processing your request. You can retry.",
+            "LLM/runner error: " + OPENAI_RESPONSES_SERVER_ERROR,
             True,
             "server_error",
             5.0,
         ),
         (
-            "LLM/runner error: An error occurred while processing your request. You can retry.",
-            True,
-            "server_error",
-            5.0,
-        ),
-        (
-            "RuntimeError('An error occurred while processing your request. You can retry.')",
-            True,
-            "server_error",
-            5.0,
-        ),
-        (
-            "An error occurred while processing your request. You can retry.\nRetry-After: 7",
+            OPENAI_RESPONSES_SERVER_ERROR + "\nRetry-After: 7",
             True,
             "server_error",
             7.0,
@@ -226,31 +224,50 @@ def test_phase4_transient_classifier_table() -> None:
         ("Connection reset by peer", True, "transport", 2.0),
         ("remote connection failure; Retry-After: 3", True, "transport", 3.0),
         (
-            "An error occurred while processing your request.",
-            False,
-            "unknown",
-            None,
-        ),
-        (
-            "You can retry this invalid request after changing tool schema.",
+            OPENAI_RESPONSES_SERVER_ERROR.replace("server_error", "invalid_request_error", 1),
             False,
             "invalid_request",
             None,
         ),
         (
-            "An error occurred while processing your request. You cannot retry.",
+            OPENAI_RESPONSES_SERVER_ERROR.replace("help.openai.com", "support.example.com"),
             False,
             "unknown",
             None,
         ),
         (
-            "An error occurred while processing your request. You can retry later.",
+            OPENAI_RESPONSES_SERVER_ERROR.replace(
+                "You can retry your request, or ", ""
+            ),
             False,
             "unknown",
             None,
         ),
         (
-            "prefix An error occurred while processing your request. You can retry.",
+            OPENAI_RESPONSES_SERVER_ERROR.replace(
+                "553755af-e48c-412a-b824-beee36624640", "not-a-uuid"
+            ),
+            False,
+            "unknown",
+            None,
+        ),
+        (
+            OPENAI_RESPONSES_SERVER_ERROR.replace(
+                "553755af-e48c-412a-b824-beee36624640",
+                "553755af-e48c-012a-b824-beee36624640",
+            ),
+            False,
+            "unknown",
+            None,
+        ),
+        (
+            "LLM error: " + OPENAI_RESPONSES_SERVER_ERROR,
+            False,
+            "unknown",
+            None,
+        ),
+        (
+            OPENAI_RESPONSES_SERVER_ERROR.replace(" in your message.", ""),
             False,
             "unknown",
             None,
@@ -258,6 +275,7 @@ def test_phase4_transient_classifier_table() -> None:
         ("remote connection refused: invalid api key", False, "auth", None),
         ("remote permission denied", False, "auth", None),
         ("upstream rejected invalid request", False, "invalid_request", None),
+        ("quota exceeded: billing hard limit reached", False, "quota", None),
     ]
 
     for text, retriable, category, delay in cases:
@@ -268,9 +286,7 @@ def test_phase4_transient_classifier_table() -> None:
 
 
 def test_recovery_notice_keeps_full_error_beyond_classifier_summary() -> None:
-    detail = "An error occurred while processing your request. You can retry. " + (
-        "provider-detail-" * 30
-    )
+    detail = "LLM/runner error: " + OPENAI_RESPONSES_SERVER_ERROR
     decision = classify_failure_text(detail)
 
     assert len(decision.source_summary) <= 240
@@ -280,14 +296,10 @@ def test_recovery_notice_keeps_full_error_beyond_classifier_summary() -> None:
 
 
 def test_phase4_transient_retry_after_is_bounded_and_preserves_detail() -> None:
-    text = (
-        "request-id=req_full_detail: "
-        "An error occurred while processing your request. You can retry.\n"
-        "Retry-After: 301"
-    )
+    text = OPENAI_RESPONSES_SERVER_ERROR + "\nRetry-After: 301"
 
     decision = classify_failure_text(text, max_delay_sec=300)
 
     assert_non_retriable(decision, "server_error")
     assert "301s exceeds maximum 300s" in decision.stop_reason
-    assert "request-id=req_full_detail" in decision.source_summary
+    assert "553755af-e48c-412a-b824-beee36624640" in decision.source_detail

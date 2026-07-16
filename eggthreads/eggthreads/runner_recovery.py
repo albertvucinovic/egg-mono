@@ -224,45 +224,26 @@ def _delay_or_default(text: str, fallback: float, max_delay_sec: float, category
     return _retry(category, reason, text, fallback)
 
 
-def _is_openai_processing_retry_error(text: str) -> bool:
-    """Match only OpenAI's generic transient processing failure sentence."""
+_OPENAI_RESPONSES_SERVER_ERROR_RE = re.compile(
+    r"^(?:LLM/runner error: )?"
+    r"Responses API error \(server_error\): "
+    r"An error occurred while processing your request\. "
+    r"You can retry your request, or contact us through our help center at "
+    r"help\.openai\.com if the error persists\. "
+    r"Please include the request ID "
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} "
+    r"in your message\."
+    r"(?:\s+Retry-After:\s*(?:\d+(?:\.\d+)?(?:\s*(?:seconds?|secs?|s|minutes?|mins?|m))?"
+    r"|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+[^\r\n]+))?\s*$",
+    flags=re.IGNORECASE,
+)
 
-    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    sentence = "An error occurred while processing your request. You can retry."
-    low = normalized.lower()
-    start = low.find(sentence.lower())
-    if start < 0:
-        return False
-    end = start + len(sentence)
-    prefix = normalized[:start]
-    suffix = normalized[end:]
-    # Runner messages prepend a stable label and exception wrappers may add
-    # surrounding punctuation. Request IDs are retained only when separated by
-    # the same wrapper prefix, never by matching arbitrary surrounding prose.
-    known_prefixes = {
-        "",
-        "LLM/runner error: ",
-        "LLM error: ",
-        "Error: ",
-        "RuntimeError('",
-        'RuntimeError("',
-    }
-    prefix_ok = prefix in known_prefixes or bool(
-        re.fullmatch(r"request-id=[^:]+:\s*", prefix, flags=re.IGNORECASE)
-    )
-    suffix = suffix.strip()
-    if suffix in {"", "')", '\")'}:
-        suffix_ok = True
-    else:
-        suffix = suffix.removeprefix("')").removeprefix('\")').strip()
-        suffix_ok = bool(
-            re.fullmatch(
-                r"retry[- ]after\s*:?[ ]*\d+(?:\.\d+)?(?:\s*(?:seconds?|secs?|s|minutes?|mins?|m))?",
-                suffix,
-                flags=re.IGNORECASE,
-            )
-        )
-    return prefix_ok and suffix_ok
+
+def _is_openai_processing_retry_error(text: str) -> bool:
+    """Match the literal observed Responses API transient server envelope."""
+
+    normalized = str(text or "").strip()
+    return bool(_OPENAI_RESPONSES_SERVER_ERROR_RE.fullmatch(normalized))
 
 
 def _is_transport_error(low: str) -> bool:
