@@ -1,6 +1,6 @@
 # Reliability and EggW Correctness Follow-up TODO
 
-Status: in progress (Phases 1–2 accepted; Phase 3 fifth repair complete, awaiting independent review)
+Status: in progress (Phases 1–3 accepted; Phase 4 next)
 Created: 2026-07-15
 Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 
@@ -104,6 +104,8 @@ Current root README opens as an AI self-assessment and comparison essay. The use
 - [ ] For transcript/UI phases, representative 5M-token or equivalent cost-shape validation proves bounded/incremental work without sacrificing history reachability; Phase 5 explicitly covers scrolling, input availability, streaming, pagination, and event-loop responsiveness.
 
 ## Status notes / commit ledger
+
+- 2026-07-16: Independent fifth review PASSed Phase 3 at immutable accepted HEAD `31c0dee` with no blockers. The accepted Phase 3 chain is `b68d77a` (initial bounded launcher, rejected) → `6c56756` (foreground supervisor repair, rejected) → `1dc4d36` (job-control/provisioning/cleanup/platform repair) → `1ca7311` (continuous spawn/wait signal relay) → `fe504a9` (latched termination/live-leader/init finalization) → `03fb0d9` (bounded cleanup-failure and final-decision protocol) → `31c0dee` (KILL fenced process group before leader reap). Reviewer verified the final KILL-before-reap ordering, confirmed the real same-PGID descendant regression catches the parent failure, ran it 5/5 successfully, ran three related cleanup tests successfully, and found the diff clean; manager independently ran the full focused launcher suite (`46 passed`). Prior validation remains full Egg `604 passed`, full EggThreads `1454 passed`, focused reload/quick-start/command `145 passed`, Bash syntax/Python compile/diff checks, with no tracked residue. Phase 3 is accepted and complete. Phase 4 — auto-continue error policy — is next and has not started.
 
 - 2026-07-16: Phase 3 fifth-review repair complete, awaiting independent review. `_kill_and_reap_leader` now unconditionally issues group/direct CONT+KILL while the unreaped direct-child leader still fences PID/PGID identity, then polls `waitpid(WNOHANG)` only to a fixed deadline and never signals that PGID after reaping. A real Linux regression starts a leader with a same-PGID TERM-ignoring descendant, injects owner quiescence that sends group TERM, waits until the leader is waitable, then raises a procfs-equivalent cleanup failure; fallback kills the fenced group before reaping, both PIDs are gone/reaped, state is unlinked, handlers restored, and root plus cleanup errors remain observable. Thirty externally bounded repetitions passed. Focused launcher suite `46 passed`; focused reload/quick-start/command set `145 passed`; Python compile and `git diff --check` passed. All prior final-decision and lifecycle tests remain retained; no Phase 4 work started.
 
