@@ -1072,7 +1072,7 @@ class ThreadRunner:
         if ra.kind != 'RA1_llm':
             return
         try:
-            from .api import append_auto_compaction_summary_request, append_recovery_notice, continue_thread, create_snapshot, get_thread_recovery
+            from .api import apply_auto_continue, append_auto_compaction_summary_request, append_recovery_notice, create_snapshot, get_thread_recovery
             from .runner_recovery import (
                 check_recovery_fence,
                 find_latest_recovery_source_after,
@@ -1151,20 +1151,66 @@ class ThreadRunner:
                     # should stop for the user instead of recursively queuing
                     # another checkpoint request.
                     if not self._has_compaction_summary_request_between(ra.triggering_event_seq, source.event_seq):
-                        summary_result = append_auto_compaction_summary_request(
-                            self.db,
-                            self.thread_id,
-                            selector=source.msg_id if decision.category == 'max_output' else (trigger_msg_id or 'last_message'),
-                        )
-                        if summary_result.success:
-                            append_action_notice(
-                                'compaction_scheduled',
-                                detail=summary_result.message,
+                        compaction_extra = {**extra_base, 'action': 'compaction_scheduled'}
+                        savepoint = f"auto_recovery_compaction_{os.urandom(8).hex()}"
+                        self.db.conn.execute(f"SAVEPOINT {savepoint}")
+                        try:
+                            locked = self.db.conn.execute(
+                                "UPDATE threads SET status=status WHERE thread_id=?",
+                                (self.thread_id,),
                             )
-                            create_snapshot(self.db, self.thread_id)
-                            return
-                except Exception:
-                    pass
+                            if locked.rowcount != 1:
+                                raise RuntimeError("thread no longer exists")
+                            fence = check_recovery_fence(
+                                self.db,
+                                self.thread_id,
+                                trigger_msg_id=trigger_msg_id,
+                                source_msg_id=source.msg_id,
+                                source_event_seq=source.event_seq,
+                                max_attempts=1,
+                            )
+                            if not fence.ok:
+                                raise RuntimeError(fence.reason)
+                            summary_result = append_auto_compaction_summary_request(
+                                self.db,
+                                self.thread_id,
+                                selector=source.msg_id if decision.category == 'max_output' else (trigger_msg_id or 'last_message'),
+                            )
+                            if not summary_result.success:
+                                raise RuntimeError(summary_result.message)
+                            append_recovery_notice(
+                                self.db,
+                                self.thread_id,
+                                format_auto_continue_notice(
+                                    decision,
+                                    action='compaction scheduled',
+                                    trigger_msg_id=trigger_msg_id,
+                                    source_msg_id=source.msg_id,
+                                    detail=summary_result.message,
+                                ),
+                                extra=compaction_extra,
+                            )
+                            self.db.append_event(
+                                event_id=os.urandom(10).hex(),
+                                thread_id=self.thread_id,
+                                type_=RECOVERY_ACTION_EVENT_TYPE,
+                                payload=compaction_extra,
+                                msg_id=trigger_msg_id,
+                            )
+                            self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                        except Exception:
+                            self.db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                            self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                            raise
+                        return
+                except Exception as exc:
+                    reason = str(exc) or 'automatic compaction transaction failed'
+                    append_action_notice(
+                        'stopped',
+                        detail='automatic compaction transaction stopped',
+                        stop_reason=reason,
+                    )
+                    return
             append_action_notice('stopped')
             return
 
@@ -1197,19 +1243,37 @@ class ThreadRunner:
             )
             return
 
-        result = continue_thread(self.db, self.thread_id, msg_id=trigger_msg_id)
-        if result.success:
-            append_action_notice(
-                'applied',
-                detail=result.message,
-                delay_sec=delay_sec,
+        applied_notice = format_auto_continue_notice(
+            decision,
+            action='applied',
+            trigger_msg_id=trigger_msg_id,
+            source_msg_id=source.msg_id,
+            detail='automatic continuation applied',
+        )
+        try:
+            result = apply_auto_continue(
+                self.db,
+                self.thread_id,
+                trigger_msg_id=trigger_msg_id or '',
+                source_msg_id=source.msg_id,
+                source_event_seq=source.event_seq,
+                action_payload={**extra_base, 'delay_sec': delay_sec},
+                notice_content=applied_notice,
             )
-            create_snapshot(self.db, self.thread_id)
-        else:
+        except Exception:
+            # The transaction rolled back all claim, continuation, notice, and
+            # action writes. Persist an explicit bounded stop if possible.
             append_action_notice(
                 'stopped',
-                detail=result.message,
-                stop_reason=result.message,
+                detail='automatic continuation transaction failed',
+                stop_reason='transaction_failed',
+            )
+            return
+        if not result.applied:
+            append_action_notice(
+                'stopped',
+                detail=result.reason,
+                stop_reason=result.reason,
             )
 
     def _evaluate_pending_approval_policies(self) -> None:

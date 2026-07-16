@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 
 import pytest
@@ -97,6 +98,15 @@ def _recovery_actions(db: ts.ThreadsDB, tid: str) -> list[dict]:
     return [json.loads(row[0]) for row in rows]
 
 
+def _recovery_attempts(db: ts.ThreadsDB, tid: str) -> list[dict]:
+    rows = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? "
+        "AND type='thread.recovery_attempt' ORDER BY event_seq ASC",
+        (tid,),
+    ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
 def _runner_error_record(db: ts.ThreadsDB, tid: str) -> tuple[int, str, dict]:
     rows = db.conn.execute(
         "SELECT event_seq, msg_id, payload_json FROM events "
@@ -144,6 +154,8 @@ def test_ra1_503_error_auto_continues_and_reruns_once(tmp_path):
     notices = _notices(db, tid)
     assert any(notice.get("action") == "scheduled" for notice in notices)
     assert any(notice.get("action") == "applied" and notice.get("trigger_msg_id") == user_msg_id for notice in notices)
+    assert [action.get("action") for action in _recovery_actions(db, tid)] == ["scheduled", "applied"]
+    assert len(_recovery_attempts(db, tid)) == 1
     assert any("Previous error summary: LLM/runner error: HTTP 503 Service Unavailable" in notice.get("content", "") for notice in notices)
     errors = [payload for payload in payloads if payload.get("runner_error")]
     assert errors and all(error.get("no_api") is True for error in errors)
@@ -402,33 +414,39 @@ def test_attempt_cap_prevents_loops(tmp_path):
     assert ts.discover_runner_actionable(db, tid) is None
 
 
-def test_recovery_notice_and_action_append_atomically(tmp_path, monkeypatch):
+def test_applied_action_failure_rolls_back_claim_and_continuation(tmp_path, monkeypatch):
     db = _make_db(tmp_path)
-    tid, _user_msg_id = _make_thread(db)
-    llm = _BoomLLM("HTTP 400 Bad Request")
+    tid, user_msg_id = _make_thread(db)
+    llm = _BoomLLM("HTTP 503 Service Unavailable; retry after 0 seconds")
     runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
     original_append_event = db.append_event
 
-    def fail_action_event(*args, **kwargs):
+    def fail_applied_action(*args, **kwargs):
         type_ = kwargs.get("type_")
-        if type_ is None and len(args) >= 3:
-            type_ = args[2]
-        if type_ == "thread.recovery_action":
-            raise RuntimeError("action persistence failed")
+        payload = kwargs.get("payload") or {}
+        if type_ == "thread.recovery_action" and payload.get("action") == "applied":
+            raise RuntimeError("applied action persistence failed")
         return original_append_event(*args, **kwargs)
 
-    monkeypatch.setattr(db, "append_event", fail_action_event)
+    monkeypatch.setattr(db, "append_event", fail_applied_action)
 
     asyncio.run(runner.run_once())
 
     assert llm.calls == 1
-    assert _notices(db, tid) == []
-    assert _recovery_actions(db, tid) == []
+    assert _recovery_attempts(db, tid) == []
+    assert user_msg_id not in _skipped_msg_ids(db, tid)
+    assert not [action for action in _recovery_actions(db, tid) if action.get("action") == "applied"]
+    assert any(
+        action.get("action") == "stopped"
+        and action.get("stop_reason") == "transaction_failed"
+        for action in _recovery_actions(db, tid)
+    )
 
 
-def test_attempt_count_reads_only_indexed_recovery_actions(tmp_path):
+
+def test_attempt_count_reads_only_indexed_recovery_claim(tmp_path):
     from eggthreads.runner_recovery import (
-        RECOVERY_ACTION_EVENT_TYPE,
+        RECOVERY_ATTEMPT_EVENT_TYPE,
         recovery_attempt_count,
     )
 
@@ -452,9 +470,9 @@ def test_attempt_count_reads_only_indexed_recovery_actions(tmp_path):
     db.append_event(
         event_id="canonical-applied",
         thread_id=tid,
-        type_=RECOVERY_ACTION_EVENT_TYPE,
+        type_=RECOVERY_ATTEMPT_EVENT_TYPE,
         msg_id=trigger_msg_id,
-        payload={"action": "applied", "trigger_msg_id": trigger_msg_id},
+        payload={"state": "claimed", "trigger_msg_id": trigger_msg_id},
     )
 
     seen_sql: list[str] = []
@@ -467,20 +485,47 @@ def test_attempt_count_reads_only_indexed_recovery_actions(tmp_path):
     selects = [sql for sql in seen_sql if sql.lstrip().upper().startswith("SELECT")]
     assert len(selects) == 1
     assert "INDEXED BY events_msg_seq" in selects[0]
-    assert "type='thread.recovery_action'" in selects[0]
+    assert "type='thread.recovery_attempt'" in selects[0]
     assert "msg_id=" in selects[0]
     assert "msg.create" not in selects[0]
     assert "json_extract" not in selects[0]
-    assert "ORDER BY event_seq DESC LIMIT 2" in selects[0]
+    assert "LIMIT 1" in selects[0]
     plan = db.conn.execute(
         "EXPLAIN QUERY PLAN SELECT payload_json FROM events "
-        "INDEXED BY events_msg_seq WHERE msg_id=? AND thread_id=? AND type=? "
-        "ORDER BY event_seq DESC LIMIT 2",
-        (trigger_msg_id, tid, RECOVERY_ACTION_EVENT_TYPE),
+        "INDEXED BY events_msg_seq WHERE msg_id=? AND thread_id=? AND type=? LIMIT 1",
+        (trigger_msg_id, tid, RECOVERY_ATTEMPT_EVENT_TYPE),
     ).fetchall()
     detail = " ".join(str(row[3]) for row in plan)
     assert "events_msg_seq" in detail
     assert "msg_id=?" in detail
+
+
+def test_attempt_claim_detected_with_newer_nonclaim_actions(tmp_path):
+    from eggthreads.runner_recovery import (
+        RECOVERY_ACTION_EVENT_TYPE,
+        RECOVERY_ATTEMPT_EVENT_TYPE,
+        recovery_attempt_count,
+    )
+
+    db = _make_db(tmp_path)
+    tid, trigger_msg_id = _make_thread(db)
+    db.append_event(
+        event_id="canonical-claim",
+        thread_id=tid,
+        type_=RECOVERY_ATTEMPT_EVENT_TYPE,
+        msg_id=trigger_msg_id,
+        payload={"state": "claimed", "trigger_msg_id": trigger_msg_id},
+    )
+    for index, action in enumerate(("scheduled", "stopped")):
+        db.append_event(
+            event_id=f"newer-action-{index}",
+            thread_id=tid,
+            type_=RECOVERY_ACTION_EVENT_TYPE,
+            msg_id=trigger_msg_id,
+            payload={"action": action, "trigger_msg_id": trigger_msg_id},
+        )
+
+    assert recovery_attempt_count(db, tid, trigger_msg_id) == 1
 
 
 def test_attempt_count_recognizes_legacy_applied_notice(tmp_path):
@@ -504,6 +549,35 @@ def test_attempt_count_recognizes_legacy_applied_notice(tmp_path):
     assert recovery_attempt_count(db, tid, trigger_msg_id) == 1
 
 
+def test_saturated_legacy_window_with_older_applied_fails_closed(tmp_path):
+    from eggthreads.runner_recovery import recovery_attempt_count
+
+    db = _make_db(tmp_path)
+    tid, trigger_msg_id = _make_thread(db)
+    ts.append_message(
+        db,
+        tid,
+        "system",
+        "legacy applied notice",
+        extra={
+            "recovery_notice": True,
+            "auto_continue": True,
+            "action": "applied",
+            "trigger_msg_id": trigger_msg_id,
+        },
+    )
+    for index in range(256):
+        db.append_event(
+            event_id=f"newer-legacy-row-{index}",
+            thread_id=tid,
+            type_="msg.create",
+            msg_id=f"newer-legacy-msg-{index}",
+            payload={"role": "system", "content": "unrelated"},
+        )
+
+    assert recovery_attempt_count(db, tid, trigger_msg_id) == 1
+
+
 def test_legacy_attempt_compatibility_scan_is_bounded(tmp_path):
     from eggthreads.runner_recovery import recovery_attempt_count
 
@@ -521,7 +595,7 @@ def test_legacy_attempt_compatibility_scan_is_bounded(tmp_path):
     seen_sql: list[str] = []
     db.conn.set_trace_callback(seen_sql.append)
     try:
-        assert recovery_attempt_count(db, tid, trigger_msg_id) == 0
+        assert recovery_attempt_count(db, tid, trigger_msg_id) == 1
     finally:
         db.conn.set_trace_callback(None)
 
@@ -573,6 +647,144 @@ def test_long_failure_is_canonical_only_at_source_and_actions_are_bounded(tmp_pa
         assert len(payload["source_summary"]) <= 240
         assert marker not in json.dumps(payload, ensure_ascii=False)
         assert len(json.dumps(payload, ensure_ascii=False)) < 2_000
+
+
+def test_final_transaction_fence_keeps_injected_new_user_unskipped(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    tid, _user_msg_id = _make_thread(db)
+    llm = _BoomLLM("HTTP 503 Service Unavailable; retry after 0 seconds")
+    runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
+    from eggthreads.api import apply_auto_continue as original_apply
+    injected: dict[str, str] = {}
+
+    def inject_then_apply(*args, **kwargs):
+        injected["msg_id"] = ts.append_message(db, tid, "user", "arrived after external fence")
+        return original_apply(*args, **kwargs)
+
+    monkeypatch.setattr("eggthreads.api.apply_auto_continue", inject_then_apply)
+
+    asyncio.run(runner.run_once())
+
+    assert injected["msg_id"] not in _skipped_msg_ids(db, tid)
+    assert _recovery_attempts(db, tid) == []
+    assert any(
+        notice.get("action") == "stopped" and "newer user" in notice.get("stop_reason", "")
+        for notice in _notices(db, tid)
+    )
+
+
+def test_concurrent_auto_continue_callbacks_claim_and_apply_once(tmp_path):
+    from eggthreads.api import apply_auto_continue
+    from eggthreads.runner_recovery import classify_failure_text, format_auto_continue_notice
+
+    db = _make_db(tmp_path)
+    tid, trigger_msg_id = _make_thread(db)
+    source_msg_id = ts.append_message(
+        db,
+        tid,
+        "system",
+        "LLM/runner error: HTTP 503 Service Unavailable",
+        extra={"no_api": True, "runner_error": True},
+    )
+    source_event_seq = int(
+        db.conn.execute(
+            "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=? "
+            "AND type='msg.create'",
+            (tid, source_msg_id),
+        ).fetchone()[0]
+    )
+    decision = classify_failure_text("LLM/runner error: HTTP 503 Service Unavailable")
+    payload = {
+        "auto_continue": True,
+        "trigger_msg_id": trigger_msg_id,
+        "source_msg_id": source_msg_id,
+        "source_event_seq": source_event_seq,
+        "decision_category": decision.category,
+        "decision_reason": decision.reason,
+        "source_summary": decision.source_summary,
+        "delay_sec": 0.0,
+    }
+    notice = format_auto_continue_notice(
+        decision,
+        action="applied",
+        trigger_msg_id=trigger_msg_id,
+        source_msg_id=source_msg_id,
+    )
+    barrier = threading.Barrier(2)
+    outcomes: list[tuple[bool, str]] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        local = ts.ThreadsDB(db.path)
+        try:
+            barrier.wait()
+            result = apply_auto_continue(
+                local,
+                tid,
+                trigger_msg_id=trigger_msg_id,
+                source_msg_id=source_msg_id,
+                source_event_seq=source_event_seq,
+                action_payload=payload,
+                notice_content=notice,
+            )
+            outcomes.append((result.applied, result.reason))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            local.conn.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert errors == []
+    assert sorted(applied for applied, _reason in outcomes) == [False, True]
+    assert len(_recovery_attempts(db, tid)) == 1
+    assert len([action for action in _recovery_actions(db, tid) if action.get("action") == "applied"]) == 1
+
+
+def test_compaction_action_failure_rolls_back_compaction_request(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    tid, _user_msg_id = _make_thread(db)
+
+    class MaxOutputLLM:
+        current_model_key = "***"
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
+            yield {
+                "type": "done",
+                "message": {
+                    "role": "assistant",
+                    "incomplete": True,
+                    "incomplete_reason": "response.incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                },
+            }
+
+    original_append_event = db.append_event
+
+    def fail_compaction_action(*args, **kwargs):
+        payload = kwargs.get("payload") or {}
+        if kwargs.get("type_") == "thread.recovery_action" and payload.get("action") == "compaction_scheduled":
+            raise RuntimeError("compaction action persistence failed")
+        return original_append_event(*args, **kwargs)
+
+    monkeypatch.setattr(db, "append_event", fail_compaction_action)
+    runner = ts.ThreadRunner(db, tid, llm=MaxOutputLLM(), config=RunnerConfig())
+    asyncio.run(runner.run_once())
+
+    assert ts.list_thread_compactions(db, tid) == []
+    assert not [payload for payload in _payloads(db, tid) if payload.get("auto_compaction_request")]
+    stopped = [notice for notice in _notices(db, tid) if notice.get("action") == "stopped"]
+    assert len(stopped) == 1
+    assert stopped[0]["stop_reason"] == "compaction action persistence failed"
+    assert not [notice for notice in _notices(db, tid) if notice.get("action") == "compaction_scheduled"]
 
 
 def test_toggle_off_disables_auto_continue(tmp_path):

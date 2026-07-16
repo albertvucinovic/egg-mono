@@ -705,7 +705,18 @@ class ContinueResult:
     diagnosis: Optional['ThreadDiagnosis'] = None
 
 
+@dataclass
+class AutoContinueResult:
+    """Atomic auto-continue authority result."""
+
+    applied: bool
+    reason: str
+    continue_result: Optional[ContinueResult] = None
+
+
 THREAD_RECOVERY_EVENT_TYPE = 'thread.recovery'
+RECOVERY_ACTION_EVENT_TYPE = 'thread.recovery_action'
+RECOVERY_ATTEMPT_EVENT_TYPE = 'thread.recovery_attempt'
 
 
 @dataclass
@@ -2941,90 +2952,16 @@ def is_thread_continuable(db: ThreadsDB, thread_id: str) -> bool:
     return True
 
 
-def continue_thread(
+def _continue_thread_mutation(
     db: ThreadsDB,
     thread_id: str,
-    msg_id: Optional[str] = None,
+    msg_id: Optional[str],
+    diagnosis: Optional[ThreadDiagnosis],
 ) -> ContinueResult:
-    """Continue a thread from a specific point or auto-detected continue point.
+    """Apply validated continuation writes in the caller's transaction."""
 
-    This function marks messages after the continue point with `skipped_on_continue=True`
-    via msg.edit events. The RA1 detection will ignore these messages, allowing the
-    thread to be re-run from the continue point.
-
-    Args:
-        db: ThreadsDB instance
-        thread_id: Thread to continue
-        msg_id: Optional message ID to continue from. If None, auto-detect.
-
-    Returns:
-        ContinueResult with details of the operation
-    """
-    th = db.get_thread(thread_id)
-    if not th:
-        return ContinueResult(
-            success=False,
-            continue_from_msg_id=None,
-            skipped_msg_ids=[],
-            message=f"Thread not found: {thread_id}"
-        )
-
-    # Explicit target validation is side-effect-free and precedes lease checks
-    # or lifecycle/history mutation. No-argument continuation remains governed
-    # by the existing auto-diagnosis path below.
-    target_validation = validate_continue_target(db, thread_id, msg_id)
-    if not target_validation.success:
-        return target_validation
-
-    # Check if thread is running (has an active, non-expired lease)
-    try:
-        row = db.current_open(thread_id)
-        if row:
-            lease_until = row['lease_until']
-            now_iso = _utcnow_iso()
-            # Only block if the lease hasn't expired yet
-            if lease_until and lease_until > now_iso:
-                return ContinueResult(
-                    success=False,
-                    continue_from_msg_id=None,
-                    skipped_msg_ids=[],
-                    message="Thread is currently running. Interrupt it first."
-                )
-            # Lease has expired - thread is not actually running, proceed with continue
-    except Exception:
-        pass
-
-    # Determine and validate the continue point before any durable mutation.
-    # A failed explicit target (or healthy/no-op diagnosis) must leave wait
-    # lifecycles and history byte-for-byte unchanged.
-    diagnosis = None
-    if msg_id is None:
-        # Run diagnosis to understand thread state and auto-detect continue point
-        diagnosis = diagnose_thread(db, thread_id)
-        if diagnosis.is_healthy:
-            return ContinueResult(
-                success=True,
-                continue_from_msg_id=None,
-                skipped_msg_ids=[],
-                message="Thread is healthy. No changes needed.",
-                diagnosis=diagnosis,
-            )
-        # Use suggested continue point from diagnosis
-        msg_id = diagnosis.suggested_continue_point
-        if msg_id is None:
-            return ContinueResult(
-                success=True,
-                continue_from_msg_id=None,
-                skipped_msg_ids=[],
-                message="No messages to skip. Thread can continue from current state.",
-                diagnosis=diagnosis,
-            )
-
-    # Resolve the already-validated explicit target at the mutation boundary.
-    # Message create events are immutable, so this cannot disappear after the
-    # side-effect-free preflight above.
     continue_seq = _get_event_seq_for_msg_id(db, thread_id, str(msg_id))
-    if continue_seq is None:  # Defensive: validation above established it.
+    if continue_seq is None:
         return ContinueResult(
             success=False,
             continue_from_msg_id=None,
@@ -3032,9 +2969,6 @@ def continue_thread(
             message=f"Message not found: {msg_id}",
         )
 
-    # Continuation supersedes every outstanding get-user owner. This runs only
-    # after target validation and repairs legacy skipped declarations/notes
-    # through preserve edits plus exact-ID ordinary tool results.
     terminalize_superseded_get_user_waits(
         db,
         thread_id,
@@ -3043,17 +2977,15 @@ def continue_thread(
         reason="Superseded by thread continuation",
     )
 
-    # First, collect msg_ids that have already been marked as skipped via msg.edit events
     already_skipped: set = set()
     preserve_on_continue: set = set()
-    cur_edit = db.conn.execute(
+    rows = db.conn.execute(
         "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
         (thread_id,),
-    )
-    for row in cur_edit.fetchall():
-        edit_msg_id = row[0]
+    ).fetchall()
+    for edit_msg_id, payload_json in rows:
         try:
-            edit_payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+            edit_payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
         except Exception:
             edit_payload = {}
         if edit_payload.get('skipped_on_continue'):
@@ -3061,33 +2993,22 @@ def continue_thread(
         if edit_payload.get('preserve_on_continue'):
             preserve_on_continue.add(edit_msg_id)
 
-    # Find all messages after the continue point
-    cur = db.conn.execute(
+    rows = db.conn.execute(
         "SELECT msg_id, payload_json FROM events "
-        "WHERE thread_id=? AND type='msg.create' AND event_seq > ? ORDER BY event_seq ASC",
+        "WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
         (thread_id, continue_seq),
-    )
-    rows = cur.fetchall()
-
+    ).fetchall()
     skipped_msg_ids = []
-    continue_event_id = _ulid_like()  # Shared ID to link all edits
-
-    for row_msg_id, pj in rows:
-        if row_msg_id is None:
+    continue_event_id = _ulid_like()
+    for row_msg_id, payload_json in rows:
+        if row_msg_id is None or row_msg_id in already_skipped or row_msg_id in preserve_on_continue:
             continue
-
-        # Skip already-skipped messages (check msg.edit events, not msg.create payload)
-        if row_msg_id in already_skipped or row_msg_id in preserve_on_continue:
-            continue
-
         try:
-            payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
         except Exception:
             payload = {}
         if isinstance(payload, dict) and payload.get('preserve_on_continue'):
             continue
-
-        # Mark this message as skipped
         db.append_event(
             event_id=_ulid_like(),
             thread_id=thread_id,
@@ -3100,8 +3021,6 @@ def continue_thread(
         )
         skipped_msg_ids.append(row_msg_id)
 
-    # Also add a control.interrupt event to advance the RA1 boundary
-    # This ensures the runner doesn't try to continue from the old state
     db.append_event(
         event_id=_ulid_like(),
         thread_id=thread_id,
@@ -3115,15 +3034,9 @@ def continue_thread(
             'skipped_count': len(skipped_msg_ids),
         },
     )
-
-    # Rebuild snapshot to reflect the skipped messages
-    create_snapshot(db, thread_id)
-
-    # Build informative message
     base_msg = f"Continued from message {msg_id[-8:] if msg_id else 'start'}, skipped {len(skipped_msg_ids)} messages."
     if diagnosis and diagnosis.issues:
         base_msg = f"Fixed {len(diagnosis.issues)} issue(s): {', '.join(diagnosis.issues)}. {base_msg}"
-
     return ContinueResult(
         success=True,
         continue_from_msg_id=msg_id,
@@ -3131,6 +3044,178 @@ def continue_thread(
         message=base_msg,
         diagnosis=diagnosis,
     )
+
+
+def continue_thread(
+    db: ThreadsDB,
+    thread_id: str,
+    msg_id: Optional[str] = None,
+) -> ContinueResult:
+    """Continue a thread from a specific point or auto-detected point."""
+
+    target_validation = validate_continue_target(db, thread_id, msg_id)
+    if not target_validation.success:
+        return target_validation
+
+    lease = db.conn.execute(
+        "SELECT 1 FROM open_streams WHERE thread_id=? "
+        "AND lease_until>datetime('now') LIMIT 1",
+        (thread_id,),
+    ).fetchone()
+    if lease is not None:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message="Thread is currently running. Interrupt it first.",
+        )
+
+    diagnosis = None
+    if msg_id is None:
+        diagnosis = diagnose_thread(db, thread_id)
+        if diagnosis.is_healthy:
+            return ContinueResult(
+                success=True,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message="Thread is healthy. No changes needed.",
+                diagnosis=diagnosis,
+            )
+        msg_id = diagnosis.suggested_continue_point
+        if msg_id is None:
+            return ContinueResult(
+                success=True,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message="No messages to skip. Thread can continue from current state.",
+                diagnosis=diagnosis,
+            )
+
+    savepoint = f"continue_thread_{os.urandom(8).hex()}"
+    db.conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        locked = db.conn.execute(
+            "UPDATE threads SET status=status WHERE thread_id=?",
+            (thread_id,),
+        )
+        if locked.rowcount != 1:
+            raise ValueError(f"Thread not found: {thread_id}")
+        lease = db.conn.execute(
+            "SELECT 1 FROM open_streams WHERE thread_id=? "
+            "AND lease_until>datetime('now') LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        if lease is not None:
+            result = ContinueResult(
+                success=False,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message="Thread is currently running. Interrupt it first.",
+            )
+        else:
+            result = _continue_thread_mutation(db, thread_id, msg_id, diagnosis)
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+
+    if result.success and result.continue_from_msg_id is not None:
+        create_snapshot(db, thread_id)
+    return result
+
+
+def apply_auto_continue(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    trigger_msg_id: str,
+    source_msg_id: str,
+    source_event_seq: int,
+    action_payload: Dict[str, Any],
+    notice_content: str,
+) -> AutoContinueResult:
+    """Atomically fence, claim, apply, and chronicle one automatic continue."""
+
+    from .runner_recovery import check_recovery_fence
+
+    savepoint = f"apply_auto_continue_{os.urandom(8).hex()}"
+    db.conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        locked = db.conn.execute(
+            "UPDATE threads SET status=status WHERE thread_id=?",
+            (thread_id,),
+        )
+        if locked.rowcount != 1:
+            raise ValueError(f"Thread not found: {thread_id}")
+
+        fence = check_recovery_fence(
+            db,
+            thread_id,
+            trigger_msg_id=trigger_msg_id,
+            source_msg_id=source_msg_id,
+            source_event_seq=source_event_seq,
+            max_attempts=1,
+        )
+        if not fence.ok:
+            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return AutoContinueResult(False, fence.reason)
+
+        if db.conn.execute(
+            "SELECT 1 FROM events INDEXED BY events_msg_seq "
+            "WHERE msg_id=? AND thread_id=? AND type=? LIMIT 1",
+            (trigger_msg_id, thread_id, RECOVERY_ATTEMPT_EVENT_TYPE),
+        ).fetchone() is not None:
+            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return AutoContinueResult(False, "automatic continue attempt cap reached")
+
+        attempt_payload = {
+            'auto_continue': True,
+            'trigger_msg_id': trigger_msg_id,
+            'source_msg_id': source_msg_id,
+            'source_event_seq': int(source_event_seq),
+            'state': 'claimed',
+        }
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_=RECOVERY_ATTEMPT_EVENT_TYPE,
+            payload=attempt_payload,
+            msg_id=trigger_msg_id,
+        )
+        continued = _continue_thread_mutation(
+            db,
+            thread_id,
+            trigger_msg_id,
+            diagnosis=None,
+        )
+        if not continued.success:
+            raise RuntimeError(continued.message)
+
+        applied_payload = {**action_payload, 'action': 'applied'}
+        append_recovery_notice(
+            db,
+            thread_id,
+            notice_content,
+            extra=applied_payload,
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_=RECOVERY_ACTION_EVENT_TYPE,
+            payload=applied_payload,
+            msg_id=trigger_msg_id,
+        )
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+
+    # ``append_recovery_notice`` already published snapshot acceleration inside
+    # the transaction. The committed events remain authoritative either way.
+    return AutoContinueResult(True, 'applied', continued)
+
 
 def continue_child_thread(
     db: ThreadsDB,

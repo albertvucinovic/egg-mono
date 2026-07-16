@@ -39,6 +39,7 @@ _SNAPSHOT_NOOP_EVENT_TYPES = frozenset({
     "thread.context_limit",
     "thread.recovery",
     "thread.recovery_action",
+    "thread.recovery_attempt",
     "thread.scheduling",
     "tool_call.approval",
     "tool_call.approval_policy",
