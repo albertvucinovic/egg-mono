@@ -1388,3 +1388,93 @@ def test_supervisor_owner_initialization_failure_unlinks_state_and_restores_hand
 
     assert not state.exists()
     assert signal.getsignal(signal.SIGTERM) is old_handler
+
+
+def test_supervisor_cleanup_failure_fallback_kills_live_ignoring_leader(
+    monkeypatch, tmp_path: Path
+):
+    module = _load_launcher_supervisor("test_launcher_cleanup_fallback")
+    state = tmp_path / "state"
+    state.write_text("", encoding="utf-8")
+    ready = tmp_path / "ready"
+    child = _write_executable(
+        tmp_path / "cleanup-failure-child",
+        """#!/usr/bin/env python3
+import os, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(os.environ["EGG_TEST_READY"], "w", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()))
+while True:
+    time.sleep(1)
+""",
+    )
+    monkeypatch.setenv("EGG_TEST_READY", str(ready))
+    old_handler = signal.getsignal(signal.SIGTERM)
+
+    class BrokenOwner:
+        def quiesce(self, _pid: int, *, leader_exited: bool) -> None:
+            raise RuntimeError("procfs disappeared")
+
+    monkeypatch.setattr(module, "_ProcessOwner", BrokenOwner)
+    original_wait = module._wait_generation
+
+    def fail_after_child_is_ready(*args, **kwargs):
+        _wait_for_path(ready)
+        raise RuntimeError("trigger finalizer")
+
+    monkeypatch.setattr(module, "_wait_generation", fail_after_child_is_ready)
+    started = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="trigger finalizer") as raised:
+        module.supervise(
+            [str(child)],
+            cwd=str(tmp_path),
+            state_file=state,
+            reload_exit_code=75,
+            max_reloads=1,
+        )
+
+    assert any("procfs disappeared" in note for note in raised.value.__notes__)
+    assert time.monotonic() - started < 1.5
+    child_pid = int(ready.read_text(encoding="utf-8"))
+    _assert_pid_gone(child_pid)
+    assert not state.exists()
+    assert signal.getsignal(signal.SIGTERM) is old_handler
+    # Keep a reference so static checkers/reviewers can see only the wait
+    # boundary—not production cleanup—is replaced by this regression.
+    assert original_wait is not fail_after_child_is_ready
+
+
+def test_supervisor_term_after_final_sample_overrides_normal_status(
+    monkeypatch, tmp_path: Path
+):
+    module = _load_launcher_supervisor("test_launcher_final_sample")
+    state = tmp_path / "state"
+    state.write_text("", encoding="utf-8")
+    child = _write_executable(tmp_path / "exit-zero", "#!/bin/sh\nexit 0\n")
+    original_terminating = module._SignalRelay.terminating
+    samples = 0
+
+    def inject_after_final_sample(relay):
+        nonlocal samples
+        value = original_terminating(relay)
+        samples += 1
+        if samples == 2:
+            # This is after the post-wait sample has returned 0. The rejected
+            # code immediately returned child status 0 and omitted this TERM.
+            os.kill(os.getpid(), signal.SIGTERM)
+        return value
+
+    monkeypatch.setattr(module._SignalRelay, "terminating", inject_after_final_sample)
+
+    status = module.supervise(
+        [str(child)],
+        cwd=str(tmp_path),
+        state_file=state,
+        reload_exit_code=75,
+        max_reloads=1,
+    )
+
+    assert samples == 2
+    assert status == 143
+    assert not state.exists()

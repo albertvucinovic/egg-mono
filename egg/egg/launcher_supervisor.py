@@ -172,6 +172,28 @@ def _signal_group(pgid: int, signum: int) -> None:
         pass
 
 
+def _kill_and_reap_leader(leader_pid: int) -> bool:
+    """Kill/reap one retained child PID without procfs or a blocking wait."""
+
+    deadline = time.monotonic() + max(_GRACE_SECONDS, 0.5)
+    while True:
+        try:
+            waited_pid, _status = os.waitpid(leader_pid, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        if waited_pid == leader_pid:
+            return True
+        # waitpid==0 proves this is still our unreaped direct child, preserving
+        # PID/PGID identity while the fallback signals are issued.
+        _signal_group(leader_pid, signal.SIGCONT)
+        _signal_group(leader_pid, signal.SIGKILL)
+        _signal_pid(leader_pid, signal.SIGCONT)
+        _signal_pid(leader_pid, signal.SIGKILL)
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_POLL_SECONDS)
+
+
 def _wait_exit_code(wait_status: int) -> int:
     if os.WIFEXITED(wait_status):
         return os.WEXITSTATUS(wait_status)
@@ -255,6 +277,24 @@ class _SignalRelay:
     def restore(self) -> None:
         for signum, handler in self.previous.items():
             signal.signal(signum, handler)
+
+    def finalize_decision(self) -> int:
+        """Linearize the final termination decision and restore signal state."""
+
+        previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK, _TERMINATING_SIGNALS
+        )
+        try:
+            # Briefly restore the caller mask while this relay remains installed.
+            # Any signal pending before this lifecycle's final linearization point
+            # is therefore delivered here and latched, never by the old handler.
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            signal.pthread_sigmask(signal.SIG_BLOCK, _TERMINATING_SIGNALS)
+            decision = self.termination_signal
+            self.restore()
+            return decision
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
     def handle(self, signum: int, _frame: object) -> None:
         if signum in _TERMINATING_SIGNALS and not self.termination_signal:
@@ -359,24 +399,24 @@ def supervise(
     reload_count = 0
     child_pid: int | None = None
     relay = _SignalRelay()
+    result: int | None = None
+    final_termination = 0
 
     try:
         relay.install()
         # Initialization belongs inside state-file finalization. Linux procfs or
         # prctl failure therefore restores handlers and unlinks shell state.
         owner = _ProcessOwner()
-        while True:
+        while result is None:
             terminating = relay.terminating()
             if terminating:
-                return 128 + terminating
+                result = 128 + terminating
+                break
             state_file.write_text("", encoding="utf-8")
             child_pid = _spawn(child_argv, cwd)
             relay.attach_child(child_pid)
             if owns_foreground:
                 _set_foreground_pgrp(tty_fd, child_pid)
-            # The same installed relay owns spawn, foreground handoff, and
-            # waiting. Any already-pending termination therefore carries its
-            # original escalation deadline into this wait.
             owns_foreground = _wait_generation(
                 child_pid,
                 tty_fd=tty_fd,
@@ -385,22 +425,9 @@ def supervise(
             )
             if owns_foreground:
                 _set_foreground_pgrp(tty_fd, own_pgrp)
-            try:
-                if owner is None:
-                    raise RuntimeError("process owner was not initialized")
-                owner.quiesce(child_pid, leader_exited=True)
-            except BaseException:
-                # Mark this generation as already cleanup-attempted; the outer
-                # finalizer still restores handlers and unlinks state without
-                # recursively invoking a second failing quiescence pass.
-                failed_pid = child_pid
-                child_pid = None
-                relay.detach_child()
-                try:
-                    os.waitpid(failed_pid, os.WNOHANG)
-                except ChildProcessError:
-                    pass
-                raise
+            if owner is None:
+                raise RuntimeError("process owner was not initialized")
+            owner.quiesce(child_pid, leader_exited=True)
             waited_pid, wait_status = os.waitpid(child_pid, 0)
             if waited_pid != child_pid:
                 raise ChildProcessError(f"lost generation leader {child_pid}")
@@ -409,18 +436,22 @@ def supervise(
 
             terminating = relay.terminating()
             if terminating:
-                return 128 + terminating
+                result = 128 + terminating
+                break
             status = _wait_exit_code(wait_status)
             if status != reload_exit_code:
-                return status
+                result = status
+                break
 
             thread_id = _read_reload_thread(state_file)
             if not thread_id:
                 print("egg.sh: reload requested without a saved thread id", file=sys.stderr)
-                return reload_exit_code
+                result = reload_exit_code
+                break
             if reload_count >= max_reloads:
                 print(f"egg.sh: reload limit ({max_reloads}) exceeded", file=sys.stderr)
-                return reload_exit_code
+                result = reload_exit_code
+                break
             os.environ["EGG_RELOAD_THREAD_ID"] = thread_id
             reload_count += 1
     finally:
@@ -430,24 +461,40 @@ def supervise(
                 _set_foreground_pgrp(tty_fd, own_pgrp)
             except BaseException as exc:
                 cleanup_error = exc
-        if child_pid is not None and owner is not None:
+        if child_pid is not None:
+            if owner is not None:
+                try:
+                    owner.quiesce(child_pid, leader_exited=False)
+                except BaseException as exc:
+                    cleanup_error = cleanup_error or exc
             try:
-                owner.quiesce(child_pid, leader_exited=False)
+                reaped = _kill_and_reap_leader(child_pid)
             except BaseException as exc:
                 cleanup_error = cleanup_error or exc
-            finally:
-                try:
-                    os.waitpid(child_pid, 0)
-                except ChildProcessError:
-                    pass
+                reaped = False
+            if not reaped and cleanup_error is None:
+                cleanup_error = RuntimeError(
+                    f"could not reap generation leader {child_pid} after SIGKILL"
+                )
         relay.detach_child()
-        relay.restore()
         try:
             state_file.unlink()
         except FileNotFoundError:
             pass
-        if cleanup_error is not None and sys.exc_info()[0] is None:
-            raise cleanup_error
+        except BaseException as exc:
+            cleanup_error = cleanup_error or exc
+        final_termination = relay.finalize_decision()
+        if cleanup_error is not None:
+            active_error = sys.exc_info()[1]
+            if active_error is None:
+                raise cleanup_error
+            active_error.add_note(f"launcher cleanup also failed: {cleanup_error!r}")
+
+    if final_termination:
+        return 128 + final_termination
+    if result is None:
+        raise RuntimeError("launcher supervision ended without a status")
+    return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
