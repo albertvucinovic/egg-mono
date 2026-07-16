@@ -649,7 +649,28 @@ def test_long_failure_is_canonical_only_at_source_and_actions_are_bounded(tmp_pa
         assert len(json.dumps(payload, ensure_ascii=False)) < 2_000
 
 
-def test_final_transaction_fence_keeps_injected_new_user_unskipped(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "role, content, extra, reason_fragment",
+    [
+        (
+            "user",
+            "run a command",
+            {"tool_calls": [{"id": "user-call", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+            "newer user activity",
+        ),
+        ("user", "keep user", {"keep_user_turn": True}, "newer user activity"),
+        ("tool", "keep tool", {"keep_user_turn": True}, "newer tool activity"),
+        (
+            "system",
+            "LLM/runner error: newer provider failure",
+            {"no_api": True, "runner_error": True},
+            "newer provider/runner activity",
+        ),
+    ],
+)
+def test_final_transaction_fence_preserves_all_injected_activity(
+    tmp_path, monkeypatch, role, content, extra, reason_fragment
+):
     db = _make_db(tmp_path)
     tid, _user_msg_id = _make_thread(db)
     llm = _BoomLLM("HTTP 503 Service Unavailable; retry after 0 seconds")
@@ -658,19 +679,101 @@ def test_final_transaction_fence_keeps_injected_new_user_unskipped(tmp_path, mon
     injected: dict[str, str] = {}
 
     def inject_then_apply(*args, **kwargs):
-        injected["msg_id"] = ts.append_message(db, tid, "user", "arrived after external fence")
+        injected["msg_id"] = ts.append_message(db, tid, role, content, extra=extra)
         return original_apply(*args, **kwargs)
 
     monkeypatch.setattr("eggthreads.api.apply_auto_continue", inject_then_apply)
-
     asyncio.run(runner.run_once())
 
     assert injected["msg_id"] not in _skipped_msg_ids(db, tid)
     assert _recovery_attempts(db, tid) == []
+    assert not [action for action in _recovery_actions(db, tid) if action.get("action") == "applied"]
     assert any(
-        notice.get("action") == "stopped" and "newer user" in notice.get("stop_reason", "")
+        notice.get("action") == "stopped"
+        and reason_fragment in notice.get("stop_reason", "")
         for notice in _notices(db, tid)
     )
+
+
+
+@pytest.mark.parametrize(
+    "failing_fragment, expected_reason",
+    [
+        ("type='msg.edit'", "could not inspect source continuation state"),
+        ("type='control.interrupt'", "could not inspect continuation interrupts"),
+    ],
+)
+def test_final_transaction_fence_fails_closed_on_authority_query_error(
+    tmp_path, monkeypatch, failing_fragment, expected_reason
+):
+    from eggthreads.api import apply_auto_continue
+    from eggthreads.runner_recovery import classify_failure_text, format_auto_continue_notice
+
+    db = _make_db(tmp_path)
+    tid, trigger_msg_id = _make_thread(db)
+    source_msg_id = ts.append_message(
+        db,
+        tid,
+        "system",
+        "LLM/runner error: HTTP 503 Service Unavailable",
+        extra={"no_api": True, "runner_error": True},
+    )
+    source_event_seq = int(
+        db.conn.execute(
+            "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=? "
+            "AND type='msg.create'",
+            (tid, source_msg_id),
+        ).fetchone()[0]
+    )
+    decision = classify_failure_text("LLM/runner error: HTTP 503 Service Unavailable")
+    payload = {
+        "auto_continue": True,
+        "trigger_msg_id": trigger_msg_id,
+        "source_msg_id": source_msg_id,
+        "source_event_seq": source_event_seq,
+        "decision_category": decision.category,
+        "decision_reason": decision.reason,
+        "source_summary": decision.source_summary,
+        "delay_sec": 0.0,
+    }
+    notice = format_auto_continue_notice(
+        decision,
+        action="applied",
+        trigger_msg_id=trigger_msg_id,
+        source_msg_id=source_msg_id,
+    )
+    original_execute = db.conn.execute
+
+    class FailingConnection:
+        _raw_conn = db.conn
+
+        def __getattr__(self, name):
+            return getattr(self._raw_conn, name)
+
+        def execute(self, sql, parameters=()):
+            if failing_fragment in sql:
+                raise RuntimeError("injected authority read failure")
+            return original_execute(sql, parameters)
+
+    monkeypatch.setattr(db, "conn", FailingConnection())
+    result = apply_auto_continue(
+        db,
+        tid,
+        trigger_msg_id=trigger_msg_id,
+        source_msg_id=source_msg_id,
+        source_event_seq=source_event_seq,
+        action_payload=payload,
+        notice_content=notice,
+    )
+
+    assert result.applied is False
+    assert result.reason == expected_reason
+    raw_conn = db.conn._raw_conn
+    monkeypatch.setattr(db, "conn", raw_conn)
+    assert _recovery_attempts(db, tid) == []
+    assert not [action for action in _recovery_actions(db, tid) if action.get("action") == "applied"]
+    assert source_msg_id not in _skipped_msg_ids(db, tid)
+
 
 
 def test_concurrent_auto_continue_callbacks_claim_and_apply_once(tmp_path):

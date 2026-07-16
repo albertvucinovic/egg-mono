@@ -2960,6 +2960,8 @@ def _continue_thread_mutation(
 ) -> ContinueResult:
     """Apply validated continuation writes in the caller's transaction."""
 
+    from .runner_recovery import continuation_would_skip_message
+
     continue_seq = _get_event_seq_for_msg_id(db, thread_id, str(msg_id))
     if continue_seq is None:
         return ContinueResult(
@@ -3007,7 +3009,7 @@ def _continue_thread_mutation(
             payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
         except Exception:
             payload = {}
-        if isinstance(payload, dict) and payload.get('preserve_on_continue'):
+        if not continuation_would_skip_message(payload):
             continue
         db.append_event(
             event_id=_ulid_like(),

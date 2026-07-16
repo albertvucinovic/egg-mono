@@ -97,6 +97,21 @@ def _payload_from_json(value: Any) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def continuation_preserves_message(payload: Dict[str, Any]) -> bool:
+    """Return whether continuation leaves one message create effective."""
+
+    return bool(
+        isinstance(payload, dict)
+        and (payload.get("preserve_on_continue") or payload.get("recovery_notice"))
+    )
+
+
+def continuation_would_skip_message(payload: Dict[str, Any]) -> bool:
+    """Shared conservative predicate for continuation mutation and fences."""
+
+    return not continuation_preserves_message(payload)
+
+
 def _retry(category: str, reason: str, source: str, delay_sec: float) -> RecoveryDecision:
     return RecoveryDecision(
         retriable=True,
@@ -582,19 +597,27 @@ def recovery_attempt_count(db: Any, thread_id: str, trigger_msg_id: Optional[str
     return 1 if len(legacy_rows) >= _LEGACY_RECOVERY_NOTICE_LOOKBACK else 0
 
 
-def message_is_skipped(db: Any, thread_id: str, msg_id: str) -> bool:
+def message_skipped_state(db: Any, thread_id: str, msg_id: str) -> Optional[bool]:
+    """Return skipped state, or ``None`` when authority cannot be inspected."""
+
     try:
         rows = db.conn.execute(
             "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.edit' AND msg_id=? ORDER BY event_seq ASC",
             (thread_id, msg_id),
         ).fetchall()
     except Exception:
-        return False
+        return None
     for (payload_json,) in rows:
         payload = _payload_from_json(payload_json)
         if payload.get("skipped_on_continue"):
             return True
     return False
+
+
+def message_is_skipped(db: Any, thread_id: str, msg_id: str) -> bool:
+    """Compatibility boolean; unreadable state is conservatively skipped."""
+
+    return message_skipped_state(db, thread_id, msg_id) is not False
 
 
 def check_recovery_fence(
@@ -620,10 +643,13 @@ def check_recovery_fence(
             (thread_id, source_msg_id),
         ).fetchone()
     except Exception:
-        row = None
+        return RecoveryFenceResult(False, "could not inspect source failure message")
     if row is None:
         return RecoveryFenceResult(False, "source failure message no longer exists")
-    if message_is_skipped(db, thread_id, source_msg_id):
+    skipped_state = message_skipped_state(db, thread_id, source_msg_id)
+    if skipped_state is None:
+        return RecoveryFenceResult(False, "could not inspect source continuation state")
+    if skipped_state:
         return RecoveryFenceResult(False, "thread was continued manually before the retry fired")
 
     try:
@@ -633,7 +659,7 @@ def check_recovery_fence(
             (thread_id, int(source_event_seq)),
         ).fetchall()
     except Exception:
-        rows = []
+        return RecoveryFenceResult(False, "could not inspect continuation interrupts")
     for (payload_json,) in rows:
         payload = _payload_from_json(payload_json)
         if payload.get("purpose") == "continue":
@@ -650,23 +676,18 @@ def check_recovery_fence(
         ).fetchall()
     except Exception:
         return RecoveryFenceResult(False, "could not inspect newer messages")
-    for msg_id, payload_json in rows:
+    for _msg_id, payload_json in rows:
         payload = _payload_from_json(payload_json)
-        if payload.get("recovery_notice") or payload.get("no_api"):
+        if not continuation_would_skip_message(payload):
             continue
         role = payload.get("role")
-        tool_calls = payload.get("tool_calls") or []
-        keep_user_turn = bool(payload.get("keep_user_turn"))
-        if role == "user" and not tool_calls and not keep_user_turn:
-            return RecoveryFenceResult(False, "newer user trigger message appeared")
-        if role == "tool" and not keep_user_turn:
-            return RecoveryFenceResult(False, "newer tool trigger message appeared")
-        if role == "assistant":
-            return RecoveryFenceResult(False, "newer assistant/provider result appeared")
-        if role == "system":
-            decision = classify_failure_payload(payload)
-            if decision.category not in {"none", "local_notice"}:
-                return RecoveryFenceResult(False, "newer provider failure appeared")
+        if role == "user":
+            return RecoveryFenceResult(False, "newer user activity appeared")
+        if role == "tool":
+            return RecoveryFenceResult(False, "newer tool activity appeared")
+        if role in {"assistant", "system"}:
+            return RecoveryFenceResult(False, "newer provider/runner activity appeared")
+        return RecoveryFenceResult(False, "newer effective message appeared")
 
     return RecoveryFenceResult(True)
 
@@ -737,6 +758,8 @@ __all__ = [
     "RecoveryDecision",
     "RecoverySource",
     "check_recovery_fence",
+    "continuation_preserves_message",
+    "continuation_would_skip_message",
     "classify_failure_payload",
     "classify_failure_text",
     "find_latest_recovery_source_after",
@@ -744,6 +767,7 @@ __all__ = [
     "format_recovery_decision_notice",
     "format_retry_delay",
     "message_is_skipped",
+    "message_skipped_state",
     "parse_retry_delay_seconds",
     "recovery_attempt_count",
 ]
