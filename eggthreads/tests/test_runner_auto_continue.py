@@ -88,6 +88,28 @@ def _notices(db: ts.ThreadsDB, tid: str) -> list[dict]:
     return [payload for payload in _payloads(db, tid) if payload.get("recovery_notice")]
 
 
+def _recovery_actions(db: ts.ThreadsDB, tid: str) -> list[dict]:
+    rows = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? "
+        "AND type='thread.recovery_action' ORDER BY event_seq ASC",
+        (tid,),
+    ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+def _runner_error_record(db: ts.ThreadsDB, tid: str) -> tuple[int, str, dict]:
+    rows = db.conn.execute(
+        "SELECT event_seq, msg_id, payload_json FROM events "
+        "WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+        (tid,),
+    ).fetchall()
+    for event_seq, msg_id, payload_json in rows:
+        payload = json.loads(payload_json)
+        if payload.get("runner_error"):
+            return int(event_seq), str(msg_id), payload
+    raise AssertionError("runner error source not found")
+
+
 def _skipped_msg_ids(db: ts.ThreadsDB, tid: str) -> set[str]:
     rows = db.conn.execute(
         "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
@@ -122,7 +144,7 @@ def test_ra1_503_error_auto_continues_and_reruns_once(tmp_path):
     notices = _notices(db, tid)
     assert any(notice.get("action") == "scheduled" for notice in notices)
     assert any(notice.get("action") == "applied" and notice.get("trigger_msg_id") == user_msg_id for notice in notices)
-    assert any("Previous error: LLM/runner error: HTTP 503 Service Unavailable" in notice.get("content", "") for notice in notices)
+    assert any("Previous error summary: LLM/runner error: HTTP 503 Service Unavailable" in notice.get("content", "") for notice in notices)
     errors = [payload for payload in payloads if payload.get("runner_error")]
     assert errors and all(error.get("no_api") is True for error in errors)
     assert user_msg_id not in _skipped_msg_ids(db, tid)
@@ -268,7 +290,7 @@ def test_generic_400_does_not_auto_continue(tmp_path):
     assert llm.calls == 1
     notices = _notices(db, tid)
     assert any(notice.get("action") == "stopped" and notice.get("decision_category") == "bad_request" for notice in notices)
-    assert any("Previous error: LLM/runner error: HTTP 400 Bad Request" in notice.get("content", "") for notice in notices)
+    assert any("Previous error summary: LLM/runner error: HTTP 400 Bad Request" in notice.get("content", "") for notice in notices)
     assert ts.discover_runner_actionable(db, tid) is None
 
 
@@ -380,6 +402,179 @@ def test_attempt_cap_prevents_loops(tmp_path):
     assert ts.discover_runner_actionable(db, tid) is None
 
 
+def test_recovery_notice_and_action_append_atomically(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    tid, _user_msg_id = _make_thread(db)
+    llm = _BoomLLM("HTTP 400 Bad Request")
+    runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
+    original_append_event = db.append_event
+
+    def fail_action_event(*args, **kwargs):
+        type_ = kwargs.get("type_")
+        if type_ is None and len(args) >= 3:
+            type_ = args[2]
+        if type_ == "thread.recovery_action":
+            raise RuntimeError("action persistence failed")
+        return original_append_event(*args, **kwargs)
+
+    monkeypatch.setattr(db, "append_event", fail_action_event)
+
+    asyncio.run(runner.run_once())
+
+    assert llm.calls == 1
+    assert _notices(db, tid) == []
+    assert _recovery_actions(db, tid) == []
+
+
+def test_attempt_count_reads_only_indexed_recovery_actions(tmp_path):
+    from eggthreads.runner_recovery import (
+        RECOVERY_ACTION_EVENT_TYPE,
+        recovery_attempt_count,
+    )
+
+    db = _make_db(tmp_path)
+    tid, trigger_msg_id = _make_thread(db)
+    for index in range(2_000):
+        db.append_event(
+            event_id=f"unrelated-{index}",
+            thread_id=tid,
+            type_="msg.create",
+            msg_id=f"unrelated-msg-{index}",
+            payload={
+                "role": "system",
+                "content": "unrelated",
+                "recovery_notice": True,
+                "auto_continue": True,
+                "action": "applied",
+                "trigger_msg_id": trigger_msg_id,
+            },
+        )
+    db.append_event(
+        event_id="canonical-applied",
+        thread_id=tid,
+        type_=RECOVERY_ACTION_EVENT_TYPE,
+        msg_id=trigger_msg_id,
+        payload={"action": "applied", "trigger_msg_id": trigger_msg_id},
+    )
+
+    seen_sql: list[str] = []
+    db.conn.set_trace_callback(seen_sql.append)
+    try:
+        assert recovery_attempt_count(db, tid, trigger_msg_id) == 1
+    finally:
+        db.conn.set_trace_callback(None)
+
+    selects = [sql for sql in seen_sql if sql.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == 1
+    assert "INDEXED BY events_msg_seq" in selects[0]
+    assert "type='thread.recovery_action'" in selects[0]
+    assert "msg_id=" in selects[0]
+    assert "msg.create" not in selects[0]
+    assert "json_extract" not in selects[0]
+    assert "ORDER BY event_seq DESC LIMIT 2" in selects[0]
+    plan = db.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT payload_json FROM events "
+        "INDEXED BY events_msg_seq WHERE msg_id=? AND thread_id=? AND type=? "
+        "ORDER BY event_seq DESC LIMIT 2",
+        (trigger_msg_id, tid, RECOVERY_ACTION_EVENT_TYPE),
+    ).fetchall()
+    detail = " ".join(str(row[3]) for row in plan)
+    assert "events_msg_seq" in detail
+    assert "msg_id=?" in detail
+
+
+def test_attempt_count_recognizes_legacy_applied_notice(tmp_path):
+    from eggthreads.runner_recovery import recovery_attempt_count
+
+    db = _make_db(tmp_path)
+    tid, trigger_msg_id = _make_thread(db)
+    ts.append_message(
+        db,
+        tid,
+        "system",
+        "legacy applied notice",
+        extra={
+            "recovery_notice": True,
+            "auto_continue": True,
+            "action": "applied",
+            "trigger_msg_id": trigger_msg_id,
+        },
+    )
+
+    assert recovery_attempt_count(db, tid, trigger_msg_id) == 1
+
+
+def test_legacy_attempt_compatibility_scan_is_bounded(tmp_path):
+    from eggthreads.runner_recovery import recovery_attempt_count
+
+    db = _make_db(tmp_path)
+    tid, trigger_msg_id = _make_thread(db)
+    for index in range(2_000):
+        db.append_event(
+            event_id=f"legacy-unrelated-{index}",
+            thread_id=tid,
+            type_="msg.create",
+            msg_id=f"legacy-unrelated-msg-{index}",
+            payload={"role": "system", "content": "unrelated"},
+        )
+
+    seen_sql: list[str] = []
+    db.conn.set_trace_callback(seen_sql.append)
+    try:
+        assert recovery_attempt_count(db, tid, trigger_msg_id) == 0
+    finally:
+        db.conn.set_trace_callback(None)
+
+    selects = [sql for sql in seen_sql if sql.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == 3
+    legacy_select = selects[-1]
+    assert "INDEXED BY events_thread_type" in legacy_select
+    assert "ORDER BY event_seq DESC LIMIT 256" in legacy_select
+
+
+def test_long_failure_is_canonical_only_at_source_and_actions_are_bounded(tmp_path):
+    db = _make_db(tmp_path)
+    tid, user_msg_id = _make_thread(db)
+    marker = "EXACT-UNBOUNDED-TAIL-MARKER"
+    long_error = (
+        "remote connection failure; retry after 0 seconds; "
+        + ("diagnostic-block-" * 8_000)
+        + marker
+    )
+    llm = _BoomLLM(long_error)
+    runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
+
+    asyncio.run(_run_until_idle(runner))
+
+    source_event_seq, source_msg_id, source = _runner_error_record(db, tid)
+    assert source["content"] == f"LLM/runner error: {long_error}"
+    assert source["content"].endswith(marker)
+
+    actions = _recovery_actions(db, tid)
+    assert [action["action"] for action in actions] == ["scheduled", "applied"]
+    assert all(action["trigger_msg_id"] == user_msg_id for action in actions)
+    action_rows = db.conn.execute(
+        "SELECT msg_id FROM events WHERE thread_id=? "
+        "AND type='thread.recovery_action' ORDER BY event_seq ASC",
+        (tid,),
+    ).fetchall()
+    assert [str(row[0]) for row in action_rows] == [user_msg_id, user_msg_id]
+    notices = [
+        notice
+        for notice in _notices(db, tid)
+        if notice.get("action") in {"scheduled", "applied"}
+    ]
+    assert len(notices) == 2
+    for payload in [*actions, *notices]:
+        assert payload["trigger_msg_id"] == user_msg_id
+        assert payload["source_msg_id"] == source_msg_id
+        assert payload["source_event_seq"] == source_event_seq
+        assert "source_detail" not in payload
+        assert len(payload["source_summary"]) <= 240
+        assert marker not in json.dumps(payload, ensure_ascii=False)
+        assert len(json.dumps(payload, ensure_ascii=False)) < 2_000
+
+
 def test_toggle_off_disables_auto_continue(tmp_path):
     db = _make_db(tmp_path)
     tid, _user_msg_id = _make_thread(db)
@@ -434,16 +629,21 @@ def test_phase4_transient_errors_schedule_apply_and_retry_once(
     applied = [notice for notice in notices if notice.get("action") == "applied"]
     assert len(scheduled) == 1
     assert len(applied) == 1
+    source_event_seq, source_msg_id, source = _runner_error_record(db, tid)
+    assert source["content"] == f"LLM/runner error: {error}"
     for notice in (scheduled[0], applied[0]):
         assert notice["decision_category"] == category
         assert notice["decision_reason"]
-        assert notice["source_detail"] == f"LLM/runner error: {error}"
-        if category == "server_error":
-            assert "Responses API error (server_error)" in notice["source_detail"]
-            assert "553755af-e48c-412a-b824-beee36624640" in notice["source_detail"]
+        assert "source_detail" not in notice
+        assert notice["source_summary"]
+        assert len(notice["source_summary"]) <= 240
+        assert notice["source_msg_id"] == source_msg_id
+        assert notice["source_event_seq"] == source_event_seq
         assert notice["trigger_msg_id"] == user_msg_id
         assert notice["delay_sec"] == expected_delay
-        assert error in notice["content"]
+        assert len(notice["content"]) < 1_000
+        if len(f"LLM/runner error: {error}") > 240:
+            assert f"LLM/runner error: {error}" not in notice["content"]
 
 
 def test_phase4_processing_retry_attempt_cap_stops_second_failure(tmp_path):
@@ -513,4 +713,12 @@ def test_phase4_nearby_permanent_or_ambiguous_errors_stop_without_retry(
     stopped = [notice for notice in notices if notice.get("action") == "stopped"]
     assert len(stopped) == 1
     assert stopped[0]["decision_category"] == category
-    assert error in stopped[0]["content"]
+    assert "source_detail" not in stopped[0]
+    assert len(stopped[0]["source_summary"]) <= 240
+    source_event_seq, source_msg_id, source = _runner_error_record(db, tid)
+    assert source["content"] == f"LLM/runner error: {error}"
+    assert stopped[0]["source_msg_id"] == source_msg_id
+    assert stopped[0]["source_event_seq"] == source_event_seq
+    assert len(stopped[0]["content"]) < 1_000
+    if len(f"LLM/runner error: {error}") > 240:
+        assert f"LLM/runner error: {error}" not in stopped[0]["content"]

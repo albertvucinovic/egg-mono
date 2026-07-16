@@ -22,6 +22,8 @@ DEFAULT_SERVER_DELAY_SEC = 5.0
 DEFAULT_RATE_LIMIT_DELAY_SEC = 5.0
 DEFAULT_EMPTY_OR_INCOMPLETE_DELAY_SEC = 2.0
 DEFAULT_MAX_RETRY_DELAY_SEC = 300.0
+RECOVERY_ACTION_EVENT_TYPE = "thread.recovery_action"
+_LEGACY_RECOVERY_NOTICE_LOOKBACK = 256
 
 _RETRIABLE_SERVER_STATUS_CODES = {500, 502, 503, 504, 520, 524, 529}
 
@@ -526,27 +528,60 @@ def find_latest_recovery_source_after(
 
 
 def recovery_attempt_count(db: Any, thread_id: str, trigger_msg_id: Optional[str]) -> int:
+    """Count one trigger's applied attempts without scanning unrelated history."""
+
     if not trigger_msg_id:
         return 0
-    count = 0
     try:
         rows = db.conn.execute(
-            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
-            (thread_id,),
+            "SELECT payload_json FROM events INDEXED BY events_msg_seq "
+            "WHERE msg_id=? AND thread_id=? AND type=? "
+            "ORDER BY event_seq DESC LIMIT 2",
+            (trigger_msg_id, thread_id, RECOVERY_ACTION_EVENT_TYPE),
         ).fetchall()
     except Exception:
         return 0
+    count = 0
     for (payload_json,) in rows:
         payload = _payload_from_json(payload_json)
-        if not payload.get("recovery_notice"):
-            continue
-        if payload.get("auto_continue") is not True:
-            continue
-        if payload.get("action") != "applied":
-            continue
-        if payload.get("trigger_msg_id") == trigger_msg_id:
+        if (
+            payload.get("action") == "applied"
+            and payload.get("trigger_msg_id") == trigger_msg_id
+        ):
             count += 1
-    return count
+    if count:
+        return count
+
+    # Compatibility fallback for attempts written before the dedicated action
+    # event existed. Bound this to the trigger's indexed message suffix: an
+    # applied legacy notice can only occur after that trigger was created.
+    try:
+        trigger_row = db.conn.execute(
+            "SELECT event_seq FROM events INDEXED BY events_msg_seq "
+            "WHERE msg_id=? AND thread_id=? AND type='msg.create' "
+            "ORDER BY event_seq ASC LIMIT 1",
+            (trigger_msg_id, thread_id),
+        ).fetchone()
+        if trigger_row is None:
+            return 0
+        legacy_rows = db.conn.execute(
+            "SELECT payload_json FROM events INDEXED BY events_thread_type "
+            "WHERE thread_id=? AND type='msg.create' AND event_seq>? "
+            "ORDER BY event_seq DESC LIMIT ?",
+            (thread_id, int(trigger_row[0]), _LEGACY_RECOVERY_NOTICE_LOOKBACK),
+        ).fetchall()
+    except Exception:
+        return 0
+    for (payload_json,) in legacy_rows:
+        payload = _payload_from_json(payload_json)
+        if (
+            payload.get("recovery_notice") is True
+            and payload.get("auto_continue") is True
+            and payload.get("action") == "applied"
+            and payload.get("trigger_msg_id") == trigger_msg_id
+        ):
+            return 1
+    return 0
 
 
 def message_is_skipped(db: Any, thread_id: str, msg_id: str) -> bool:
@@ -657,8 +692,8 @@ def format_recovery_decision_notice(decision: RecoveryDecision, *, source: str =
     lines.append(f"Reason: {decision.reason}")
     if decision.stop_reason and not decision.retriable:
         lines.append(f"Stop reason: {decision.stop_reason}")
-    if decision.source_detail:
-        lines.append(f"Source: {decision.source_detail}")
+    if decision.source_summary:
+        lines.append(f"Source summary: {decision.source_summary}")
     return "\n".join(lines)
 
 
@@ -686,8 +721,8 @@ def format_auto_continue_notice(
         lines.append(f"Stop reason: {decision.stop_reason}")
     if detail:
         lines.append(f"Detail: {detail}")
-    if decision.source_detail:
-        lines.append(f"Previous error: {decision.source_detail}")
+    if decision.source_summary:
+        lines.append(f"Previous error summary: {decision.source_summary}")
     return "\n".join(lines)
 
 
@@ -698,6 +733,7 @@ __all__ = [
     "DEFAULT_SERVER_DELAY_SEC",
     "DEFAULT_TIMEOUT_DELAY_SEC",
     "DEFAULT_TRANSPORT_DELAY_SEC",
+    "RECOVERY_ACTION_EVENT_TYPE",
     "RecoveryFenceResult",
     "RecoveryDecision",
     "RecoverySource",

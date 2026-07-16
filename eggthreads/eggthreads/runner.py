@@ -1078,6 +1078,7 @@ class ThreadRunner:
                 find_latest_recovery_source_after,
                 format_auto_continue_notice,
                 recovery_attempt_count,
+                RECOVERY_ACTION_EVENT_TYPE,
             )
         except Exception:
             return
@@ -1100,8 +1101,48 @@ class ThreadRunner:
             'source_event_seq': source.event_seq,
             'decision_category': decision.category,
             'decision_reason': decision.reason,
-            'source_detail': decision.source_detail,
+            'source_summary': decision.source_summary,
         }
+
+        def append_action_notice(
+            action: str,
+            *,
+            detail: Optional[str] = None,
+            stop_reason: Optional[str] = None,
+            delay_sec: Optional[float] = None,
+        ) -> None:
+            extra = {**extra_base, 'action': action}
+            if stop_reason is not None:
+                extra['stop_reason'] = stop_reason
+            if delay_sec is not None:
+                extra['delay_sec'] = float(delay_sec)
+            savepoint = f"append_recovery_action_{os.urandom(8).hex()}"
+            self.db.conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                append_recovery_notice(
+                    self.db,
+                    self.thread_id,
+                    format_auto_continue_notice(
+                        decision,
+                        action=action.replace('_', ' '),
+                        trigger_msg_id=trigger_msg_id,
+                        source_msg_id=source.msg_id,
+                        detail=detail,
+                    ),
+                    extra=extra,
+                )
+                self.db.append_event(
+                    event_id=os.urandom(10).hex(),
+                    thread_id=self.thread_id,
+                    type_=RECOVERY_ACTION_EVENT_TYPE,
+                    payload=extra,
+                    msg_id=trigger_msg_id,
+                )
+                self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception:
+                self.db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
 
         if not decision.retriable:
             if decision.category in {'context_length', 'max_output'}:
@@ -1116,62 +1157,27 @@ class ThreadRunner:
                             selector=source.msg_id if decision.category == 'max_output' else (trigger_msg_id or 'last_message'),
                         )
                         if summary_result.success:
-                            append_recovery_notice(
-                                self.db,
-                                self.thread_id,
-                                format_auto_continue_notice(
-                                    decision,
-                                    action='compaction scheduled',
-                                    trigger_msg_id=trigger_msg_id,
-                                    source_msg_id=source.msg_id,
-                                    detail=summary_result.message,
-                                ),
-                                extra={**extra_base, 'action': 'compaction_scheduled'},
+                            append_action_notice(
+                                'compaction_scheduled',
+                                detail=summary_result.message,
                             )
                             create_snapshot(self.db, self.thread_id)
                             return
                 except Exception:
                     pass
-            append_recovery_notice(
-                self.db,
-                self.thread_id,
-                format_auto_continue_notice(
-                    decision,
-                    action='stopped',
-                    trigger_msg_id=trigger_msg_id,
-                    source_msg_id=source.msg_id,
-                ),
-                extra={**extra_base, 'action': 'stopped'},
-            )
+            append_action_notice('stopped')
             return
 
         if recovery_attempt_count(self.db, self.thread_id, trigger_msg_id) >= 1:
-            append_recovery_notice(
-                self.db,
-                self.thread_id,
-                format_auto_continue_notice(
-                    decision,
-                    action='stopped',
-                    trigger_msg_id=trigger_msg_id,
-                    source_msg_id=source.msg_id,
-                    detail='automatic continue attempt cap reached',
-                ),
-                extra={**extra_base, 'action': 'stopped', 'stop_reason': 'attempt_cap'},
+            append_action_notice(
+                'stopped',
+                detail='automatic continue attempt cap reached',
+                stop_reason='attempt_cap',
             )
             return
 
         delay_sec = float(decision.delay_sec or 0.0)
-        append_recovery_notice(
-            self.db,
-            self.thread_id,
-            format_auto_continue_notice(
-                decision,
-                action='scheduled',
-                trigger_msg_id=trigger_msg_id,
-                source_msg_id=source.msg_id,
-            ),
-            extra={**extra_base, 'action': 'scheduled', 'delay_sec': delay_sec},
-        )
+        append_action_notice('scheduled', delay_sec=delay_sec)
         if delay_sec > 0:
             await asyncio.sleep(delay_sec)
 
@@ -1184,47 +1190,26 @@ class ThreadRunner:
             max_attempts=1,
         )
         if not fence.ok:
-            append_recovery_notice(
-                self.db,
-                self.thread_id,
-                format_auto_continue_notice(
-                    decision,
-                    action='stopped',
-                    trigger_msg_id=trigger_msg_id,
-                    source_msg_id=source.msg_id,
-                    detail=fence.reason,
-                ),
-                extra={**extra_base, 'action': 'stopped', 'stop_reason': fence.reason},
+            append_action_notice(
+                'stopped',
+                detail=fence.reason,
+                stop_reason=fence.reason,
             )
             return
 
         result = continue_thread(self.db, self.thread_id, msg_id=trigger_msg_id)
         if result.success:
-            append_recovery_notice(
-                self.db,
-                self.thread_id,
-                format_auto_continue_notice(
-                    decision,
-                    action='applied',
-                    trigger_msg_id=trigger_msg_id,
-                    source_msg_id=source.msg_id,
-                    detail=result.message,
-                ),
-                extra={**extra_base, 'action': 'applied', 'delay_sec': delay_sec},
+            append_action_notice(
+                'applied',
+                detail=result.message,
+                delay_sec=delay_sec,
             )
             create_snapshot(self.db, self.thread_id)
         else:
-            append_recovery_notice(
-                self.db,
-                self.thread_id,
-                format_auto_continue_notice(
-                    decision,
-                    action='stopped',
-                    trigger_msg_id=trigger_msg_id,
-                    source_msg_id=source.msg_id,
-                    detail=result.message,
-                ),
-                extra={**extra_base, 'action': 'stopped', 'stop_reason': result.message},
+            append_action_notice(
+                'stopped',
+                detail=result.message,
+                stop_reason=result.message,
             )
 
     def _evaluate_pending_approval_policies(self) -> None:

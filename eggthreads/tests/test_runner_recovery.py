@@ -182,7 +182,7 @@ def test_format_recovery_decision_notice_for_retry_and_stop() -> None:
     retry = classify_failure_text("HTTP 503 Service Unavailable")
     retry_notice = format_recovery_decision_notice(retry, source="auto-continue")
     assert "Decision: retry (server_error) after 5s." in retry_notice
-    assert "Source: HTTP 503 Service Unavailable" in retry_notice
+    assert "Source summary: HTTP 503 Service Unavailable" in retry_notice
 
     stop = classify_failure_text("HTTP 400 Bad Request")
     stop_notice = format_recovery_decision_notice(stop, source="auto-continue")
@@ -285,14 +285,16 @@ def test_phase4_transient_classifier_table() -> None:
         assert decision.delay_sec == delay, text
 
 
-def test_recovery_notice_keeps_full_error_beyond_classifier_summary() -> None:
+def test_recovery_notice_bounds_error_beyond_classifier_summary() -> None:
     detail = "LLM/runner error: " + OPENAI_RESPONSES_SERVER_ERROR
     decision = classify_failure_text(detail)
 
     assert len(decision.source_summary) <= 240
     assert decision.source_summary.endswith("…")
     notice = format_recovery_decision_notice(decision)
-    assert detail in notice
+    assert decision.source_summary in notice
+    assert detail not in notice
+    assert len(notice) < 500
 
 
 def test_phase4_transient_retry_after_is_bounded_and_preserves_detail() -> None:
