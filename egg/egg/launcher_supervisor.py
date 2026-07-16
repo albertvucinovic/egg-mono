@@ -173,7 +173,15 @@ def _signal_group(pgid: int, signum: int) -> None:
 
 
 def _kill_and_reap_leader(leader_pid: int) -> bool:
-    """Kill/reap one retained child PID without procfs or a blocking wait."""
+    """Fence one generation group with KILL, then boundedly reap its leader."""
+
+    # The unreaped direct-child leader is the PID/PGID identity fence. Always
+    # kill the entire fenced group before waitpid can destroy that identity,
+    # even when the leader is already waitable after an earlier TERM.
+    _signal_group(leader_pid, signal.SIGCONT)
+    _signal_group(leader_pid, signal.SIGKILL)
+    _signal_pid(leader_pid, signal.SIGCONT)
+    _signal_pid(leader_pid, signal.SIGKILL)
 
     deadline = time.monotonic() + max(_GRACE_SECONDS, 0.5)
     while True:
@@ -182,13 +190,8 @@ def _kill_and_reap_leader(leader_pid: int) -> bool:
         except ChildProcessError:
             return True
         if waited_pid == leader_pid:
+            # Never signal leader_pid/PGID after this point: it can now be reused.
             return True
-        # waitpid==0 proves this is still our unreaped direct child, preserving
-        # PID/PGID identity while the fallback signals are issued.
-        _signal_group(leader_pid, signal.SIGCONT)
-        _signal_group(leader_pid, signal.SIGKILL)
-        _signal_pid(leader_pid, signal.SIGCONT)
-        _signal_pid(leader_pid, signal.SIGKILL)
         if time.monotonic() >= deadline:
             return False
         time.sleep(_POLL_SECONDS)

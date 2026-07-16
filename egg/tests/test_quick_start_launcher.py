@@ -1478,3 +1478,85 @@ def test_supervisor_term_after_final_sample_overrides_normal_status(
     assert samples == 2
     assert status == 143
     assert not state.exists()
+
+
+def test_supervisor_cleanup_failure_kills_same_group_descendant_before_reap(
+    monkeypatch, tmp_path: Path
+):
+    module = _load_launcher_supervisor("test_launcher_group_fence")
+    state = tmp_path / "state"
+    state.write_text("", encoding="utf-8")
+    ready = tmp_path / "ready"
+    child = _write_executable(
+        tmp_path / "group-leader",
+        """#!/usr/bin/env python3
+import os, signal, subprocess, sys, time
+helper = subprocess.Popen([
+    sys.executable,
+    "-c",
+    "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+])
+with open(os.environ["EGG_TEST_READY"], "w", encoding="utf-8") as handle:
+    handle.write(f"{os.getpid()}\\n{helper.pid}\\n")
+while True:
+    time.sleep(1)
+""",
+    )
+    monkeypatch.setenv("EGG_TEST_READY", str(ready))
+    old_handler = signal.getsignal(signal.SIGTERM)
+
+    class TermThenBrokenOwner:
+        def quiesce(self, pid: int, *, leader_exited: bool) -> None:
+            os.killpg(pid, signal.SIGTERM)
+            deadline = time.monotonic() + 1
+            while True:
+                observed = os.waitid(
+                    os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                )
+                if observed is not None and observed.si_pid == pid:
+                    break
+                if time.monotonic() >= deadline:
+                    raise AssertionError("leader did not exit after TERM")
+                time.sleep(0.01)
+            raise RuntimeError("procfs disappeared after leader exit")
+
+    monkeypatch.setattr(module, "_ProcessOwner", TermThenBrokenOwner)
+
+    def trigger_finalizer(*_args, **_kwargs):
+        _wait_for_path(ready)
+        raise RuntimeError("trigger finalizer")
+
+    monkeypatch.setattr(module, "_wait_generation", trigger_finalizer)
+    started = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="trigger finalizer") as raised:
+        module.supervise(
+            [str(child)],
+            cwd=str(tmp_path),
+            state_file=state,
+            reload_exit_code=75,
+            max_reloads=1,
+        )
+
+    assert time.monotonic() - started < 1.5
+    assert any(
+        "procfs disappeared after leader exit" in note
+        for note in raised.value.__notes__
+    )
+    leader_pid, helper_pid = map(
+        int, ready.read_text(encoding="utf-8").splitlines()
+    )
+    _assert_pid_gone(leader_pid)
+    # The subreaper owns and must reap the killed same-group descendant.
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            waited, _status = os.waitpid(helper_pid, os.WNOHANG)
+        except ChildProcessError:
+            waited = helper_pid
+        if waited == helper_pid:
+            break
+        time.sleep(0.01)
+    _assert_pid_gone(helper_pid)
+    assert not state.exists()
+    assert signal.getsignal(signal.SIGTERM) is old_handler
