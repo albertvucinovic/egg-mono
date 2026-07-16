@@ -1196,7 +1196,9 @@ raise SystemExit(0)
 
 
 
-def test_supervisor_signal_in_spawn_wait_handoff_reaches_child_and_escalates(
+
+
+def test_supervisor_pending_term_at_wait_entry_kills_ignoring_child(
     monkeypatch, tmp_path: Path
 ):
     import importlib.util
@@ -1208,25 +1210,43 @@ def test_supervisor_signal_in_spawn_wait_handoff_reaches_child_and_escalates(
     spec.loader.exec_module(module)
     state = tmp_path / "state"
     state.write_text("", encoding="utf-8")
-    forwarded: list[tuple[int, int]] = []
+    ready = tmp_path / "ready"
+    child = _write_executable(
+        tmp_path / "term-ignoring-child",
+        """#!/usr/bin/env python3
+import os, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(os.environ["EGG_TEST_READY"], "w", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()))
+while True:
+    time.sleep(1)
+""",
+    )
+    monkeypatch.setenv("EGG_TEST_READY", str(ready))
+    original_wait = module._wait_generation
+    entered = False
 
-    class Owner:
-        def quiesce(self, pid: int) -> None:
-            forwarded.append((pid, signal.SIGKILL))
+    def inject_at_wait_entry(*args, **kwargs):
+        nonlocal entered
+        if not entered:
+            entered = True
+            _wait_for_path(ready)
+            os.kill(os.getpid(), signal.SIGTERM)
+        return original_wait(*args, **kwargs)
 
-    monkeypatch.setattr(module, "_ProcessOwner", Owner)
-    monkeypatch.setattr(module, "_spawn", lambda *_args: (os.kill(os.getpid(), signal.SIGTERM), 4242)[1])
-    monkeypatch.setattr(module, "_signal_group", lambda pid, sig: forwarded.append((pid, sig)))
-    monkeypatch.setattr(module.os, "waitpid", lambda *_args: (4242, 0))
+    monkeypatch.setattr(module, "_wait_generation", inject_at_wait_entry)
+    started = time.monotonic()
 
     status = module.supervise(
-        ["child"],
+        [str(child)],
         cwd=str(tmp_path),
         state_file=state,
         reload_exit_code=75,
         max_reloads=1,
     )
 
+    elapsed = time.monotonic() - started
     assert status == 143
-    assert forwarded == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+    assert elapsed < 1.5
     assert not state.exists()
+    _assert_pid_gone(int(ready.read_text(encoding="utf-8")))

@@ -211,68 +211,94 @@ def _spawn(argv: Sequence[str], cwd: str) -> int:
     return pid
 
 
+class _SignalRelay:
+    """One signal/deadline authority spanning spawn, handoff, and wait."""
+
+    def __init__(self) -> None:
+        self.child_pid: int | None = None
+        self.pending: list[int] = []
+        self.kill_deadline: float | None = None
+        self.previous = {
+            signum: signal.getsignal(signum) for signum in _FORWARDED_SIGNALS
+        }
+
+    def install(self) -> None:
+        for signum in _FORWARDED_SIGNALS:
+            signal.signal(signum, self.handle)
+
+    def restore(self) -> None:
+        for signum, handler in self.previous.items():
+            signal.signal(signum, handler)
+
+    def handle(self, signum: int, _frame: object) -> None:
+        self.pending.append(signum)
+        if self.child_pid is not None:
+            _signal_group(self.child_pid, signum)
+        if signum in _TERMINATING_SIGNALS and self.kill_deadline is None:
+            self.kill_deadline = time.monotonic() + _GRACE_SECONDS
+
+    def terminating(self) -> int:
+        return _termination_signal(self.pending)
+
+    def clear(self) -> None:
+        self.pending.clear()
+        self.kill_deadline = None
+
+    def escalate_if_due(self) -> None:
+        if (
+            self.child_pid is not None
+            and self.kill_deadline is not None
+            and time.monotonic() >= self.kill_deadline
+        ):
+            _signal_group(self.child_pid, signal.SIGCONT)
+            _signal_group(self.child_pid, signal.SIGKILL)
+            self.kill_deadline = None
+
+
 def _wait_generation(
     child_pid: int,
     *,
     tty_fd: int | None,
     owns_foreground: bool,
-    pending_signals: list[int],
+    relay: _SignalRelay,
 ) -> bool:
-    """Wait for a generation and return current supervisor foreground authority."""
+    """Wait for a generation under the already-installed signal relay."""
 
-    kill_deadline: float | None = None
-
-    def forward(signum: int, _frame: object) -> None:
-        nonlocal kill_deadline
-        pending_signals.append(signum)
-        _signal_group(child_pid, signum)
-        if signum in _TERMINATING_SIGNALS and kill_deadline is None:
-            kill_deadline = time.monotonic() + _GRACE_SECONDS
-
-    previous = {signum: signal.getsignal(signum) for signum in _FORWARDED_SIGNALS}
-    for signum in _FORWARDED_SIGNALS:
-        signal.signal(signum, forward)
-
-    try:
-        while True:
-            try:
-                status = os.waitid(
-                    os.P_PID,
-                    child_pid,
-                    os.WEXITED | os.WSTOPPED | os.WNOHANG | os.WNOWAIT,
+    if relay.child_pid != child_pid:
+        raise RuntimeError("signal relay does not own generation")
+    while True:
+        try:
+            status = os.waitid(
+                os.P_PID,
+                child_pid,
+                os.WEXITED | os.WSTOPPED | os.WNOHANG | os.WNOWAIT,
+            )
+        except InterruptedError:
+            status = None
+        if status is not None and status.si_pid == child_pid:
+            if status.si_code in {os.CLD_STOPPED, os.CLD_TRAPPED}:
+                os.waitid(os.P_PID, child_pid, os.WSTOPPED | os.WNOHANG)
+                if owns_foreground:
+                    _set_foreground_pgrp(tty_fd, os.getpgrp())
+                # This also handles an uncatchable child SIGSTOP: unlike the
+                # rejected implementation, no handler is installed for it.
+                os.kill(os.getpid(), signal.SIGSTOP)
+                # A shell `bg` retains terminal authority; `fg` assigns the
+                # wrapper job's group before continuing it.
+                owns_foreground = (
+                    tty_fd is not None
+                    and _foreground_pgrp(tty_fd) == os.getpgrp()
                 )
-            except InterruptedError:
-                status = None
-            if status is not None and status.si_pid == child_pid:
-                if status.si_code in {os.CLD_STOPPED, os.CLD_TRAPPED}:
-                    os.waitid(os.P_PID, child_pid, os.WSTOPPED | os.WNOHANG)
-                    if owns_foreground:
-                        _set_foreground_pgrp(tty_fd, os.getpgrp())
-                    # This also handles an uncatchable child SIGSTOP: unlike the
-                    # rejected implementation, no handler is installed for it.
-                    os.kill(os.getpid(), signal.SIGSTOP)
-                    # A shell `bg` retains terminal authority; `fg` assigns the
-                    # wrapper job's group before continuing it.
-                    owns_foreground = (
-                        tty_fd is not None
-                        and _foreground_pgrp(tty_fd) == os.getpgrp()
-                    )
-                    if owns_foreground:
-                        _set_foreground_pgrp(tty_fd, child_pid)
-                    # The generation is a separate process group, so explicitly
-                    # continue it. A background terminal read then receives
-                    # SIGTTIN and is surfaced as another stopped job.
-                    _signal_group(child_pid, signal.SIGCONT)
-                elif status.si_code in {os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED}:
-                    return owns_foreground
-            if kill_deadline is not None and time.monotonic() >= kill_deadline:
+                if owns_foreground:
+                    _set_foreground_pgrp(tty_fd, child_pid)
+                # The generation is a separate process group, so explicitly
+                # continue it. A background terminal read then receives
+                # SIGTTIN and is surfaced as another stopped job.
                 _signal_group(child_pid, signal.SIGCONT)
-                _signal_group(child_pid, signal.SIGKILL)
-                kill_deadline = None
-            time.sleep(_POLL_SECONDS)
-    finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+            elif status.si_code in {os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED}:
+                return owns_foreground
+        relay.escalate_if_due()
+        time.sleep(_POLL_SECONDS)
 
 
 def _read_reload_thread(state_file: Path) -> str:
@@ -307,41 +333,28 @@ def supervise(
     owns_foreground = tty_fd is not None and _foreground_pgrp(tty_fd) == own_pgrp
     reload_count = 0
     child_pid: int | None = None
-    pending_signals: list[int] = []
-
-    def forward_or_record(signum: int, _frame: object) -> None:
-        pending_signals.append(signum)
-        if child_pid is not None:
-            _signal_group(child_pid, signum)
-
-    previous = {signum: signal.getsignal(signum) for signum in _FORWARDED_SIGNALS}
-    for signum in _FORWARDED_SIGNALS:
-        signal.signal(signum, forward_or_record)
+    relay = _SignalRelay()
+    relay.install()
 
     try:
         while True:
-            terminating = _termination_signal(pending_signals)
+            terminating = relay.terminating()
             if terminating:
                 return 128 + terminating
-            pending_signals.clear()
+            relay.clear()
             state_file.write_text("", encoding="utf-8")
             child_pid = _spawn(child_argv, cwd)
+            relay.child_pid = child_pid
             if owns_foreground:
                 _set_foreground_pgrp(tty_fd, child_pid)
-            terminating = _termination_signal(pending_signals)
-            if terminating:
-                # A signal may arrive after fork but before the generation wait
-                # installs its deadline-owning handler. Forward it now; cleanup
-                # below provides bounded TERM-to-KILL escalation.
-                _signal_group(child_pid, terminating)
-                return 128 + terminating
-            # The outer forwarding handler owns the complete spawn/handoff gap;
-            # this call replaces it only after child_pid is published.
+            # The same installed relay owns spawn, foreground handoff, and
+            # waiting. Any already-pending termination therefore carries its
+            # original escalation deadline into this wait.
             owns_foreground = _wait_generation(
                 child_pid,
                 tty_fd=tty_fd,
                 owns_foreground=owns_foreground,
-                pending_signals=pending_signals,
+                relay=relay,
             )
             if owns_foreground:
                 _set_foreground_pgrp(tty_fd, own_pgrp)
@@ -353,6 +366,7 @@ def supervise(
                 # recursively invoking a second failing quiescence pass.
                 failed_pid = child_pid
                 child_pid = None
+                relay.child_pid = None
                 try:
                     os.waitpid(failed_pid, os.WNOHANG)
                 except ChildProcessError:
@@ -362,9 +376,10 @@ def supervise(
             if waited_pid != child_pid:
                 raise ChildProcessError(f"lost generation leader {child_pid}")
             child_pid = None
+            relay.child_pid = None
 
-            terminating = _termination_signal(pending_signals)
-            pending_signals.clear()
+            terminating = relay.terminating()
+            relay.clear()
             if terminating:
                 return 128 + terminating
             status = _wait_exit_code(wait_status)
@@ -397,8 +412,8 @@ def supervise(
                     os.waitpid(child_pid, 0)
                 except ChildProcessError:
                     pass
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+        relay.child_pid = None
+        relay.restore()
         try:
             state_file.unlink()
         except FileNotFoundError:

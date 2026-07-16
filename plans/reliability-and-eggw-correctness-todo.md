@@ -1,6 +1,6 @@
 # Reliability and EggW Correctness Follow-up TODO
 
-Status: in progress (Phases 1–2 accepted; Phase 3 second repair complete, awaiting independent review)
+Status: in progress (Phases 1–2 accepted; Phase 3 signal-relay follow-up awaiting review)
 Created: 2026-07-15
 Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 
@@ -43,11 +43,11 @@ Original diagnosis: default auto search built Tavily → SearXNG when a Tavily k
 
 CI failure: `test_egg_wrapper_preserves_argv_across_reload` timed out after 15s while invoking `egg/egg.sh` with quoted arguments. Local success alone is insufficient.
 
-- [x] Reproduce or identify the CI-only hang from launcher process/env semantics.
-- [x] Audit recursive `exec "$SCRIPT_DIR/egg.sh"`, reload-state cleanup, inherited reload variables, venv activation, `.env`, and child process ownership.
-- [x] Replace recursion/ambiguous inherited state with a bounded, explicit reload loop if that is the root cause, preserving exact argv and cwd.
-- [x] Add deterministic tests for one reload, repeated reload bounds/failure, quoting, cleanup, and no leaked temp file/process.
-- [x] Run the full Egg test suite.
+- [ ] Reproduce or identify the CI-only hang from launcher process/env semantics.
+- [ ] Audit recursive `exec "$SCRIPT_DIR/egg.sh"`, reload-state cleanup, inherited reload variables, venv activation, `.env`, and child process ownership.
+- [ ] Replace recursion/ambiguous inherited state with a bounded, explicit reload loop if that is the root cause, preserving exact argv and cwd.
+- [ ] Add deterministic tests for one reload, repeated reload bounds/failure, quoting, cleanup, and no leaked temp file/process.
+- [ ] Run the full Egg test suite.
 
 ## Phase 4 — Auto-continue error policy
 
@@ -104,6 +104,10 @@ Current root README opens as an AI self-assessment and comparison essay. The use
 - [ ] For transcript/UI phases, representative 5M-token or equivalent cost-shape validation proves bounded/incremental work without sacrificing history reachability; Phase 5 explicitly covers scrolling, input availability, streaming, pagination, and event-loop responsiveness.
 
 ## Status notes / commit ledger
+
+- 2026-07-16: The remaining spawn→wait race is repaired, pending fresh review. One `_SignalRelay` is installed before any generation spawn and remains the sole handler, pending-termination record, child-forwarder, and TERM→KILL deadline owner through spawn, foreground handoff, `_wait_generation`, and final restoration; `_wait_generation` no longer swaps handlers or initializes a new deadline, so a TERM delivered exactly at function entry retains its original escalation deadline. A real TERM-ignoring infinite child regression monkeypatches only the wait entry boundary, delivers TERM after the child readiness marker and before the original wait body, and asserts status 143, KILL completion under 1.5s, state unlink, and PID disappearance; the test is externally bounded. Focused launcher suite `39 passed`; 20 externally bounded exact-boundary repetitions passed with no matching child or new state file; Python compile and `git diff --check` passed. Phase 3 checklist remains reopened pending independent review; no Phase 4 work started.
+
+- 2026-07-16: Manager re-review rejected follow-up `1dc4d36` on one remaining spawn→wait race. A termination can arrive after the post-spawn pending check but before `_wait_generation` replaces the outer handler: the outer handler forwards and records TERM, but the newly installed local handler never converts that already-pending signal into a KILL deadline. A TERM-ignoring child therefore waits for natural exit or hangs. Repair must use one continuous termination/deadline authority across spawn, handoff, and wait, with a real externally bounded exact-boundary regression. Phase 3 is reopened; no Phase 4 work started.
 
 - 2026-07-16: Phase 3 second-review repair complete, awaiting independent review. Interactive-shell authority is now shell-led: a real Bash PTY proves `egg.sh &` never steals the controlling terminal, normal background exit returns a usable prompt, a foreground child stop returns terminal ownership, `bg` keeps the shell foreground (and a child TTY read stops with SIGTTIN), and subsequent `fg` restores child foreground input; direct initial/post-reload PTY input, Ctrl-C, SIGWINCH, stop/resume, and literal child SIGSTOP also pass. `egg.sh` now sources `.env` exactly once before capturing `EGG_PYTHON_BIN`, `EGG_SUPERVISOR_PYTHON`, and `EGG_MAX_RELOADS`; setup runs under an explicit bounded owner, terminating traps preserve 128+signal, stop/escalate provisioning, never launch the app, and cannot leave live setup group members or launcher state. State creation moved after provisioning under umask 077, including owner-only recreation. The outer supervisor signal handler owns spawn/foreground/wait handoff and the deterministic boundary regression proves a TERM in that gap is forwarded and cleanup-escalated. Linux cleanup verifies procfs before launch, enables subreaping, repeatedly discovers/signals/reaps sequentially adopted descendants through a setsid A→B→C cascade, and fails closed if required procfs becomes unreadable; handler restoration and state unlink are guaranteed even when cleanup raises. Per manager decision, non-Linux availability is preserved with a tested best-effort process-group TERM/KILL contract; escaped-session descendants there are explicitly outside launcher authority. Reload bounds, exact argv/cwd/status/thread identity, clean-checkout explicit-interpreter bypass, and transcript-independent bounded work remain retained. Validation: focused launcher `39 passed`; focused reload/quick-start/command set `138 passed`; 20 bounded repeated complete launcher runs passed after timeout-probe diagnosis with no matching orphan or new state file; full Egg `598 passed`; full EggThreads `1454 passed`; Bash syntax, Python compile, and `git diff --check` passed. `shellcheck` remains unavailable. Three development tool timeouts were diagnosed as flawed exploratory/race harnesses rather than current launcher deadlocks, their orphan/state residue was removed, and all replacement probes are internally and externally bounded. No Phase 4 work started.
 
