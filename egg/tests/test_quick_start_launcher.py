@@ -734,3 +734,499 @@ while True:
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+def test_egg_wrapper_recreated_state_file_remains_owner_only(tmp_path: Path):
+    fake_python = _write_executable(
+        tmp_path / "recreate-state",
+        """#!/usr/bin/env python3
+import os, stat
+path = os.environ["EGG_RELOAD_STATE_FILE"]
+os.unlink(path)
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write("")
+with open(os.environ["EGG_TEST_CAPTURE"], "w", encoding="utf-8") as handle:
+    handle.write(oct(stat.S_IMODE(os.stat(path).st_mode)))
+""",
+    )
+    capture = tmp_path / "mode"
+
+    result = subprocess.run(
+        [str(_egg_wrapper())],
+        cwd=tmp_path,
+        env=_launcher_env(tmp_path, fake_python, EGG_TEST_CAPTURE=str(capture)),
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture.read_text(encoding="utf-8") == "0o600"
+
+
+def _copy_launcher_tree(tmp_path: Path) -> Path:
+    checkout = tmp_path / "checkout"
+    (checkout / "egg" / "egg").mkdir(parents=True)
+    wrapper = _egg_wrapper()
+    (checkout / "egg" / "egg.sh").write_bytes(wrapper.read_bytes())
+    (checkout / "egg" / "egg.sh").chmod(0o755)
+    (checkout / "egg" / "egg" / "launcher_supervisor.py").write_bytes(
+        (wrapper.parent / "egg" / "launcher_supervisor.py").read_bytes()
+    )
+    return checkout
+
+
+def test_egg_wrapper_dotenv_controls_interpreter_supervisor_and_reload_bound(
+    tmp_path: Path,
+):
+    checkout = _copy_launcher_tree(tmp_path)
+    capture = tmp_path / "capture"
+    app = _write_executable(
+        tmp_path / "dotenv-app",
+        """#!/usr/bin/env python3
+import os
+capture = os.environ["EGG_TEST_CAPTURE"]
+try:
+    count = int(open(capture, encoding="utf-8").read())
+except Exception:
+    count = 0
+with open(capture, "w", encoding="utf-8") as handle:
+    handle.write(str(count + 1))
+with open(os.environ["EGG_RELOAD_STATE_FILE"], "w", encoding="utf-8") as handle:
+    handle.write("dotenv-thread\\n")
+raise SystemExit(int(os.environ["EGG_RELOAD_EXIT_CODE"]))
+""",
+    )
+    supervisor_log = tmp_path / "supervisor-log"
+    supervisor = _write_executable(
+        tmp_path / "dotenv-supervisor",
+        f"#!/bin/sh\necho used > {supervisor_log}\nexec {os.fsencode(os.sys.executable).decode()} \"$@\"\n",
+    )
+    (checkout / "egg" / ".env").write_text(
+        f"EGG_PYTHON_BIN={app}\n"
+        f"EGG_SUPERVISOR_PYTHON={supervisor}\n"
+        "EGG_MAX_RELOADS=0\n"
+        f"EGG_TEST_CAPTURE={capture}\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ}
+    for key in (
+        "EGG_PYTHON_BIN",
+        "EGG_SUPERVISOR_PYTHON",
+        "EGG_MAX_RELOADS",
+        "EGG_TEST_CAPTURE",
+    ):
+        env.pop(key, None)
+
+    result = subprocess.run(
+        [str(checkout / "egg" / "egg.sh")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+
+    assert result.returncode == RELOAD_EXIT_CODE
+    assert capture.read_text(encoding="utf-8") == "1"
+    assert supervisor_log.read_text(encoding="utf-8") == "used\n"
+    assert "reload limit (0) exceeded" in result.stderr
+    assert not (checkout / "venv").exists()
+
+
+def test_egg_wrapper_term_during_provisioning_stops_setup_and_never_launches(
+    tmp_path: Path,
+):
+    checkout = _copy_launcher_tree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    setup_info = tmp_path / "setup-info"
+    app_started = tmp_path / "app-started"
+    fake_python3 = _write_executable(
+        bin_dir / "python3",
+        """#!/bin/sh
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+    mkdir -p "$3/bin"
+    cat > "$3/bin/activate" <<'ACTIVATE'
+PATH="$VIRTUAL_ENV/bin:$PATH"
+export PATH
+ACTIVATE
+    echo "$$ $EGG_TEST_SETUP_INFO" > "$EGG_TEST_SETUP_INFO"
+    trap '' TERM
+    sleep 60 &
+    wait
+fi
+exit 99
+""",
+    )
+    _write_executable(
+        tmp_path / "must-not-start",
+        f"#!/bin/sh\ntouch {app_started}\n",
+    )
+    env = {**os.environ}
+    env.pop("EGG_PYTHON_BIN", None)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["EGG_TEST_SETUP_INFO"] = str(setup_info)
+    proc = subprocess.Popen(
+        [str(checkout / "egg" / "egg.sh")],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_path(setup_info)
+        proc.send_signal(signal.SIGTERM)
+        stdout, stderr = proc.communicate(timeout=5)
+        assert proc.returncode == 143, (stdout, stderr)
+        assert not app_started.exists()
+        assert not list(tmp_path.glob("egg-reload.*"))
+        setup_pid = int(setup_info.read_text(encoding="utf-8").split()[0])
+        _assert_pid_gone(setup_pid)
+        live_group_members = []
+        for stat_path in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                fields = stat_path.read_text(encoding="ascii").rsplit(") ", 1)[1].split()
+            except (FileNotFoundError, IndexError):
+                continue
+            if int(fields[2]) == setup_pid and fields[0] != "Z":
+                live_group_members.append(int(stat_path.parent.name))
+        assert live_group_members == []
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        # The fake setup deliberately leaves a partial tree; it must not contain
+        # launcher state and a future run must not treat mode-unsafe state as valid.
+        assert not app_started.exists()
+
+
+def test_process_owner_non_linux_uses_best_effort_group_cleanup(monkeypatch):
+    import importlib.util
+
+    path = _egg_wrapper().parent / "egg" / "launcher_supervisor.py"
+    spec = importlib.util.spec_from_file_location("test_launcher_supervisor", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        module,
+        "_signal_group",
+        lambda pgid, signum: calls.append((pgid, signum)),
+    )
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    owner = module._ProcessOwner()
+    owner.quiesce(123)
+
+    assert owner.strong is False
+    assert calls == [
+        (123, signal.SIGCONT),
+        (123, signal.SIGTERM),
+        (123, signal.SIGKILL),
+    ]
+
+
+def test_process_owner_linux_procfs_failure_is_closed(monkeypatch):
+    import importlib.util
+
+    path = _egg_wrapper().parent / "egg" / "launcher_supervisor.py"
+    spec = importlib.util.spec_from_file_location("test_launcher_supervisor_proc", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        module._ProcessOwner,
+        "_verify_procfs",
+        staticmethod(lambda: (_ for _ in ()).throw(RuntimeError("no proc"))),
+    )
+
+    with pytest.raises(RuntimeError, match="no proc"):
+        module._ProcessOwner()
+
+
+def test_supervisor_cleanup_error_still_restores_handlers_and_unlinks_state(
+    monkeypatch, tmp_path: Path
+):
+    import importlib.util
+
+    path = _egg_wrapper().parent / "egg" / "launcher_supervisor.py"
+    spec = importlib.util.spec_from_file_location("test_launcher_cleanup", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    state = tmp_path / "state"
+    state.write_text("", encoding="utf-8")
+    old_handler = signal.getsignal(signal.SIGTERM)
+
+    class Owner:
+        def quiesce(self, _pid: int) -> None:
+            raise RuntimeError("cleanup exploded")
+
+    monkeypatch.setattr(module, "_ProcessOwner", Owner)
+    monkeypatch.setattr(module, "_spawn", lambda *_args: 99_999_999)
+    monkeypatch.setattr(
+        module,
+        "_wait_generation",
+        lambda *_args, **kwargs: kwargs["owns_foreground"],
+    )
+    monkeypatch.setattr(module, "_foreground_pgrp", lambda _fd: None)
+    monkeypatch.setattr(module, "_controlling_tty_fd", lambda: None)
+    monkeypatch.setattr(module.os, "waitpid", lambda *_args: (0, 0))
+
+    with pytest.raises(RuntimeError, match="cleanup exploded"):
+        module.supervise(
+            ["child"],
+            cwd=str(tmp_path),
+            state_file=state,
+            reload_exit_code=75,
+            max_reloads=1,
+        )
+
+    assert not state.exists()
+    assert signal.getsignal(signal.SIGTERM) is old_handler
+
+
+def _start_interactive_shell(
+    tmp_path: Path, fake_python: Path
+) -> tuple[subprocess.Popen[bytes], int]:
+    master, slave = os.openpty()
+
+    def acquire_controlling_tty() -> None:
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+    env = _launcher_env(tmp_path, fake_python)
+    env.update({"PS1": "EGG-TEST-PROMPT> ", "PS2": ""})
+    proc = subprocess.Popen(
+        ["/bin/bash", "--noprofile", "--norc", "-i"],
+        cwd=tmp_path,
+        env=env,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        preexec_fn=acquire_controlling_tty,
+    )
+    os.close(slave)
+    return proc, master
+
+
+def _shell_write(master: int, command: str) -> None:
+    os.write(master, command.encode("utf-8") + b"\n")
+
+
+def test_egg_wrapper_interactive_shell_background_job_never_steals_tty(
+    tmp_path: Path,
+):
+    fake_python = _write_executable(
+        tmp_path / "background-child",
+        """#!/usr/bin/env python3
+import os, time
+print(f"BACKGROUND {os.getpgrp()} {os.tcgetpgrp(0)}", flush=True)
+time.sleep(0.2)
+""",
+    )
+    shell, master = _start_interactive_shell(tmp_path, fake_python)
+    try:
+        _read_until(master, b"EGG-TEST-PROMPT>")
+        _shell_write(master, f"{_egg_wrapper()} &")
+        launched = _read_until(master, b"EGG-TEST-PROMPT>")
+        job_pgid = int(launched.split(b"[1] ", 1)[1].split()[0])
+        output = _read_until(master, b"BACKGROUND")
+        child_pgrp, foreground = map(
+            int, output.split(b"BACKGROUND ", 1)[1].split()[:2]
+        )
+        assert child_pgrp != job_pgid
+        assert foreground != job_pgid
+        assert foreground != child_pgrp
+        _shell_write(master, "wait %1")
+        _read_until(master, b"EGG-TEST-PROMPT>")
+        _shell_write(master, "echo SHELL-ALIVE")
+        _read_until(master, b"SHELL-ALIVE")
+    finally:
+        _shell_write(master, "exit")
+        shell.wait(timeout=5)
+        os.close(master)
+
+
+@pytest.mark.parametrize("resume", ["bg", "fg"])
+def test_egg_wrapper_interactive_shell_stop_respects_bg_and_fg(
+    tmp_path: Path, resume: str
+):
+    fake_python = _write_executable(
+        tmp_path / "stopping-child",
+        """#!/usr/bin/env python3
+import os, signal, sys
+print(f"STOPPING {os.getpid()} {os.getpgrp()} {os.tcgetpgrp(0)}", flush=True)
+os.kill(os.getpid(), signal.SIGTSTP)
+print(f"RESUMED {os.getpid()} {os.getpgrp()} {os.tcgetpgrp(0)}", flush=True)
+line = sys.stdin.readline()
+print(f"GOT {line.strip()}", flush=True)
+""",
+    )
+    shell, master = _start_interactive_shell(tmp_path, fake_python)
+    try:
+        _read_until(master, b"EGG-TEST-PROMPT>")
+        _shell_write(master, str(_egg_wrapper()))
+        stopped = _read_until(master, b"STOPPING")
+        child_pid = int(stopped.split(b"STOPPING ", 1)[1].split()[0])
+        _read_until(master, b"EGG-TEST-PROMPT>")
+        _shell_write(master, f"{resume} %1")
+        if resume == "bg":
+            background = _read_until(master, b"RESUMED")
+            background_pgrp, background_foreground = map(
+                int, background.split(b"RESUMED ", 1)[1].split()[1:3]
+            )
+            assert background_pgrp == child_pid
+            assert background_foreground != child_pid
+            _shell_write(master, "fg %1")
+            # The first background read stopped the child with SIGTTIN. Bash
+            # may report that stop before applying this fg; a second fg then
+            # resumes the complete job in the foreground.
+            foreground_output = _read_until(master, b"EGG-TEST-PROMPT>")
+            if b"Stopped" in foreground_output:
+                _shell_write(master, "fg %1")
+            else:
+                # The shell can print the prompt before its asynchronous job
+                # notification. Wait for that notification before the retry.
+                notification = _read_until(master, b"Stopped")
+                assert b"Stopped" in notification
+                _shell_write(master, "fg %1")
+            resumed = background
+        else:
+            resumed = _read_until(master, b"RESUMED")
+        child_pgrp, foreground = map(
+            int, resumed.split(b"RESUMED ", 1)[1].split()[1:3]
+        )
+        assert child_pgrp == child_pid
+        if resume == "fg":
+            assert foreground == child_pgrp
+        os.write(master, b"shell input\n")
+        _read_until(master, b"GOT shell input")
+        _read_until(master, b"EGG-TEST-PROMPT>")
+    finally:
+        if shell.poll() is None:
+            _shell_write(master, "exit")
+            try:
+                shell.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(shell.pid, signal.SIGKILL)
+                shell.wait()
+        os.close(master)
+
+
+def test_egg_wrapper_child_sigstop_is_mirrored_without_crash(tmp_path: Path):
+    fake_python = _write_executable(
+        tmp_path / "sigstop-child",
+        """#!/usr/bin/env python3
+import os, signal
+print(f"READY {os.getpid()}", flush=True)
+os.kill(os.getpid(), signal.SIGSTOP)
+print("CONTINUED", flush=True)
+""",
+    )
+    proc, master = _start_pty_process(
+        [str(_egg_wrapper())], cwd=tmp_path, env=_launcher_env(tmp_path, fake_python)
+    )
+    try:
+        _read_until(master, b"READY")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            status = Path(f"/proc/{proc.pid}/stat").read_text(encoding="ascii").split()[2]
+            if status in {"T", "t"}:
+                break
+            time.sleep(0.01)
+        assert status in {"T", "t"}
+        os.kill(proc.pid, signal.SIGCONT)
+        _read_until(master, b"CONTINUED")
+        assert proc.wait(timeout=5) == 0
+    finally:
+        os.close(master)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+
+
+def test_egg_wrapper_kills_sequential_reparent_setsid_cascade(tmp_path: Path):
+    fake_python = _write_executable(
+        tmp_path / "cascade-generation",
+        """#!/usr/bin/env python3
+import os, signal, subprocess, sys
+capture = os.environ["EGG_TEST_CAPTURE"]
+code_c = "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(os.environ['EGG_TEST_CAPTURE'] + '.c', 'w').write(str(os.getpid())); time.sleep(60)"
+code_b = "import os,signal,subprocess,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(os.environ['EGG_TEST_CAPTURE'] + '.b', 'w').write(str(os.getpid())); subprocess.Popen([sys.executable, '-c', os.environ['EGG_TEST_CODE_C']]); time.sleep(60)"
+code_a = "import os,signal,subprocess,sys,time; os.setsid(); signal.signal(signal.SIGTERM, signal.SIG_IGN); open(os.environ['EGG_TEST_CAPTURE'] + '.a', 'w').write(str(os.getpid())); subprocess.Popen([sys.executable, '-c', os.environ['EGG_TEST_CODE_B']]); time.sleep(60)"
+os.environ["EGG_TEST_CODE_B"] = code_b
+os.environ["EGG_TEST_CODE_C"] = code_c
+subprocess.Popen([sys.executable, "-c", code_a])
+import time
+for suffix in (".a", ".b", ".c"):
+    deadline = time.monotonic() + 3
+    while not os.path.exists(capture + suffix) and time.monotonic() < deadline:
+        time.sleep(0.01)
+with open(capture + ".state", "w", encoding="utf-8") as handle:
+    handle.write(os.environ["EGG_RELOAD_STATE_FILE"])
+raise SystemExit(0)
+""",
+    )
+    capture = tmp_path / "cascade"
+
+    result = subprocess.run(
+        [str(_egg_wrapper())],
+        cwd=tmp_path,
+        env=_launcher_env(tmp_path, fake_python, EGG_TEST_CAPTURE=str(capture)),
+        text=True,
+        capture_output=True,
+        timeout=7,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for suffix in ("a", "b", "c"):
+        path = Path(f"{capture}.{suffix}")
+        _wait_for_path(path)
+        _assert_pid_gone(int(path.read_text(encoding="utf-8")))
+    state = Path(Path(f"{capture}.state").read_text(encoding="utf-8"))
+    assert not state.exists()
+
+
+
+
+def test_supervisor_signal_in_spawn_wait_handoff_reaches_child_and_escalates(
+    monkeypatch, tmp_path: Path
+):
+    import importlib.util
+
+    path = _egg_wrapper().parent / "egg" / "launcher_supervisor.py"
+    spec = importlib.util.spec_from_file_location("test_launcher_signal_gap", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    state = tmp_path / "state"
+    state.write_text("", encoding="utf-8")
+    forwarded: list[tuple[int, int]] = []
+
+    class Owner:
+        def quiesce(self, pid: int) -> None:
+            forwarded.append((pid, signal.SIGKILL))
+
+    monkeypatch.setattr(module, "_ProcessOwner", Owner)
+    monkeypatch.setattr(module, "_spawn", lambda *_args: (os.kill(os.getpid(), signal.SIGTERM), 4242)[1])
+    monkeypatch.setattr(module, "_signal_group", lambda pid, sig: forwarded.append((pid, sig)))
+    monkeypatch.setattr(module.os, "waitpid", lambda *_args: (4242, 0))
+
+    status = module.supervise(
+        ["child"],
+        cwd=str(tmp_path),
+        state_file=state,
+        reload_exit_code=75,
+        max_reloads=1,
+    )
+
+    assert status == 143
+    assert forwarded == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+    assert not state.exists()

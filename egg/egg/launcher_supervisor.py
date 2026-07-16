@@ -19,43 +19,117 @@ _JOB_CONTROL_SIGNALS = (signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU)
 _FORWARDED_SIGNALS = (*_TERMINATING_SIGNALS, signal.SIGWINCH, *_JOB_CONTROL_SIGNALS)
 
 
-def _require_linux() -> None:
-    if not sys.platform.startswith("linux"):
-        raise RuntimeError("egg launcher supervision currently requires Linux")
+class _ProcessOwner:
+    """Generation cleanup, strong on Linux and process-group best effort elsewhere."""
 
+    def __init__(self) -> None:
+        self.strong = sys.platform.startswith("linux")
+        if not self.strong:
+            return
+        self._verify_procfs()
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, f"cannot enable launcher subreaper: {os.strerror(error)}")
 
-def _enable_subreaper() -> None:
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
-
-
-def _linux_direct_children() -> list[int]:
-    """Return direct children from Linux procfs without reaping them."""
-
-    path = f"/proc/{os.getpid()}/task/{os.getpid()}/children"
-    try:
-        values = Path(path).read_text(encoding="ascii").split()
-    except OSError:
-        return []
-    children: list[int] = []
-    for value in values:
+    @staticmethod
+    def _verify_procfs() -> None:
+        children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
         try:
-            children.append(int(value))
-        except ValueError:
-            continue
-    return children
+            children.read_text(encoding="ascii")
+            Path(f"/proc/{os.getpid()}/stat").read_text(encoding="ascii")
+        except OSError as exc:
+            raise RuntimeError("Linux launcher cleanup requires readable /proc") from exc
 
-
-def _reap_linux_adopted(leader_pid: int) -> None:
-    for pid in _linux_direct_children():
-        if pid == leader_pid:
-            continue
+    @staticmethod
+    def _direct_children() -> list[int]:
+        path = f"/proc/{os.getpid()}/task/{os.getpid()}/children"
         try:
-            os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            continue
+            values = Path(path).read_text(encoding="ascii").split()
+        except OSError as exc:
+            raise RuntimeError("lost required Linux /proc child ownership") from exc
+        try:
+            return [int(value) for value in values]
+        except ValueError as exc:
+            raise RuntimeError("invalid Linux /proc child ownership data") from exc
+
+    @staticmethod
+    def _group_has_live_member(pgid: int) -> bool:
+        try:
+            process_paths = list(Path("/proc").iterdir())
+        except OSError as exc:
+            raise RuntimeError("lost required Linux /proc process inventory") from exc
+        for path in process_paths:
+            if not path.name.isdigit() or path.name == str(pgid):
+                continue
+            try:
+                fields = (
+                    (path / "stat").read_text(encoding="ascii").rsplit(") ", 1)[1].split()
+                )
+                state = fields[0]
+                process_group = int(fields[2])
+            except FileNotFoundError:
+                continue
+            except (IndexError, OSError, ValueError) as exc:
+                raise RuntimeError(f"cannot inspect Linux process {path.name}") from exc
+            if process_group == pgid and state != "Z":
+                return True
+        return False
+
+    def _reap_adopted(self, leader_pid: int) -> None:
+        if not self.strong:
+            return
+        for pid in self._direct_children():
+            if pid == leader_pid:
+                continue
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                continue
+
+    def _linux_remaining(self, leader_pid: int) -> tuple[list[int], bool]:
+        self._reap_adopted(leader_pid)
+        adopted = [pid for pid in self._direct_children() if pid != leader_pid]
+        return adopted, self._group_has_live_member(leader_pid)
+
+    def quiesce(self, leader_pid: int) -> None:
+        """Boundedly terminate one generation and every observable descendant."""
+
+        _signal_group(leader_pid, signal.SIGCONT)
+        _signal_group(leader_pid, signal.SIGTERM)
+        if not self.strong:
+            # Portable contract: members that remain in the generation's process
+            # group are terminated; descendants that create another session are
+            # outside the launcher authority on platforms without subreapers.
+            time.sleep(_GRACE_SECONDS)
+            _signal_group(leader_pid, signal.SIGKILL)
+            return
+
+        deadline = time.monotonic() + _GRACE_SECONDS
+        while time.monotonic() < deadline:
+            adopted, group_alive = self._linux_remaining(leader_pid)
+            if not adopted and not group_alive:
+                return
+            for pid in adopted:
+                _signal_pid(pid, signal.SIGCONT)
+                _signal_pid(pid, signal.SIGTERM)
+            time.sleep(_POLL_SECONDS)
+
+        # Adoption can happen one link at a time. Re-read and signal every newly
+        # adopted PID on every pass until the ownership tree converges or the
+        # bounded hard-cleanup deadline expires.
+        deadline = time.monotonic() + max(_GRACE_SECONDS * 4, 2.0)
+        while time.monotonic() < deadline:
+            _signal_group(leader_pid, signal.SIGCONT)
+            _signal_group(leader_pid, signal.SIGKILL)
+            adopted, group_alive = self._linux_remaining(leader_pid)
+            if not adopted and not group_alive:
+                return
+            for pid in adopted:
+                _signal_pid(pid, signal.SIGCONT)
+                _signal_pid(pid, signal.SIGKILL)
+            time.sleep(_POLL_SECONDS)
+        raise RuntimeError(f"generation process group {leader_pid} did not terminate")
 
 
 def _signal_pid(pid: int, signum: int) -> None:
@@ -72,74 +146,6 @@ def _signal_group(pgid: int, signum: int) -> None:
         pass
 
 
-def _process_group_has_live_member(pgid: int) -> bool:
-    if not sys.platform.startswith("linux"):
-        return False
-    try:
-        process_paths = Path("/proc").iterdir()
-    except OSError:
-        return False
-    for path in process_paths:
-        if not path.name.isdigit() or path.name == str(pgid):
-            continue
-        try:
-            fields = (
-                (path / "stat").read_text(encoding="ascii").rsplit(") ", 1)[1].split()
-            )
-            state = fields[0]
-            process_group = int(fields[2])
-        except (IndexError, OSError, ValueError):
-            continue
-        if process_group == pgid and state != "Z":
-            return True
-    return False
-
-
-def _quiesce_generation(pgid: int) -> None:
-    """Terminate/reap every process left by one completed generation.
-
-    The generation gets its own process group and this process is a subreaper.
-    We never start the next generation until that group has no live members and
-    all adopted descendants have been reaped. The leader stays a zombie until
-    the caller collects its status, preventing PGID reuse while group signalling
-    is still possible.
-    """
-
-    _signal_group(pgid, signal.SIGCONT)
-    _signal_group(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + _GRACE_SECONDS
-    while time.monotonic() < deadline:
-        children = _linux_direct_children()
-        adopted = [pid for pid in children if pid != pgid]
-        group_alive = _process_group_has_live_member(pgid)
-        if not adopted and not group_alive:
-            return
-        for pid in adopted:
-            _signal_pid(pid, signal.SIGCONT)
-            _signal_pid(pid, signal.SIGTERM)
-        _reap_linux_adopted(pgid)
-        time.sleep(_POLL_SECONDS)
-
-    _signal_group(pgid, signal.SIGCONT)
-    _signal_group(pgid, signal.SIGKILL)
-    for pid in _linux_direct_children():
-        if pid == pgid:
-            continue
-        _signal_pid(pid, signal.SIGCONT)
-        _signal_pid(pid, signal.SIGKILL)
-
-    deadline = time.monotonic() + _GRACE_SECONDS
-    while time.monotonic() < deadline:
-        _reap_linux_adopted(pgid)
-        children = _linux_direct_children()
-        adopted = [pid for pid in children if pid != pgid]
-        group_alive = _process_group_has_live_member(pgid)
-        if not adopted and not group_alive:
-            return
-        time.sleep(_POLL_SECONDS)
-    raise RuntimeError(f"generation process group {pgid} did not terminate")
-
-
 def _wait_exit_code(wait_status: int) -> int:
     if os.WIFEXITED(wait_status):
         return os.WEXITSTATUS(wait_status)
@@ -148,7 +154,7 @@ def _wait_exit_code(wait_status: int) -> int:
     return 1
 
 
-def _tty_fd() -> int | None:
+def _controlling_tty_fd() -> int | None:
     for fd in (0, 1, 2):
         try:
             if os.isatty(fd):
@@ -157,6 +163,17 @@ def _tty_fd() -> int | None:
         except OSError:
             continue
     return None
+
+
+def _foreground_pgrp(fd: int | None) -> int | None:
+    if fd is None:
+        return None
+    try:
+        return os.tcgetpgrp(fd)
+    except OSError as exc:
+        if exc.errno == errno.ENOTTY:
+            return None
+        raise
 
 
 def _set_foreground_pgrp(fd: int | None, pgid: int) -> None:
@@ -174,26 +191,13 @@ def _set_foreground_pgrp(fd: int | None, pgid: int) -> None:
 
 
 def _spawn(argv: Sequence[str], cwd: str) -> int:
-    # Block forwarded signals across fork/setpgid. The child restores inherited
-    # handlers and unmasks before exec; the parent publishes the child PGID
-    # before unmasking, so no termination can land in the creation gap.
-    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, _FORWARDED_SIGNALS)
-    try:
-        pid = os.fork()
-    except BaseException:
-        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
-        raise
+    pid = os.fork()
     if pid == 0:
         try:
             os.setpgid(0, 0)
             for signum in _FORWARDED_SIGNALS:
                 signal.signal(signum, signal.SIG_DFL)
-            # Python itself maps SIGINT to KeyboardInterrupt; the shell that
-            # execs this supervisor may instead have inherited SIGINT ignored
-            # (common for asynchronous or test launchers). Restore Python's
-            # ordinary interactive Ctrl-C behavior explicitly.
             signal.signal(signal.SIGINT, signal.default_int_handler)
-            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
             os.chdir(cwd)
             os.execvpe(argv[0], list(argv), os.environ)
         except BaseException as exc:
@@ -204,16 +208,18 @@ def _spawn(argv: Sequence[str], cwd: str) -> int:
     except OSError as exc:
         if exc.errno not in (errno.EACCES, errno.ESRCH):
             raise
-    finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
     return pid
 
 
 def _wait_generation(
     child_pid: int,
+    *,
     tty_fd: int | None,
+    owns_foreground: bool,
     pending_signals: list[int],
-) -> None:
+) -> bool:
+    """Wait for a generation and return current supervisor foreground authority."""
+
     kill_deadline: float | None = None
 
     def forward(signum: int, _frame: object) -> None:
@@ -239,22 +245,26 @@ def _wait_generation(
                 status = None
             if status is not None and status.si_pid == child_pid:
                 if status.si_code in {os.CLD_STOPPED, os.CLD_TRAPPED}:
-                    stop_signal = status.si_status
-                    # Consume the stop notification while retaining future exit
-                    # status and the leader PID as a cleanup identity fence.
                     os.waitid(os.P_PID, child_pid, os.WSTOPPED | os.WNOHANG)
-                    _set_foreground_pgrp(tty_fd, os.getpgrp())
-                    previous_stop = signal.getsignal(stop_signal)
-                    signal.signal(stop_signal, signal.SIG_DFL)
-                    # An orphaned process group discards default job-control
-                    # stops. SIGSTOP reliably mirrors the child stop; the shell
-                    # or embedding resumes this stable supervisor PID.
+                    if owns_foreground:
+                        _set_foreground_pgrp(tty_fd, os.getpgrp())
+                    # This also handles an uncatchable child SIGSTOP: unlike the
+                    # rejected implementation, no handler is installed for it.
                     os.kill(os.getpid(), signal.SIGSTOP)
-                    signal.signal(stop_signal, previous_stop)
-                    _set_foreground_pgrp(tty_fd, child_pid)
+                    # A shell `bg` retains terminal authority; `fg` assigns the
+                    # wrapper job's group before continuing it.
+                    owns_foreground = (
+                        tty_fd is not None
+                        and _foreground_pgrp(tty_fd) == os.getpgrp()
+                    )
+                    if owns_foreground:
+                        _set_foreground_pgrp(tty_fd, child_pid)
+                    # The generation is a separate process group, so explicitly
+                    # continue it. A background terminal read then receives
+                    # SIGTTIN and is surfaced as another stopped job.
                     _signal_group(child_pid, signal.SIGCONT)
                 elif status.si_code in {os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED}:
-                    return
+                    return owns_foreground
             if kill_deadline is not None and time.monotonic() >= kill_deadline:
                 _signal_group(child_pid, signal.SIGCONT)
                 _signal_group(child_pid, signal.SIGKILL)
@@ -272,6 +282,13 @@ def _read_reload_thread(state_file: Path) -> str:
         return ""
 
 
+def _termination_signal(pending_signals: Sequence[int]) -> int:
+    return next(
+        (signum for signum in pending_signals if signum in _TERMINATING_SIGNALS),
+        0,
+    )
+
+
 def supervise(
     child_argv: Sequence[str],
     *,
@@ -282,56 +299,71 @@ def supervise(
 ) -> int:
     if not child_argv:
         raise ValueError("missing child argv")
-    _require_linux()
-    _enable_subreaper()
+    owner = _ProcessOwner()
     own_pgrp = os.getpgrp()
-    tty_fd = _tty_fd()
+    tty_fd = _controlling_tty_fd()
+    # Respect the invoking shell. Only a foreground job may transfer terminal
+    # ownership; a shell-background `egg.sh &` must not steal it.
+    owns_foreground = tty_fd is not None and _foreground_pgrp(tty_fd) == own_pgrp
     reload_count = 0
     child_pid: int | None = None
     pending_signals: list[int] = []
 
-    def record_signal(signum: int, _frame: object) -> None:
+    def forward_or_record(signum: int, _frame: object) -> None:
         pending_signals.append(signum)
+        if child_pid is not None:
+            _signal_group(child_pid, signum)
 
     previous = {signum: signal.getsignal(signum) for signum in _FORWARDED_SIGNALS}
     for signum in _FORWARDED_SIGNALS:
-        signal.signal(signum, record_signal)
+        signal.signal(signum, forward_or_record)
 
     try:
         while True:
-            terminating = next(
-                (
-                    signum
-                    for signum in pending_signals
-                    if signum in _TERMINATING_SIGNALS
-                ),
-                0,
-            )
+            terminating = _termination_signal(pending_signals)
             if terminating:
                 return 128 + terminating
-            # SIGWINCH/job-control notifications received while no generation
-            # exists are stale for the next generation; termination is never
-            # discarded.
             pending_signals.clear()
             state_file.write_text("", encoding="utf-8")
             child_pid = _spawn(child_argv, cwd)
-            _set_foreground_pgrp(tty_fd, child_pid)
-            _wait_generation(child_pid, tty_fd, pending_signals)
-            _set_foreground_pgrp(tty_fd, own_pgrp)
-            _quiesce_generation(child_pid)
+            if owns_foreground:
+                _set_foreground_pgrp(tty_fd, child_pid)
+            terminating = _termination_signal(pending_signals)
+            if terminating:
+                # A signal may arrive after fork but before the generation wait
+                # installs its deadline-owning handler. Forward it now; cleanup
+                # below provides bounded TERM-to-KILL escalation.
+                _signal_group(child_pid, terminating)
+                return 128 + terminating
+            # The outer forwarding handler owns the complete spawn/handoff gap;
+            # this call replaces it only after child_pid is published.
+            owns_foreground = _wait_generation(
+                child_pid,
+                tty_fd=tty_fd,
+                owns_foreground=owns_foreground,
+                pending_signals=pending_signals,
+            )
+            if owns_foreground:
+                _set_foreground_pgrp(tty_fd, own_pgrp)
+            try:
+                owner.quiesce(child_pid)
+            except BaseException:
+                # Mark this generation as already cleanup-attempted; the outer
+                # finalizer still restores handlers and unlinks state without
+                # recursively invoking a second failing quiescence pass.
+                failed_pid = child_pid
+                child_pid = None
+                try:
+                    os.waitpid(failed_pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+                raise
             waited_pid, wait_status = os.waitpid(child_pid, 0)
             if waited_pid != child_pid:
                 raise ChildProcessError(f"lost generation leader {child_pid}")
             child_pid = None
 
-            terminating = next(
-                (
-                    signum
-                    for signum in pending_signals
-                    if signum in _TERMINATING_SIGNALS
-                ),
-                0,
-            )
+            terminating = _termination_signal(pending_signals)
             pending_signals.clear()
             if terminating:
                 return 128 + terminating
@@ -349,10 +381,17 @@ def supervise(
             os.environ["EGG_RELOAD_THREAD_ID"] = thread_id
             reload_count += 1
     finally:
-        _set_foreground_pgrp(tty_fd, own_pgrp)
+        cleanup_error: BaseException | None = None
+        if owns_foreground:
+            try:
+                _set_foreground_pgrp(tty_fd, own_pgrp)
+            except BaseException as exc:
+                cleanup_error = exc
         if child_pid is not None:
             try:
-                _quiesce_generation(child_pid)
+                owner.quiesce(child_pid)
+            except BaseException as exc:
+                cleanup_error = cleanup_error or exc
             finally:
                 try:
                     os.waitpid(child_pid, 0)
@@ -364,6 +403,8 @@ def supervise(
             state_file.unlink()
         except FileNotFoundError:
             pass
+        if cleanup_error is not None and sys.exc_info()[0] is None:
+            raise cleanup_error
 
 
 def main(argv: Sequence[str] | None = None) -> int:
