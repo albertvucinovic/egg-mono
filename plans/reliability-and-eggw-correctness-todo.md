@@ -1,6 +1,6 @@
 # Reliability and EggW Correctness Follow-up TODO
 
-Status: in progress (Phases 1–3 accepted; Phase 4 next)
+Status: in progress (Phases 1–3 accepted; Phase 4 complete, awaiting independent review)
 Created: 2026-07-15
 Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 
@@ -51,11 +51,11 @@ CI failure: `test_egg_wrapper_preserves_argv_across_reload` timed out after 15s 
 
 ## Phase 4 — Auto-continue error policy
 
-- [ ] Add exact conservative classification for OpenAI’s “An error occurred while processing your request. You can retry” server response and retry once.
-- [ ] Classify “remote connection failure” and closely equivalent upstream connection/reset failures as transport errors.
-- [ ] Choose reasonable bounded default delays and honor explicit Retry-After without loops; keep the existing one-attempt cap and recovery fences.
-- [ ] Preserve full provider error detail and distinguish retry scheduled/applied/stopped.
-- [ ] Add table-driven classifier and runner integration tests for positive and nearby permanent/ambiguous negative cases.
+- [x] Add exact conservative classification for OpenAI’s “An error occurred while processing your request. You can retry” server response and retry once.
+- [x] Classify “remote connection failure” and closely equivalent upstream connection/reset failures as transport errors.
+- [x] Choose reasonable bounded default delays and honor explicit Retry-After without loops; keep the existing one-attempt cap and recovery fences.
+- [x] Preserve full provider error detail and distinguish retry scheduled/applied/stopped.
+- [x] Add table-driven classifier and runner integration tests for positive and nearby permanent/ambiguous negative cases.
 
 ## Phase 5 — EggW transcript monotonicity and scroll/timer stability
 
@@ -104,6 +104,10 @@ Current root README opens as an AI self-assessment and comparison essay. The use
 - [ ] For transcript/UI phases, representative 5M-token or equivalent cost-shape validation proves bounded/incremental work without sacrificing history reachability; Phase 5 explicitly covers scrolling, input availability, streaming, pagination, and event-loop responsiveness.
 
 ## Status notes / commit ledger
+
+- 2026-07-16: Phase 4 implementation complete, awaiting independent review. The existing recovery authority is extended rather than duplicated: exact OpenAI `An error occurred while processing your request. You can retry.` (allowing only known runner/exception/request-ID wrappers and an attached retry-delay phrase) classifies as transient `server_error`; nearby incomplete, “cannot retry,” “retry later,” arbitrary-prefix, invalid-request, auth, quota, and safety text remains stopped. `remote connection failure`, RemoteConnectionError/remote-end-close, upstream connect/failure/premature-close/reset, reset-by-peer, and established disconnect/stream errors classify as `transport`, while refused/auth/invalid upstream cases remain permanent. Existing defaults remain 5s server and 2s transport/timeout; explicit numeric/date Retry-After remains honored only through the bounded 300s policy, and excessive delays stop. Existing one-applied-attempt cap, lease/source/manual-continue/newer-activity fences, and durable scheduled/applied/stopped events remain authoritative. Recovery decisions now retain bounded `source_summary` plus full `source_detail`; durable notices and event payloads preserve complete provider detail and decision reason. Table-driven classifier and real runner integrations cover positives/nearby negatives, exact delays, scheduled→applied retry, one-attempt stop, full detail, and distinct action events. Work is bounded to fixed-size failure classification and existing indexed recovery metadata, independent of >5M-token transcript content. Validation: focused recovery/runner/continue/command/compaction `157 passed`; 20 bounded focused repetitions passed; full EggThreads `1464 passed`; full Egg `605 passed`; Python compile and `git diff --check` passed. No Phase 5 work started.
+
+- 2026-07-16: Phase 4 investigation started from clean accepted HEAD `d6b93a2`. Scope is limited to conservative auto-continue recovery policy: exact OpenAI processing-retry text, remote/upstream connection-reset transport failures, bounded defaults/Retry-After, one-attempt and activity/manual-continue fences, complete diagnostics, and distinct scheduled/applied/stopped notices. Existing `runner_recovery.py` and runner integration already provide bounded delay parsing, max-delay rejection, one applied-attempt cap, lease/activity/manual-continue fences, and durable scheduled/applied/stopped notices; the slice will audit and extend those authorities rather than add a parallel retry mechanism. Classification and recovery queries are bounded to failure/attempt metadata and do not load transcript content, preserving >5M-token cost shape. No Phase 5 work started.
 
 - 2026-07-16: Independent fifth review PASSed Phase 3 at immutable accepted HEAD `31c0dee` with no blockers. The accepted Phase 3 chain is `b68d77a` (initial bounded launcher, rejected) → `6c56756` (foreground supervisor repair, rejected) → `1dc4d36` (job-control/provisioning/cleanup/platform repair) → `1ca7311` (continuous spawn/wait signal relay) → `fe504a9` (latched termination/live-leader/init finalization) → `03fb0d9` (bounded cleanup-failure and final-decision protocol) → `31c0dee` (KILL fenced process group before leader reap). Reviewer verified the final KILL-before-reap ordering, confirmed the real same-PGID descendant regression catches the parent failure, ran it 5/5 successfully, ran three related cleanup tests successfully, and found the diff clean; manager independently ran the full focused launcher suite (`46 passed`). Prior validation remains full Egg `604 passed`, full EggThreads `1454 passed`, focused reload/quick-start/command `145 passed`, Bash syntax/Python compile/diff checks, with no tracked residue. Phase 3 is accepted and complete. Phase 4 — auto-continue error policy — is next and has not started.
 

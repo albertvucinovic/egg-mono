@@ -1099,6 +1099,8 @@ class ThreadRunner:
             'source_msg_id': source.msg_id,
             'source_event_seq': source.event_seq,
             'decision_category': decision.category,
+            'decision_reason': decision.reason,
+            'source_detail': decision.source_detail,
         }
 
         if not decision.retriable:

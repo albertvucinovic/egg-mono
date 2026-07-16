@@ -4,6 +4,8 @@ import asyncio
 import json
 import uuid
 
+import pytest
+
 import eggthreads as ts
 from eggthreads.runner import RunnerConfig
 
@@ -390,3 +392,100 @@ def test_toggle_off_disables_auto_continue(tmp_path):
     assert llm.calls == 1
     assert not _notices(db, tid)
     assert ts.discover_runner_actionable(db, tid) is None
+
+
+@pytest.mark.parametrize(
+    "error, category, expected_delay",
+    [
+        (
+            "An error occurred while processing your request. You can retry. retry after 0 seconds",
+            "server_error",
+            0.0,
+        ),
+        (
+            "remote connection failure; retry after 0 seconds; upstream reset request-id=req_transport_full",
+            "transport",
+            0.0,
+        ),
+    ],
+)
+def test_phase4_transient_errors_schedule_apply_and_retry_once(
+    tmp_path, error, category, expected_delay
+):
+    db = _make_db(tmp_path)
+    tid, user_msg_id = _make_thread(db)
+    llm = _BoomLLM(error)
+    runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
+
+    asyncio.run(_run_until_idle(runner))
+
+    assert llm.calls == 2
+    notices = _notices(db, tid)
+    scheduled = [notice for notice in notices if notice.get("action") == "scheduled"]
+    applied = [notice for notice in notices if notice.get("action") == "applied"]
+    assert len(scheduled) == 1
+    assert len(applied) == 1
+    for notice in (scheduled[0], applied[0]):
+        assert notice["decision_category"] == category
+        assert notice["decision_reason"]
+        assert notice["source_detail"] == f"LLM/runner error: {error}"
+        assert notice["trigger_msg_id"] == user_msg_id
+        assert notice["delay_sec"] == expected_delay
+        assert error in notice["content"]
+
+
+def test_phase4_processing_retry_attempt_cap_stops_second_failure(tmp_path):
+    db = _make_db(tmp_path)
+    tid, user_msg_id = _make_thread(db)
+    error = (
+        "An error occurred while processing your request. You can retry. "
+        "retry after 0 seconds"
+    )
+    llm = _BoomLLM(error, error)
+    runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
+
+    asyncio.run(_run_until_idle(runner))
+
+    assert llm.calls == 2
+    notices = _notices(db, tid)
+    assert len(
+        [
+            notice
+            for notice in notices
+            if notice.get("action") == "applied"
+            and notice.get("trigger_msg_id") == user_msg_id
+        ]
+    ) == 1
+    assert any(
+        notice.get("action") == "stopped"
+        and notice.get("stop_reason") == "attempt_cap"
+        for notice in notices
+    )
+
+
+@pytest.mark.parametrize(
+    "error, category",
+    [
+        ("An error occurred while processing your request.", "unknown"),
+        ("An error occurred while processing your request. You cannot retry.", "unknown"),
+        ("upstream rejected invalid request", "invalid_request"),
+        ("remote connection refused: invalid api key", "auth"),
+    ],
+)
+def test_phase4_nearby_permanent_or_ambiguous_errors_stop_without_retry(
+    tmp_path, error, category
+):
+    db = _make_db(tmp_path)
+    tid, _user_msg_id = _make_thread(db)
+    llm = _BoomLLM(error)
+    runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
+
+    asyncio.run(_run_until_idle(runner))
+
+    assert llm.calls == 1
+    notices = _notices(db, tid)
+    assert not [notice for notice in notices if notice.get("action") in {"scheduled", "applied"}]
+    stopped = [notice for notice in notices if notice.get("action") == "stopped"]
+    assert len(stopped) == 1
+    assert stopped[0]["decision_category"] == category
+    assert error in stopped[0]["content"]

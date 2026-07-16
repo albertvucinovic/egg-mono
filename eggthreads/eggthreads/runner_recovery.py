@@ -49,6 +49,7 @@ class RecoveryDecision:
     category: str
     reason: str
     source_summary: str
+    source_detail: str
     delay_sec: Optional[float] = None
     stop_reason: Optional[str] = None
 
@@ -99,6 +100,7 @@ def _retry(category: str, reason: str, source: str, delay_sec: float) -> Recover
         category=category,
         reason=reason,
         source_summary=_short_text(source),
+        source_detail=str(source or "").strip(),
         delay_sec=float(delay_sec),
         stop_reason=None,
     )
@@ -110,6 +112,7 @@ def _stop(category: str, reason: str, source: str, stop_reason: Optional[str] = 
         category=category,
         reason=reason,
         source_summary=_short_text(source),
+        source_detail=str(source or "").strip(),
         delay_sec=None,
         stop_reason=stop_reason or reason,
     )
@@ -221,6 +224,47 @@ def _delay_or_default(text: str, fallback: float, max_delay_sec: float, category
     return _retry(category, reason, text, fallback)
 
 
+def _is_openai_processing_retry_error(text: str) -> bool:
+    """Match only OpenAI's generic transient processing failure sentence."""
+
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    sentence = "An error occurred while processing your request. You can retry."
+    low = normalized.lower()
+    start = low.find(sentence.lower())
+    if start < 0:
+        return False
+    end = start + len(sentence)
+    prefix = normalized[:start]
+    suffix = normalized[end:]
+    # Runner messages prepend a stable label and exception wrappers may add
+    # surrounding punctuation. Request IDs are retained only when separated by
+    # the same wrapper prefix, never by matching arbitrary surrounding prose.
+    known_prefixes = {
+        "",
+        "LLM/runner error: ",
+        "LLM error: ",
+        "Error: ",
+        "RuntimeError('",
+        'RuntimeError("',
+    }
+    prefix_ok = prefix in known_prefixes or bool(
+        re.fullmatch(r"request-id=[^:]+:\s*", prefix, flags=re.IGNORECASE)
+    )
+    suffix = suffix.strip()
+    if suffix in {"", "')", '\")'}:
+        suffix_ok = True
+    else:
+        suffix = suffix.removeprefix("')").removeprefix('\")').strip()
+        suffix_ok = bool(
+            re.fullmatch(
+                r"retry[- ]after\s*:?[ ]*\d+(?:\.\d+)?(?:\s*(?:seconds?|secs?|s|minutes?|mins?|m))?",
+                suffix,
+                flags=re.IGNORECASE,
+            )
+        )
+    return prefix_ok and suffix_ok
+
+
 def _is_transport_error(low: str) -> bool:
     return _contains_any(
         low,
@@ -232,6 +276,15 @@ def _is_transport_error(low: str) -> bool:
             "chunkedencodingerror",
             "incompleteread",
             "serverdisconnectederror",
+            "remote connection failure",
+            "remoteconnectionerror",
+            "remote disconnected",
+            "remote end closed connection",
+            "upstream connection failure",
+            "upstream connect error",
+            "upstream prematurely closed connection",
+            "upstream connection reset",
+            "connection reset by peer",
             "connection reset",
             "connection aborted",
             "connection closed",
@@ -370,6 +423,13 @@ def classify_failure_text(
     source = str(text or "").strip()
     if not source:
         return _stop("none", "No failure text provided", source)
+    if max_delay_sec < 0:
+        return _stop(
+            "unknown",
+            "Retry policy maximum delay is invalid",
+            source,
+            "Retry policy maximum delay must be non-negative",
+        )
     low = source.lower()
 
     if _is_empty_assistant_error(low):
@@ -386,6 +446,15 @@ def classify_failure_text(
         return _stop("quota", "Quota or billing error is not recoverable by continue", source)
     if _is_permanent_invalid_request(low):
         return _stop("invalid_request", "Permanent invalid request/schema error", source)
+
+    if _is_openai_processing_retry_error(source):
+        return _delay_or_default(
+            source,
+            DEFAULT_SERVER_DELAY_SEC,
+            max_delay_sec,
+            "server_error",
+            "Provider reported a transient request-processing failure",
+        )
 
     # Transport checks intentionally precede generic HTTP 400 handling. Some
     # transient transport exceptions include a 400 in their nested text.
@@ -607,8 +676,8 @@ def format_recovery_decision_notice(decision: RecoveryDecision, *, source: str =
     lines.append(f"Reason: {decision.reason}")
     if decision.stop_reason and not decision.retriable:
         lines.append(f"Stop reason: {decision.stop_reason}")
-    if decision.source_summary:
-        lines.append(f"Source: {decision.source_summary}")
+    if decision.source_detail:
+        lines.append(f"Source: {decision.source_detail}")
     return "\n".join(lines)
 
 
@@ -636,8 +705,8 @@ def format_auto_continue_notice(
         lines.append(f"Stop reason: {decision.stop_reason}")
     if detail:
         lines.append(f"Detail: {detail}")
-    if decision.source_summary:
-        lines.append(f"Previous error: {decision.source_summary}")
+    if decision.source_detail:
+        lines.append(f"Previous error: {decision.source_detail}")
     return "\n".join(lines)
 
 
