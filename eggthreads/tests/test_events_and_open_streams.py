@@ -7,10 +7,14 @@ the Egg app, ensuring that eggthreads can be tested on its own.
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any, Dict
+
+import pytest
 
 from eggthreads import ThreadsDB
 from eggthreads import events as events_module
+from eggthreads.runner import _is_transient_sqlite_contention
 
 
 def _make_temp_db(tmp_path) -> ThreadsDB:
@@ -90,6 +94,19 @@ def test_open_streams_lease_heartbeat_and_release(tmp_path) -> None:
     assert db.heartbeat(tid, "inv-lease", "2999-01-02 00:00:00") is True
     assert db.release(tid, "inv-lease") is True
     assert db.current_open(tid) is None
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("database is locked", True),
+        ("database table is locked", True),
+        ("disk I/O error", False),
+        ("attempt to write a readonly database", False),
+    ],
+)
+def test_heartbeat_contention_classifier_is_conservative(message, expected) -> None:
+    assert _is_transient_sqlite_contention(sqlite3.OperationalError(message)) is expected
 
 
 def test_invocation_writer_rejects_expired_lease_without_appending(tmp_path) -> None:

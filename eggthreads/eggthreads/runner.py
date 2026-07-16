@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -83,6 +84,16 @@ def _is_context_length_exceeded_error(exc: BaseException) -> bool:
 
 def _now_plus(ttl_sec: int) -> str:
     return (_utcnow() + timedelta(seconds=ttl_sec)).strftime(ISO)
+
+
+def _is_transient_sqlite_contention(exc: sqlite3.OperationalError) -> bool:
+    """Return True only for SQLite lock/busy failures that can be retried."""
+
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        return True
+    text = str(exc).lower()
+    return "database is locked" in text or "database table is locked" in text
 
 
 def runner_actionable_resource_class(ra: Optional[RunnerActionable]) -> str:
@@ -1444,7 +1455,38 @@ class ThreadRunner:
             nonlocal stop_flag
             while not stop_flag:
                 await asyncio.sleep(self.cfg.heartbeat_sec)
-                if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
+                try:
+                    renewed = self.db.heartbeat(
+                        self.thread_id,
+                        invoke_id,
+                        _now_plus(self.cfg.lease_ttl_sec),
+                    )
+                except sqlite3.OperationalError as exc:
+                    if not _is_transient_sqlite_contention(exc):
+                        raise
+                    # Lock contention is not evidence that this invocation lost
+                    # ownership. Check the exact lease through a fresh
+                    # connection: keep retrying only while that row is still
+                    # live, otherwise stop just like a failed heartbeat.
+                    try:
+                        probe = ThreadsDB(self.db.path)
+                        try:
+                            row = probe.current_open(self.thread_id)
+                        finally:
+                            probe.conn.close()
+                        renewed = bool(
+                            row is not None
+                            and str(row["invoke_id"] or "") == invoke_id
+                            and str(row["lease_until"] or "") > _utcnow_iso()
+                        )
+                    except sqlite3.OperationalError as probe_exc:
+                        if not _is_transient_sqlite_contention(probe_exc):
+                            raise
+                        # The next lease-fenced write remains fail-closed. An
+                        # unavailable probe must not by itself kill an otherwise
+                        # healthy long-running tool invocation.
+                        continue
+                if not renewed:
                     stop_flag = True
                     return
 
