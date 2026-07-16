@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import eggthreads as ts
+from eggthreads.runner import ThreadRunner
 
 
 GET_USER_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
@@ -167,6 +170,102 @@ def test_wait_tool_inherits_active_get_user_waiting_state(tmp_path, monkeypatch)
 
     assert f"Thread {tid[-8:]} finished" in out
     assert "What title should I use?" in out
+
+
+def test_wait_observes_get_user_boundary_after_transient_heartbeat_error(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.enqueue_user_tool_call(db, parent, "wait", {"thread_ids": [child]}, hidden=True)
+    child_tool_call_id = ts.enqueue_user_tool_call(
+        db,
+        child,
+        GET_USER_TOOL_NAME,
+        {"assistant_note": "HANDOFF_READY"},
+        hidden=True,
+    )
+
+    parent_runner = ThreadRunner(
+        db,
+        parent,
+        llm=object(),
+        config=ts.RunnerConfig(lease_ttl_sec=2, heartbeat_sec=0.01),
+    )
+    child_runner = ThreadRunner(
+        db,
+        child,
+        llm=object(),
+        config=ts.RunnerConfig(lease_ttl_sec=5, heartbeat_sec=0.01),
+    )
+    parent_observed = asyncio.Event()
+    observed = {}
+
+    real_heartbeat = db.heartbeat
+    parent_heartbeat_attempts = 0
+
+    def flaky_heartbeat(thread_id, invoke_id, lease_until):
+        nonlocal parent_heartbeat_attempts
+        if thread_id == parent:
+            parent_heartbeat_attempts += 1
+            if parent_heartbeat_attempts == 1:
+                raise sqlite3.OperationalError("database is locked")
+        return real_heartbeat(thread_id, invoke_id, lease_until)
+
+    monkeypatch.setattr(db, "heartbeat", flaky_heartbeat)
+
+    async def parent_wait(_invoke_id, _model, _ra):
+        def wait_on_worker_connection():
+            worker_db = ts.ThreadsDB(db.path)
+            try:
+                return ts.wait_for_threads(
+                    worker_db,
+                    [child],
+                    timeout_sec=3,
+                    poll_interval=0.01,
+                )
+            finally:
+                worker_db.conn.close()
+
+        result = await asyncio.to_thread(wait_on_worker_connection)
+        observed["child"] = result[child]
+        parent_observed.set()
+
+    async def child_handoff(invoke_id, _model, _ra):
+        # Cross the original two-second parent lease. Before the repair, the
+        # first transient heartbeat exception killed the heartbeat task, so the
+        # parent's otherwise successful wait result could never be published.
+        await asyncio.sleep(2.1)
+        child_runner._owned_append(
+            invoke_id,
+            type_="tool_call.execution_started",
+            payload={"tool_call_id": child_tool_call_id},
+        )
+        ts.start_get_user_message_wait(
+            db,
+            child,
+            invoke_id=invoke_id,
+            tool_call_id=child_tool_call_id,
+            assistant_note="HANDOFF_READY",
+        )
+        await asyncio.wait_for(parent_observed.wait(), timeout=1)
+
+    monkeypatch.setattr(parent_runner, "_run_ra_tools", parent_wait)
+    monkeypatch.setattr(child_runner, "_run_ra_tools", child_handoff)
+
+    async def run():
+        return await asyncio.gather(
+            parent_runner.run_once(),
+            child_runner.run_once(),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(run())
+
+    assert results == [True, True]
+    assert parent_heartbeat_attempts >= 2
+    assert observed["child"].finished is True
+    assert observed["child"].state == "waiting_user"
+    assert observed["child"].last_assistant_message == "HANDOFF_READY"
 
 
 def test_get_child_status_reports_waiting_user_and_note_for_active_get_user_wait(tmp_path, monkeypatch):
