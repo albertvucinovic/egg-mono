@@ -88,6 +88,81 @@ curl_fetch_complete() {
         "$url" >/dev/null
 }
 
+probe_url() {
+    local url="$1"
+    local timeout_sec="${2:-1}"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl \
+            --fail \
+            --silent \
+            --http1.1 \
+            --noproxy '*' \
+            --max-time "$timeout_sec" \
+            -H "Accept-Encoding: identity" \
+            -H "Connection: close" \
+            -o /dev/null \
+            "$url" 2>/dev/null
+        return
+    fi
+
+    # The launcher has already activated its Python environment. Use a
+    # proxy-free local request rather than falling back to PID liveness, which
+    # does not prove that Hypercorn completed ASGI lifespan startup.
+    python - "$url" "$timeout_sec" >/dev/null 2>&1 <<'PY'
+import sys
+import urllib.request
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+request = urllib.request.Request(
+    sys.argv[1],
+    headers={"Accept-Encoding": "identity", "Connection": "close"},
+)
+with opener.open(request, timeout=float(sys.argv[2])) as response:
+    if not 200 <= response.status < 300:
+        raise SystemExit(1)
+PY
+}
+
+wait_for_backend_startup() {
+    local backend_url="$1"
+    local timeout_sec="${EGGW_BACKEND_STARTUP_TIMEOUT:-90}"
+    local deadline
+    local status
+    case "$timeout_sec" in
+        ''|*[!0-9]*)
+            echo "Error: EGGW_BACKEND_STARTUP_TIMEOUT must be a positive integer" >&2
+            return 1
+            ;;
+    esac
+    if [ "$timeout_sec" -le 0 ]; then
+        echo "Error: EGGW_BACKEND_STARTUP_TIMEOUT must be a positive integer" >&2
+        return 1
+    fi
+    deadline=$((SECONDS + timeout_sec))
+
+    echo "Waiting for backend health..."
+    while true; do
+        if probe_url "$backend_url/health" 1; then
+            echo "Backend ready."
+            return 0
+        fi
+        if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+            status=0
+            wait "$BACKEND_PID" 2>/dev/null || status=$?
+            echo "Error: Backend exited during startup (status $status)" >&2
+            return 1
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            break
+        fi
+        sleep 0.2
+    done
+
+    echo "Error: Backend did not become healthy within ${timeout_sec}s" >&2
+    return 1
+}
+
 js_chunk_complete() {
     local path="$1"
     local min_bytes="${2:-1024}"
@@ -119,6 +194,11 @@ wait_for_frontend_warmup() {
     echo "Warming frontend before opening browser..."
 
     while [ "$SECONDS" -lt "$deadline" ]; do
+        if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+            rm -rf "$tmpdir"
+            echo "Error: Backend stopped during frontend startup"
+            return 1
+        fi
         if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
             rm -rf "$tmpdir"
             echo "Error: Frontend stopped during startup"
@@ -126,7 +206,7 @@ wait_for_frontend_warmup() {
         fi
 
         if \
-            curl_fetch_complete "$backend_url/health" "$tmpdir/backend-health.json" 10 && \
+            probe_url "$backend_url/health" 1 && \
             curl_fetch_complete "$frontend_url/" "$tmpdir/root.html" 20 && \
             grep -q '/_next/static/chunks/app/layout.js' "$tmpdir/root.html" && \
             curl_fetch_complete "$frontend_url/_next/static/chunks/app/layout.js" "$tmpdir/layout.js" 30 && \
@@ -259,6 +339,17 @@ case "$BACKEND_HOST" in
         ;;
 esac
 
+# Always probe through a local client address. Wildcard bind addresses are
+# listener configuration, not portable request destinations; raw IPv6 literals
+# also need URL brackets.
+case "$BACKEND_HOST" in
+    0.0.0.0|\*) BACKEND_PROBE_HOST="127.0.0.1" ;;
+    ::|\[::\]) BACKEND_PROBE_HOST="[::1]" ;;
+    \[*\]) BACKEND_PROBE_HOST="$BACKEND_HOST" ;;
+    *:*) BACKEND_PROBE_HOST="[$BACKEND_HOST]" ;;
+    *) BACKEND_PROBE_HOST="$BACKEND_HOST" ;;
+esac
+
 # The private browser bootstrap is safe only when the frontend listener itself
 # is loopback-only. Public mode never receives a bootstrap token; its listener
 # also stays loopback unless the operator explicitly selects a remote bind.
@@ -321,14 +412,7 @@ cd "$CALLER_CWD"
 start_prefixed backend env PYTHONSAFEPATH=1 EGGW_QUICK_START_ARGS_JSON="$EGGW_QUICK_START_ARGS_JSON" "${EGGW_HYPERCORN_BIN:-hypercorn}" eggw.main:app --bind "$BACKEND_HOST:$BACKEND_PORT"
 BACKEND_PID="$STARTED_PID"
 
-# Wait a moment for backend to start
-sleep 2
-
-# Check if backend is running
-if ! kill -0 $BACKEND_PID 2>/dev/null; then
-    echo "Error: Backend failed to start"
-    exit 1
-fi
+wait_for_backend_startup "http://$BACKEND_PROBE_HOST:$BACKEND_PORT"
 
 # Start frontend
 echo "Starting frontend on port $FRONTEND_PORT..."

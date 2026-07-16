@@ -188,7 +188,12 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def _run_launcher(tmp_path: Path, *launcher_args: str, **environment: str) -> subprocess.CompletedProcess[str]:
+def _run_launcher(
+    tmp_path: Path,
+    *launcher_args: str,
+    backend_body: str | None = None,
+    **environment: str,
+) -> subprocess.CompletedProcess[str]:
     repo_root = Path(__file__).resolve().parents[2]
     tmp_path.mkdir(parents=True, exist_ok=True)
     fake_bin = tmp_path / "bin"
@@ -197,12 +202,21 @@ def _run_launcher(tmp_path: Path, *launcher_args: str, **environment: str) -> su
     capture.mkdir()
     _write_executable(fake_bin / "nc", "exit 1")
     _write_executable(
-        fake_bin / "fake-hypercorn",
+        fake_bin / "curl",
+        'printf "%s\\n" "$@" >> "$EGGW_TEST_CAPTURE/curl-args"\n'
+        'if [ "${EGGW_TEST_CURL_FAIL:-0}" = "1" ]; then exit 7; fi\n'
+        'exit 0',
+    )
+    default_backend_body = (
         'printf "%s\\n" "$@" > "$EGGW_TEST_CAPTURE/backend-args"\n'
         'printf "%s" "$EGGW_API_TOKEN" > "$EGGW_TEST_CAPTURE/backend-token"\n'
         'printf "%s" "$EGGW_ALLOWED_ORIGINS" > "$EGGW_TEST_CAPTURE/origins"\n'
         'printf "%s" "${EGGW_QUICK_START_ARGS_JSON:-}" > "$EGGW_TEST_CAPTURE/quick-start-json"\n'
-        'sleep 3',
+        'sleep 3'
+    )
+    _write_executable(
+        fake_bin / "fake-hypercorn",
+        backend_body if backend_body is not None else "".join(default_backend_body),
     )
     _write_executable(
         fake_bin / "fake-npm",
@@ -219,6 +233,7 @@ def _run_launcher(tmp_path: Path, *launcher_args: str, **environment: str) -> su
         "EGGW_HYPERCORN_BIN": str(fake_bin / "fake-hypercorn"),
         "EGGW_NPM_BIN": str(fake_bin / "fake-npm"),
         "EGGW_SKIP_FRONTEND_WARMUP": "1",
+        "EGGW_BACKEND_STARTUP_TIMEOUT": "1",
         "EGGW_NO_BROWSER": "1",
         "EGGW_BACKEND_PORT": "18123",
         "EGGW_FRONTEND_PORT": "18124",
@@ -265,10 +280,18 @@ def test_launcher_generates_shared_high_entropy_token_and_binds_loopback(tmp_pat
     assert frontend_args[-4:] == ["-H", "127.0.0.1", "-p", "18124"]
     assert (capture / "frontend-api-url").read_text() == "http://localhost:18123"
     assert (capture / "origins").read_text() == "http://localhost:18124,http://127.0.0.1:18124"
+    curl_args = (capture / "curl-args").read_text()
+    assert "--noproxy\n*" in curl_args
+    assert "http://127.0.0.1:18123/health" in curl_args
 
 
 def test_launcher_preserves_quick_start_argument_boundaries_and_reload_suppresses_them(tmp_path: Path):
-    result = _run_launcher(tmp_path / "fresh", "Tell", "me a story", 'quote "inside"')
+    result = _run_launcher(
+        tmp_path / "fresh",
+        "Tell",
+        "me a story",
+        'quote "inside"',
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads((tmp_path / "fresh" / "capture" / "quick-start-json").read_text()) == [
         "Tell",
@@ -283,6 +306,41 @@ def test_launcher_preserves_quick_start_argument_boundaries_and_reload_suppresse
     )
     assert reloaded.returncode == 0, reloaded.stdout + reloaded.stderr
     assert json.loads((tmp_path / "reload" / "capture" / "quick-start-json").read_text()) == []
+
+
+def test_launcher_does_not_start_frontend_before_backend_is_healthy(tmp_path: Path):
+    result = _run_launcher(
+        tmp_path,
+        backend_body='sleep 3',
+        EGGW_BACKEND_STARTUP_TIMEOUT="1",
+        EGGW_TEST_CURL_FAIL="1",
+    )
+
+    assert result.returncode != 0
+    assert "Backend did not become healthy within 1s" in result.stderr
+    assert not (tmp_path / "capture" / "frontend-args").exists()
+
+
+def test_launcher_reports_backend_exit_before_starting_frontend(tmp_path: Path):
+    result = _run_launcher(
+        tmp_path,
+        backend_body='printf "backend boom\\n" >&2\nexit 23',
+        EGGW_BACKEND_STARTUP_TIMEOUT="5",
+        EGGW_TEST_CURL_FAIL="1",
+    )
+
+    assert result.returncode != 0
+    assert "[backend] backend boom" in result.stdout
+    assert "Backend exited during startup (status 23)" in result.stderr
+    assert not (tmp_path / "capture" / "frontend-args").exists()
+
+
+def test_launcher_rejects_invalid_backend_startup_timeout(tmp_path: Path):
+    result = _run_launcher(tmp_path, EGGW_BACKEND_STARTUP_TIMEOUT="invalid")
+
+    assert result.returncode != 0
+    assert "EGGW_BACKEND_STARTUP_TIMEOUT must be a positive integer" in result.stderr
+    assert not (tmp_path / "capture" / "frontend-args").exists()
 
 
 @pytest.mark.skipif(not (Path(__file__).resolve().parents[1] / "frontend" / "node_modules").is_dir(), reason="frontend dependencies not installed")
@@ -388,4 +446,5 @@ def test_launcher_requires_explicit_public_override_for_non_loopback(tmp_path: P
     assert (capture / "frontend-public-token").read_text() == ""
     assert (capture / "frontend-server-api-token").read_text() == ""
     assert (capture / "frontend-api-url").read_text() == "https://api.eggw.example"
+    assert "http://127.0.0.1:18123/health" in (capture / "curl-args").read_text()
     assert TEST_TOKEN not in (capture / "frontend-args").read_text()
