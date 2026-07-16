@@ -2960,7 +2960,10 @@ def _continue_thread_mutation(
 ) -> ContinueResult:
     """Apply validated continuation writes in the caller's transaction."""
 
-    from .runner_recovery import continuation_would_skip_message
+    from .runner_recovery import (
+        continuation_message_rows_after,
+        continuation_would_skip_message,
+    )
 
     continue_seq = _get_event_seq_for_msg_id(db, thread_id, str(msg_id))
     if continue_seq is None:
@@ -2995,14 +2998,10 @@ def _continue_thread_mutation(
         if edit_payload.get('preserve_on_continue'):
             preserve_on_continue.add(edit_msg_id)
 
-    rows = db.conn.execute(
-        "SELECT msg_id, payload_json FROM events "
-        "WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
-        (thread_id, continue_seq),
-    ).fetchall()
+    rows = continuation_message_rows_after(db, thread_id, int(continue_seq))
     skipped_msg_ids = []
     continue_event_id = _ulid_like()
-    for row_msg_id, payload_json in rows:
+    for _event_seq, row_msg_id, payload_json in rows:
         if row_msg_id is None or row_msg_id in already_skipped or row_msg_id in preserve_on_continue:
             continue
         try:

@@ -697,6 +697,127 @@ def test_final_transaction_fence_preserves_all_injected_activity(
 
 
 @pytest.mark.parametrize(
+    "role, content, extra, reason_fragment",
+    [
+        ("user", "normal intervening user", {}, "newer user activity"),
+        (
+            "user",
+            "intervening user command",
+            {"tool_calls": [{"id": "intervening-call", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+            "newer user activity",
+        ),
+        ("user", "intervening keep user", {"keep_user_turn": True}, "newer user activity"),
+        ("tool", "intervening keep tool", {"keep_user_turn": True}, "newer tool activity"),
+    ],
+)
+def test_final_transaction_fence_rejects_activity_between_trigger_and_source(
+    tmp_path, role, content, extra, reason_fragment
+):
+    from eggthreads.api import apply_auto_continue
+    from eggthreads.runner_recovery import classify_failure_text, format_auto_continue_notice
+
+    db = _make_db(tmp_path)
+    tid, trigger_msg_id = _make_thread(db)
+    activity_msg_id = ts.append_message(db, tid, role, content, extra=extra)
+    source_msg_id = ts.append_message(
+        db,
+        tid,
+        "system",
+        "LLM/runner error: HTTP 503 Service Unavailable",
+        extra={"no_api": True, "runner_error": True},
+    )
+    source_event_seq = int(
+        db.conn.execute(
+            "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=? "
+            "AND type='msg.create'",
+            (tid, source_msg_id),
+        ).fetchone()[0]
+    )
+    decision = classify_failure_text("LLM/runner error: HTTP 503 Service Unavailable")
+    result = apply_auto_continue(
+        db,
+        tid,
+        trigger_msg_id=trigger_msg_id,
+        source_msg_id=source_msg_id,
+        source_event_seq=source_event_seq,
+        action_payload={
+            "auto_continue": True,
+            "trigger_msg_id": trigger_msg_id,
+            "source_msg_id": source_msg_id,
+            "source_event_seq": source_event_seq,
+            "decision_category": decision.category,
+            "decision_reason": decision.reason,
+            "source_summary": decision.source_summary,
+            "delay_sec": 0.0,
+        },
+        notice_content=format_auto_continue_notice(
+            decision,
+            action="applied",
+            trigger_msg_id=trigger_msg_id,
+            source_msg_id=source_msg_id,
+        ),
+    )
+
+    assert result.applied is False
+    assert reason_fragment in result.reason
+    assert activity_msg_id not in _skipped_msg_ids(db, tid)
+    assert source_msg_id not in _skipped_msg_ids(db, tid)
+    assert _recovery_attempts(db, tid) == []
+    assert not [action for action in _recovery_actions(db, tid) if action.get("action") == "applied"]
+
+
+def test_final_transaction_allows_exact_source_and_skips_it(tmp_path):
+    from eggthreads.api import apply_auto_continue
+    from eggthreads.runner_recovery import classify_failure_text, format_auto_continue_notice
+
+    db = _make_db(tmp_path)
+    tid, trigger_msg_id = _make_thread(db)
+    source_msg_id = ts.append_message(
+        db,
+        tid,
+        "system",
+        "LLM/runner error: HTTP 503 Service Unavailable",
+        extra={"no_api": True, "runner_error": True},
+    )
+    source_event_seq = int(
+        db.conn.execute(
+            "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=? "
+            "AND type='msg.create'",
+            (tid, source_msg_id),
+        ).fetchone()[0]
+    )
+    decision = classify_failure_text("LLM/runner error: HTTP 503 Service Unavailable")
+    result = apply_auto_continue(
+        db,
+        tid,
+        trigger_msg_id=trigger_msg_id,
+        source_msg_id=source_msg_id,
+        source_event_seq=source_event_seq,
+        action_payload={
+            "auto_continue": True,
+            "trigger_msg_id": trigger_msg_id,
+            "source_msg_id": source_msg_id,
+            "source_event_seq": source_event_seq,
+            "decision_category": decision.category,
+            "decision_reason": decision.reason,
+            "source_summary": decision.source_summary,
+            "delay_sec": 0.0,
+        },
+        notice_content=format_auto_continue_notice(
+            decision,
+            action="applied",
+            trigger_msg_id=trigger_msg_id,
+            source_msg_id=source_msg_id,
+        ),
+    )
+
+    assert result.applied is True
+    assert source_msg_id in _skipped_msg_ids(db, tid)
+    assert len(_recovery_attempts(db, tid)) == 1
+    assert len([action for action in _recovery_actions(db, tid) if action.get("action") == "applied"]) == 1
+
+
+@pytest.mark.parametrize(
     "failing_fragment, expected_reason",
     [
         ("type='msg.edit'", "could not inspect source continuation state"),

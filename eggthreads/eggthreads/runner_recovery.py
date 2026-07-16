@@ -112,6 +112,21 @@ def continuation_would_skip_message(payload: Dict[str, Any]) -> bool:
     return not continuation_preserves_message(payload)
 
 
+def continuation_message_rows_after(
+    db: Any,
+    thread_id: str,
+    continue_event_seq: int,
+) -> list[Any]:
+    """Load exactly the message range a continuation would consider skipping."""
+
+    return db.conn.execute(
+        "SELECT event_seq, msg_id, payload_json FROM events "
+        "WHERE thread_id=? AND type='msg.create' AND event_seq>? "
+        "ORDER BY event_seq ASC",
+        (thread_id, int(continue_event_seq)),
+    ).fetchall()
+
+
 def _retry(category: str, reason: str, source: str, delay_sec: float) -> RecoveryDecision:
     return RecoveryDecision(
         retriable=True,
@@ -637,14 +652,31 @@ def check_recovery_fence(
     except Exception:
         return RecoveryFenceResult(False, "could not verify runner lease")
 
+    if not trigger_msg_id:
+        return RecoveryFenceResult(False, "recovery trigger message is missing")
+    try:
+        trigger_row = db.conn.execute(
+            "SELECT event_seq FROM events INDEXED BY events_msg_seq "
+            "WHERE thread_id=? AND type='msg.create' AND msg_id=? "
+            "ORDER BY event_seq ASC LIMIT 1",
+            (thread_id, trigger_msg_id),
+        ).fetchone()
+    except Exception:
+        return RecoveryFenceResult(False, "could not inspect recovery trigger message")
+    if trigger_row is None:
+        return RecoveryFenceResult(False, "recovery trigger message no longer exists")
+    trigger_event_seq = int(trigger_row[0])
+
     try:
         row = db.conn.execute(
-            "SELECT 1 FROM events WHERE thread_id=? AND type='msg.create' AND msg_id=? LIMIT 1",
+            "SELECT event_seq FROM events INDEXED BY events_msg_seq "
+            "WHERE thread_id=? AND type='msg.create' AND msg_id=? "
+            "ORDER BY event_seq ASC LIMIT 1",
             (thread_id, source_msg_id),
         ).fetchone()
     except Exception:
         return RecoveryFenceResult(False, "could not inspect source failure message")
-    if row is None:
+    if row is None or int(row[0]) != int(source_event_seq):
         return RecoveryFenceResult(False, "source failure message no longer exists")
     skipped_state = message_skipped_state(db, thread_id, source_msg_id)
     if skipped_state is None:
@@ -669,14 +701,12 @@ def check_recovery_fence(
         return RecoveryFenceResult(False, "automatic continue attempt cap reached")
 
     try:
-        rows = db.conn.execute(
-            "SELECT msg_id, payload_json FROM events "
-            "WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
-            (thread_id, int(source_event_seq)),
-        ).fetchall()
+        rows = continuation_message_rows_after(db, thread_id, trigger_event_seq)
     except Exception:
-        return RecoveryFenceResult(False, "could not inspect newer messages")
-    for _msg_id, payload_json in rows:
+        return RecoveryFenceResult(False, "could not inspect continuation message range")
+    for _event_seq, msg_id, payload_json in rows:
+        if str(msg_id or "") == source_msg_id:
+            continue
         payload = _payload_from_json(payload_json)
         if not continuation_would_skip_message(payload):
             continue
@@ -758,6 +788,7 @@ __all__ = [
     "RecoveryDecision",
     "RecoverySource",
     "check_recovery_fence",
+    "continuation_message_rows_after",
     "continuation_preserves_message",
     "continuation_would_skip_message",
     "classify_failure_payload",
