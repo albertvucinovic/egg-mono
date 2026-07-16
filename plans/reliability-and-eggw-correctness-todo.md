@@ -1,6 +1,6 @@
 # Reliability and EggW Correctness Follow-up TODO
 
-Status: in progress (Phases 1–3 accepted; Phase 4 range-alignment repair awaiting fifth review)
+Status: in progress (Phases 1–4 accepted; Phase 5 next)
 Created: 2026-07-15
 Branch baseline: `af7b2e9` (`Merge branch 'main' into refactor20260709`)
 
@@ -104,6 +104,8 @@ Current root README opens as an AI self-assessment and comparison essay. The use
 - [ ] For transcript/UI phases, representative 5M-token or equivalent cost-shape validation proves bounded/incremental work without sacrificing history reachability; Phase 5 explicitly covers scrolling, input availability, streaming, pagination, and event-loop responsiveness.
 
 ## Status notes / commit ledger
+
+- 2026-07-16: Independent fifth review PASSed Phase 4 at immutable `daa3f93` with no blockers; Phase 4 is accepted and complete. Reviewer verified the trigger-boundary/shared-range/shared-predicate authority, exact source identity, atomic claim/continuation/action transaction, compaction rollback, and fail-closed query paths. Reviewer validation passed `86` focused cases, 20 critical repetitions (`180` cases), full EggThreads `1486 passed`, and a clean diff. Accepted Phase 4 chain: `18ef311` (initial policy, rejected) → `1be3c85` (literal OpenAI envelope, subsequently extended) → `a09ab35` (bounded metadata, rejected) → `0bac44d` (transactional authority, rejected) → `84cba4d` (predicate/fail-closed alignment, rejected) → `daa3f93` (trigger-range authority, accepted). Prior implementation evidence remains recorded below. Phase 5 is next and has not started.
 
 - 2026-07-16: Phase 4 range-alignment repair complete, awaiting fifth independent review. The writer-transaction fence now resolves the exact trigger `msg.create` event sequence and loads the same post-trigger rows as continuation mutation through shared `continuation_message_rows_after()`; predicate and range authority can no longer drift independently. It permits only the exact source `msg_id` at its verified `source_event_seq` plus rows retained by the shared preserve predicate, and rejects every other would-be-skipped row between trigger and source or after source. Regressions cover trigger→normal user/tool-call user/keep-turn user/keep-turn tool→source, proving no claim/skip/applied effect, while a trigger→exact source case still claims/applies and skips that source. Source/trigger lookup and range-query failures remain fail closed. All transactional claim/continuation/compaction, fence predicate, structural cap, saturated legacy, bounded diagnostic/query, full-source dereference, literal envelope, Retry-After, transport, and conservative-negative fixes remain intact. Validation: focused relevant `205 passed`; focused recovery/runner `60 passed` repeated 20 times; EggThreads excluding the unrelated cancellation module `1462 passed` plus that module isolated `24 passed` (combined full run twice reached `1484 passed` then exposed two pre-existing sessiond zombie-reaping tests because PID 1 retained defunct children; both isolated reruns passed, and no Phase 4 files touch sessiond); full Egg `605 passed`; Python compile and `git diff --check` passed. No Phase 5 work started.
 
