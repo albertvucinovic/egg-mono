@@ -2969,6 +2969,99 @@ test.describe('Atomic Live Tool Continuity', () => {
     expect(messageRequests).toBeGreaterThan(1);
   });
 
+  test('keeps a live tool at its canonical declaration position through durable completion', async ({ page }) => {
+    const threadId = 'min-live-interleaved-chronology';
+    const toolCallId = 'live-chronology-tool';
+    const initialMessages = [
+      { id: 'live-chronology-user', role: 'user', content: 'Run the live check.', event_seq: 10 },
+      {
+        id: 'live-chronology-call',
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: toolCallId, name: 'bash', arguments: { script: 'echo LIVE_RESULT' } }],
+        event_seq: 20,
+      },
+      {
+        id: 'live-chronology-note',
+        role: 'assistant',
+        content: 'LIVE NOTE AFTER DECLARATION',
+        answer_user_preserve_turn: true,
+        event_seq: 30,
+      },
+    ];
+    let durable = false;
+    let releaseDurable!: () => void;
+    const durableReady = new Promise<void>((resolve) => { releaseDurable = resolve; });
+    await mockThreadShell(page, threadId, { messages: initialMessages });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-live-chronology', live_replay_cursor: 30, active_get_user_wait: false },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: {
+        items: durable ? [
+          ...initialMessages,
+          { id: 'live-chronology-result', role: 'tool', name: 'bash', tool_call_id: toolCallId, content: 'LIVE_RESULT', event_seq: 50 },
+        ] : initialMessages,
+        snapshot_cursor: durable ? 50 : 30,
+        next_before: null,
+      },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>, msgId: string | null = null) => JSON.stringify({
+        event_id: `live-chronology-${eventSeq}`,
+        event_seq: eventSeq,
+        type,
+        ts: '2026-07-17T04:00:00.000Z',
+        msg_id: msgId,
+        invoke_id: 'invoke-live-chronology',
+        chunk_seq: type === 'stream.delta' ? eventSeq : null,
+        payload,
+      });
+      await durableReady;
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          'id: 40', 'event: tool_call.execution_started', `data: ${envelope(40, 'tool_call.execution_started', { tool_call_id: toolCallId, name: 'bash', arguments: { script: 'echo LIVE_RESULT' } })}`, '',
+          'id: 41', 'event: stream.delta', `data: ${envelope(41, 'stream.delta', { tool: { id: toolCallId, name: 'bash', text: 'LIVE_RESULT' } })}`, '',
+          'id: 42', 'event: tool_call.finished', `data: ${envelope(42, 'tool_call.finished', { tool_call_id: toolCallId, reason: 'success', output: 'LIVE_RESULT' })}`, '',
+          'id: 50', 'event: msg.create', `data: ${envelope(50, 'msg.create', { role: 'tool', name: 'bash', tool_call_id: toolCallId, content: 'LIVE_RESULT' }, 'live-chronology-result')}`, '',
+          'id: 51', 'event: stream.close', `data: ${envelope(51, 'stream.close', {})}`, '',
+          '',
+        ].join('\n'),
+      });
+      durable = true;
+    });
+
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+    const transcript = page.getByTestId('static-transcript-owner');
+    const declaration = transcript.locator('[data-source-message-id="live-chronology-call"]');
+    const note = transcript.locator('[data-message-id="live-chronology-note"]');
+    await expect(declaration).toBeVisible();
+    await expect(note).toBeVisible();
+    expect(await declaration.evaluate((element) => element.compareDocumentPosition(document.querySelector('[data-message-id="live-chronology-note"]')!) & Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
+
+    releaseDurable();
+    await expect(transcript.locator('[data-source-message-id="live-chronology-result"]')).toBeVisible();
+    await expect.poll(() => transcript.locator(':scope > .eggw-message-card').evaluateAll((cards) =>
+      cards.map((card) => card.getAttribute('data-message-id') || card.getAttribute('data-source-message-id')),
+    )).toEqual([
+      'live-chronology-user',
+      'live-chronology-call',
+      'live-chronology-note',
+      'live-chronology-result',
+    ]);
+    await expect(page.locator('[role="status"][aria-label="Tool streaming"]')).toHaveCount(0);
+  });
+
   test('uses monotonic detail levels for completed transcript content', async ({ page }) => {
     const threadId = 'verbosity-semantics';
     await mockThreadShell(page, threadId, {
@@ -3051,22 +3144,31 @@ test.describe('Atomic Live Tool Continuity', () => {
 
     await select.selectOption('min');
     const hidden = page.getByTestId('hidden-details');
-    await expect(hidden.getByRole('button', { name: 'bash', exact: true })).toHaveCount(1);
-    await expect(hidden.getByRole('button', { name: 'python', exact: true })).toHaveCount(1);
+    const bashEntries = hidden.getByRole('button', { name: 'bash', exact: true });
+    const pythonEntries = hidden.getByRole('button', { name: 'python', exact: true });
+    await expect(bashEntries).toHaveCount(2);
+    await expect(pythonEntries).toHaveCount(2);
     await expect(hidden.getByRole('button', { name: 'Tool result · n-1234567890', exact: true })).toHaveCount(1);
     await expect(hidden.getByRole('button', { name: 'tool', exact: true })).toHaveCount(0);
 
-    await hidden.getByRole('button', { name: 'bash', exact: true }).click();
+    await bashEntries.nth(0).click();
     let dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('ARG_BASH');
-    await expect(dialog).toContainText('RESULT_BASH');
+    await expect(dialog).not.toContainText('RESULT_BASH');
     await expect(dialog).not.toContainText('RESULT_PYTHON');
     await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
 
-    await hidden.getByRole('button', { name: 'python', exact: true }).click();
+    await pythonEntries.nth(0).click();
     dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('ARG_PYTHON');
+    await expect(dialog).not.toContainText('RESULT_PYTHON');
+    await expect(dialog).not.toContainText('RESULT_BASH');
+    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
+
+    await pythonEntries.nth(1).click();
+    dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('RESULT_PYTHON');
+    await expect(dialog).not.toContainText('ARG_PYTHON');
     await expect(dialog).not.toContainText('RESULT_BASH');
   });
 
@@ -3102,20 +3204,138 @@ test.describe('Atomic Live Tool Continuity', () => {
     await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
 
     const tools = page.getByTestId('hidden-details').getByRole('button', { name: 'bash' });
-    await expect(tools).toHaveCount(2);
+    await expect(tools).toHaveCount(3);
 
     await tools.nth(0).click();
     let dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('ARGUMENT_A');
-    await expect(dialog).toContainText('(not found in the loaded transcript)');
     await expect(dialog).not.toContainText('RESULT_B');
     await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
 
     await tools.nth(1).click();
     dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('ARGUMENT_B');
+    await expect(dialog).not.toContainText('RESULT_B');
+    await expect(dialog).not.toContainText('ARGUMENT_A');
+    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
+
+    await tools.nth(2).click();
+    dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('RESULT_B');
     await expect(dialog).not.toContainText('ARGUMENT_A');
+    await expect(dialog).not.toContainText('ARGUMENT_B');
+  });
+
+  test('preserves literal interleaved durable chronology in min', async ({ page }) => {
+    const threadId = 'min-interleaved-chronology';
+    const sameTimestamp = '2026-07-17T04:00:00.000Z';
+    const canonicalMessages = [
+      { id: 'chronology-user', role: 'user', content: 'Run both checks.', event_seq: 10, timestamp: sameTimestamp },
+      {
+        id: 'chronology-call-a',
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'chronology-tool-a', name: 'bash', arguments: { script: 'echo ARG_A' } }],
+        event_seq: 20,
+        timestamp: sameTimestamp,
+      },
+      {
+        id: 'chronology-note-a',
+        role: 'assistant',
+        content: 'FIRST INTERLEAVED NOTE',
+        answer_user_preserve_turn: true,
+        event_seq: 30,
+      },
+      {
+        id: 'chronology-result-a',
+        role: 'tool',
+        name: 'bash',
+        tool_call_id: 'chronology-tool-a',
+        content: 'RESULT_A',
+        event_seq: 40,
+        timestamp: '2020-01-01T00:00:00.000Z',
+      },
+      {
+        id: 'chronology-call-b',
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'chronology-tool-b', name: 'python', arguments: { script: 'print("ARG_B")' } }],
+        event_seq: 50,
+        timestamp: sameTimestamp,
+      },
+      {
+        id: 'chronology-note-b',
+        role: 'assistant',
+        content: 'SECOND INTERLEAVED NOTE',
+        answer_user_preserve_turn: true,
+        event_seq: 60,
+        timestamp: '2030-01-01T00:00:00.000Z',
+      },
+      {
+        id: 'chronology-result-b',
+        role: 'tool',
+        name: 'python',
+        tool_call_id: 'chronology-tool-b',
+        content: 'RESULT_B',
+        event_seq: 70,
+      },
+      {
+        id: 'chronology-recovery',
+        role: 'system',
+        content: 'RECOVERY NOTICE AFTER TOOLS',
+        recovery_notice: true,
+        event_seq: 80,
+        timestamp: '2010-01-01T00:00:00.000Z',
+      },
+      { id: 'chronology-final', role: 'assistant', content: 'FINAL AFTER RECOVERY', event_seq: 90, timestamp: sameTimestamp },
+    ];
+    await mockThreadShell(page, threadId, { messages: canonicalMessages });
+
+    await page.goto(`/${threadId}`);
+    const verbosity = page.locator('select[title="Transcript display verbosity"]');
+    const expectedMessageOrder = [
+      'chronology-user',
+      'chronology-call-a',
+      'chronology-note-a',
+      'chronology-result-a',
+      'chronology-call-b',
+      'chronology-note-b',
+      'chronology-result-b',
+      'chronology-recovery',
+      'chronology-final',
+    ];
+    for (const level of ['max', 'medium'] as const) {
+      await verbosity.selectOption(level);
+      await expect.poll(() => page.getByTestId('static-transcript-owner').locator(':scope > .eggw-message-card').evaluateAll((cards) =>
+        cards.map((card) => card.getAttribute('data-message-id')),
+      )).toEqual(expectedMessageOrder);
+    }
+
+    await verbosity.selectOption('min');
+    const transcript = page.getByTestId('static-transcript-owner');
+    const semanticOrder = await transcript.locator(':scope > .eggw-message-card').evaluateAll((cards) => cards.map((card) => ({
+      role: card.getAttribute('data-message-role') || 'hidden-details',
+      messageId: card.getAttribute('data-message-id') || card.getAttribute('data-source-message-id'),
+      text: (card.textContent || '').replace(/\s+/g, ' ').trim(),
+    })));
+    expect(canonicalMessages.map((message) => message.event_seq)).toEqual([10, 20, 30, 40, 50, 60, 70, 80, 90]);
+    expect(semanticOrder).toEqual([
+      expect.objectContaining({ messageId: 'chronology-user' }),
+      expect.objectContaining({ messageId: 'chronology-call-a', role: 'hidden-details', text: expect.stringContaining('bash') }),
+      expect.objectContaining({ messageId: 'chronology-note-a' }),
+      expect.objectContaining({ messageId: 'chronology-result-a', role: 'hidden-details', text: expect.stringContaining('bash') }),
+      expect.objectContaining({ messageId: 'chronology-call-b', role: 'hidden-details', text: expect.stringContaining('python') }),
+      expect.objectContaining({ messageId: 'chronology-note-b' }),
+      expect.objectContaining({ messageId: 'chronology-result-b', role: 'hidden-details', text: expect.stringContaining('python') }),
+      expect.objectContaining({ messageId: 'chronology-recovery' }),
+      expect.objectContaining({ messageId: 'chronology-final' }),
+    ]);
+
+    await page.reload();
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+    await expect.poll(() => page.getByTestId('static-transcript-owner').locator(':scope > .eggw-message-card').evaluateAll((cards) =>
+      cards.map((card) => card.getAttribute('data-message-id') || card.getAttribute('data-source-message-id')),
+    )).toEqual(expectedMessageOrder);
   });
 
   test('keeps an Assistant Note tool result attached across the visible note in min', async ({ page }) => {
@@ -3156,11 +3376,17 @@ test.describe('Atomic Live Tool Continuity', () => {
     await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
 
     await expect(page.getByText('Visible interim status.', { exact: true })).toBeVisible();
-    await page.getByTestId('hidden-details').getByRole('button', { name: 'answer_user_while_preserving_llm_turn' }).click();
-    const dialog = page.getByRole('dialog');
+    const toolEntries = page.getByTestId('hidden-details').getByRole('button', { name: 'answer_user_while_preserving_llm_turn' });
+    await expect(toolEntries).toHaveCount(2);
+    await toolEntries.nth(0).click();
+    let dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('Visible interim status.');
+    await expect(dialog).not.toContainText('Interim answer shown to user.');
+    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
+    await toolEntries.nth(1).click();
+    dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('Interim answer shown to user.');
-    await expect(dialog).not.toContainText('(not found in the loaded transcript)');
+    await expect(dialog).not.toContainText('Visible interim status.');
   });
 });
 

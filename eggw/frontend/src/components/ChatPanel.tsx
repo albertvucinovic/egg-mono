@@ -45,7 +45,6 @@ import {
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import { liveTimingSnapshot, shouldUpdateLiveTiming, type LiveTimingSnapshot } from "@/lib/liveTiming";
 import {
-  correlateHiddenToolDetails,
   getUserAnswerToolCallId,
   getUserToolCallIds,
   isGetUserMessageTool,
@@ -53,6 +52,7 @@ import {
   toolCallId,
   toolCallName,
   toolDisplayName,
+  shortToolCallId,
   type HiddenToolDetail,
   type HiddenDetailKind,
 } from "@/lib/toolPresentation";
@@ -363,14 +363,36 @@ function hiddenSummaryCountsText(details: HiddenDetail[]): string {
   return parts.join(", ") || "Hidden details";
 }
 
-function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDetail[]; showBorders?: boolean }) {
+function HiddenDetailsBlock({
+  details,
+  sourceMessage,
+  showBorders = true,
+}: {
+  details: HiddenDetail[];
+  sourceMessage?: Message;
+  showBorders?: boolean;
+}) {
   const [selectedDetail, setSelectedDetail] = useState<HiddenDetail | null>(null);
   if (!details.length) return null;
-  const toolDetails = correlateHiddenToolDetails(details);
+  const toolDetails = details
+    .filter((detail) => (detail.kind === "tool_calls" || detail.kind === "tool_results") && Boolean(detail.name))
+    .map((detail) => {
+      if (detail.source !== "tool_result") return detail;
+      const header = [
+        `Tool result: ${detail.name}`,
+        detail.tool_call_id ? `tool_call_id: ${detail.tool_call_id}` : "",
+      ].filter(Boolean).join("\n");
+      return {
+        ...detail,
+        body: [header, "", "Result:", detail.body || "(empty)"].join("\n"),
+      };
+    });
   return (
     <div
       className={clsx("eggw-message-card eggw-role-card eggw-role-tool", !showBorders && "eggw-role-card-borderless")}
       data-testid="hidden-details"
+      data-source-message-id={sourceMessage?.id || undefined}
+      data-source-event-seq={sourceMessage?.event_seq ?? undefined}
     >
       <div className="eggw-hidden-summary">{hiddenSummaryCountsText(details)}</div>
       {toolDetails.length > 0 && (
@@ -386,6 +408,11 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
               >
                 {detail.name}
               </button>
+              {detail.tool_call_id && (
+                <span className="eggw-message-meta ml-1 font-mono" title={detail.tool_call_id}>
+                  {shortToolCallId(detail.tool_call_id)}
+                </span>
+              )}
               {index < toolDetails.length - 1 ? ", " : null}
             </span>
           ))}
@@ -1162,19 +1189,13 @@ function renderMessagesForVerbosity(
     ));
   }
 
+  // Keep compact details message-local. The ordered transcript is the sole
+  // chronology authority; tool identity is for inspection, never relocation.
   const nodes: ReactNode[] = [];
   const answeredGetUserIds = new Set(displayMessages.map(getUserAnswerToolCallId).filter(Boolean));
-  let hidden: HiddenDetail[] = [];
-  const flushHidden = (key: string) => {
-    if (!hidden.length) return;
-    const details = hidden;
-    hidden = [];
-    nodes.push(<HiddenDetailsBlock key={`hidden-${key}-${nodes.length}`} details={details} showBorders={showBorders} />);
-  };
 
   displayMessages.forEach((msg, idx) => {
     if (msg.kind === "compaction_marker" || msg.role === "compaction_marker") {
-      flushHidden(`marker-${idx}`);
       nodes.push(<CompactionMarker key={msg.id || `marker-${idx}`} message={msg} />);
       return;
     }
@@ -1188,31 +1209,22 @@ function renderMessagesForVerbosity(
           (getUserCallIds.has(detail.tool_call_id) || detail.source === "tool_result" || detail.source === "tool_call_stream")
         )
     );
+    const reasoningDetails = hiddenDetails.filter((detail) => detail.kind === "reasoning");
+    const operationalDetails = hiddenDetails.filter((detail) => detail.kind !== "reasoning");
     const hasVisibleConversationBody =
       (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
-    if (msg.role === "assistant" && msg.answer_user_preserve_turn && hasVisibleConversationBody) {
-      // A preserve-turn note is inserted while its ordinary tool lifecycle is
-      // still in flight. Keep the pending call details across this visible note
-      // so the later role=tool message can pair with the call by tool_call_id.
-      // Treating the note as a normal conversation boundary splits one tool
-      // lifecycle into two HiddenDetailsBlocks in min verbosity.
+
+    if (reasoningDetails.length) {
       nodes.push(
-        <MessageBlock
-          key={msg.id || idx}
-          message={msg}
+        <HiddenDetailsBlock
+          key={`reasoning-${msg.id || idx}`}
+          details={reasoningDetails}
+          sourceMessage={msg}
           showBorders={showBorders}
-          displayVerbosity="min"
-          onStageAttachment={onStageAttachment}
         />
       );
-      hidden.push(...hiddenDetails);
-      return;
     }
     if (hasVisibleConversationBody || isImportantSystemMessage(msg)) {
-      const beforeVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind === "reasoning") : [];
-      const afterVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind !== "reasoning") : hiddenDetails;
-      hidden.push(...beforeVisibleDetails);
-      flushHidden(`before-${msg.id || idx}`);
       nodes.push(
         <MessageBlock
           key={msg.id || idx}
@@ -1222,14 +1234,19 @@ function renderMessagesForVerbosity(
           onStageAttachment={onStageAttachment}
         />
       );
-      hidden.push(...afterVisibleDetails);
-      return;
     }
-
-    hidden.push(...hiddenDetails);
+    if (operationalDetails.length) {
+      nodes.push(
+        <HiddenDetailsBlock
+          key={`details-${msg.id || idx}`}
+          details={operationalDetails}
+          sourceMessage={msg}
+          showBorders={showBorders}
+        />
+      );
+    }
   });
 
-  flushHidden("end");
   return nodes;
 }
 

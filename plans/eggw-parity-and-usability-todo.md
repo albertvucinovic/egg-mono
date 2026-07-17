@@ -54,12 +54,13 @@ reported approval issue is Phase 10 even though it is investigated first.
   operational records in both Egg and EggW at every verbosity.
 - [ ] Define or reuse one shared semantic representation for compact operational
   and error output rather than inferring chronology separately in each client.
-- [ ] Preserve canonical event chronology in EggW: assistant notes/messages and
+- [x] Preserve canonical event chronology in EggW: assistant notes/messages and
   tool declarations/results must not be grouped or reordered incorrectly,
   including at `displayVerbosity=min`.
-- [ ] Add a literal interleaved chronology fixture (assistant note → tool call →
-  note/message → tool result → recovery/error) and require Egg and EggW to render
-  the same semantic order.
+- [x] Add a literal interleaved chronology fixture (assistant message/tool call →
+  Assistant Note/message → tool result → recovery/error) and require EggW min,
+  medium, and max to retain the shared canonical message order. Cross-client Egg
+  fixture parity remains part of the broader shared-semantics inventory.
 - [ ] Keep active errors, approval/recovery decisions, and manual continuation
   inspectable without repeating large verbose cards.
 
@@ -253,6 +254,25 @@ policy.
   commit ledger below.
 
 ## Status notes / commit ledger
+
+- 2026-07-17: Phase 6 chronology-ordering slice implemented. Reproduction proved
+  the backend snapshot and ordered SSE `msg.create` feed already retained
+  canonical `event_seq` order; the defect was EggW min-only presentation
+  grouping. `renderMessagesForVerbosity()` accumulated hidden tool details across
+  records, paired declarations/results by ID across intervening Assistant Notes,
+  and emitted the combined block at a later visible boundary. Min now emits each
+  compact reasoning/tool declaration/result at its source message position,
+  retains full tool-call identity beside each inspectable entry, and keeps
+  medium/max on the same transcript ordering authority. Literal browser coverage
+  uses equal, missing, and adversarial timestamps with explicit event sequences;
+  covers multiple interleaved calls, notes/messages, results, recovery notice,
+  initial load, reload, and live-to-durable completion. Focused validation before
+  commit: frontend unit `121 passed`; TypeScript and production build passed;
+  chronology/live/get-user/performance Playwright envelope `17 passed`, including
+  the 5M-token-equivalent fixture; `git diff --check` passed. The focused Playwright
+  rerun used `--reporter=line` under an external timeout after an HTML-report
+  process left only defunct children; listener 9323 is clear. Commit hash follows
+  after creation. No other Phase 6 or excluded phase work started.
 
 - 2026-07-17: Phase 8 child-identity slice implemented. Every Children panel
   row now shows an explicit compact thread-ID suffix independently of the
