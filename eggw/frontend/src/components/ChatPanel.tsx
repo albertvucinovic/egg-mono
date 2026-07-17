@@ -298,6 +298,85 @@ function messageTimestampText(timestamp?: string): string | null {
   }
 }
 
+interface MessageHeaderFieldsProps {
+  message: Message;
+  displayVerbosity: DisplayVerbosity;
+}
+
+function copyText(value: string): void {
+  if (!navigator.clipboard?.writeText) return;
+  void navigator.clipboard.writeText(value);
+}
+
+function InspectableHeaderId({
+  fullId,
+  label,
+  displayVerbosity,
+  testId,
+}: {
+  fullId: string;
+  label: string;
+  displayVerbosity: DisplayVerbosity;
+  testId: string;
+}) {
+  if (!fullId) return null;
+  const compact = fullId.length > 8 ? fullId.slice(-8) : fullId;
+  return (
+    <button
+      type="button"
+      className="eggw-message-id font-mono"
+      title={`Click to copy ${label}: ${fullId}`}
+      aria-label={`${label} ${fullId}; click to copy`}
+      data-testid={testId}
+      onClick={() => copyText(fullId)}
+    >
+      {displayVerbosity === "max" ? `${label}: ${fullId}` : compact}
+    </button>
+  );
+}
+
+function MessageHeaderFields({ message, displayVerbosity }: MessageHeaderFieldsProps) {
+  const modelKey = typeof message.model_key === "string" ? message.model_key.trim() : "";
+  const tokenText = formatTokenCount(message.tokens);
+  const messageTps = formatStreamingTps(message.tps);
+  const timestampText = messageTimestampText(message.timestamp);
+  const messageId = message.id && !message.id.startsWith("temp-") ? message.id : "";
+  const toolCallIdText = typeof message.tool_call_id === "string" ? message.tool_call_id.trim() : "";
+
+  return (
+    <>
+      {modelKey && (
+        <span className="eggw-message-meta eggw-header-model" title={`Model: ${modelKey}`} data-testid="message-model">
+          {modelKey}
+        </span>
+      )}
+      {tokenText && <span className="eggw-message-meta" data-testid="message-tokens">{tokenText}</span>}
+      {messageTps && <span className="eggw-message-meta" data-testid="message-tps">{messageTps}</span>}
+      {timestampText && (
+        <time className="eggw-message-meta font-mono" dateTime={message.timestamp} title={timestampText} data-testid="message-timestamp">
+          {timestampText}
+        </time>
+      )}
+      {messageId && (
+        <InspectableHeaderId
+          fullId={messageId}
+          label="msg_id"
+          displayVerbosity={displayVerbosity}
+          testId="message-id"
+        />
+      )}
+      {toolCallIdText && (
+        <InspectableHeaderId
+          fullId={toolCallIdText}
+          label="tool_call_id"
+          displayVerbosity={displayVerbosity}
+          testId="tool-call-id"
+        />
+      )}
+    </>
+  );
+}
+
 function messageMetadataText(message: Message, label: string): string {
   const parts = [label];
   if (message.model_key) parts.push(`model: ${message.model_key}`);
@@ -394,6 +473,21 @@ function HiddenDetailsBlock({
       data-source-message-id={sourceMessage?.id || undefined}
       data-source-event-seq={sourceMessage?.event_seq ?? undefined}
     >
+      {sourceMessage && (
+        <div className="eggw-message-header eggw-compact-detail-header">
+          <span className="eggw-role-marker" aria-hidden="true" />
+          <span className="eggw-role-label">
+            {details.some((detail) => detail.kind === "reasoning")
+              ? "Reasoning"
+              : sourceMessage.role === "tool"
+                ? sourceMessage.name
+                  ? `Tool Result: ${sourceMessage.name}`
+                  : "Tool Result"
+                : "Tool Calls"}
+          </span>
+          <MessageHeaderFields message={sourceMessage} displayVerbosity="min" />
+        </div>
+      )}
       <div className="eggw-hidden-summary">{hiddenSummaryCountsText(details)}</div>
       {toolDetails.length > 0 && (
         <div className="eggw-hidden-tools">
@@ -831,8 +925,6 @@ const MessageBlock = memo(function MessageBlock({
 
   const roleClass = displayRole === "assistant_note" ? "eggw-role-assistant-note" : `eggw-role-${displayRole}`;
 
-  const messageTps = formatStreamingTps(message.tps);
-  const tokenText = formatTokenCount(message.tokens);
   const toolCalls = message.tool_calls || [];
   const toolStreamEntries = stringRecordEntries(message.tool_stream);
   const toolCallStreamEntries = stringRecordEntries(message.tool_calls_stream);
@@ -866,38 +958,7 @@ const MessageBlock = memo(function MessageBlock({
       <div className="eggw-message-header">
         <span className="eggw-role-marker" aria-hidden="true" />
         <span className="eggw-role-label">{isShellCommand ? "Shell" : roleLabel}</span>
-        {displayVerbosity !== "min" && message.model_key && <span className="eggw-message-meta">{message.model_key}</span>}
-        {displayVerbosity !== "min" && tokenText && <span className="eggw-message-meta">{tokenText}</span>}
-        {displayVerbosity !== "min" && messageTps && <span className="eggw-message-meta">{messageTps}</span>}
-        {displayVerbosity === "max" && message.timestamp && (
-          <span className="eggw-message-meta font-mono">
-            {new Date(message.timestamp).toLocaleString(undefined, {
-              year: "numeric",
-              month: "2-digit",
-              day: "2-digit",
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            })}
-          </span>
-        )}
-        {displayVerbosity === "max" && message.id && message.id.length >= 8 && !message.id.startsWith("temp-") && (
-          <button
-            type="button"
-            className="eggw-message-id font-mono"
-            title={`Click to copy: ${message.id}`}
-            aria-label={`Message id ${message.id}; click to copy`}
-            data-testid="message-id"
-            onClick={() => {
-              navigator.clipboard.writeText(message.id);
-            }}
-          >
-            [msg_id: {message.id}]
-          </button>
-        )}
-        {displayVerbosity === "max" && message.tool_call_id && (
-          <span className="eggw-message-meta font-mono">← {message.tool_call_id.slice(-8)}</span>
-        )}
+        <MessageHeaderFields message={message} displayVerbosity={displayVerbosity} />
         {displayVerbosity !== "min" && optimizerSummary && (
           <StatusChip
             tone="info"

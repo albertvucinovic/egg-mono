@@ -66,10 +66,12 @@ reported approval issue is Phase 10 even though it is investigated first.
 
 ### Header parity
 
-- [ ] Inventory every header-bearing display component in Egg: timestamps,
+Inventory matrix: `plans/eggw-header-parity-matrix.md`.
+
+- [x] Inventory every header-bearing display component in Egg: timestamps,
   message/tool IDs, model/provider, token counts, TPS, duration/timeout,
   approval/result state, provenance, thread identity, and other existing fields.
-- [ ] Define which header fields are canonical/shared and which are intentionally
+- [x] Define which header fields are canonical/shared and which are intentionally
   client-specific; do not fabricate fields unavailable from shared state.
 - [ ] Make EggW display all applicable Egg header information for messages,
   assistant notes, tool calls/results, errors, and every other rendered object
@@ -254,6 +256,26 @@ policy.
   commit ledger below.
 
 ## Status notes / commit ledger
+
+- 2026-07-17: Phase 6 header-parity inventory and first bounded implementation
+  completed. The explicit matrix in `plans/eggw-header-parity-matrix.md` traces
+  ordinary user/assistant messages, Assistant Notes, tool declarations/live
+  tools/results, recovery/errors, compaction markers, pending approvals, and
+  operational records to terminal Egg headers and shared EggW data. The first
+  coherent available-data group required no protocol work: one shared
+  `MessageHeaderFields` renderer now exposes model, content tokens, TPS, local
+  timestamp, copyable message ID, and copyable tool-call ID on durable message
+  headers at max/medium/min and on min compact reasoning/tool cards. Min keeps
+  compact suffixes while title/ARIA/copy preserve exact IDs; max retains visible
+  full IDs. Documented gaps requiring later decisions include absent
+  `runner_error` and compaction timestamp API fields, live/approval header
+  terminology, and non-durable operational records. Validation before commit:
+  frontend unit `121 passed`; TypeScript and production build passed; bounded
+  header/chronology/get-user/performance/accessibility Playwright envelope
+  `17 passed`, including the 5M-token-equivalent fixture; `git diff --check`
+  passed. Commit hash follows after creation. No `/show`, default-min, startup,
+  model-sync,
+  output-approval, sidecar, or README work started.
 
 - 2026-07-17: Phase 6 chronology-ordering slice implemented. Reproduction proved
   the backend snapshot and ordered SSE `msg.create` feed already retained

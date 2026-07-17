@@ -1252,6 +1252,13 @@ code {
   color: var(--border-strong);
 }
 
+.eggw-header-model {
+  max-width: min(28rem, 42vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Numeric live labels reserve their widest expected line. Countdown updates
    therefore neither wrap the summary nor change transcript geometry. */
 .eggw-live-timing {
@@ -1291,6 +1298,12 @@ code {
 .eggw-message-id:hover {
   background: var(--control-bg-hover);
   color: var(--link);
+}
+
+.eggw-message-id::before {
+  content: "·";
+  margin-inline-end: 0.4rem;
+  color: var(--border-strong);
 }
 
 .eggw-message-action {
@@ -1549,6 +1562,10 @@ code {
 
   .eggw-message-header {
     gap: 0.3rem 0.5rem;
+  }
+
+  .eggw-header-model {
+    max-width: 60vw;
   }
 
   .eggw-message-action {

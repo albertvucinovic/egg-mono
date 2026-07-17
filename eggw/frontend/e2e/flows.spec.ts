@@ -2884,6 +2884,103 @@ test.describe('Live Tool Streaming', () => {
   });
 });
 
+test.describe('Message header parity', () => {
+  test('keeps canonical message headers inspectable at every verbosity', async ({ page }) => {
+    const threadId = 'message-header-parity';
+    const timestamp = '2026-07-17T04:05:06.000Z';
+    const messages = [
+      {
+        id: 'header-user-message-00000001',
+        role: 'user',
+        content: 'HEADER USER BODY',
+        model_key: 'provider:user-model',
+        tokens: 11,
+        timestamp,
+      },
+      {
+        id: 'header-assistant-message-00000002',
+        role: 'assistant',
+        content: 'HEADER ASSISTANT BODY',
+        model_key: 'provider:assistant-model',
+        tokens: 22,
+        tps: 4.2,
+        timestamp,
+      },
+      {
+        id: 'header-assistant-note-00000003',
+        role: 'assistant',
+        content: 'HEADER ASSISTANT NOTE BODY',
+        answer_user_preserve_turn: true,
+        model_key: 'provider:note-model',
+        tokens: 33,
+        tps: 5.3,
+        timestamp,
+      },
+      {
+        id: 'header-tool-result-00000004',
+        role: 'tool',
+        content: 'HEADER TOOL RESULT BODY',
+        name: 'bash',
+        tool_call_id: 'header-tool-call-00000004',
+        model_key: 'provider:tool-model',
+        tokens: 44,
+        tps: 6.4,
+        timestamp,
+      },
+      {
+        id: 'header-recovery-notice-00000005',
+        role: 'system',
+        content: 'HEADER RECOVERY BODY',
+        recovery_notice: true,
+        model_key: 'provider:recovery-model',
+        tokens: 55,
+        timestamp,
+      },
+    ];
+    await mockThreadShell(page, threadId, { messages });
+    await page.goto(`/${threadId}`);
+    const verbosity = page.locator('select[title="Transcript display verbosity"]');
+    const timestampText = await page.evaluate((value) => new Date(value).toLocaleString(undefined, {
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }), timestamp);
+
+    for (const level of ['max', 'medium', 'min'] as const) {
+      await verbosity.selectOption(level);
+      for (const message of messages) {
+        const card = level === 'min' && message.role === 'tool'
+          ? page.locator(`[data-source-message-id="${message.id}"]`)
+          : page.locator(`[data-message-id="${message.id}"]`);
+        await expect(card).toHaveCount(1);
+        await expect(card.getByTestId('message-model')).toHaveAttribute('title', `Model: ${message.model_key}`);
+        await expect(card.getByTestId('message-tokens')).toHaveText(`${message.tokens} tok`);
+        await expect(card.getByTestId('message-timestamp')).toHaveText(timestampText);
+        const messageId = card.getByTestId('message-id');
+        await expect(messageId).toHaveAttribute('title', `Click to copy msg_id: ${message.id}`);
+        await expect(messageId).toHaveText(level === 'max' ? `msg_id: ${message.id}` : message.id.slice(-8));
+        if (typeof message.tps === 'number') await expect(card.getByTestId('message-tps')).toHaveText(`${message.tps.toFixed(1)} tps`);
+      }
+      const toolCard = level === 'min'
+        ? page.locator('[data-source-message-id="header-tool-result-00000004"]')
+        : page.locator('[data-message-id="header-tool-result-00000004"]');
+      const toolCallId = toolCard.getByTestId('tool-call-id');
+      await expect(toolCallId).toHaveAttribute('title', 'Click to copy tool_call_id: header-tool-call-00000004');
+      await expect(toolCallId).toHaveText(level === 'max' ? 'tool_call_id: header-tool-call-00000004' : '00000004');
+      await expect(page.locator('[data-message-id="header-assistant-note-00000003"]')).toContainText('Assistant Note');
+      await expect(page.locator('[data-message-id="header-recovery-notice-00000005"]')).toContainText('Continue Status');
+    }
+
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: (value: string) => { (window as typeof window & { copiedHeaderId?: string }).copiedHeaderId = value; } },
+      });
+    });
+    await verbosity.selectOption('min');
+    await page.locator('[data-source-message-id="header-tool-result-00000004"]').getByTestId('tool-call-id').click();
+    await expect.poll(() => page.evaluate(() => (window as typeof window & { copiedHeaderId?: string }).copiedHeaderId)).toBe('header-tool-call-00000004');
+  });
+});
+
 test.describe('Atomic Live Tool Continuity', () => {
   test('keeps the canonical tool card through immediate close and a stale refetch at every verbosity', async ({ page }) => {
     await page.addInitScript(() => {
@@ -3104,7 +3201,7 @@ test.describe('Atomic Live Tool Continuity', () => {
     await expect(chat).toContainText('Display verbosity changed.');
     await expect(chat).toContainText('Executed 1 tool');
     await expect(chat).toContainText('private provider setup instructions');
-    await expect(chat).not.toContainText('provider-model');
+    await expect(chat.getByTestId('message-model').first()).toContainText('provider-model');
     await expect(chat).not.toContainText('raw private reasoning body');
   });
 

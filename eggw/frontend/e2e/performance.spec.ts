@@ -82,13 +82,16 @@ test.describe('Deterministic performance gates', () => {
     expect(minCardCount).toBeLessThanOrEqual(90);
     const initialToolButtons = await page.getByTestId('hidden-details').getByRole('button').count();
     expect(initialToolButtons).toBeGreaterThan(1);
-    expect(initialToolButtons).toBeLessThan(30);
+    // Message-local compact headers now add one copyable msg_id control per
+    // mounted hidden-detail card. The count remains bounded by the 60-message
+    // render window rather than loaded history.
+    expect(initialToolButtons).toBeLessThan(90);
 
     await page.getByTestId('show-more-loaded-messages').click();
     await expect(page.getByTestId('show-more-loaded-messages')).toContainText('180 earlier');
     const revealedToolButtons = await page.getByTestId('hidden-details').getByRole('button').count();
     expect(revealedToolButtons).toBeGreaterThan(initialToolButtons);
-    expect(revealedToolButtons).toBeLessThan(60);
+    expect(revealedToolButtons).toBeLessThan(180);
     await expect(page.getByTestId('hidden-details').first()).toBeVisible();
     await expect(page.getByText('Streaming performance fixture').first()).toBeVisible();
   });
