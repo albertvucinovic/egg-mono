@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
+import shutil
 import sqlite3
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, replace
@@ -182,12 +185,197 @@ MAX_STORED_TOOL_OUTPUT_CHARS = 10_000_000
 LONG_OUTPUT_CHUNK_LINES = 400
 LONG_OUTPUT_CHUNK_CHARS = 40_000
 
+# Successful-TC4 repair does not add a durable failure state. Bound each
+# process's attempts for one unchanged lifecycle watermark instead, while
+# allowing a later process restart or durable state change another small window.
+TOOL_OUTPUT_RECOVERY_MAX_ATTEMPTS = 3
+TOOL_OUTPUT_RECOVERY_BASE_DELAY_SEC = 1.0
+TOOL_OUTPUT_RECOVERY_MAX_DELAY_SEC = 30.0
+
 # Size of the preview that gets embedded in the tool message when
 # the full output is stored as an artifact.
 PREVIEW_MAX_LINES = 200
 PREVIEW_MAX_CHARS = 8000
 TOOL_STREAM_PREVIEW_MAX_LINES = PREVIEW_MAX_LINES
 TOOL_STREAM_PREVIEW_MAX_CHARS = PREVIEW_MAX_CHARS
+
+
+@dataclass(frozen=True)
+class _ToolOutputRecoveryKey:
+    db_path: str
+    thread_id: str
+    tool_call_id: str
+    state_event_seq: int
+
+
+@dataclass
+class _ToolOutputRecoveryRetryState:
+    attempts: int = 0
+    retry_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class _ToolOutputRecoveryRetryDisposition:
+    allowed: bool
+    retry_at: Optional[float] = None
+    exhausted: bool = False
+
+
+class _ToolOutputRecoveryDeferred(RuntimeError):
+    """The process-local retry window is not currently runnable."""
+
+    def __init__(
+        self,
+        key: _ToolOutputRecoveryKey,
+        disposition: _ToolOutputRecoveryRetryDisposition,
+    ) -> None:
+        self.key = key
+        self.disposition = disposition
+        super().__init__("automatic tool-output recovery is deferred")
+
+
+class _ToolOutputRecoveryRetries:
+    """Process-local retry budget for unchanged successful TC4 recovery."""
+
+    def __init__(
+        self,
+        *,
+        max_attempts: int = TOOL_OUTPUT_RECOVERY_MAX_ATTEMPTS,
+        base_delay_sec: float = TOOL_OUTPUT_RECOVERY_BASE_DELAY_SEC,
+        max_delay_sec: float = TOOL_OUTPUT_RECOVERY_MAX_DELAY_SEC,
+    ) -> None:
+        self.max_attempts = max(1, int(max_attempts))
+        self.base_delay_sec = max(0.0, float(base_delay_sec))
+        self.max_delay_sec = max(self.base_delay_sec, float(max_delay_sec))
+        self._states: Dict[_ToolOutputRecoveryKey, _ToolOutputRecoveryRetryState] = {}
+        self._lock = threading.RLock()
+
+    def disposition(
+        self,
+        key: _ToolOutputRecoveryKey,
+        *,
+        now: Optional[float] = None,
+    ) -> _ToolOutputRecoveryRetryDisposition:
+        current = time.monotonic() if now is None else float(now)
+        with self._lock:
+            state = self._states.get(key)
+            if state is None:
+                return _ToolOutputRecoveryRetryDisposition(True)
+            if state.attempts >= self.max_attempts:
+                return _ToolOutputRecoveryRetryDisposition(False, exhausted=True)
+            if current < state.retry_at:
+                return _ToolOutputRecoveryRetryDisposition(
+                    False,
+                    retry_at=state.retry_at,
+                )
+            return _ToolOutputRecoveryRetryDisposition(True)
+
+    def record_failure(
+        self,
+        key: _ToolOutputRecoveryKey,
+        *,
+        now: Optional[float] = None,
+    ) -> _ToolOutputRecoveryRetryState:
+        current = time.monotonic() if now is None else float(now)
+        with self._lock:
+            # A later lifecycle watermark is new recovery work and must not
+            # inherit the obsolete attempt budget for this call.
+            for existing in list(self._states):
+                if (
+                    existing.db_path == key.db_path
+                    and existing.thread_id == key.thread_id
+                    and existing.tool_call_id == key.tool_call_id
+                    and existing != key
+                ):
+                    self._states.pop(existing, None)
+            state = self._states.setdefault(key, _ToolOutputRecoveryRetryState())
+            state.attempts += 1
+            delay = min(
+                self.max_delay_sec,
+                self.base_delay_sec * (2 ** max(0, state.attempts - 1)),
+            )
+            state.retry_at = current + delay
+            return _ToolOutputRecoveryRetryState(state.attempts, state.retry_at)
+
+    def clear(self, key: Optional[_ToolOutputRecoveryKey]) -> None:
+        if key is None:
+            return
+        with self._lock:
+            self._states.pop(key, None)
+
+
+_PROCESS_TOOL_OUTPUT_RECOVERY_RETRIES = _ToolOutputRecoveryRetries()
+_STAGED_TOOL_OUTPUT_ARTIFACTS: contextvars.ContextVar[Optional[list[Path]]] = (
+    contextvars.ContextVar("staged_tool_output_artifacts", default=None)
+)
+
+
+def _tool_output_recovery_key(
+    db: ThreadsDB,
+    ra: Optional[RunnerActionable],
+) -> Optional[_ToolOutputRecoveryKey]:
+    if ra is None or ra.recovery_mode != "stranded_successful_tc4":
+        return None
+    for tc in ra.tool_calls or []:
+        if (
+            tc.state == "TC4"
+            and str(tc.finished_reason or "").lower() in {"success", "ok"}
+            and tc.finished_event_seq is not None
+            and tc.output_decision is None
+        ):
+            return _ToolOutputRecoveryKey(
+                db_path=str(Path(db.path).resolve()),
+                thread_id=str(ra.thread_id),
+                tool_call_id=str(tc.tool_call_id),
+                state_event_seq=int(tc.state_event_seq),
+            )
+    return None
+
+
+def _tool_output_recovery_key_for_call(
+    db: ThreadsDB,
+    thread_id: str,
+    tool_call_id: str,
+) -> Optional[_ToolOutputRecoveryKey]:
+    tc = build_tool_call_states(db, thread_id).get(str(tool_call_id))
+    if (
+        tc is None
+        or tc.state != "TC4"
+        or str(tc.finished_reason or "").lower() not in {"success", "ok"}
+        or tc.finished_event_seq is None
+        or tc.output_decision is not None
+    ):
+        return None
+    return _ToolOutputRecoveryKey(
+        db_path=str(Path(db.path).resolve()),
+        thread_id=str(thread_id),
+        tool_call_id=str(tool_call_id),
+        state_event_seq=int(tc.state_event_seq),
+    )
+
+
+def _cleanup_staged_tool_output_artifacts(
+    paths: List[Path],
+    *,
+    keep_path: str = "",
+) -> None:
+    """Remove only artifact directories allocated by the current policy call."""
+
+    keep = Path(keep_path).resolve() if str(keep_path or "").strip() else None
+    for raw_path in dict.fromkeys(paths):
+        path = Path(raw_path).resolve()
+        if keep is not None and path == keep:
+            continue
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            continue
+        try:
+            path.parent.rmdir()
+        except Exception:
+            pass
 
 
 class ToolStreamPreviewLimiter:
@@ -370,11 +558,15 @@ def _stash_tool_output_artifact(
 
     saved_path = ""
     artifact_id = ""
+    artifact_dir: Optional[Path] = None
     try:
         workspace = Path.cwd().resolve()
         from .output_paths import create_thread_artifact_dir
 
         artifact_id, artifact_dir = create_thread_artifact_dir(workspace, thread_id)
+        staged = _STAGED_TOOL_OUTPUT_ARTIFACTS.get()
+        if staged is not None:
+            staged.append(artifact_dir)
         for index, chunk in enumerate(chunks, start=1):
             chunk_path = artifact_dir / f"chunk-{index:04d}.txt"
             chunk_path.write_text(chunk, encoding="utf-8")
@@ -411,6 +603,8 @@ def _stash_tool_output_artifact(
             pass
         saved_path = str(artifact_dir)
     except Exception:
+        if artifact_dir is not None:
+            _cleanup_staged_tool_output_artifacts([artifact_dir])
         saved_path = ""
         artifact_id = ""
 
@@ -621,6 +815,8 @@ def _finalize_auto_tool_output(
     stored_char_count = len(full_output)
     stored_line_count = len(full_output.splitlines())
     original_count = original_char_count if original_char_count is not None else stored_char_count
+    staged_artifacts: list[Path] = []
+    staged_token = _STAGED_TOOL_OUTPUT_ARTIFACTS.set(staged_artifacts)
     try:
         thread_output_optimizer_config = get_thread_output_optimizer_policy_config(db, thread_id)
         publication = decide_output_publication(
@@ -653,11 +849,14 @@ def _finalize_auto_tool_output(
             ),
         )
     except Exception as exc:
+        _cleanup_staged_tool_output_artifacts(staged_artifacts)
         raise ToolOutputPlanError(
             thread_id,
             str(tool_call_id),
             f"Automatic output policy failed: {type(exc).__name__}: {exc}",
         ) from exc
+    finally:
+        _STAGED_TOOL_OUTPUT_ARTIFACTS.reset(staged_token)
     plan = ToolOutputPublicationPlan(
         decision=publication.decision,
         preview=publication.preview,
@@ -672,16 +871,25 @@ def _finalize_auto_tool_output(
             "publication_presentation": dict(publication_presentation or {}),
         },
     )
-    return finalize_tool_output(
-        db,
-        thread_id,
-        tool_call_id,
-        decision=publication.decision,
-        source="automatic_policy",
-        expected_event_seq=expected_event_seq,
-        publication_plan=plan,
-        invocation_writer=writer,
+    try:
+        result = finalize_tool_output(
+            db,
+            thread_id,
+            tool_call_id,
+            decision=publication.decision,
+            source="automatic_policy",
+            expected_event_seq=expected_event_seq,
+            publication_plan=plan,
+            invocation_writer=writer,
+        )
+    except Exception:
+        _cleanup_staged_tool_output_artifacts(staged_artifacts)
+        raise
+    _cleanup_staged_tool_output_artifacts(
+        staged_artifacts,
+        keep_path=str(result.payload.get("artifact_path") or ""),
     )
+    return result
 
 
 def _tool_output_content_parts_for_transcript(tool_name: str, output: str) -> Optional[List[Dict[str, Any]]]:
@@ -1046,7 +1254,8 @@ class ThreadRunner:
 
     def __init__(self, db: ThreadsDB, thread_id: str, llm: Optional[LLMClient] = None, owner: Optional[str] = None, purpose: str = "assistant_stream", config: Optional[RunnerConfig] = None,
                  models_path: Optional[str] = None, all_models_path: Optional[str] = None, tools: Optional[ToolRegistry] = None,
-                 image_generation_models_path: Optional[str] = None):
+                 image_generation_models_path: Optional[str] = None,
+                 output_recovery_retries: Optional[_ToolOutputRecoveryRetries] = None):
         self.db = db
         self.thread_id = thread_id
         if llm is not None:
@@ -1070,6 +1279,10 @@ class ThreadRunner:
             except Exception:
                 self.image_generation_models_path = str(Path(self.models_path).with_name('image-generation-models.json'))
         self._invocation_writer: Optional[InvocationEventWriter] = None
+        # Standalone runners model a fresh/manual runner pass and are not
+        # process schedulers. Resident SubtreeScheduler instances inject their
+        # shared process-local budget explicitly.
+        self._output_recovery_retries = output_recovery_retries
 
     def _owned_writer(self, invoke_id: str) -> InvocationEventWriter:
         writer = self._invocation_writer
@@ -1406,6 +1619,12 @@ class ThreadRunner:
         if not ra:
             return False
 
+        recovery_key = _tool_output_recovery_key(self.db, ra)
+        if recovery_key is not None and self._output_recovery_retries is not None:
+            disposition = self._output_recovery_retries.disposition(recovery_key)
+            if not disposition.allowed:
+                raise _ToolOutputRecoveryDeferred(recovery_key, disposition)
+
         # Block RA1 and RA2 in NO_API_CALLS mode (read-only viewing mode)
         if _no_api_calls_mode(self.cfg):
             if (
@@ -1613,6 +1832,14 @@ class ThreadRunner:
             # TC4 finalization failures are deliberately retriable. Do not append
             # a generic runner error (which would move the turn boundary or hide
             # the pending output prompt); leave the finished output in TC4.
+            failure_key = _tool_output_recovery_key_for_call(
+                self.db,
+                self.thread_id,
+                getattr(e, "tool_call_id", ""),
+            )
+            retry_key = failure_key or recovery_key
+            if retry_key is not None and self._output_recovery_retries is not None:
+                self._output_recovery_retries.record_failure(retry_key)
             print(f"Tool output finalization pending retry: {e}")
         except Exception as e:
             if ra.kind == 'RA1_llm' and _is_context_length_exceeded_error(e):
@@ -3441,8 +3668,12 @@ class ThreadRunner:
                     "tool_index": current.index,
                     "stranded_output_recovery": True,
                 },
-                original_char_count=len(full_output),
-                output_capped=False,
+                original_char_count=(
+                    current.finished_original_char_count
+                    if current.finished_original_char_count is not None
+                    else len(full_output)
+                ),
+                output_capped=bool(current.finished_output_capped),
                 publication_presentation=current.publication_presentation,
                 expected_event_seq=current.state_event_seq,
                 writer=writer,
@@ -3854,6 +4085,8 @@ class ThreadRunner:
                         'tool_call_id': tc.tool_call_id,
                         'reason': finish_reason,
                         'output': full_result,
+                        'original_char_count': original_output_char_count,
+                        'output_capped': output_was_capped,
                         'publication_presentation': publication_presentation,
                     },
                 )
@@ -4561,6 +4794,7 @@ class SubtreeScheduler:
             except Exception:
                 self.image_generation_models_path = str(Path(self.models_path).with_name('image-generation-models.json'))
         self._tasks: Set[asyncio.Task] = set()
+        self._output_recovery_retries = _ToolOutputRecoveryRetries()
 
     async def shutdown(self) -> None:
         """Cancel and await runner tasks spawned by this scheduler."""
@@ -4670,7 +4904,11 @@ class SubtreeScheduler:
                 await self.shutdown()
                 raise
 
-        async def drive(tid: str, resource_class: str):
+        async def drive(
+            tid: str,
+            resource_class: str,
+            scheduled_recovery_key: Optional[_ToolOutputRecoveryKey],
+        ):
             try:
                 runner = ThreadRunner(
                     self.db,
@@ -4683,15 +4921,33 @@ class SubtreeScheduler:
                     all_models_path=self.all_models_path,
                     image_generation_models_path=self.image_generation_models_path,
                     tools=self.tools,
+                    output_recovery_retries=self._output_recovery_retries,
                 )
-                try:
-                    await runner.run_once()
-                except Exception:
-                    # Clear cache to force re-check on next iteration
-                    last_checked_seq.pop(tid, None)
+                await runner.run_once()
+            except _ToolOutputRecoveryDeferred:
+                pass
+            except Exception:
+                # Preserve the scheduler's longstanding resilience for
+                # unrelated runner failures. The TC4 finalization exceptions
+                # handled inside run_once use the retry path below instead.
+                last_checked_seq.pop(tid, None)
             finally:
                 # Remove from running set when done
                 running_threads.pop(tid, None)
+                # A successful-TC4 failure adds stream bookkeeping events while
+                # leaving the durable TC4 watermark unchanged. Its retry budget,
+                # not the event-log watermark, decides whether/when to re-run.
+                remaining_key = _tool_output_recovery_key_for_call(
+                    self.db,
+                    scheduled_recovery_key.thread_id,
+                    scheduled_recovery_key.tool_call_id,
+                ) if scheduled_recovery_key is not None else None
+                if remaining_key == scheduled_recovery_key:
+                    disposition = self._output_recovery_retries.disposition(
+                        remaining_key
+                    )
+                    if disposition.allowed or disposition.retry_at is not None:
+                        last_checked_seq.pop(tid, None)
                 # Reserve slot (actual idle check happens in scheduling loop)
                 if self.cfg.sticky_scheduling and resource_class == "llm":
                     reserved_slots.add(tid)
@@ -4876,7 +5132,13 @@ class SubtreeScheduler:
                     last_run_end.pop(tid, None)  # Clear idle timer when scheduled
 
                 running_threads[tid] = resource_class
-                task = asyncio.create_task(drive(tid, resource_class))
+                task = asyncio.create_task(
+                    drive(
+                        tid,
+                        resource_class,
+                        _tool_output_recovery_key(self.db, _ra),
+                    )
+                )
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
                 if resource_class == "llm":

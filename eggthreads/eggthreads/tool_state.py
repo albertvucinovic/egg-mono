@@ -60,6 +60,10 @@ class ToolCallState:
     execution_started: bool = False
     finished_reason: Optional[str] = None  # "success" | "interrupted" | ...
     finished_output: Optional[str] = None  # full tool output from tool_call.finished, if any
+    # Storage facts remain durable across the TC4 publication recovery window.
+    # Historical finish events default to their stored output size/uncapped.
+    finished_original_char_count: Optional[int] = None
+    finished_output_capped: bool = False
     # Normalized presentation stays separate from canonical finished output.
     publication_presentation: Dict[str, Any] = field(default_factory=dict)
     output_decision: Optional[str] = None  # "whole" | "partial" | "omit"
@@ -397,6 +401,8 @@ def _interrupted_tool_update(tc: ToolCallState, reason: str, output: str) -> Too
         tc,
         finished_reason="interrupted",
         finished_output=output,
+        finished_original_char_count=len(output),
+        finished_output_capped=False,
         output_decision=None,
         last_output_approval_payload=None,
         output_decision_event_seq=None,
@@ -705,6 +711,12 @@ def _try_reduce_thread_events_incrementally(
                 ),
                 finished_reason=None if resume_after_lease_loss else tc.finished_reason,
                 finished_output=None if resume_after_lease_loss else tc.finished_output,
+                finished_original_char_count=(
+                    None if resume_after_lease_loss else tc.finished_original_char_count
+                ),
+                finished_output_capped=(
+                    False if resume_after_lease_loss else tc.finished_output_capped
+                ),
                 output_decision=None if resume_after_lease_loss else tc.output_decision,
                 last_output_approval_payload=(
                     None if resume_after_lease_loss else tc.last_output_approval_payload
@@ -725,6 +737,20 @@ def _try_reduce_thread_events_incrementally(
             out = payload.get("output")
             if out is not None:
                 changes["finished_output"] = str(out)
+            stored_output = str(out) if out is not None else str(tc.finished_output or "")
+            try:
+                original_char_count = int(
+                    payload.get("original_char_count", len(stored_output))
+                )
+            except (TypeError, ValueError):
+                original_char_count = len(stored_output)
+            changes["finished_original_char_count"] = max(
+                len(stored_output), original_char_count
+            )
+            changes["finished_output_capped"] = bool(
+                payload.get("output_capped")
+                or changes["finished_original_char_count"] > len(stored_output)
+            )
             from .tool_output_presentation import normalize_publication_presentation
 
             changes["publication_presentation"] = normalize_publication_presentation(
@@ -1024,6 +1050,8 @@ def _reduce_loaded_thread_events(
                     if resume_after_lease_loss:
                         tc.finished_reason = None
                         tc.finished_output = None
+                        tc.finished_original_char_count = None
+                        tc.finished_output_capped = False
                         tc.output_decision = None
                         tc.last_output_approval_payload = None
                         tc.output_decision_event_seq = None
@@ -1049,6 +1077,20 @@ def _reduce_loaded_thread_events(
                     out = payload.get("output")
                     if out is not None:
                         tc.finished_output = str(out)
+                    stored_output = str(out) if out is not None else str(tc.finished_output or "")
+                    try:
+                        original_char_count = int(
+                            payload.get("original_char_count", len(stored_output))
+                        )
+                    except (TypeError, ValueError):
+                        original_char_count = len(stored_output)
+                    tc.finished_original_char_count = max(
+                        len(stored_output), original_char_count
+                    )
+                    tc.finished_output_capped = bool(
+                        payload.get("output_capped")
+                        or tc.finished_original_char_count > len(stored_output)
+                    )
                     from .tool_output_presentation import normalize_publication_presentation
 
                     tc.publication_presentation = normalize_publication_presentation(

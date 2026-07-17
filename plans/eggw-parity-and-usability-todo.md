@@ -271,6 +271,30 @@ policy.
 
 ## Status notes / commit ledger
 
+- 2026-07-18: Phase 10 R1 review follow-up closes the two post-`70563de`
+  blockers without changing schema, API, lifecycle event types, or publication
+  authority. Normal execution now records the already-computed original output
+  character count and cap flag in the existing `tool_call.finished` payload;
+  both reducer paths preserve those fields in `ToolCallState`, and successful
+  TC4 recovery reuses them so capped prefixes remain truthfully labeled in
+  artifact metadata and previews (legacy finish events retain stored-size,
+  uncapped fallback semantics). Resident schedulers now share a process-local,
+  finish-watermark-scoped three-attempt exponential-backoff budget for automatic
+  successful-TC4 recovery. Persistent deterministic failure therefore stops
+  stream/event churn in each process while TC4 stays visible and manually
+  finalizable; another process/restart gets the same bounded window, and a new
+  durable lifecycle watermark retries immediately. Standalone/manual runner
+  passes remain explicit retry opportunities. Artifact directories allocated by
+  one automatic policy attempt are tracked task-locally: incomplete writes and
+  failed/non-authoritative plans are removed, while only the committed artifact
+  is retained. Literal tests cover capped recovery, partial-write cleanup,
+  bounded resident-scheduler churn, independent process budgets, and state-
+  watermark reset. Focused Phase 10/output/reducer/orphan/continuation/scheduler
+  suites: `229 passed`; terminal approval: `16 passed`; EggW API: `126 passed,
+  1 skipped`; full EggThreads: `1545 passed` with the same two unrelated
+  process-containment cases failing only in the full run and passing together
+  immediately in isolation (`2 passed`).
+
 - 2026-07-18: Phase 10 R1 repair implemented within the existing schema and authorities. A durable successful/`ok` TC4 with no live lease is now a runner actionable (`stranded_successful_tc4`); the winning Egg/EggW runner acquires the ordinary per-thread tool lease, re-reads the exact TC4 lifecycle/version, applies the established shared output policy to the already-durable raw output, commits through the existing lease/version-fenced `finalize_tool_output()`, and publishes through the existing TC5 path. It never invokes the tool again. TC3 orphan recovery remains higher priority and unchanged; interrupted/error TC4 remains manual/fail-closed. Parent batches retain declaration order and include already-decided TC5 siblings on retry. Policy/artifact failure leaves raw TC4 retryable; restart, expired-lease takeover, two-scheduler contention, long artifact retry, multi-tool ordering, terminal prompt clearing, and passive EggW read parity are covered. No schema, API, lifecycle event, storage authority, approval policy, frontend, or Phase 8 behavior changed. Validation: focused output/recovery/scheduler suites `237 passed`; terminal approval `16 passed`; EggW API `126 passed, 1 skipped`; full EggThreads `1540 passed` with two unrelated process-containment tests failing only in the full run and passing together immediately in isolation (`2 passed`); compileall and `git diff --check` passed. Commit hash follows after final review.
 
 - 2026-07-17: Phase 10 bounded reproduction/evidence slice (commit `c3a33b7`) completed before R1 was authorized; no product behavior changed in that evidence commit. It established the canonical TC4 → shared output policy → lease/version-fenced `finalize_tool_output()` → TC5 → TC6 lifecycle, proved TC1 execution approval is separate, captured the legacy terminal/EggW prompt substrate, and reproduced successful TC4 as non-actionable after policy failure, restart, or lease loss. It also documented that no configured manual output-policy mode exists and compared recovery, prompt-only suppression, and broader atomic-lifecycle options. The subsequent R1 entry above supersedes its non-actionable-state description.
