@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChatPanel } from "@/components/ChatPanel";
@@ -58,8 +58,9 @@ export default function ThreadPage() {
     appendStagedAttachments(threadId, [attachment]);
   }, [appendStagedAttachments, threadId]);
 
-  // Sync URL thread ID to store on mount and when URL changes
-  useEffect(() => {
+  // Publish route identity before child layout effects run. A detached prior
+  // thread must not suppress the new transcript's first pre-paint correction.
+  useLayoutEffect(() => {
     if (threadId && threadId !== currentThreadId) {
       setCurrentThreadId(threadId);
       openThread(threadId)

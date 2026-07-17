@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .db import ThreadsDB
 
 
-PROJECTION_SNAPSHOT_VERSION = 1
+PROJECTION_SNAPSHOT_VERSION = 2
 _PROJECTION_METADATA_KEY = "_thread_projection"
 
 # Keep the incremental publication path fail-closed.  New event types must be
@@ -45,16 +45,70 @@ _SNAPSHOT_NOOP_EVENT_TYPES = frozenset({
     "tool_call.approval_policy",
     "tool_call.execution_started",
     "tool_call.finished",
-    "tool_call.output_approval",
     "tool_call.summary",
     "user_command.finished",
     "user_command.started",
     "user_command.status",
 })
 
+# Tail events handled by ``_extend_coherent_snapshot`` without invoking the
+# full reducer. Optimizer approvals mutate only serialized pending metadata.
+_SNAPSHOT_FAST_TAIL_EVENT_TYPES = _SNAPSHOT_NOOP_EVENT_TYPES | frozenset({
+    "msg.create",
+    "tool_call.output_approval",
+})
+
 
 class ThreadProjectionError(RuntimeError):
     """Raised when a bounded event stream cannot be projected faithfully."""
+
+
+def _output_optimizer_metadata(payload: Mapping[str, Any]) -> Dict[str, Any] | None:
+    """Return canonical public metadata for one output-approval event."""
+
+    from .output_optimizer.observability import optimizer_public_metadata_from_output_approval
+
+    metadata = optimizer_public_metadata_from_output_approval(payload)
+    return copy.deepcopy(metadata) if metadata else None
+
+
+def _payload_with_output_optimizer_metadata(
+    payload: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> Dict[str, Any]:
+    updated = copy.deepcopy(dict(payload))
+    updated["output_optimizer"] = copy.deepcopy(dict(metadata))
+    return updated
+
+
+def _apply_output_optimizer_metadata_to_states(
+    ordered_ids: Sequence[str],
+    states: Dict[str, "ProjectedMessage"],
+    *,
+    event_seq: int,
+    event_id: str | None,
+    ts: str | None,
+    approval_payload: Mapping[str, Any],
+) -> None:
+    """Apply successful approval metadata to every matching tool message."""
+
+    tool_call_id = approval_payload.get("tool_call_id")
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return
+    metadata = _output_optimizer_metadata(approval_payload)
+    if metadata is None:
+        return
+    for msg_id in ordered_ids:
+        current = states[msg_id]
+        if current.payload.get("tool_call_id") != tool_call_id:
+            continue
+        states[msg_id] = replace(
+            current,
+            payload=_payload_with_output_optimizer_metadata(current.payload, metadata),
+            last_event_seq=int(event_seq),
+            last_event_id=event_id,
+            updated_at=ts,
+        )
 
 
 @dataclass(frozen=True)
@@ -148,6 +202,7 @@ class ThreadProjection:
     message_states: Tuple[ProjectedMessage, ...]
     started_from_snapshot_event_seq: int = -1
     tail_event_types: Tuple[str, ...] = ()
+    pending_optimizer_metadata: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     _base_snapshot: Optional[Mapping[str, Any]] = field(default=None, repr=False, compare=False)
 
     @property
@@ -165,6 +220,9 @@ class ThreadProjection:
                 "thread_id": self.thread_id,
                 "through_event_seq": self.through_event_seq,
                 "message_states": [message._state_dict() for message in self.message_states],
+                "pending_optimizer_metadata": copy.deepcopy(
+                    dict(self.pending_optimizer_metadata),
+                ),
             },
         }
 
@@ -324,8 +382,17 @@ def _decode_coherent_snapshot(
     ):
         return None
     raw_states = metadata.get("message_states")
-    if not isinstance(raw_states, list):
+    raw_pending_optimizer_metadata = metadata.get("pending_optimizer_metadata")
+    if not isinstance(raw_states, list) or not isinstance(raw_pending_optimizer_metadata, Mapping):
         return None
+    for tool_call_id, optimizer_metadata in raw_pending_optimizer_metadata.items():
+        if (
+            not isinstance(tool_call_id, str)
+            or not tool_call_id
+            or not isinstance(optimizer_metadata, Mapping)
+            or optimizer_metadata.get("optimized") is not True
+        ):
+            return None
 
     seen_ids = set()
     message_index = 0
@@ -377,7 +444,8 @@ def _extend_coherent_snapshot(
     if not isinstance(metadata, dict) or not isinstance(messages, list):
         return None
     raw_states = metadata.get("message_states")
-    if not isinstance(raw_states, list):
+    pending_optimizer_metadata = metadata.get("pending_optimizer_metadata")
+    if not isinstance(raw_states, list) or not isinstance(pending_optimizer_metadata, dict):
         return None
     try:
         start_event_seq = int(metadata.get("through_event_seq"))
@@ -412,11 +480,26 @@ def _extend_coherent_snapshot(
             if msg_id in existing_ids:
                 return None
             existing_ids.add(msg_id)
+            created_payload = copy.deepcopy(dict(event.payload))
+            tool_call_id = created_payload.get("tool_call_id")
+            if (
+                isinstance(tool_call_id, str)
+                and tool_call_id
+                and "output_optimizer" not in created_payload
+                and tool_call_id in pending_optimizer_metadata
+            ):
+                optimizer_metadata = pending_optimizer_metadata[tool_call_id]
+                if not isinstance(optimizer_metadata, Mapping):
+                    return None
+                created_payload = _payload_with_output_optimizer_metadata(
+                    created_payload,
+                    optimizer_metadata,
+                )
             appended.append(
                 ProjectedMessage(
                     thread_id=thread_id,
                     msg_id=msg_id,
-                    payload=event.payload,
+                    payload=created_payload,
                     created_event_seq=event.event_seq,
                     created_event_id=event.event_id,
                     created_at=event.ts,
@@ -426,6 +509,16 @@ def _extend_coherent_snapshot(
                 )
             )
             continue
+        if event.type == "tool_call.output_approval":
+            tool_call_id = event.payload.get("tool_call_id")
+            optimizer_metadata = _output_optimizer_metadata(event.payload)
+            if (
+                isinstance(tool_call_id, str)
+                and tool_call_id
+                and optimizer_metadata is not None
+            ):
+                pending_optimizer_metadata[tool_call_id] = optimizer_metadata
+            continue
         if event.type == "control.interrupt" and event.payload.get("purpose") != "continue":
             continue
         if event.type not in _SNAPSHOT_NOOP_EVENT_TYPES:
@@ -434,6 +527,16 @@ def _extend_coherent_snapshot(
     tail_messages = [message.as_message_dict() for message in appended]
     messages.extend(tail_messages)
     raw_states.extend(message._state_dict() for message in appended)
+    consumed_tool_call_ids = {
+        str(raw.get("payload", {}).get("tool_call_id"))
+        for raw in raw_states
+        if isinstance(raw, Mapping)
+        and isinstance(raw.get("payload"), Mapping)
+        and isinstance(raw.get("payload", {}).get("tool_call_id"), str)
+        and raw.get("payload", {}).get("tool_call_id")
+    }
+    for tool_call_id in consumed_tool_call_ids:
+        pending_optimizer_metadata.pop(tool_call_id, None)
     metadata["through_event_seq"] = int(through_event_seq)
     return tail_messages
 
@@ -455,8 +558,13 @@ def _projection_from_snapshot(
         return None
     metadata = snapshot[_PROJECTION_METADATA_KEY]
     raw_states = metadata.get("message_states")
+    raw_pending_optimizer_metadata = metadata.get("pending_optimizer_metadata")
     try:
         states = tuple(ProjectedMessage._from_state_dict(thread_id, raw) for raw in raw_states)
+        pending_optimizer_metadata = {
+            str(tool_call_id): copy.deepcopy(dict(optimizer_metadata))
+            for tool_call_id, optimizer_metadata in raw_pending_optimizer_metadata.items()
+        }
     except (ThreadProjectionError, TypeError):
         return None
     if any(state.last_event_seq > snapshot_event_seq for state in states):
@@ -466,6 +574,7 @@ def _projection_from_snapshot(
         through_event_seq=snapshot_event_seq,
         message_states=states,
         started_from_snapshot_event_seq=snapshot_event_seq,
+        pending_optimizer_metadata=pending_optimizer_metadata,
         _base_snapshot=copy.deepcopy(dict(snapshot)),
     )
     return projection
@@ -479,9 +588,14 @@ def _apply_events(
     through_event_seq: int,
     started_from_snapshot_event_seq: int,
     base_snapshot: Optional[Mapping[str, Any]],
+    base_pending_optimizer_metadata: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> ThreadProjection:
     ordered_ids: List[str] = []
     states: Dict[str, ProjectedMessage] = {}
+    pending_optimizer_metadata: Dict[str, Dict[str, Any]] = {
+        str(tool_call_id): copy.deepcopy(dict(optimizer_metadata))
+        for tool_call_id, optimizer_metadata in (base_pending_optimizer_metadata or {}).items()
+    }
     for state in base_states:
         if state.msg_id in states:
             raise ThreadProjectionError(f"Duplicate projected message id: {state.msg_id}")
@@ -512,10 +626,22 @@ def _apply_events(
                 # duplicate must not silently replace provider payload.
                 raise ThreadProjectionError(f"Duplicate msg.create id: {msg_id}")
             ordered_ids.append(msg_id)
+            created_payload = copy.deepcopy(dict(event.payload))
+            tool_call_id = created_payload.get("tool_call_id")
+            if (
+                isinstance(tool_call_id, str)
+                and tool_call_id
+                and "output_optimizer" not in created_payload
+                and tool_call_id in pending_optimizer_metadata
+            ):
+                created_payload = _payload_with_output_optimizer_metadata(
+                    created_payload,
+                    pending_optimizer_metadata[tool_call_id],
+                )
             states[msg_id] = ProjectedMessage(
                 thread_id=thread_id,
                 msg_id=msg_id,
-                payload=copy.deepcopy(dict(event.payload)),
+                payload=created_payload,
                 created_event_seq=event.event_seq,
                 created_event_id=event.event_id,
                 created_at=event.ts,
@@ -566,6 +692,21 @@ def _apply_events(
             )
             continue
 
+        if event.type == "tool_call.output_approval":
+            tool_call_id = event.payload.get("tool_call_id")
+            metadata = _output_optimizer_metadata(event.payload)
+            if isinstance(tool_call_id, str) and tool_call_id and metadata is not None:
+                pending_optimizer_metadata[tool_call_id] = metadata
+            _apply_output_optimizer_metadata_to_states(
+                ordered_ids,
+                states,
+                event_seq=event.event_seq,
+                event_id=event.event_id,
+                ts=event.ts,
+                approval_payload=event.payload,
+            )
+            continue
+
         if event.type == "control.interrupt" and event.payload.get("purpose") == "continue":
             continue_from = event.payload.get("continue_from_msg_id")
             if not isinstance(continue_from, str) or continue_from not in states:
@@ -591,6 +732,14 @@ def _apply_events(
         message_states=tuple(states[msg_id] for msg_id in ordered_ids),
         started_from_snapshot_event_seq=int(started_from_snapshot_event_seq),
         tail_event_types=tuple(event.type for event in events),
+        pending_optimizer_metadata={
+            tool_call_id: copy.deepcopy(metadata)
+            for tool_call_id, metadata in pending_optimizer_metadata.items()
+            if not any(
+                state.payload.get("tool_call_id") == tool_call_id
+                for state in states.values()
+            )
+        },
         _base_snapshot=copy.deepcopy(dict(base_snapshot)) if isinstance(base_snapshot, Mapping) else None,
     )
 
@@ -666,6 +815,9 @@ def load_thread_projection(
         through_event_seq=target,
         started_from_snapshot_event_seq=after_seq,
         base_snapshot=base.base_snapshot if base is not None else None,
+        base_pending_optimizer_metadata=(
+            base.pending_optimizer_metadata if base is not None else None
+        ),
     )
 
 

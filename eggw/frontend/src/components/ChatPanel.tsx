@@ -1,6 +1,20 @@
 "use client";
 
-import { memo, Profiler, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type TouchEvent, type WheelEvent } from "react";
+import {
+  memo,
+  Profiler,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+  type ReactNode,
+  type TouchEvent,
+  type WheelEvent,
+} from "react";
 import Link from "next/link";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -42,10 +56,19 @@ import {
   type HiddenToolDetail,
   type HiddenDetailKind,
 } from "@/lib/toolPresentation";
-import { fetchOlderTranscriptPage, flattenTranscript, refreshTranscriptTail, transcriptInfiniteQueryOptions } from "@/lib/transcript";
+import {
+  cancelTranscriptRequests,
+  fetchOlderTranscriptPage,
+  refreshTranscriptTail,
+  transcriptInfiniteQueryOptions,
+} from "@/lib/transcript";
 import { AnimationFrameCoalescer, IntervalCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
 import { recordReactCommit, recordStreamingFlush } from "@/lib/performanceInstrumentation";
-import { expandedTranscriptStartId, transcriptWindow, TRANSCRIPT_WINDOW_MESSAGES } from "@/lib/transcriptWindow";
+import {
+  nextTranscriptStartIndex,
+  TRANSCRIPT_WINDOW_MESSAGES,
+} from "@/lib/transcriptWindow";
+import { expandedTranscriptStartIndex, oldestTranscriptFrontier, transcriptIndex, transcriptRenderWindow } from "@/lib/transcriptIndex";
 import {
   IDLE_HISTORY_DEMAND,
   reduceHistoryDemand,
@@ -84,9 +107,7 @@ function preprocessLatex(content: string): string {
       const body = String(rest);
       const withoutClosingFence = body.replace(/\$\$[ \t]*$/, "").trimEnd();
       if (withoutClosingFence !== body.trimEnd()) {
-        return withoutClosingFence.trim()
-          ? `${indent}$$\n${indent}${withoutClosingFence.trimStart()}\n${indent}$$`
-          : `${indent}$$`;
+        return withoutClosingFence.trim() ? `${indent}$$\n${indent}${withoutClosingFence.trimStart()}\n${indent}$$` : `${indent}$$`;
       }
       return `${indent}$$\n${indent}${body.trimStart()}`;
     });
@@ -124,16 +145,13 @@ function preprocessLatex(content: string): string {
   // Match a standalone [ followed by whitespace and backslash, capture until
   // closing ]. Do not treat brackets that are part of LaTeX commands (for
   // example \left[ ... \right]) as markdown math delimiters.
-  processed = processed.replace(
-    /(^|[^\w\\])\[\s*(\\[\s\S]*?)\s*\]/g,
-    (match, prefix, math) => {
-      // Only convert if it looks like LaTeX (contains common LaTeX commands)
-      if (/\\(?:begin|end|frac|sum|int|prod|lim|nabla|partial|sqrt|text|mathbf|mathrm|left|right|aligned|equation|matrix|cases)/.test(math)) {
-        return `${prefix}$$${math}$$`;
-      }
-      return match; // Keep original if not LaTeX
+  processed = processed.replace(/(^|[^\w\\])\[\s*(\\[\s\S]*?)\s*\]/g, (match, prefix, math) => {
+    // Only convert if it looks like LaTeX (contains common LaTeX commands)
+    if (/\\(?:begin|end|frac|sum|int|prod|lim|nabla|partial|sqrt|text|mathbf|mathrm|left|right|aligned|equation|matrix|cases)/.test(math)) {
+      return `${prefix}$$${math}$$`;
     }
-  );
+    return match; // Keep original if not LaTeX
+  });
 
   return processed;
 }
@@ -165,25 +183,36 @@ const LiveTimingText = memo(function LiveTimingText({
   testId?: string;
   className?: string;
 }) {
-  const [text, setText] = useState<string | null>(null);
-  useEffect(() => {
-    const read = (snapshot: LiveTimingSnapshot) => {
+  const read = useCallback(
+    (snapshot: LiveTimingSnapshot) => {
       if (kind === "provider") return snapshot.provider;
       if (kind === "generic") return snapshot.generic;
       if (kind === "toolElapsed") return toolId ? snapshot.tools[toolId]?.elapsed || null : null;
       return toolId ? snapshot.tools[toolId]?.timeout || null : null;
-    };
-    const update = () => setText(read(liveTimingSnapshot(
-      Date.now(), isStreaming, streamingKind, streamingStartedAtMs, providerRequest, toolOutputs,
-    )));
+    },
+    [kind, toolId]
+  );
+  const initialText = read(liveTimingSnapshot(Date.now(), isStreaming, streamingKind, streamingStartedAtMs, providerRequest, toolOutputs));
+  const [text, setText] = useState<string | null>(initialText);
+  useEffect(() => {
+    const update = () =>
+      setText(read(liveTimingSnapshot(Date.now(), isStreaming, streamingKind, streamingStartedAtMs, providerRequest, toolOutputs)));
     update();
     if (!shouldUpdateLiveTiming(isStreaming, toolOutputs, providerRequest, streamingKind)) return;
     const intervalId = window.setInterval(update, 1000);
     return () => window.clearInterval(intervalId);
-  }, [kind, toolId, isStreaming, streamingKind, streamingStartedAtMs, providerRequest, toolOutputs]);
-  const content = text
-    ? <span data-testid={testId} className={clsx(className, "eggw-live-timing")}>{text}</span>
-    : null;
+  }, [read, isStreaming, streamingKind, streamingStartedAtMs, providerRequest, toolOutputs]);
+  // Mount the slot with fixed geometry even when this timing kind currently has
+  // no text. The first effect/tick therefore cannot create or remove layout.
+  const content = (
+    <span
+      data-testid={testId}
+      className={clsx(className, "eggw-live-timing", `eggw-live-timing-${kind}`)}
+      aria-hidden={text ? undefined : true}
+    >
+      {text || "\u00a0"}
+    </span>
+  );
   if (process.env.NODE_ENV === "production") return content;
   return (
     <Profiler id="LiveTiming" onRender={(id, _phase, duration) => recordReactCommit(id as "LiveTiming", duration)}>
@@ -232,7 +261,6 @@ function streamedMetadataHiddenHeader(message: Message, label: string, text: str
   return `${messageMetadataText(message, label)} | ${text.length.toLocaleString()} chars`;
 }
 
-
 function toolCallArgs(tc: any): unknown {
   const args = tc?.arguments ?? tc?.function?.arguments;
   if (typeof args === "string") {
@@ -258,12 +286,12 @@ function messageTimestampText(timestamp?: string): string | null {
   if (!timestamp) return null;
   try {
     return new Date(timestamp).toLocaleString(undefined, {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
     });
   } catch {
     return timestamp;
@@ -279,7 +307,7 @@ function messageMetadataText(message: Message, label: string): string {
   if (tpsText) parts.push(tpsText);
   const tsText = messageTimestampText(message.timestamp);
   if (tsText) parts.push(tsText);
-  if (message.id && !message.id.startsWith('temp-')) parts.push(`msg_id: ${message.id}`);
+  if (message.id && !message.id.startsWith("temp-")) parts.push(`msg_id: ${message.id}`);
   if (message.tool_call_id) parts.push(`tool_call_id: ${message.tool_call_id}`);
   return parts.join(" | ");
 }
@@ -307,22 +335,30 @@ function isImportantSystemMessage(message: Message): boolean {
   // System messages are part of the chronological transcript skeleton at every
   // verbosity. In particular, the root system prompt must remain reachable
   // after loading and revealing the oldest page.
-  return message.role === "system"
-    && Boolean(contentToPlainText(message.content, message.content_text || "").trim());
+  return message.role === "system" && Boolean(contentToPlainText(message.content, message.content_text || "").trim());
 }
 
 function plural(count: number, singular: string, pluralText?: string): string {
-  return `${count} ${count === 1 ? singular : (pluralText || `${singular}s`)}`;
+  return `${count} ${count === 1 ? singular : pluralText || `${singular}s`}`;
 }
 
 function hiddenSummaryCountsText(details: HiddenDetail[]): string {
-  const counts: Record<HiddenDetailKind, number> = { reasoning: 0, tool_calls: 0, tool_results: 0 };
-  details.forEach((detail) => { counts[detail.kind] += 1; });
+  const counts: Record<HiddenDetailKind, number> = {
+    reasoning: 0,
+    tool_calls: 0,
+    tool_results: 0,
+  };
+  details.forEach((detail) => {
+    counts[detail.kind] += 1;
+  });
   const parts: string[] = [];
   if (counts.tool_calls > 0) parts.push(`Executed ${plural(counts.tool_calls, "tool")}`);
   if (counts.tool_results > 0) parts.push(`got ${plural(counts.tool_results, "tool result")}`);
   if (counts.reasoning > 0) parts.push(plural(counts.reasoning, "reasoning block"));
-  const tokenTotal = details.reduce((total, detail) => total + (Number.isFinite(detail.tokens || 0) ? Math.max(0, Math.trunc(detail.tokens || 0)) : 0), 0);
+  const tokenTotal = details.reduce(
+    (total, detail) => total + (Number.isFinite(detail.tokens || 0) ? Math.max(0, Math.trunc(detail.tokens || 0)) : 0),
+    0
+  );
   if (tokenTotal > 0) parts.push(`total tokens ${tokenTotal.toLocaleString()}`);
   return parts.join(", ") || "Hidden details";
 }
@@ -420,7 +456,7 @@ function ThreadCommandOutput({ content, threadIds }: { content: string; threadId
           title={`Open thread ${fullThreadId}`}
         >
           {token}
-        </Link>,
+        </Link>
       );
       lastIndex = match.index + token.length;
     }
@@ -453,31 +489,33 @@ function ContentPartsView({
   const addSystemLog = useAppStore((state) => state.addSystemLog);
   const [promotingArtifactIds, setPromotingArtifactIds] = useState<Record<string, boolean>>({});
   const imagePreviewClassName = "eggw-attachment-preview";
-  const hasImagePart = parts.some(
-    (part) => (isAttachmentPart(part) || isArtifactPart(part)) && isImageContentPart(part),
-  );
+  const hasImagePart = parts.some((part) => (isAttachmentPart(part) || isArtifactPart(part)) && isImageContentPart(part));
   const imagePreviewStyle = { maxHeight: MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT };
 
-  const handleUseAsAttachment = useCallback(async (part: Extract<ContentPart, { type: "artifact" }>) => {
-    if (!currentThreadId || !part.artifact_id || !onStageAttachment) return;
-    const descendantThreadId = part.owner_thread_id && part.owner_thread_id !== currentThreadId
-      ? part.owner_thread_id
-      : undefined;
-    setPromotingArtifactIds((prev) => ({ ...prev, [part.artifact_id]: true }));
-    try {
-      const promoted = await promoteProviderOutput(currentThreadId, part.artifact_id, { descendantThreadId });
-      onStageAttachment(promoted.content_part);
-      addSystemLog(`Staged provider output ${part.artifact_id} as attachment ${promoted.input_id}`, "success");
-    } catch (error) {
-      addSystemLog(error instanceof Error ? error.message : "Failed to use provider output as attachment", "error");
-    } finally {
-      setPromotingArtifactIds((prev) => {
-        const next = { ...prev };
-        delete next[part.artifact_id];
-        return next;
-      });
-    }
-  }, [addSystemLog, currentThreadId, onStageAttachment]);
+  const handleUseAsAttachment = useCallback(
+    async (part: Extract<ContentPart, { type: "artifact" }>) => {
+      if (!currentThreadId || !part.artifact_id || !onStageAttachment) return;
+      const descendantThreadId = part.owner_thread_id && part.owner_thread_id !== currentThreadId ? part.owner_thread_id : undefined;
+      setPromotingArtifactIds((prev) => ({
+        ...prev,
+        [part.artifact_id]: true,
+      }));
+      try {
+        const promoted = await promoteProviderOutput(currentThreadId, part.artifact_id, { descendantThreadId });
+        onStageAttachment(promoted.content_part);
+        addSystemLog(`Staged provider output ${part.artifact_id} as attachment ${promoted.input_id}`, "success");
+      } catch (error) {
+        addSystemLog(error instanceof Error ? error.message : "Failed to use provider output as attachment", "error");
+      } finally {
+        setPromotingArtifactIds((prev) => {
+          const next = { ...prev };
+          delete next[part.artifact_id];
+          return next;
+        });
+      }
+    },
+    [addSystemLog, currentThreadId, onStageAttachment]
+  );
 
   return (
     <div className="space-y-2">
@@ -492,14 +530,18 @@ function ContentPartsView({
         if (isAttachmentPart(part)) {
           const isImage = isImageContentPart(part);
           const canLink = Boolean(currentThreadId && part.input_id);
-          const descendantThreadId = canLink && part.owner_thread_id && part.owner_thread_id !== currentThreadId
-            ? part.owner_thread_id
-            : undefined;
+          const descendantThreadId =
+            canLink && part.owner_thread_id && part.owner_thread_id !== currentThreadId ? part.owner_thread_id : undefined;
           const openUrl = canLink
-            ? attachmentUrl(currentThreadId!, part.input_id, { descendantThreadId })
+            ? attachmentUrl(currentThreadId!, part.input_id, {
+                descendantThreadId,
+              })
             : null;
           const downloadUrl = canLink
-            ? attachmentUrl(currentThreadId!, part.input_id, { descendantThreadId, download: true })
+            ? attachmentUrl(currentThreadId!, part.input_id, {
+                descendantThreadId,
+                download: true,
+              })
             : null;
           return (
             <div
@@ -510,17 +552,18 @@ function ContentPartsView({
               <div className={clsx("flex flex-wrap items-center gap-2", isImage && "justify-center")}>
                 <span className="font-medium">Attachment</span>
                 <span>{attachmentFilename(part)}</span>
-                <span className="eggw-attachment-kind">
-                  {part.presentation || "file"}
-                </span>
+                <span className="eggw-attachment-kind">{part.presentation || "file"}</span>
                 <span className="eggw-attachment-meta">{part.mime_type || "application/octet-stream"}</span>
                 <span className="eggw-attachment-meta">{formatBytes(part.size_bytes)}</span>
               </div>
-              <div className="eggw-attachment-description">
-                {attachmentPlaceholder(part)}
-              </div>
+              <div className="eggw-attachment-description">{attachmentPlaceholder(part)}</div>
               {openUrl && isImage && (
-                <ProtectedFileLink url={openUrl} newWindow className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${attachmentFilename(part)}`}>
+                <ProtectedFileLink
+                  url={openUrl}
+                  newWindow
+                  className="mx-auto mt-3 block w-fit"
+                  aria-label={`Open preview of ${attachmentFilename(part)}`}
+                >
                   <ProtectedImage
                     url={openUrl}
                     alt={`Preview of ${attachmentFilename(part)}`}
@@ -552,14 +595,18 @@ function ContentPartsView({
           const isImage = isImageContentPart(part);
           const canLink = Boolean(currentThreadId && part.artifact_id);
           const canPromote = Boolean(canLink && onStageAttachment);
-          const descendantThreadId = canLink && part.owner_thread_id && part.owner_thread_id !== currentThreadId
-            ? part.owner_thread_id
-            : undefined;
+          const descendantThreadId =
+            canLink && part.owner_thread_id && part.owner_thread_id !== currentThreadId ? part.owner_thread_id : undefined;
           const openUrl = canLink
-            ? providerOutputUrl(currentThreadId!, part.artifact_id, { descendantThreadId })
+            ? providerOutputUrl(currentThreadId!, part.artifact_id, {
+                descendantThreadId,
+              })
             : null;
           const downloadUrl = canLink
-            ? providerOutputUrl(currentThreadId!, part.artifact_id, { descendantThreadId, download: true })
+            ? providerOutputUrl(currentThreadId!, part.artifact_id, {
+                descendantThreadId,
+                download: true,
+              })
             : null;
           return (
             <div
@@ -570,17 +617,18 @@ function ContentPartsView({
               <div className={clsx("flex flex-wrap items-center gap-2", isImage && "justify-center")}>
                 <span className="font-medium">Provider artifact</span>
                 <span>{artifactFilename(part)}</span>
-                <span className="eggw-attachment-kind">
-                  {part.presentation || "file"}
-                </span>
+                <span className="eggw-attachment-kind">{part.presentation || "file"}</span>
                 <span className="eggw-attachment-meta">{part.mime_type || "application/octet-stream"}</span>
                 <span className="eggw-attachment-meta">{formatBytes(part.size_bytes)}</span>
               </div>
-              <div className="eggw-attachment-description">
-                {artifactPlaceholder(part)}
-              </div>
+              <div className="eggw-attachment-description">{artifactPlaceholder(part)}</div>
               {openUrl && isImage && (
-                <ProtectedFileLink url={openUrl} newWindow className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${artifactFilename(part)}`}>
+                <ProtectedFileLink
+                  url={openUrl}
+                  newWindow
+                  className="mx-auto mt-3 block w-fit"
+                  aria-label={`Open preview of ${artifactFilename(part)}`}
+                >
                   <ProtectedImage
                     url={openUrl}
                     alt={`Preview of ${artifactFilename(part)}`}
@@ -643,15 +691,14 @@ function CompactionMarker({ message }: { message: Message }) {
     message.start_event_seq ? `start event #${message.start_event_seq}` : null,
     message.selector ? `selector ${message.selector}` : null,
     message.created_by ? `by ${message.created_by}` : null,
-  ].filter(Boolean).join(" · ");
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="eggw-compaction-marker" data-testid="compaction-marker" role="separator" aria-label="Compaction boundary">
       <div className="eggw-compaction-line" />
-      <div
-        className="eggw-compaction-label"
-        title={contentToPlainText(message.content, message.content_text || "") || undefined}
-      >
+      <div className="eggw-compaction-label" title={contentToPlainText(message.content, message.content_text || "") || undefined}>
         Compaction boundary: API context now starts at {startShort ? `msg_${startShort}` : "the selected message"}
         {details && <span className="eggw-compaction-detail">({details})</span>}
       </div>
@@ -684,7 +731,12 @@ function nestedScrollportConsumesWheel(target: EventTarget | null, outer: HTMLEl
   return false;
 }
 
-const MessageBlock = memo(function MessageBlock({ message, showBorders = true, displayVerbosity = "max", onStageAttachment }: MessageBlockProps) {
+const MessageBlock = memo(function MessageBlock({
+  message,
+  showBorders = true,
+  displayVerbosity = "max",
+  onStageAttachment,
+}: MessageBlockProps) {
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const openEditAnswerModal = useAppStore((state) => state.openEditAnswerModal);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
@@ -694,7 +746,9 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
     if (!currentThreadId || !message.id) return;
     setIsPreparingEditAnswer(true);
     try {
-      const draft = await createEditAnswerDraft(currentThreadId, { source_msg_id: message.id });
+      const draft = await createEditAnswerDraft(currentThreadId, {
+        source_msg_id: message.id,
+      });
       openEditAnswerModal({
         threadId: currentThreadId,
         draft: draft.draft,
@@ -725,23 +779,24 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
   };
 
   const displayRole = message.answer_user_preserve_turn && message.role === "assistant" ? "assistant_note" : message.role;
-  const baseRoleLabel = message.recovery_notice && message.role === "system"
-    ? "Continue Status"
-    : message.role === "system" && !message.command_name && !message.id?.startsWith("cmd-")
+  const baseRoleLabel =
+    message.recovery_notice && message.role === "system"
+      ? "Continue Status"
+      : message.role === "system" && !message.command_name && !message.id?.startsWith("cmd-")
       ? "System"
       : roleLabels[displayRole] || displayRole;
-  const roleLabel = message.role === "tool"
-    ? (message.name
-      ? `${baseRoleLabel}: ${message.name}`
-      : toolDisplayName("", message.tool_call_id, "Tool result"))
-    : baseRoleLabel;
+  const roleLabel =
+    message.role === "tool"
+      ? message.name
+        ? `${baseRoleLabel}: ${message.name}`
+        : toolDisplayName("", message.tool_call_id, "Tool result")
+      : baseRoleLabel;
 
   // Check if this is a shell command (starts with $ or $$)
   // Handle cases: "$ cmd", "$$ cmd", "$cmd" (no space)
   const contentText = contentToPlainText(message.content, message.content_text || "");
   const stringContent = typeof message.content === "string" ? message.content : contentText;
-  const isShellCommand = message.role === "user" &&
-    typeof message.content === "string" && message.content.match(/^\$\$?\s*\S/);
+  const isShellCommand = message.role === "user" && typeof message.content === "string" && message.content.match(/^\$\$?\s*\S/);
 
   // Check if this is a system/command message (should render as monospace)
   const isCommandOutput = message.role === "system";
@@ -763,10 +818,10 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
   const showStreamedMetadata = displayVerbosity !== "min" && (toolStreamEntries.length > 0 || toolCallStreamEntries.length > 0);
   const canQuoteEdit = Boolean(
     currentThreadId &&
-    message.id &&
-    !message.id.startsWith("temp-") &&
-    contentText.trim() &&
-    (displayRole === "assistant" || displayRole === "assistant_note")
+      message.id &&
+      !message.id.startsWith("temp-") &&
+      contentText.trim() &&
+      (displayRole === "assistant" || displayRole === "assistant_note")
   );
 
   return (
@@ -774,39 +829,32 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
       className={clsx(
         "eggw-message-card eggw-role-card",
         isShellCommand ? "eggw-role-shell" : roleClass,
-        !showBorders && "eggw-role-card-borderless",
+        !showBorders && "eggw-role-card-borderless"
       )}
       data-message-role={displayRole}
       data-message-id={message.id || undefined}
+      data-consumed-by-tool-call-id={message.consumed_by_tool_call_id || undefined}
     >
       {/* Header */}
       <div className="eggw-message-header">
         <span className="eggw-role-marker" aria-hidden="true" />
-        <span className="eggw-role-label">
-          {isShellCommand ? "Shell" : roleLabel}
-        </span>
-        {displayVerbosity !== "min" && message.model_key && (
-          <span className="eggw-message-meta">{message.model_key}</span>
-        )}
-        {displayVerbosity !== "min" && tokenText && (
-          <span className="eggw-message-meta">{tokenText}</span>
-        )}
-        {displayVerbosity !== "min" && messageTps && (
-          <span className="eggw-message-meta">{messageTps}</span>
-        )}
+        <span className="eggw-role-label">{isShellCommand ? "Shell" : roleLabel}</span>
+        {displayVerbosity !== "min" && message.model_key && <span className="eggw-message-meta">{message.model_key}</span>}
+        {displayVerbosity !== "min" && tokenText && <span className="eggw-message-meta">{tokenText}</span>}
+        {displayVerbosity !== "min" && messageTps && <span className="eggw-message-meta">{messageTps}</span>}
         {displayVerbosity === "max" && message.timestamp && (
           <span className="eggw-message-meta font-mono">
             {new Date(message.timestamp).toLocaleString(undefined, {
-              year: 'numeric',
-              month: '2-digit',
-              day: '2-digit',
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
             })}
           </span>
         )}
-        {displayVerbosity === "max" && message.id && message.id.length >= 8 && !message.id.startsWith('temp-') && (
+        {displayVerbosity === "max" && message.id && message.id.length >= 8 && !message.id.startsWith("temp-") && (
           <button
             type="button"
             className="eggw-message-id font-mono"
@@ -821,9 +869,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
           </button>
         )}
         {displayVerbosity === "max" && message.tool_call_id && (
-          <span className="eggw-message-meta font-mono">
-            ← {message.tool_call_id.slice(-8)}
-          </span>
+          <span className="eggw-message-meta font-mono">← {message.tool_call_id.slice(-8)}</span>
         )}
         {displayVerbosity !== "min" && optimizerSummary && (
           <StatusChip
@@ -864,14 +910,10 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
           <summary className="eggw-detail-summary">
             Reasoning
             {displayVerbosity === "medium" && message.reasoning && (
-              <span className="eggw-message-meta ml-2 font-mono">
-                {message.reasoning.length.toLocaleString()} chars
-              </span>
+              <span className="eggw-message-meta ml-2 font-mono">{message.reasoning.length.toLocaleString()} chars</span>
             )}
           </summary>
-          <div className="eggw-detail-content whitespace-pre-wrap">
-            {message.reasoning}
-          </div>
+          <div className="eggw-detail-content whitespace-pre-wrap">{message.reasoning}</div>
         </details>
       )}
 
@@ -880,17 +922,13 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
         <>
           {/* Shell command display */}
           {isShellCommand ? (
-            <pre className="eggw-code-block eggw-shell-command">
-              {stringContent}
-            </pre>
+            <pre className="eggw-code-block eggw-shell-command">{stringContent}</pre>
           ) : isCommandOutput ? (
             /* Command output (system messages) - monospace for tree/list formatting */
             isThreadsCommandOutput ? (
               <ThreadCommandOutput content={contentText} threadIds={message.command_data?.thread_ids} />
             ) : (
-              <pre className="eggw-code-block whitespace-pre-wrap">
-                {contentText}
-              </pre>
+              <pre className="eggw-code-block whitespace-pre-wrap">{contentText}</pre>
             )
           ) : isContentPartArray(message.content) ? (
             <ContentPartsView parts={message.content} showBorders={showBorders} onStageAttachment={onStageAttachment} />
@@ -900,14 +938,10 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
                 <summary className="eggw-detail-summary">
                   {oneLinePreview(contentText) || `Output (${contentText.length.toLocaleString()} chars)`}
                 </summary>
-                <pre className="eggw-code-block max-h-96 whitespace-pre-wrap">
-                  {contentText}
-                </pre>
+                <pre className="eggw-code-block max-h-96 whitespace-pre-wrap">{contentText}</pre>
               </details>
             ) : (
-              <pre className="eggw-code-block max-h-96 whitespace-pre-wrap">
-                {contentText}
-              </pre>
+              <pre className="eggw-code-block max-h-96 whitespace-pre-wrap">{contentText}</pre>
             )
           ) : (
             /* Regular markdown content with GFM tables and LaTeX support */
@@ -920,11 +954,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
                     const match = /language-(\w+)/.exec(className || "");
                     const inline = !match;
                     return !inline ? (
-                      <SyntaxHighlighter
-                        style={eggwSyntaxTheme}
-                        language={match[1]}
-                        PreTag="div"
-                      >
+                      <SyntaxHighlighter style={eggwSyntaxTheme} language={match[1]} PreTag="div">
                         {String(children).replace(/\n$/, "")}
                       </SyntaxHighlighter>
                     ) : (
@@ -936,9 +966,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
                   table({ children }) {
                     return (
                       <div className="overflow-x-auto my-4">
-                        <table className="min-w-full border-collapse border">
-                          {children}
-                        </table>
+                        <table className="min-w-full border-collapse border">{children}</table>
                       </div>
                     );
                   },
@@ -946,18 +974,10 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
                     return <thead>{children}</thead>;
                   },
                   th({ children }) {
-                    return (
-                      <th className="px-4 py-2 text-left border font-semibold">
-                        {children}
-                      </th>
-                    );
+                    return <th className="px-4 py-2 text-left border font-semibold">{children}</th>;
                   },
                   td({ children }) {
-                    return (
-                      <td className="px-4 py-2 border">
-                        {children}
-                      </td>
-                    );
+                    return <td className="px-4 py-2 border">{children}</td>;
                   },
                 }}
               >
@@ -976,9 +996,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             const toolName = toolDisplayName(toolCallName(tc), toolCallIdText, "Tool call");
             const args = toolCallArgs(tc);
             const isBash = toolName === "bash";
-            const script = isBash && typeof args === "object" && args !== null && "script" in args
-              ? (args as any).script
-              : null;
+            const script = isBash && typeof args === "object" && args !== null && "script" in args ? (args as any).script : null;
 
             return (
               <details
@@ -988,27 +1006,15 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
               >
                 <summary className="eggw-detail-summary flex-wrap">
                   <span className="font-medium">{toolName}</span>
-                  {toolCallIdText && (
-                    <span className="eggw-message-meta font-mono">
-                      {toolCallIdText.slice(-8)}
-                    </span>
-                  )}
-                  {displayVerbosity === "medium" && (
-                    <span className="eggw-message-meta font-mono">
-                      {oneLinePreview(args)}
-                    </span>
-                  )}
+                  {toolCallIdText && <span className="eggw-message-meta font-mono">{toolCallIdText.slice(-8)}</span>}
+                  {displayVerbosity === "medium" && <span className="eggw-message-meta font-mono">{oneLinePreview(args)}</span>}
                 </summary>
                 {/* Special display for bash scripts */}
                 {isBash && script ? (
-                  <pre className="eggw-code-block eggw-shell-command whitespace-pre-wrap break-all">
-                    $ {String(script)}
-                  </pre>
+                  <pre className="eggw-code-block eggw-shell-command whitespace-pre-wrap break-all">$ {String(script)}</pre>
                 ) : (
                   <pre className="eggw-code-block max-h-40 whitespace-pre-wrap break-words">
-                    {typeof args === "string"
-                      ? args
-                      : JSON.stringify(args, null, 2)}
+                    {typeof args === "string" ? args : JSON.stringify(args, null, 2)}
                   </pre>
                 )}
               </details>
@@ -1027,14 +1033,10 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
               className={clsx("eggw-detail-block eggw-role-tool", !showBorders && "eggw-detail-borderless")}
             >
               <summary className="eggw-detail-summary font-mono">
-                {displayVerbosity === "medium"
-                  ? `Tool Output: ${name} · ${text.length.toLocaleString()} chars`
-                  : `Tool Output: ${name}`}
+                {displayVerbosity === "medium" ? `Tool Output: ${name} · ${text.length.toLocaleString()} chars` : `Tool Output: ${name}`}
               </summary>
               {displayVerbosity === "medium" && <div className="mt-1 text-xs font-mono">{oneLinePreview(text)}</div>}
-              <pre className="eggw-code-block max-h-64 whitespace-pre-wrap">
-                {text}
-              </pre>
+              <pre className="eggw-code-block max-h-64 whitespace-pre-wrap">{text}</pre>
             </details>
           ))}
 
@@ -1049,14 +1051,8 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
                   ? `Tool Call Args: ${streamKey} · ${text.length.toLocaleString()} chars`
                   : `Tool Call Args: ${streamKey}`}
               </summary>
-              {displayVerbosity === "medium" && (
-                <div className="eggw-detail-content font-mono">
-                  {oneLinePreview(text)}
-                </div>
-              )}
-              <pre className="eggw-code-block max-h-40 whitespace-pre-wrap break-words">
-                {text}
-              </pre>
+              {displayVerbosity === "medium" && <div className="eggw-detail-content font-mono">{oneLinePreview(text)}</div>}
+              <pre className="eggw-code-block max-h-40 whitespace-pre-wrap break-words">{text}</pre>
             </details>
           ))}
         </div>
@@ -1080,7 +1076,12 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
     return tokens;
   };
   if (message.reasoning) {
-    details.push({ kind: "reasoning", header: messageMetadataText(message, "Reasoning"), tokens: takeTokens(), source: "reasoning" });
+    details.push({
+      kind: "reasoning",
+      header: messageMetadataText(message, "Reasoning"),
+      tokens: takeTokens(),
+      source: "reasoning",
+    });
   }
   if (message.tool_calls?.length) {
     message.tool_calls.forEach((tc: any) => {
@@ -1146,12 +1147,18 @@ function renderMessagesForVerbosity(
   messages: Message[],
   displayVerbosity: DisplayVerbosity,
   showBorders: boolean,
-  onStageAttachment?: (attachment: AttachmentContentPart) => void,
+  onStageAttachment?: (attachment: AttachmentContentPart) => void
 ): ReactNode[] {
   const displayMessages = resolveToolResultNames(messages);
   if (displayVerbosity !== "min") {
     return displayMessages.map((msg, idx) => (
-      <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity={displayVerbosity} onStageAttachment={onStageAttachment} />
+      <MessageBlock
+        key={msg.id || idx}
+        message={msg}
+        showBorders={showBorders}
+        displayVerbosity={displayVerbosity}
+        onStageAttachment={onStageAttachment}
+      />
     ));
   }
 
@@ -1173,19 +1180,31 @@ function renderMessagesForVerbosity(
     }
 
     const getUserCallIds = new Set(getUserToolCallIds(msg));
-    const hiddenDetails = collectHiddenDetailsForMessage(msg).filter((detail) => !(
-      detail.tool_call_id
-      && answeredGetUserIds.has(detail.tool_call_id)
-      && (getUserCallIds.has(detail.tool_call_id) || detail.source === "tool_result" || detail.source === "tool_call_stream")
-    ));
-    const hasVisibleConversationBody = (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
+    const hiddenDetails = collectHiddenDetailsForMessage(msg).filter(
+      (detail) =>
+        !(
+          detail.tool_call_id &&
+          answeredGetUserIds.has(detail.tool_call_id) &&
+          (getUserCallIds.has(detail.tool_call_id) || detail.source === "tool_result" || detail.source === "tool_call_stream")
+        )
+    );
+    const hasVisibleConversationBody =
+      (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
     if (msg.role === "assistant" && msg.answer_user_preserve_turn && hasVisibleConversationBody) {
       // A preserve-turn note is inserted while its ordinary tool lifecycle is
       // still in flight. Keep the pending call details across this visible note
       // so the later role=tool message can pair with the call by tool_call_id.
       // Treating the note as a normal conversation boundary splits one tool
       // lifecycle into two HiddenDetailsBlocks in min verbosity.
-      nodes.push(<MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity="min" onStageAttachment={onStageAttachment} />);
+      nodes.push(
+        <MessageBlock
+          key={msg.id || idx}
+          message={msg}
+          showBorders={showBorders}
+          displayVerbosity="min"
+          onStageAttachment={onStageAttachment}
+        />
+      );
       hidden.push(...hiddenDetails);
       return;
     }
@@ -1194,7 +1213,15 @@ function renderMessagesForVerbosity(
       const afterVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind !== "reasoning") : hiddenDetails;
       hidden.push(...beforeVisibleDetails);
       flushHidden(`before-${msg.id || idx}`);
-      nodes.push(<MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity="min" onStageAttachment={onStageAttachment} />);
+      nodes.push(
+        <MessageBlock
+          key={msg.id || idx}
+          message={msg}
+          showBorders={showBorders}
+          displayVerbosity="min"
+          onStageAttachment={onStageAttachment}
+        />
+      );
       hidden.push(...afterVisibleDetails);
       return;
     }
@@ -1206,7 +1233,7 @@ function renderMessagesForVerbosity(
   return nodes;
 }
 
-const StaticTranscript = memo(function StaticTranscript({
+function StaticTranscriptImpl({
   messages,
   displayVerbosity,
   showBorders,
@@ -1217,14 +1244,28 @@ const StaticTranscript = memo(function StaticTranscript({
   showBorders: boolean;
   onStageAttachment?: (attachment: AttachmentContentPart) => void;
 }) {
-  const content = renderMessagesForVerbosity(messages, displayVerbosity, showBorders, onStageAttachment);
-  if (process.env.NODE_ENV === "production") return <>{content}</>;
+  const content = <div data-testid="static-transcript-owner">{renderMessagesForVerbosity(
+    messages,
+    displayVerbosity,
+    showBorders,
+    onStageAttachment,
+  )}</div>;
+  if (process.env.NODE_ENV === "production") return content;
   return (
     <Profiler id="StaticTranscript" onRender={(id, _phase, duration) => recordReactCommit(id as "StaticTranscript", duration)}>
       {content}
     </Profiler>
   );
-});
+}
+
+const StaticTranscript = memo(
+  StaticTranscriptImpl,
+  (previous, next) =>
+    previous.messages === next.messages &&
+    previous.displayVerbosity === next.displayVerbosity &&
+    previous.showBorders === next.showBorders &&
+    previous.onStageAttachment === next.onStageAttachment,
+);
 
 interface ChatPanelProps {
   threadId: string;
@@ -1233,7 +1274,7 @@ interface ChatPanelProps {
   onStageAttachment?: (attachment: AttachmentContentPart) => void;
 }
 
-export function ChatPanel({ threadId, showBorders = true, streamingTps = null, onStageAttachment }: ChatPanelProps) {
+function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onStageAttachment }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamingContentRef = useRef<HTMLDivElement>(null);
@@ -1257,7 +1298,10 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const historyDemandRef = useRef<HistoryDemandState>(IDLE_HISTORY_DEMAND);
   const historyDemandRunRef = useRef<(() => void) | null>(null);
   const historyBoundaryRafRef = useRef<number | null>(null);
-  const pendingHistoryBoundaryRef = useRef<{ token: number; scrollport: HTMLDivElement } | null>(null);
+  const pendingHistoryBoundaryRef = useRef<{
+    token: number;
+    scrollport: HTMLDivElement;
+  } | null>(null);
   const historyBoundaryTokenRef = useRef(0);
   const historyOperationRef = useRef(0);
   const pendingHistoryAnchorRef = useRef<{
@@ -1267,21 +1311,24 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     operation: number;
   } | null>(null);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
-  const [renderStartMessageId, setRenderStartMessageId] = useState<string | null>(null);
+  const [renderStartIndex, setRenderStartIndex] = useState<number | null>(null);
+  const routeIdentityRef = useRef(threadId);
 
   const currentThreadId = threadId;
   const queryClient = useQueryClient();
   const transcriptQuery = useInfiniteQuery(transcriptInfiniteQueryOptions(threadId, queryClient));
-  const messages = useMemo(() => flattenTranscript(transcriptQuery.data), [transcriptQuery.data]);
+  const transcriptMetadata = useMemo(() => transcriptIndex(transcriptQuery.data), [transcriptQuery.data]);
+  const totalMessages = transcriptMetadata.totalMessages;
+  const hasOlderTranscript = Boolean(oldestTranscriptFrontier(transcriptQuery.data));
   const displayVerbosity = useAppStore((state) => state.displayVerbosity);
   const renderedTranscript = useMemo(
-    () => transcriptWindow(messages, renderStartMessageId),
-    [messages, renderStartMessageId],
+    () => transcriptRenderWindow(transcriptQuery.data, renderStartIndex),
+    [transcriptQuery.data, renderStartIndex]
   );
   const historyAvailabilityRef = useRef({ canReveal: false, canFetch: false });
   historyAvailabilityRef.current = {
     canReveal: renderedTranscript.hiddenCount > 0,
-    canFetch: Boolean(transcriptQuery.hasNextPage),
+    canFetch: renderedTranscript.hiddenCount === 0 && hasOlderTranscript,
   };
   const streamingToolCalls = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolCalls);
   const streamingToolOutputs = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolOutputs);
@@ -1293,7 +1340,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const visibleStreamingToolCalls = streamingToolCalls || {};
   const visibleStreamingToolOutputs = streamingToolOutputs || {};
   const hasLiveTools = Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0;
-  const showLiveCard = isStreaming || hasLiveTools;
+  const showLiveCard = renderedTranscript.atLiveTail && (isStreaming || hasLiveTools);
   // Ordinary live tools remain expanded at every verbosity. Timing owns its
   // one-second updates in memoized leaves, so transcript/layout ownership never
   // re-renders merely because countdown text changed.
@@ -1302,6 +1349,16 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   // never infer provenance from a coordinate that can become stale mid-commit.
   const liveEdgeStateRef = useRef<LiveEdgeState>("following");
   const rafIdRef = useRef<number | null>(null);
+  if (routeIdentityRef.current !== threadId) {
+    // Render-time refs make the upcoming layout commit route-local; the layout
+    // effect below resets React-owned history state before paint.
+    routeIdentityRef.current = threadId;
+    liveEdgeStateRef.current = "following";
+    historyDemandRef.current = IDLE_HISTORY_DEMAND;
+    loadingOlderRef.current = false;
+    revealingLoadedRef.current = false;
+    pendingHistoryAnchorRef.current = null;
+  }
 
   const distanceFromBottom = useCallback(() => {
     if (!scrollRef.current) return 0;
@@ -1331,7 +1388,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   }, [scrollToBottomNow]);
 
   const detachFromBottom = useCallback(() => {
-    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, { type: "user_toward_history" });
+    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, {
+      type: "user_toward_history",
+    });
     if (rafIdRef.current !== null) {
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
@@ -1339,9 +1398,22 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   }, []);
 
   const followBottom = useCallback(() => {
-    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, { type: "user_reached_live_edge" });
-    scrollToBottom();
+    // Re-entering live mode is explicit. A historical window's local bottom is
+    // never evidence that the user reached the true transcript live edge.
+    setRenderStartIndex(null);
+    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, {
+      type: "user_reached_live_edge",
+    });
+    requestAnimationFrame(scrollToBottom);
   }, [scrollToBottom]);
+
+  const followLocalLiveEdge = useCallback(() => {
+    if (!renderedTranscript.atLiveTail) return;
+    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, {
+      type: "user_reached_live_edge",
+    });
+    scrollToBottom();
+  }, [renderedTranscript.atLiveTail, scrollToBottom]);
 
   const captureHistoryAnchor = useCallback(() => {
     const scrollport = scrollRef.current;
@@ -1351,7 +1423,10 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     for (const candidate of candidates) {
       const rect = candidate.getBoundingClientRect();
       if (rect.bottom > scrollportTop) {
-        return { id: candidate.dataset.messageId || "", offset: rect.top - scrollportTop };
+        return {
+          id: candidate.dataset.messageId || "",
+          offset: rect.top - scrollportTop,
+        };
       }
     }
     return null;
@@ -1361,8 +1436,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     const scrollport = scrollRef.current;
     if (!scrollport) return;
     const anchored = anchor
-      ? Array.from(scrollport.querySelectorAll<HTMLElement>("[data-message-id]"))
-          .find((candidate) => candidate.dataset.messageId === anchor.id) || null
+      ? Array.from(scrollport.querySelectorAll<HTMLElement>("[data-message-id]")).find(
+          (candidate) => candidate.dataset.messageId === anchor.id
+        ) || null
       : null;
     if (anchored && anchor) {
       const scrollportTop = scrollport.getBoundingClientRect().top;
@@ -1372,47 +1448,62 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     scrollport.scrollTop = fallbackTop + (scrollport.scrollHeight - fallbackHeight);
   }, []);
 
-  const settleHistoryDemand = useCallback((operation = historyOperationRef.current) => {
-    if (operation !== historyOperationRef.current) return;
-    if (pendingHistoryAnchorRef.current?.operation === operation) pendingHistoryAnchorRef.current = null;
-    revealingLoadedRef.current = false;
-    loadingOlderRef.current = false;
-    setIsLoadingOlder(false);
-    historyAvailabilityRef.current = {
-      canReveal: renderedTranscript.hiddenCount > 0,
-      canFetch: Boolean(transcriptQuery.hasNextPage),
-    };
-    historyDemandRef.current = reduceHistoryDemand(
-      historyDemandRef.current,
-      { type: "settled" },
-      historyAvailabilityRef.current,
-    );
-    if (historyDemandRef.current.phase !== "idle") queueMicrotask(() => historyDemandRunRef.current?.());
-  }, [renderedTranscript.hiddenCount, transcriptQuery.hasNextPage]);
+  const settleHistoryDemand = useCallback(
+    (operation = historyOperationRef.current) => {
+      if (operation !== historyOperationRef.current) return;
+      if (pendingHistoryAnchorRef.current?.operation === operation) pendingHistoryAnchorRef.current = null;
+      revealingLoadedRef.current = false;
+      loadingOlderRef.current = false;
+      setIsLoadingOlder(false);
+      historyAvailabilityRef.current = {
+        canReveal: renderedTranscript.hiddenCount > 0,
+        canFetch: renderedTranscript.hiddenCount === 0 && hasOlderTranscript,
+      };
+      historyDemandRef.current = reduceHistoryDemand(historyDemandRef.current, { type: "settled" }, historyAvailabilityRef.current);
+      if (historyDemandRef.current.phase !== "idle") queueMicrotask(() => historyDemandRunRef.current?.());
+    },
+    [renderedTranscript.hiddenCount, hasOlderTranscript]
+  );
 
-  const revealFromMessage = useCallback((startMessageId: string | null) => {
-    const el = scrollRef.current;
-    const anchor = captureHistoryAnchor();
-    const previousScrollHeight = el?.scrollHeight ?? 0;
-    const previousScrollTop = el?.scrollTop ?? 0;
-    revealingLoadedRef.current = true;
-    const operation = historyOperationRef.current + 1;
-    historyOperationRef.current = operation;
-    pendingHistoryAnchorRef.current = {
-      anchor,
-      fallbackTop: previousScrollTop,
-      fallbackHeight: previousScrollHeight,
-      operation,
-    };
-    setRenderStartMessageId(startMessageId);
-  }, [captureHistoryAnchor, restoreHistoryAnchor, settleHistoryDemand]);
+  const revealFromIndex = useCallback(
+    (startIndex: number) => {
+      const el = scrollRef.current;
+      const anchor = captureHistoryAnchor();
+      const previousScrollHeight = el?.scrollHeight ?? 0;
+      const previousScrollTop = el?.scrollTop ?? 0;
+      revealingLoadedRef.current = true;
+      const operation = historyOperationRef.current + 1;
+      historyOperationRef.current = operation;
+      pendingHistoryAnchorRef.current = {
+        anchor,
+        fallbackTop: previousScrollTop,
+        fallbackHeight: previousScrollHeight,
+        operation,
+      };
+      setRenderStartIndex(startIndex);
+    },
+    [captureHistoryAnchor]
+  );
 
   const expandLoadedTranscript = useCallback(() => {
-    revealFromMessage(expandedTranscriptStartId(messages, renderedTranscript.startIndex));
-  }, [messages, renderedTranscript.startIndex, revealFromMessage]);
+    revealFromIndex(expandedTranscriptStartIndex(renderedTranscript.startIndex));
+  }, [renderedTranscript.startIndex, revealFromIndex]);
+
+  const showNewerTranscript = useCallback(() => {
+    const nextStart = nextTranscriptStartIndex(
+      renderedTranscript.startIndex,
+      totalMessages,
+    );
+    if (nextStart === null) followBottom();
+    else revealFromIndex(nextStart);
+  }, [followBottom, renderedTranscript.startIndex, revealFromIndex, totalMessages]);
+
+  const showLiveTranscript = useCallback(() => {
+    followBottom();
+  }, [followBottom]);
 
   const loadOlderMessages = useCallback(async () => {
-    if (!transcriptQuery.hasNextPage) {
+    if (!hasOlderTranscript) {
       settleHistoryDemand();
       return;
     }
@@ -1427,30 +1518,39 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     historyOperationRef.current = operation;
     try {
       const updated = await fetchOlderTranscriptPage(queryClient, threadId);
-      const updatedMessages = flattenTranscript(updated);
-      const previousStartId = renderedTranscript.messages[0]?.id || null;
-      const previousStartIndex = previousStartId
-        ? updatedMessages.findIndex((message) => message.id === previousStartId)
-        : updatedMessages.length;
-      const nextStartMessageId = expandedTranscriptStartId(updatedMessages, previousStartIndex);
-      const currentStartMessageId = renderedTranscript.messages[0]?.id || null;
-      if (nextStartMessageId === currentStartMessageId) {
+      if (!updated) {
         restoreHistoryAnchor(anchor, previousScrollTop, previousScrollHeight);
         requestAnimationFrame(() => settleHistoryDemand(operation));
         return;
       }
+      const updatedMetadata = transcriptIndex(updated);
+      const addedCount = Math.max(0, updatedMetadata.totalMessages - totalMessages);
+      const nextStartIndex = Math.max(
+        0,
+        renderedTranscript.startIndex + addedCount - TRANSCRIPT_WINDOW_MESSAGES,
+      );
       pendingHistoryAnchorRef.current = {
         anchor,
         fallbackTop: previousScrollTop,
         fallbackHeight: previousScrollHeight,
         operation,
       };
-      setRenderStartMessageId(nextStartMessageId);
+      setRenderStartIndex(nextStartIndex);
     } catch (error) {
       console.error("Failed to load older messages:", error);
       settleHistoryDemand(operation);
     }
-  }, [captureHistoryAnchor, detachFromBottom, renderedTranscript.messages, restoreHistoryAnchor, settleHistoryDemand, queryClient, threadId, transcriptQuery.hasNextPage]);
+  }, [
+    captureHistoryAnchor,
+    detachFromBottom,
+    renderedTranscript.startIndex,
+    restoreHistoryAnchor,
+    settleHistoryDemand,
+    queryClient,
+    threadId,
+    hasOlderTranscript,
+    totalMessages,
+  ]);
 
   const runHistoryDemand = useCallback(() => {
     if (historyDemandRef.current.phase === "revealing") {
@@ -1467,11 +1567,14 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     const next = reduceHistoryDemand(
       previous,
       { type: "older_intent" },
-      { canReveal: renderedTranscript.hiddenCount > 0, canFetch: Boolean(transcriptQuery.hasNextPage) },
+      {
+        canReveal: renderedTranscript.hiddenCount > 0,
+        canFetch: renderedTranscript.hiddenCount === 0 && hasOlderTranscript,
+      }
     );
     historyDemandRef.current = next;
     if (previous.phase === "idle" && next.phase !== "idle") runHistoryDemand();
-  }, [detachFromBottom, renderedTranscript.hiddenCount, runHistoryDemand, transcriptQuery.hasNextPage]);
+  }, [detachFromBottom, renderedTranscript.hiddenCount, runHistoryDemand, hasOlderTranscript]);
 
   useEffect(() => {
     const pending = pendingHistoryAnchorRef.current;
@@ -1479,34 +1582,40 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     pendingHistoryAnchorRef.current = null;
     restoreHistoryAnchor(pending.anchor, pending.fallbackTop, pending.fallbackHeight);
     requestAnimationFrame(() => settleHistoryDemand(pending.operation));
-  }, [renderStartMessageId, renderedTranscript.startIndex, restoreHistoryAnchor, settleHistoryDemand]);
+  }, [renderStartIndex, renderedTranscript.startIndex, restoreHistoryAnchor, settleHistoryDemand]);
 
-  const consumeHistoryBoundary = useCallback((token: number, scrollport: HTMLDivElement) => {
-    const pending = pendingHistoryBoundaryRef.current;
-    if (!pending || pending.token !== token || pending.scrollport !== scrollport) return;
-    pendingHistoryBoundaryRef.current = null;
-    historyBoundaryTokenRef.current += 1;
-    if (historyBoundaryRafRef.current !== null) {
-      cancelAnimationFrame(historyBoundaryRafRef.current);
-      historyBoundaryRafRef.current = null;
-    }
-    demandOlderHistory();
-  }, [demandOlderHistory]);
-
-  const scheduleHistoryBoundaryCheck = useCallback((scrollport: HTMLDivElement) => {
-    const token = historyBoundaryTokenRef.current + 1;
-    historyBoundaryTokenRef.current = token;
-    pendingHistoryBoundaryRef.current = { token, scrollport };
-    if (historyBoundaryRafRef.current !== null) cancelAnimationFrame(historyBoundaryRafRef.current);
-    // The scroll event services a moving input. This single input-owned frame is
-    // solely the fallback for an already-clamped gesture that emits no scroll.
-    historyBoundaryRafRef.current = requestAnimationFrame(() => {
-      historyBoundaryRafRef.current = null;
-      if (scrollRef.current === scrollport && scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
-        consumeHistoryBoundary(token, scrollport);
+  const consumeHistoryBoundary = useCallback(
+    (token: number, scrollport: HTMLDivElement) => {
+      const pending = pendingHistoryBoundaryRef.current;
+      if (!pending || pending.token !== token || pending.scrollport !== scrollport) return;
+      pendingHistoryBoundaryRef.current = null;
+      historyBoundaryTokenRef.current += 1;
+      if (historyBoundaryRafRef.current !== null) {
+        cancelAnimationFrame(historyBoundaryRafRef.current);
+        historyBoundaryRafRef.current = null;
       }
-    });
-  }, [consumeHistoryBoundary]);
+      demandOlderHistory();
+    },
+    [demandOlderHistory]
+  );
+
+  const scheduleHistoryBoundaryCheck = useCallback(
+    (scrollport: HTMLDivElement) => {
+      const token = historyBoundaryTokenRef.current + 1;
+      historyBoundaryTokenRef.current = token;
+      pendingHistoryBoundaryRef.current = { token, scrollport };
+      if (historyBoundaryRafRef.current !== null) cancelAnimationFrame(historyBoundaryRafRef.current);
+      // The scroll event services a moving input. This single input-owned frame is
+      // solely the fallback for an already-clamped gesture that emits no scroll.
+      historyBoundaryRafRef.current = requestAnimationFrame(() => {
+        historyBoundaryRafRef.current = null;
+        if (scrollRef.current === scrollport && scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
+          consumeHistoryBoundary(token, scrollport);
+        }
+      });
+    },
+    [consumeHistoryBoundary]
+  );
 
   const handleScroll = useCallback(() => {
     const pending = pendingHistoryBoundaryRef.current;
@@ -1516,60 +1625,82 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     }
   }, [consumeHistoryBoundary]);
 
-  const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
-    if (nestedScrollportConsumesWheel(event.target, event.currentTarget, event.deltaY)) return;
-    if (event.deltaY < 0) {
-      detachFromBottom();
-      scheduleHistoryBoundaryCheck(event.currentTarget);
-      return;
-    }
-    if (event.deltaY > 0) requestAnimationFrame(() => { if (isAtBottom()) followBottom(); });
-  }, [detachFromBottom, followBottom, isAtBottom, scheduleHistoryBoundaryCheck]);
+  const handleWheel = useCallback(
+    (event: WheelEvent<HTMLDivElement>) => {
+      if (nestedScrollportConsumesWheel(event.target, event.currentTarget, event.deltaY)) return;
+      if (event.deltaY < 0) {
+        detachFromBottom();
+        scheduleHistoryBoundaryCheck(event.currentTarget);
+        return;
+      }
+      if (event.deltaY > 0)
+        requestAnimationFrame(() => {
+          if (renderedTranscript.atLiveTail && isAtBottom()) followLocalLiveEdge();
+        });
+    },
+    [detachFromBottom, followLocalLiveEdge, isAtBottom, renderedTranscript.atLiveTail, scheduleHistoryBoundaryCheck]
+  );
 
-  const handlePointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    if (event.clientX >= rect.right - 20) detachFromBottom();
-  }, [detachFromBottom]);
+  const handlePointerDown = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      const rect = event.currentTarget.getBoundingClientRect();
+      if (event.clientX >= rect.right - 20) detachFromBottom();
+    },
+    [detachFromBottom]
+  );
 
-  const handlePointerUp = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    if (event.clientX < rect.right - 20) return;
-    if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
-    else if (isAtBottom()) followBottom();
-  }, [demandOlderHistory, followBottom, isAtBottom]);
+  const handlePointerUp = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      const rect = event.currentTarget.getBoundingClientRect();
+      if (event.clientX < rect.right - 20) return;
+      if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
+      else if (renderedTranscript.atLiveTail && isAtBottom()) followLocalLiveEdge();
+    },
+    [demandOlderHistory, followLocalLiveEdge, isAtBottom, renderedTranscript.atLiveTail]
+  );
 
   const lastTouchYRef = useRef<number | null>(null);
   const handleTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
     lastTouchYRef.current = event.touches[0]?.clientY ?? null;
   }, []);
 
-  const handleTouchMove = useCallback((event: TouchEvent<HTMLDivElement>) => {
-    const nextY = event.touches[0]?.clientY;
-    const previousY = lastTouchYRef.current;
-    lastTouchYRef.current = nextY ?? null;
-    if (nextY !== undefined && previousY !== null && nextY > previousY) {
-      detachFromBottom();
-      scheduleHistoryBoundaryCheck(event.currentTarget);
-    } else if (nextY !== undefined && previousY !== null && nextY < previousY) {
-      requestAnimationFrame(() => { if (isAtBottom()) followBottom(); });
-    }
-  }, [detachFromBottom, followBottom, isAtBottom, scheduleHistoryBoundaryCheck]);
+  const handleTouchMove = useCallback(
+    (event: TouchEvent<HTMLDivElement>) => {
+      const nextY = event.touches[0]?.clientY;
+      const previousY = lastTouchYRef.current;
+      lastTouchYRef.current = nextY ?? null;
+      if (nextY !== undefined && previousY !== null && nextY > previousY) {
+        detachFromBottom();
+        scheduleHistoryBoundaryCheck(event.currentTarget);
+      } else if (nextY !== undefined && previousY !== null && nextY < previousY) {
+        requestAnimationFrame(() => {
+          if (renderedTranscript.atLiveTail && isAtBottom()) followLocalLiveEdge();
+        });
+      }
+    },
+    [detachFromBottom, followLocalLiveEdge, isAtBottom, renderedTranscript.atLiveTail, scheduleHistoryBoundaryCheck]
+  );
 
-  const handleKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "End") {
-      followBottom();
-      return;
-    }
-    if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) {
-      detachFromBottom();
-      if (event.key === "Home") event.currentTarget.scrollTop = 0;
-      scheduleHistoryBoundaryCheck(event.currentTarget);
-      return;
-    }
-    if (["ArrowDown", "PageDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) {
-      requestAnimationFrame(() => { if (isAtBottom()) followBottom(); });
-    }
-  }, [detachFromBottom, followBottom, isAtBottom, scheduleHistoryBoundaryCheck]);
+  const handleKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      if (event.key === "End") {
+        followBottom();
+        return;
+      }
+      if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) {
+        detachFromBottom();
+        if (event.key === "Home") event.currentTarget.scrollTop = 0;
+        scheduleHistoryBoundaryCheck(event.currentTarget);
+        return;
+      }
+      if (["ArrowDown", "PageDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) {
+        requestAnimationFrame(() => {
+          if (renderedTranscript.atLiveTail && isAtBottom()) followLocalLiveEdge();
+        });
+      }
+    },
+    [detachFromBottom, followBottom, followLocalLiveEdge, isAtBottom, renderedTranscript.atLiveTail, scheduleHistoryBoundaryCheck]
+  );
 
   const flushStreamingText = useCallback(() => {
     recordStreamingFlush("text");
@@ -1585,8 +1716,8 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     if (streamingReasoningRef.current) {
       const chunks = streamingBuffer.reasoningChunks;
       if (chunks.length > 0) {
-        const container = document.getElementById('streaming-reasoning-container');
-        if (container) container.style.display = displayVerbosity === "min" ? 'none' : 'block';
+        const container = document.getElementById("streaming-reasoning-container");
+        if (container) container.style.display = displayVerbosity === "min" ? "none" : "block";
       }
       appended = appendBufferedTextChunks(streamingReasoningRef.current, chunks, lastReasoningIndexRef.current) || appended;
       lastReasoningIndexRef.current = chunks.length;
@@ -1595,8 +1726,8 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     if (streamingReasoningSummaryRef.current) {
       const chunks = streamingBuffer.reasoningSummaryChunks;
       if (chunks.length > 0) {
-        const container = document.getElementById('streaming-reasoning-summary-container');
-        if (container) container.style.display = displayVerbosity === "min" ? 'none' : 'block';
+        const container = document.getElementById("streaming-reasoning-summary-container");
+        if (container) container.style.display = displayVerbosity === "min" ? "none" : "block";
       }
       appended = appendBufferedTextChunks(streamingReasoningSummaryRef.current, chunks, lastReasoningSummaryIndexRef.current) || appended;
       lastReasoningSummaryIndexRef.current = chunks.length;
@@ -1655,7 +1786,6 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
         lastToolCallArgIndexRef.current[tcId] = chunks.length;
         if (!argsElement.textContent) argsElement.textContent = "...";
       }
-
     });
     scrollToBottom();
   }, [scrollToBottom, threadId]);
@@ -1668,7 +1798,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       if (!previewElement) return;
       const argumentPrefix = streamingBuffer.getToolCallArgumentPrefix(tcId);
       previewElement.textContent = oneLinePreview(
-        toolCall.name === "bash" ? argumentPrefix.replace(/^\s*\{?\s*"script"\s*:\s*"?/, "$ ") : argumentPrefix,
+        toolCall.name === "bash" ? argumentPrefix.replace(/^\s*\{?\s*"script"\s*:\s*"?/, "$ ") : argumentPrefix
       );
     });
   }, [threadId]);
@@ -1696,24 +1826,30 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     return timeoutId;
   }, []);
 
-  const attachStreamingToolCallArgs = useCallback((toolCallId: string, element: HTMLPreElement | null) => {
-    const previous = streamingToolCallArgRefs.current[toolCallId];
-    streamingToolCallArgRefs.current[toolCallId] = element;
-    if (!element || previous === element) return;
-    lastToolCallArgIndexRef.current[toolCallId] = 0;
-    delete lastToolCallChunksRef.current[toolCallId];
-    element.textContent = "";
-    requestAnimationFrame(flushStreamingToolCalls);
-  }, [flushStreamingToolCalls]);
+  const attachStreamingToolCallArgs = useCallback(
+    (toolCallId: string, element: HTMLPreElement | null) => {
+      const previous = streamingToolCallArgRefs.current[toolCallId];
+      streamingToolCallArgRefs.current[toolCallId] = element;
+      if (!element || previous === element) return;
+      lastToolCallArgIndexRef.current[toolCallId] = 0;
+      delete lastToolCallChunksRef.current[toolCallId];
+      element.textContent = "";
+      requestAnimationFrame(flushStreamingToolCalls);
+    },
+    [flushStreamingToolCalls]
+  );
 
-  const attachStreamingToolOutput = useCallback((toolCallId: string, element: HTMLPreElement | null) => {
-    const previous = streamingToolOutputRefs.current[toolCallId];
-    streamingToolOutputRefs.current[toolCallId] = element;
-    if (!element || previous === element) return;
-    lastToolOutputIndexRef.current[toolCallId] = 0;
-    element.textContent = "";
-    requestAnimationFrame(flushStreamingToolOutput);
-  }, [flushStreamingToolOutput]);
+  const attachStreamingToolOutput = useCallback(
+    (toolCallId: string, element: HTMLPreElement | null) => {
+      const previous = streamingToolOutputRefs.current[toolCallId];
+      streamingToolOutputRefs.current[toolCallId] = element;
+      if (!element || previous === element) return;
+      lastToolOutputIndexRef.current[toolCallId] = 0;
+      element.textContent = "";
+      requestAnimationFrame(flushStreamingToolOutput);
+    },
+    [flushStreamingToolOutput]
+  );
 
   // Subscribe to streaming buffer updates - bypasses React entirely
   // This is O(1) per chunk with direct DOM manipulation
@@ -1726,7 +1862,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
 
     // Render any existing buffer content (catches up when joining mid-stream).
     // When isStreaming changes to true, refs should be available after render.
-    const timeoutId = isStreaming ? scheduleInitialStreamingFlush(flushStreamingText) : null;
+    const timeoutId = isStreaming && renderedTranscript.atLiveTail
+      ? scheduleInitialStreamingFlush(flushStreamingText)
+      : null;
 
     return () => {
       if (timeoutId !== null) clearTimeout(timeoutId);
@@ -1741,7 +1879,14 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
         rafIdRef.current = null;
       }
     };
-  }, [isStreaming, flushStreamingText, scheduleInitialStreamingFlush, scheduleStreamingTextFlush, threadId]);
+  }, [
+    isStreaming,
+    renderedTranscript.atLiveTail,
+    flushStreamingText,
+    scheduleInitialStreamingFlush,
+    scheduleStreamingTextFlush,
+    threadId,
+  ]);
 
   // Tool-call arguments use the same mutable/RAF architecture as text and
   // tool output. A burst schedules one imperative preview flush per frame and
@@ -1750,13 +1895,13 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     const streamingBuffer = streamingBufferForThread(threadId);
     const coalescer = new AnimationFrameCoalescer(
       (callback) => window.requestAnimationFrame(callback),
-      (id) => window.cancelAnimationFrame(id),
+      (id) => window.cancelAnimationFrame(id)
     );
     const previewCoalescer = new IntervalCoalescer<number>(
       TOOL_ARGUMENT_PREVIEW_INTERVAL_MS,
       () => performance.now(),
       (callback, delayMs) => window.setTimeout(callback, delayMs),
-      (id) => window.clearTimeout(id),
+      (id) => window.clearTimeout(id)
     );
     streamingToolCallFlushRef.current = coalescer;
     streamingToolPreviewFlushRef.current = previewCoalescer;
@@ -1804,37 +1949,51 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       lastToolCallArgIndexRef.current = {};
       lastToolCallChunksRef.current = {};
       if (streamingContentRef.current) {
-        streamingContentRef.current.textContent = '';
+        streamingContentRef.current.textContent = "";
       }
       if (streamingReasoningRef.current) {
-        streamingReasoningRef.current.textContent = '';
+        streamingReasoningRef.current.textContent = "";
       }
       if (streamingReasoningSummaryRef.current) {
-        streamingReasoningSummaryRef.current.textContent = '';
+        streamingReasoningSummaryRef.current.textContent = "";
       }
       Object.values(streamingToolOutputRefs.current).forEach((el) => {
-        if (el) el.textContent = '';
+        if (el) el.textContent = "";
       });
       Object.values(streamingToolCallArgRefs.current).forEach((el) => {
-        if (el) el.textContent = '';
+        if (el) el.textContent = "";
       });
       Object.values(streamingToolCallPreviewRefs.current).forEach((el) => {
-        if (el) el.textContent = '';
+        if (el) el.textContent = "";
       });
     }
   }, [showLiveCard]);
 
   const { isLoading, isError } = transcriptQuery;
+  useEffect(() => {
+    const ownedThreadId = threadId;
+    return () => {
+      // React Strict Mode immediately remounts the same route. Defer the test so
+      // only a genuine route-owner change aborts pending retry waits.
+      queueMicrotask(() => {
+        if (useAppStore.getState().currentThreadId !== ownedThreadId) {
+          cancelTranscriptRequests(ownedThreadId);
+        }
+      });
+    };
+  }, [threadId]);
+
   const retryTranscript = useCallback(() => {
     void refreshTranscriptTail(queryClient, threadId).catch((error) => {
       console.error("Failed to retry transcript tail:", error);
     });
   }, [queryClient, threadId]);
 
-  // Reset intent/history ownership when the route changes. The layout effect
-  // below performs the initial live-edge correction before the browser paints.
-  useEffect(() => {
-    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, { type: "thread_changed" });
+  // Reset route intent/history and correct the new route before paint.
+  useLayoutEffect(() => {
+    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, {
+      type: "thread_changed",
+    });
     historyDemandRef.current = reduceHistoryDemand(historyDemandRef.current, { type: "reset" }, { canReveal: false, canFetch: false });
     loadingOlderRef.current = false;
     revealingLoadedRef.current = false;
@@ -1846,7 +2005,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       cancelAnimationFrame(historyBoundaryRafRef.current);
       historyBoundaryRafRef.current = null;
     }
-    setRenderStartMessageId(null);
+    setRenderStartIndex(null);
     setIsLoadingOlder(false);
     scrollToBottomNow();
   }, [currentThreadId, scrollToBottomNow]);
@@ -1860,7 +2019,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   }, [
     currentThreadId,
     isStreaming,
-    messages.length,
+    transcriptMetadata.revision,
     renderedTranscript.startIndex,
     showLiveCard,
     streamingToolCalls,
@@ -1881,30 +2040,28 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     }
 
     return () => observer.disconnect();
-  }, [currentThreadId, isStreaming, messages.length, scrollToBottom]);
+  }, [currentThreadId, isStreaming, transcriptMetadata.revision, scrollToBottom]);
 
   if (!currentThreadId) {
-    return (
-      <div className="eggw-transcript-state m-auto max-w-xl">
-        Select a thread to view messages
-      </div>
-    );
+    return <div className="eggw-transcript-state m-auto max-w-xl">Select a thread to view messages</div>;
   }
 
-  const lastMessageWithTps = [...messages].reverse().find(
-    (msg) => (msg.role === "assistant" || msg.role === "tool") && typeof msg.tps === "number" && Number.isFinite(msg.tps) && (msg.tps || 0) > 0
-  );
   const formattedStreamingTps =
-    isStreaming && streamingKind === "llm"
-      ? formatStreamingTps(streamingTps)
-      : formatStreamingTps(lastMessageWithTps?.tps ?? null);
+    isStreaming && streamingKind === "llm" ? formatStreamingTps(streamingTps) : formatStreamingTps(transcriptMetadata.tailTps);
   const streamingRoleLabel = streamingKind === "tool" ? "Tool" : "Assistant";
 
   const panel = (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className={clsx("eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0", showBorders && "border-b border-[var(--border-default)]")}>
+      <div
+        className={clsx(
+          "eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0",
+          showBorders && "border-b border-[var(--border-default)]"
+        )}
+      >
         <span>
-              Chat Messages · {messages.length.toLocaleString()} loaded{transcriptQuery.hasNextPage ? " · scroll up for older" : ""}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
+          Chat Messages · {totalMessages.toLocaleString()} loaded
+          {hasOlderTranscript ? " · scroll up for older" : ""}
+          {formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
         </span>
       </div>
       <div
@@ -1924,43 +2081,34 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       >
         <div className="eggw-transcript-inner" data-testid="chat-panel-content">
           {isLoading ? (
-            <div className="eggw-transcript-state" role="status" aria-live="polite">Loading messages…</div>
+            <div className="eggw-transcript-state" role="status" aria-live="polite">
+              Loading messages…
+            </div>
           ) : isError ? (
             <div className="eggw-transcript-state eggw-transcript-state-error space-y-2" role="alert">
               <div>Failed to load messages</div>
-              <Button
-                variant="danger"
-                onClick={retryTranscript}
-              >
+              <Button variant="danger" onClick={retryTranscript}>
                 Retry
               </Button>
             </div>
-          ) : messages.length === 0 ? (
-            <div className="eggw-transcript-state">
-              No messages yet. Start a conversation!
-            </div>
+          ) : totalMessages === 0 ? (
+            <div className="eggw-transcript-state">No messages yet. Start a conversation!</div>
           ) : (
             <>
-              {messages.length > 0 && renderedTranscript.hiddenCount === 0 && transcriptQuery.hasNextPage && (
+              {renderedTranscript.hiddenCount > 0 && (
                 <div className="mb-4 flex justify-center">
-                  <Button
-                    variant="secondary"
-                    onClick={demandOlderHistory}
-                    disabled={isLoadingOlder}
-                    data-testid="load-older-messages"
-                  >
-                    {isLoadingOlder ? "Loading older messages…" : "Load older messages"}
+                  <Button variant="secondary" onClick={demandOlderHistory} data-testid="show-more-loaded-messages">
+                    Show {TRANSCRIPT_WINDOW_MESSAGES} older loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} earlier)
                   </Button>
                 </div>
               )}
-              {renderedTranscript.hiddenCount > 0 && (
-                <div className="mb-4 flex justify-center">
-                  <Button
-                    variant="secondary"
-                    onClick={demandOlderHistory}
-                    data-testid="show-more-loaded-messages"
-                  >
-                    Show {TRANSCRIPT_WINDOW_MESSAGES} older loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} earlier)
+              {renderedTranscript.newerHiddenCount > 0 && (
+                <div className="mb-4 flex justify-center gap-2">
+                  <Button variant="secondary" onClick={showNewerTranscript} data-testid="show-newer-loaded-messages">
+                    Show newer ({renderedTranscript.newerHiddenCount.toLocaleString()} later)
+                  </Button>
+                  <Button variant="secondary" onClick={showLiveTranscript} data-testid="return-to-live-tail">
+                    Return to live tail
                   </Button>
                 </div>
               )}
@@ -1982,12 +2130,8 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                   <div className="eggw-message-header">
                     <span className="eggw-role-marker" aria-hidden="true" />
                     <span className="eggw-role-label">{streamingRoleLabel}</span>
-                    {displayVerbosity !== "min" && streamingModelKey && (
-                      <span className="eggw-message-meta">{streamingModelKey}</span>
-                    )}
-                    {isStreaming && streamingKind !== "tool" && (
-                      <StatusChip tone="info">Streaming…</StatusChip>
-                    )}
+                    {displayVerbosity !== "min" && streamingModelKey && <span className="eggw-message-meta">{streamingModelKey}</span>}
+                    {isStreaming && streamingKind !== "tool" && <StatusChip tone="info">Streaming…</StatusChip>}
                     <LiveTimingText
                       kind={streamingKind === "llm" ? "provider" : "generic"}
                       isStreaming={isStreaming}
@@ -1999,45 +2143,39 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                   </div>
 
                   <>
-                      {/* Streaming reasoning - direct DOM updates via ref */}
-                      <details
+                    {/* Streaming reasoning - direct DOM updates via ref */}
+                    <details
                       open={displayVerbosity === "max" ? true : undefined}
-                      className={clsx("eggw-detail-block eggw-role-reasoning", !showBorders && "eggw-detail-borderless", displayVerbosity === "min" && "hidden")}
+                      className={clsx(
+                        "eggw-detail-block eggw-role-reasoning",
+                        !showBorders && "eggw-detail-borderless",
+                        displayVerbosity === "min" && "hidden"
+                      )}
                       id="streaming-reasoning-container"
-                      >
+                    >
                       <summary className="eggw-detail-summary">
                         Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
                       </summary>
-                      <div
-                        ref={streamingReasoningRef}
-                        className="eggw-detail-content whitespace-pre-wrap"
-                      />
-                      </details>
+                      <div ref={streamingReasoningRef} className="eggw-detail-content whitespace-pre-wrap" />
+                    </details>
 
-                      {/* Streaming reasoning summary - display-only, not persisted as reasoning */}
-                      <details
+                    {/* Streaming reasoning summary - display-only, not persisted as reasoning */}
+                    <details
                       open={displayVerbosity === "max" ? true : undefined}
                       className={clsx("eggw-detail-block eggw-role-reasoning hidden", !showBorders && "eggw-detail-borderless")}
                       id="streaming-reasoning-summary-container"
-                      >
+                    >
                       <summary className="eggw-detail-summary">
                         Reasoning Summary <span className="text-xs animate-pulse">(streaming...)</span>
                       </summary>
-                      <div
-                        ref={streamingReasoningSummaryRef}
-                        className="eggw-detail-content whitespace-pre-wrap"
-                      />
-                      </details>
+                      <div ref={streamingReasoningSummaryRef} className="eggw-detail-content whitespace-pre-wrap" />
+                    </details>
 
-                      {/* Streaming content - direct DOM updates via ref for O(1) performance */}
-                      <div
-                      ref={streamingContentRef}
-                      data-testid="streaming-content"
-                      className="eggw-streaming-content"
-                      />
+                    {/* Streaming content - direct DOM updates via ref for O(1) performance */}
+                    <div ref={streamingContentRef} data-testid="streaming-content" className="eggw-streaming-content" />
 
-                      {/* Streaming tool calls */}
-                      {Object.keys(visibleStreamingToolCalls).length > 0 && (
+                    {/* Streaming tool calls */}
+                    {Object.keys(visibleStreamingToolCalls).length > 0 && (
                       <div className="mt-2 space-y-2">
                         {Object.entries(visibleStreamingToolCalls).map(([tcId, tc]) => {
                           return (
@@ -2049,21 +2187,19 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                             >
                               <summary className="eggw-detail-summary">
                                 <span className="font-medium">{tc.name || "tool"}</span>
-                                <span className="eggw-message-meta font-mono">
-                                  {tcId.slice(-8)}
+                                <span className="eggw-message-meta font-mono">{tcId.slice(-8)}</span>
+                                <span className="eggw-streaming-label">
+                                  {tc.finished ? "finished" : isGetUserMessageTool(tc.name) ? "waiting for reply" : "streaming..."}
                                 </span>
-                                <span className="eggw-streaming-label">{tc.finished ? "finished" : isGetUserMessageTool(tc.name) ? "waiting for reply" : "streaming..."}</span>
                                 {displayVerbosity === "medium" && (
                                   <span
-                                    ref={(element) => { streamingToolCallPreviewRefs.current[tcId] = element; }}
+                                    ref={(element) => {
+                                      streamingToolCallPreviewRefs.current[tcId] = element;
+                                    }}
                                     className="eggw-message-meta font-mono"
                                   />
                                 )}
-                                {displayVerbosity === "medium" && (
-                                  <span className="eggw-attachment-meta">
-                                    expand to inspect args
-                                  </span>
-                                )}
+                                {displayVerbosity === "medium" && <span className="eggw-attachment-meta">expand to inspect args</span>}
                               </summary>
                               <div className="px-2 pb-2">
                                 <pre
@@ -2078,10 +2214,10 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                           );
                         })}
                       </div>
-                      )}
+                    )}
 
-                      {/* Streaming tool output preview */}
-                      {Object.keys(visibleStreamingToolOutputs).length > 0 && (
+                    {/* Streaming tool output preview */}
+                    {Object.keys(visibleStreamingToolOutputs).length > 0 && (
                       <div className="mt-2 space-y-2">
                         {Object.entries(visibleStreamingToolOutputs).map(([toolId, tool]) => {
                           const isGetUserWait = isGetUserMessageTool(tool.name);
@@ -2094,10 +2230,10 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                             >
                               <summary className="eggw-detail-summary flex-wrap">
                                 <span className="font-medium">{tool.name || "tool"}</span>
-                                <span className="eggw-message-meta font-mono">
-                                  {toolId.slice(-8)}
+                                <span className="eggw-message-meta font-mono">{toolId.slice(-8)}</span>
+                                <span className="eggw-streaming-label">
+                                  {tool.finished ? "finished" : isGetUserWait ? "waiting for reply" : "streaming output..."}
                                 </span>
-                                <span className="eggw-streaming-label">{tool.finished ? "finished" : isGetUserWait ? "waiting for reply" : "streaming output..."}</span>
                                 {displayVerbosity === "medium" && (
                                   <span className="eggw-attachment-meta">
                                     {isGetUserWait ? "expand to inspect" : "expand to inspect output"}
@@ -2130,10 +2266,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                               </summary>
                               <div className="px-2 pb-2">
                                 {tool.summary && (
-                                  <div
-                                    data-testid="streaming-tool-summary"
-                                    className="eggw-streaming-label mb-2"
-                                  >
+                                  <div data-testid="streaming-tool-summary" className="eggw-streaming-label mb-2">
                                     {tool.summary}
                                   </div>
                                 )}
@@ -2143,10 +2276,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                   className="eggw-code-block max-h-64 whitespace-pre-wrap break-words"
                                 />
                                 {tool.suppressed && (
-                                  <div
-                                    data-testid="streaming-tool-output-suppressed"
-                                    className="eggw-message-meta mt-2"
-                                  >
+                                  <div data-testid="streaming-tool-output-suppressed" className="eggw-message-meta mt-2">
                                     {toolStreamSavingText(tool.name, tool.suppressedFrames)}
                                   </div>
                                 )}
@@ -2155,11 +2285,10 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                           );
                         })}
                       </div>
-                      )}
-
+                    )}
                   </>
-              </div>
-            )}
+                </div>
+              )}
             </>
           )}
           {/* Scroll anchor for auto-scroll */}
@@ -2175,3 +2304,6 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     </Profiler>
   );
 }
+
+
+export const ChatPanel = memo(ChatPanelImpl);

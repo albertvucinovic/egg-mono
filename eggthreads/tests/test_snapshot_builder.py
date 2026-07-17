@@ -150,6 +150,94 @@ def test_snapshot_excludes_deleted_messages() -> None:
     assert [m["msg_id"] for m in snapshot["messages"]] == ["keep"]
 
 
+def test_create_snapshot_fast_tail_carries_pending_optimizer_metadata(tmp_path, monkeypatch) -> None:
+    """Snapshot extension applies serialized approval state without replay."""
+
+    db = ts.ThreadsDB(tmp_path / "optimizer-tail.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="optimizer-tail")
+    tool_call_id = "optimizer-tail-call"
+    db.append_event(
+        "optimizer-tail-approval",
+        tid,
+        "tool_call.output_approval",
+        {
+            "tool_call_id": tool_call_id,
+            "decision": "whole",
+            "channels": {
+                "raw": {"stored_in_finished_event": True},
+                "optimizer": {
+                    "optimized": True,
+                    "fallback": False,
+                    "published_savings_pct": 89.0,
+                },
+            },
+        },
+    )
+    ts.create_snapshot(db, tid)
+    msg_id = ts.append_message(
+        db,
+        tid,
+        "tool",
+        "late output",
+        extra={"name": "bash", "tool_call_id": tool_call_id},
+    )
+
+    monkeypatch.setattr("eggthreads.projection.load_thread_projection", _fail_canonical_projection)
+    snapshot = ts.create_snapshot(db, tid)
+
+    message = next(item for item in snapshot["messages"] if item["msg_id"] == msg_id)
+    assert message["output_optimizer"]["savings_pct"] == 89.0
+    assert tool_call_id not in snapshot["_thread_projection"][
+        "pending_optimizer_metadata"
+    ]
+
+
+def test_create_snapshot_fast_tail_updates_pending_optimizer_order(tmp_path, monkeypatch) -> None:
+    """Successful tail approvals update state; quiet approvals cannot erase it."""
+
+    db = ts.ThreadsDB(tmp_path / "optimizer-tail-order.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="optimizer-tail-order")
+    tool_call_id = "optimizer-tail-order-call"
+    ts.append_message(db, tid, "user", "anchor")
+    ts.create_snapshot(db, tid)
+    for event_id, payload in (
+        (
+            "optimizer-tail-success",
+            {
+                "tool_call_id": tool_call_id,
+                "decision": "whole",
+                "channels": {
+                    "optimizer": {
+                        "optimized": True,
+                        "fallback": False,
+                        "published_savings_pct": 87.0,
+                    },
+                },
+            },
+        ),
+        (
+            "optimizer-tail-default",
+            {"tool_call_id": tool_call_id, "decision": "whole"},
+        ),
+    ):
+        db.append_event(event_id, tid, "tool_call.output_approval", payload)
+    msg_id = ts.append_message(
+        db,
+        tid,
+        "tool",
+        "ordered output",
+        extra={"name": "bash", "tool_call_id": tool_call_id},
+    )
+
+    monkeypatch.setattr("eggthreads.projection.load_thread_projection", _fail_canonical_projection)
+    snapshot = ts.create_snapshot(db, tid)
+
+    message = next(item for item in snapshot["messages"] if item["msg_id"] == msg_id)
+    assert message["output_optimizer"]["savings_pct"] == 87.0
+
+
 def test_create_snapshot_appends_msg_create_tail_incrementally(tmp_path, monkeypatch) -> None:
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()

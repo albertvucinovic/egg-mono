@@ -3492,13 +3492,13 @@ def _snapshot_from_projection(projection) -> Dict[str, Any]:
         base_snapshot = projection.base_snapshot
         projected_messages = projection.message_dicts()
         base_messages_for_shape = base_snapshot.get('messages') if isinstance(base_snapshot, Mapping) else None
-        from .projection import _SNAPSHOT_NOOP_EVENT_TYPES
+        from .projection import _SNAPSHOT_FAST_TAIL_EVENT_TYPES
 
         tail_is_append_only = (
             isinstance(base_messages_for_shape, list)
             and len(projected_messages) >= len(base_messages_for_shape)
             and all(
-                event_type == 'msg.create' or event_type in _SNAPSHOT_NOOP_EVENT_TYPES
+                event_type in _SNAPSHOT_FAST_TAIL_EVENT_TYPES
                 for event_type in projection.tail_event_types
             )
         )

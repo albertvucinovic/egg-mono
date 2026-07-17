@@ -137,12 +137,12 @@ export interface MessageSnapshot<T = ApiMessage> {
 
 export async function fetchMessages(
   threadId: string,
-  options: { limit?: number; beforeId?: string } = {},
+  options: { limit?: number; beforeId?: string; signal?: AbortSignal } = {},
 ): Promise<MessageSnapshot> {
   const params = new URLSearchParams({ envelope: "true" });
   if (options.limit && options.limit > 0) params.set("limit", String(Math.trunc(options.limit)));
   if (options.beforeId) params.set("before_id", options.beforeId);
-  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/messages?${params.toString()}`);
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/messages?${params.toString()}`, { signal: options.signal });
   if (!res.ok) throw new Error("Failed to fetch messages");
   const payload = await res.json();
   if (!payload || !Array.isArray(payload.items) || !Number.isSafeInteger(payload.snapshot_cursor)) {

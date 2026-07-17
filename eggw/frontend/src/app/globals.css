@@ -1256,9 +1256,24 @@ code {
    therefore neither wrap the summary nor change transcript geometry. */
 .eggw-live-timing {
   display: inline-block;
-  min-width: 20ch;
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
   white-space: nowrap;
+  text-overflow: clip;
   font-variant-numeric: tabular-nums;
+}
+
+/* Maximum supported formatting: 86,400-second limits plus six-digit elapsed
+   time. Width is fixed from first render; 10000→9999 cannot move siblings. */
+.eggw-live-timing-provider { width: 34ch; }
+.eggw-live-timing-generic { width: 18ch; }
+.eggw-live-timing-toolElapsed { width: 18ch; }
+.eggw-live-timing-toolTimeout { width: 38ch; }
+
+@media (max-width: 520px) {
+  .eggw-live-timing-provider,
+  .eggw-live-timing-toolTimeout { width: min(38ch, 100%); }
 }
 
 .eggw-message-id {

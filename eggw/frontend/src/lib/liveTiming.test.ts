@@ -52,4 +52,16 @@ describe("live timing snapshots", () => {
     expect(Object.keys(snapshot.tools)).toEqual(["bash"]);
     expect(snapshot.tools.bash.elapsed).toBe("running 2s");
   });
+  it("formats long-limit digit transitions within the reserved timer contract", () => {
+    const atTenThousand = liveTimingSnapshot(76_400_000, true, "tool", 1_000, null, {
+      bash: output({ id: "bash", startedAtMs: 1_000, timeout: { startedAtMs: 1_000, timeoutSec: 86_400 } }),
+    });
+    const belowTenThousand = liveTimingSnapshot(76_401_000, true, "tool", 1_000, null, {
+      bash: output({ id: "bash", startedAtMs: 1_000, timeout: { startedAtMs: 1_000, timeoutSec: 86_400 } }),
+    });
+    expect(atTenThousand.tools.bash.timeout).toBe("timeout in 10001s (limit 86400s)");
+    expect(belowTenThousand.tools.bash.timeout).toBe("timeout in 10000s (limit 86400s)");
+    expect(Math.max(atTenThousand.tools.bash.timeout!.length, belowTenThousand.tools.bash.timeout!.length)).toBeLessThanOrEqual(38);
+  });
+
 });

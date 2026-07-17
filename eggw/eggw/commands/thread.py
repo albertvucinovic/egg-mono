@@ -460,7 +460,11 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
             "continue_from": result.continue_from_msg_id,
             "skipped_count": len(result.skipped_msg_ids),
             "was_interrupted": was_interrupted,
-            "reload": True,  # Signal frontend to refresh messages
+            # Continuation invalidates the loaded page chain; unlike ordinary
+            # reload commands, the browser must rewind generation authority
+            # before fetching the disjoint post-continue tail.
+            "reload": True,
+            "reload_mode": "continuation",
         }
         # Include diagnosis details if available
         if result.diagnosis:

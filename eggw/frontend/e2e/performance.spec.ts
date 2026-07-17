@@ -93,22 +93,32 @@ test.describe('Deterministic performance gates', () => {
     await expect(page.getByText('Streaming performance fixture').first()).toBeVisible();
   });
 
-  test('5M-token-equivalent history stays reachable with bounded tail refresh, input, and scroll work', async ({ page }) => {
+  test('5M-token-equivalent multi-megabyte history reaches oldest while input and streaming stay bounded', async ({ page }) => {
+    test.setTimeout(240_000);
     const threadId = 'performance-five-million';
     const messagesPerPage = 300;
     const pageCount = 24;
-    // 7,200 messages x 700 tokens/message = 5,040,000 token-equivalent.
-    const tokenEquivalent = messagesPerPage * pageCount * 700;
-    expect(tokenEquivalent).toBeGreaterThan(5_000_000);
+    const tokenUnitsPerMessage = 700;
+    const tokenUnits = Array.from({ length: tokenUnitsPerMessage }, (_, index) => `u${index % 10}`).join(' ');
+    expect(tokenUnits.trim().split(/\s+/)).toHaveLength(tokenUnitsPerMessage);
     const pageMessages = (pageIndex: number) => Array.from({ length: messagesPerPage }, (_, index) => ({
       id: `five-million-${pageIndex}-${index}`,
       role: index % 2 ? 'assistant' : 'user',
-      content: `page ${pageIndex} message ${index}`,
+      content: `page ${pageIndex} message ${index} ${tokenUnits}`,
     }));
+    const actualTokenUnits = messagesPerPage * pageCount * tokenUnitsPerMessage;
+    expect(actualTokenUnits).toBeGreaterThanOrEqual(5_040_000);
+    expect(Buffer.byteLength(JSON.stringify(pageMessages(0))) * pageCount).toBeGreaterThan(10 * 1024 * 1024);
+
     let tailRequests = 0;
     const requestedPages: number[] = [];
+    let eventConnections = 0;
+    let releaseLiveUpdate!: () => void;
+    const liveUpdateReady = new Promise<void>((resolve) => { releaseLiveUpdate = resolve; });
     await mockPerformanceThread(page, threadId, 0);
     await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.unroute(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`));
+    await page.unroute(`${API_BASE}/api/threads/${threadId}/events`);
     await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
       const before = new URL(request.url()).searchParams.get('before_id');
       const pageIndex = before ? Number(before.replace('cursor-', '')) : 0;
@@ -119,48 +129,110 @@ test.describe('Deterministic performance gates', () => {
         headers,
         json: {
           items: pageMessages(pageIndex),
-          snapshot_cursor: 10 + tailRequests,
+          snapshot_cursor: 20,
           next_before: pageIndex + 1 < pageCount ? `cursor-${pageIndex + 1}` : null,
         },
       });
     });
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers,
+      json: { state: 'running', streaming_kind: 'llm', streaming_invoke_id: 'five-million-live', live_replay_cursor: 20 },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      eventConnections += 1;
+      const ts = new Date().toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `five-million-event-${eventSeq}`,
+        event_seq: eventSeq,
+        type,
+        ts,
+        msg_id: null,
+        invoke_id: 'five-million-live',
+        chunk_seq: type === 'stream.delta' ? eventSeq : null,
+        payload,
+      });
+      const block = (eventSeq: number, type: string, payload: Record<string, unknown>) => [
+        `id: ${eventSeq}`, `event: ${type}`, `data: ${envelope(eventSeq, type, payload)}`, '', '',
+      ];
+      if (eventConnections === 1) {
+        return route.fulfill({
+          status: 200,
+          headers: { ...headers, 'content-type': 'text/event-stream' },
+          body: [...block(21, 'stream.open', { stream_kind: 'llm' }), ...block(22, 'stream.delta', { text: 'live-start' })].join('\n'),
+        });
+      }
+      if (eventConnections === 2) {
+        await liveUpdateReady;
+        return route.fulfill({
+          status: 200,
+          headers: { ...headers, 'content-type': 'text/event-stream' },
+          body: Array.from({ length: 100 }, (_, index) => block(index + 23, 'stream.delta', { text: ' live-unit' })).flat().join('\n'),
+        });
+      }
+      return route.fulfill({ status: 200, headers: { ...headers, 'content-type': 'text/event-stream' }, body: '' });
+    });
 
     await page.goto(`/${threadId}`);
-    await expect(page.getByText(/Chat Messages · 300 loaded/)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/Chat Messages · 300 loaded/)).toBeVisible({ timeout: 20_000 });
+    const chat = page.getByTestId('chat-panel');
     const input = page.getByTestId('message-input');
+    const assertBounded = async () => {
+      expect(await page.locator('[data-message-id]').count()).toBeLessThanOrEqual(120);
+    };
+    await assertBounded();
+    await page.waitForTimeout(150);
+
     const beforeInput = await counters(page);
     await input.pressSequentially('bounded input', { delay: 0 });
     const afterInput = await counters(page);
     expect(afterInput.transcriptCommits - beforeInput.transcriptCommits).toBe(0);
     expect(afterInput.chatPanelCommits - beforeInput.chatPanelCommits).toBe(0);
 
-    const chat = page.getByTestId('chat-panel');
-    await chat.focus();
-    await page.keyboard.press('Home');
-    await expect(page.getByTestId('show-more-loaded-messages')).toBeVisible();
-    expect(requestedPages).toEqual([]);
-    let reveals = 0;
+    // Each Home moves one overlapping 60-message window toward oldest. Once the
+    // current loaded cache is exhausted, exactly one older backend page is fetched.
+    for (let pageIndex = 1; pageIndex < pageCount; pageIndex += 1) {
+      while (await page.getByTestId('show-more-loaded-messages').isVisible()) {
+        await page.getByTestId('show-more-loaded-messages').click();
+        await assertBounded();
+      }
+      await chat.focus();
+      await page.keyboard.press('Home');
+      await expect.poll(() => requestedPages.at(-1)).toBe(pageIndex);
+      await expect(page.getByText(new RegExp(`Chat Messages · ${((pageIndex + 1) * messagesPerPage).toLocaleString()} loaded`))).toBeVisible({ timeout: 20_000 });
+      await assertBounded();
+    }
     while (await page.getByTestId('show-more-loaded-messages').isVisible()) {
       await page.getByTestId('show-more-loaded-messages').click();
-      reveals += 1;
-      expect(reveals).toBeLessThanOrEqual(5);
+      await assertBounded();
     }
-    expect(reveals).toBe(3);
-    expect(requestedPages).toEqual([]);
-    await expect(page.getByTestId('load-older-messages')).toBeVisible();
-    await page.getByTestId('load-older-messages').click();
-    await expect.poll(() => requestedPages).toEqual([1]);
-    await expect(page.getByText(/Chat Messages · 600 loaded/)).toBeVisible();
-    await expect(page.locator('[data-message-id="five-million-1-0"]')).toHaveCount(0);
-    await page.getByTestId('show-more-loaded-messages').click();
-    await expect(page.locator('[data-message-id="five-million-1-240"]')).toBeVisible();
-
-    // Every interactive path above touched at most the visible tail or one
-    // explicitly requested page. Complete history remains reachable one cursor
-    // at a time; no hidden 5M-token body was scanned or mounted.
+    await expect(page.locator('[data-message-id="five-million-23-0"]')).toBeVisible();
+    await expect(page.getByTestId('return-to-live-tail')).toBeVisible();
+    expect(requestedPages).toEqual(Array.from({ length: pageCount - 1 }, (_, index) => index + 1));
     expect(tailRequests).toBeLessThanOrEqual(2);
-    expect(requestedPages).toEqual([1]);
-    await expect(page.getByText(/Chat Messages · 600 loaded/)).toBeVisible();
+
+    // A local historical-window bottom is not the live edge: streaming remains
+    // hidden and does not reattach until End explicitly returns to the live tail.
+    await chat.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect(page.getByTestId('streaming-content')).toHaveCount(0);
+    await chat.focus();
+    await page.keyboard.press('End');
+    await expect(page.locator('[data-message-id="five-million-0-299"]')).toBeVisible();
+    await expect(page.getByTestId('streaming-content')).toContainText('live-start');
+    await assertBounded();
+
+    await expect.poll(() => eventConnections).toBeGreaterThanOrEqual(2);
+    await page.waitForTimeout(150);
+    const beforeLive = await counters(page);
+    releaseLiveUpdate();
+    await expect(page.getByTestId('streaming-content')).toContainText('live-unit');
+    const afterLive = await counters(page);
+    expect(afterLive.streamingTextFlushes).toBeGreaterThan(beforeLive.streamingTextFlushes);
+    // The reconnect can publish one semantic query/stream metadata commit; the
+    // 100 body chunks themselves remain isolated in the imperative streaming leaf.
+    expect(afterLive.transcriptCommits - beforeLive.transcriptCommits).toBeLessThanOrEqual(1);
+    await input.pressSequentially(' after live', { delay: 0 });
+    await assertBounded();
   });
 
   test('1,100 delta burst bypasses React commits and bounds tool previews', async ({ page }) => {
@@ -230,7 +302,7 @@ test.describe('Deterministic performance gates', () => {
     await page.goto(`/${threadId}`);
     await expect(page.getByTestId('chat-panel')).toContainText('Tool', { timeout: 15_000 });
     await expect.poll(() => eventConnections, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(250);
     const before = await counters(page);
     releaseBurst();
     await expect.poll(async () => (await counters(page)).streamingToolArgumentFlushes)

@@ -1,6 +1,16 @@
 import type { InfiniteData, QueryClient } from "@tanstack/react-query";
 import { fetchMessages, type MessageSnapshot } from "./api";
 import type { Message } from "./store";
+import {
+  appendTranscriptHistoryData,
+  flattenIndexedTranscript,
+  replaceTranscriptPageData,
+  replaceTranscriptTailData,
+  transcriptDataFromTail,
+  transcriptHistory,
+  transcriptOwnerPage,
+  upsertTranscriptTailData,
+} from "./transcriptIndex";
 
 export const TRANSCRIPT_PAGE_SIZE = 300;
 export type TranscriptPage = MessageSnapshot<Message> & {
@@ -13,11 +23,97 @@ export function transcriptQueryKey(threadId: string) {
   return ["messages", threadId] as const;
 }
 
+interface TranscriptRequestState {
+  generation: number;
+  tailController: AbortController | null;
+  tailRefreshPromise: Promise<TranscriptData> | null;
+  tailRefreshGeneration: number | null;
+  initialController: AbortController | null;
+  initialGeneration: number | null;
+  olderControllers: Set<AbortController>;
+}
+
+const transcriptRequests = new Map<string, TranscriptRequestState>();
+
+function transcriptRequestState(threadId: string): TranscriptRequestState {
+  let state = transcriptRequests.get(threadId);
+  if (!state) {
+    state = {
+      generation: 0,
+      tailController: null,
+      tailRefreshPromise: null,
+      tailRefreshGeneration: null,
+      initialController: null,
+      initialGeneration: null,
+      olderControllers: new Set(),
+    };
+    transcriptRequests.set(threadId, state);
+  }
+  return state;
+}
+
+function beginTailRequest(threadId: string): {
+  generation: number;
+  controller: AbortController;
+} {
+  const state = transcriptRequestState(threadId);
+  state.tailController?.abort();
+  const controller = new AbortController();
+  state.tailController = controller;
+  return { generation: state.generation, controller };
+}
+
+function beginOlderRequest(threadId: string): {
+  generation: number;
+  controller: AbortController;
+} {
+  const state = transcriptRequestState(threadId);
+  const controller = new AbortController();
+  state.olderControllers.add(controller);
+  return { generation: state.generation, controller };
+}
+
+function requestGenerationMatches(
+  threadId: string,
+  generation: number,
+): boolean {
+  return transcriptRequestState(threadId).generation === generation;
+}
+
+/** Fence every in-flight page response before applying destructive authority. */
+export function advanceTranscriptGeneration(threadId: string): number {
+  const state = transcriptRequestState(threadId);
+  state.generation += 1;
+  state.tailController?.abort();
+  state.tailController = null;
+  // A post-invalidation refresh must never join the stale generation's request.
+  // Its rejected promise retains its own identity and clears itself in finally.
+  state.tailRefreshPromise = null;
+  state.tailRefreshGeneration = null;
+  state.initialController?.abort();
+  state.initialController = null;
+  state.initialGeneration = null;
+  state.olderControllers.forEach((controller) => controller.abort());
+  state.olderControllers.clear();
+  return state.generation;
+}
+
+export function transcriptGeneration(threadId: string): number {
+  return transcriptRequestState(threadId).generation;
+}
+
+/** Cancel pending retry waits when a route stops owning this transcript. */
+export function cancelTranscriptRequests(threadId: string): void {
+  advanceTranscriptGeneration(threadId);
+}
+
 function isCommandClientMessage(message: Message): boolean {
   return message.client_only === "command";
 }
 
-function messageTimestampMs(message: Pick<Message, "timestamp">): number | null {
+function messageTimestampMs(
+  message: Pick<Message, "timestamp">,
+): number | null {
   if (typeof message.timestamp !== "string" || !message.timestamp) return null;
   const parsed = Date.parse(message.timestamp);
   return Number.isFinite(parsed) ? parsed : null;
@@ -25,7 +121,8 @@ function messageTimestampMs(message: Pick<Message, "timestamp">): number | null 
 
 function operationDedupKey(message: Message): string | null {
   if (!message.client_operation_id) return null;
-  if (message.client_only === "optimistic") return `optimistic:${message.client_operation_id}`;
+  if (message.client_only === "optimistic")
+    return `optimistic:${message.client_operation_id}`;
   if (isCommandClientMessage(message)) {
     // A shell/image command can intentionally render one pending card and one
     // response card for the same operation. Deduplicate each lifecycle slot,
@@ -56,23 +153,40 @@ function appendIfUnique(
  * their input order for equal or missing/invalid timestamps. Only these two
  * bounded arrays are examined -- older transcript pages are never sorted.
  */
-export function mergeMessagesByTimestamp(base: Message[], placed: Message[]): Message[] {
+export function mergeMessagesByTimestamp(
+  base: Message[],
+  placed: Message[],
+): Message[] {
   const merged: Message[] = [];
   const seenIds = new Set<string>();
   const seenOperations = new Set<string>();
-  base.forEach((message) => appendIfUnique(merged, message, seenIds, seenOperations));
+  base.forEach((message) =>
+    appendIfUnique(merged, message, seenIds, seenOperations),
+  );
 
-  const uniquePlaced: Array<{ message: Message; index: number; timestampMs: number | null }> = [];
+  const uniquePlaced: Array<{
+    message: Message;
+    index: number;
+    timestampMs: number | null;
+  }> = [];
   placed.forEach((message, index) => {
     const operationKey = operationDedupKey(message);
     if (message.id && seenIds.has(message.id)) return;
     if (operationKey && seenOperations.has(operationKey)) return;
     if (message.id) seenIds.add(message.id);
     if (operationKey) seenOperations.add(operationKey);
-    uniquePlaced.push({ message, index, timestampMs: messageTimestampMs(message) });
+    uniquePlaced.push({
+      message,
+      index,
+      timestampMs: messageTimestampMs(message),
+    });
   });
   uniquePlaced.sort((left, right) => {
-    if (left.timestampMs !== null && right.timestampMs !== null && left.timestampMs !== right.timestampMs) {
+    if (
+      left.timestampMs !== null &&
+      right.timestampMs !== null &&
+      left.timestampMs !== right.timestampMs
+    ) {
       return left.timestampMs - right.timestampMs;
     }
     if (left.timestampMs !== null && right.timestampMs === null) return -1;
@@ -108,11 +222,12 @@ export function reconcileTranscriptTail(
   // two versions of one message.
   const newerPreviousById = new Map(
     previous.items
-      .filter((message) => (
-        Boolean(message.id)
-        && Number.isSafeInteger(message.event_seq)
-        && message.event_seq! > fetched.snapshot_cursor
-      ))
+      .filter(
+        (message) =>
+          Boolean(message.id) &&
+          Number.isSafeInteger(message.event_seq) &&
+          message.event_seq! > fetched.snapshot_cursor,
+      )
       .map((message) => [message.id, message]),
   );
   let replacedFetchedVersion = false;
@@ -122,23 +237,33 @@ export function reconcileTranscriptTail(
     replacedFetchedVersion = true;
     return newer;
   });
-  const fetchedIds = new Set(fetchedItems.map((message) => message.id).filter(Boolean));
+  const fetchedIds = new Set(
+    fetchedItems.map((message) => message.id).filter(Boolean),
+  );
   const fetchedOperations = new Set(
-    fetchedItems.map(operationDedupKey).filter((key): key is string => Boolean(key)),
+    fetchedItems
+      .map(operationDedupKey)
+      .filter((key): key is string => Boolean(key)),
   );
   const preserved = previous.items.filter((message) => {
     if (message.id && fetchedIds.has(message.id)) return false;
     const operationKey = operationDedupKey(message);
     if (operationKey && fetchedOperations.has(operationKey)) return false;
-    if (message.client_operation_id && message.client_only === "optimistic") return true;
+    if (message.client_operation_id && message.client_only === "optimistic")
+      return true;
     if (isCommandClientMessage(message)) return true;
     // A delayed HTTP snapshot must not erase a msg.create already consumed
     // from the ordered live feed. Once its cursor covers the event, absence is
     // authoritative and the retained envelope can be discarded.
-    return Number.isSafeInteger(message.event_seq) && message.event_seq! > fetched.snapshot_cursor;
+    return (
+      Number.isSafeInteger(message.event_seq) &&
+      message.event_seq! > fetched.snapshot_cursor
+    );
   });
   if (!preserved.length) {
-    return replacedFetchedVersion ? { ...fetched, items: fetchedItems } : fetched;
+    return replacedFetchedVersion
+      ? { ...fetched, items: fetchedItems }
+      : fetched;
   }
   return {
     ...fetched,
@@ -149,7 +274,10 @@ export function reconcileTranscriptTail(
   };
 }
 
-function retainedTailPrefix(fetched: TranscriptPage, previousTail: TranscriptPage): Message[] {
+function retainedTailPrefix(
+  fetched: TranscriptPage,
+  previousTail: TranscriptPage,
+): Message[] {
   const previousIndexById = new Map<string, number>();
   const previousIndexByOperation = new Map<string, number>();
   previousTail.items.forEach((message, index) => {
@@ -160,8 +288,9 @@ function retainedTailPrefix(fetched: TranscriptPage, previousTail: TranscriptPag
   let firstOverlap = -1;
   for (const message of fetched.items) {
     const operationKey = operationDedupKey(message);
-    const previousIndex = (message.id ? previousIndexById.get(message.id) : undefined)
-      ?? (operationKey ? previousIndexByOperation.get(operationKey) : undefined);
+    const previousIndex =
+      (message.id ? previousIndexById.get(message.id) : undefined) ??
+      (operationKey ? previousIndexByOperation.get(operationKey) : undefined);
     if (previousIndex !== undefined) {
       firstOverlap = previousIndex;
       break;
@@ -169,12 +298,17 @@ function retainedTailPrefix(fetched: TranscriptPage, previousTail: TranscriptPag
   }
   // No overlap means the complete old tail may have been displaced by a large
   // burst. Preserve it; explicit destructive events own wholesale invalidation.
-  const candidates = firstOverlap >= 0
-    ? previousTail.items.slice(0, firstOverlap)
-    : previousTail.items;
-  const fetchedIds = new Set(fetched.items.map((message) => message.id).filter(Boolean));
+  const candidates =
+    firstOverlap >= 0
+      ? previousTail.items.slice(0, firstOverlap)
+      : previousTail.items;
+  const fetchedIds = new Set(
+    fetched.items.map((message) => message.id).filter(Boolean),
+  );
   const fetchedOperations = new Set(
-    fetched.items.map(operationDedupKey).filter((key): key is string => Boolean(key)),
+    fetched.items
+      .map(operationDedupKey)
+      .filter((key): key is string => Boolean(key)),
   );
   return candidates.filter((message) => {
     if (message.id && fetchedIds.has(message.id)) return false;
@@ -187,69 +321,69 @@ function retainedBridgePages(
   displaced: Message[],
   previous: TranscriptData,
   snapshotCursor: number,
-): { pages: TranscriptPage[]; pageParams: Array<string | null> } {
-  const olderPages = previous.pages.slice(1);
-  const olderPageParams = previous.pageParams.slice(1);
-  if (!displaced.length) return { pages: olderPages, pageParams: olderPageParams };
-  const priorBridge = olderPages[0]?.retained_tail_bridge ? olderPages[0] : null;
-  const combined = [...(priorBridge?.items || []), ...displaced];
+): TranscriptPage[] {
+  if (!displaced.length) return [];
   const bridgePages: TranscriptPage[] = [];
-  let newestEnd = combined.length;
-  let newestSize = combined.length % TRANSCRIPT_PAGE_SIZE || Math.min(TRANSCRIPT_PAGE_SIZE, combined.length);
-  while (newestEnd > 0) {
-    const start = Math.max(0, newestEnd - newestSize);
+  for (
+    let offset = 0;
+    offset < displaced.length;
+    offset += TRANSCRIPT_PAGE_SIZE
+  ) {
+    const items = displaced.slice(offset, offset + TRANSCRIPT_PAGE_SIZE);
     bridgePages.push({
-      items: combined.slice(start, newestEnd),
+      items,
       snapshot_cursor: snapshotCursor,
       next_before: null,
       retained_tail_bridge: true,
     });
-    newestEnd = start;
-    newestSize = TRANSCRIPT_PAGE_SIZE;
   }
-  const remainingOlderPages = olderPages.slice(priorBridge ? 1 : 0);
-  const remainingOlderParams = olderPageParams.slice(priorBridge ? 1 : 0);
-  if (!remainingOlderPages.length && bridgePages.length) {
-    const continuation = previous.pages.at(-1)?.next_before || null;
+  // If this is the first displacement, transfer the backend frontier to the
+  // oldest bridge. The linked history index retains it across later refreshes.
+  const history = transcriptHistory(previous);
+  if (!history.newest && bridgePages.length) {
+    const continuation = history.tail.next_before;
     if (continuation) {
       const oldestIndex = bridgePages.length - 1;
-      bridgePages[oldestIndex] = { ...bridgePages[oldestIndex], next_before: continuation };
+      bridgePages[oldestIndex] = {
+        ...bridgePages[oldestIndex],
+        next_before: continuation,
+      };
     }
   }
-  const bridgeParams = bridgePages.map((page, index) => (
-    `retained-tail:${page.items[0]?.id || index}`
-  ));
-  return {
-    pages: [...bridgePages, ...remainingOlderPages],
-    pageParams: [...bridgeParams, ...remainingOlderParams],
-  };
+  return bridgePages;
 }
 
 export function mergeRefreshedTranscriptTail(
   fetched: TranscriptPage,
   previous: TranscriptData | undefined,
 ): TranscriptData {
-  if (!previous || !previous.pages.length) {
-    return { pages: [fetched], pageParams: [null] };
-  }
-  const previousTail = previous.pages[0];
+  if (!previous) return transcriptDataFromTail(fetched);
+  const previousTail = transcriptHistory(previous).tail;
   if (previousTail.snapshot_cursor > fetched.snapshot_cursor) return previous;
-  const displaced = previousTail.snapshot_cursor === fetched.snapshot_cursor
-    ? previousTail.items.filter((message) => (
-        message.client_only === "optimistic" || isCommandClientMessage(message)
-      ))
-    : retainedTailPrefix(fetched, previousTail);
+  const displaced =
+    previousTail.snapshot_cursor === fetched.snapshot_cursor
+      ? previousTail.items.filter(
+          (message) =>
+            message.client_only === "optimistic" ||
+            isCommandClientMessage(message),
+        )
+      : retainedTailPrefix(fetched, previousTail);
   let tail = reconcileTranscriptTail(fetched, previousTail);
-  const retained = retainedBridgePages(displaced, previous, fetched.snapshot_cursor);
-  // Ordinary refresh is not destructive authority. A transient short/stale
-  // snapshot must not close pagination that was already proven reachable.
-  if (!tail.next_before && (retained.pages.length || previousTail.next_before)) {
-    tail = { ...tail, next_before: previousTail.next_before || fetched.items[0]?.id || null };
+  const bridges = retainedBridgePages(
+    displaced,
+    previous,
+    fetched.snapshot_cursor,
+  );
+  const history = transcriptHistory(previous);
+  if (
+    !tail.next_before &&
+    (history.newest || bridges.length || previousTail.next_before)
+  ) {
+    const frontier =
+      history.oldest?.page.next_before || previousTail.next_before;
+    tail = { ...tail, next_before: frontier || fetched.items[0]?.id || null };
   }
-  return {
-    pages: [tail, ...retained.pages],
-    pageParams: [null, ...retained.pageParams],
-  };
+  return replaceTranscriptTailData(previous, tail, bridges);
 }
 
 /**
@@ -258,23 +392,80 @@ export function mergeRefreshedTranscriptTail(
  * history and can commit a shorter cursor chain. Displaced tail prefixes move
  * into bounded client bridge pages; already-loaded older pages stay immutable.
  */
-export async function refreshTranscriptTail(
+export function refreshTranscriptTail(
   queryClient: QueryClient,
   threadId: string,
 ): Promise<TranscriptData> {
-  const fetched = (await fetchMessages(threadId, { limit: TRANSCRIPT_PAGE_SIZE })) as TranscriptPage;
-  queryClient.setQueryData<TranscriptData>(
-    transcriptQueryKey(threadId),
-    (previous) => {
-      const latestCursor = previous?.pages[0]?.snapshot_cursor;
-      if (Number.isSafeInteger(latestCursor) && Number(latestCursor) > fetched.snapshot_cursor) {
-        return previous;
+  const state = transcriptRequestState(threadId);
+  // React Strict Mode and reconnect/setup callers can request the same current
+  // tail in one turn. Share that generation's authority instead of aborting and
+  // restarting it: duplicate requests can observe different snapshots and make
+  // an aborted intermediate response look like disappeared history.
+  if (
+    state.tailRefreshPromise &&
+    state.tailRefreshGeneration === state.generation
+  )
+    return state.tailRefreshPromise;
+
+  const request = beginTailRequest(threadId);
+  state.tailRefreshGeneration = request.generation;
+  let pending!: Promise<TranscriptData>;
+  pending = (async () => {
+    try {
+      const fetched = (await fetchMessages(threadId, {
+        limit: TRANSCRIPT_PAGE_SIZE,
+        signal: request.controller.signal,
+      })) as TranscriptPage;
+      if (!requestGenerationMatches(threadId, request.generation)) {
+        return (
+          queryClient.getQueryData<TranscriptData>(
+            transcriptQueryKey(threadId),
+          ) || emptyTranscriptData()
+        );
       }
-      return mergeRefreshedTranscriptTail(fetched, previous);
-    },
-  );
-  return queryClient.getQueryData<TranscriptData>(transcriptQueryKey(threadId))
-    || { pages: [fetched], pageParams: [null] };
+      queryClient.setQueryData<TranscriptData>(
+        transcriptQueryKey(threadId),
+        (previous) => {
+          if (!requestGenerationMatches(threadId, request.generation)) {
+            return previous;
+          }
+          const latestCursor = previous
+            ? transcriptHistory(previous).tail.snapshot_cursor
+            : undefined;
+          if (
+            Number.isSafeInteger(latestCursor) &&
+            Number(latestCursor) > fetched.snapshot_cursor
+          ) {
+            return previous;
+          }
+          return mergeRefreshedTranscriptTail(fetched, previous);
+        },
+      );
+      return (
+        queryClient.getQueryData<TranscriptData>(
+          transcriptQueryKey(threadId),
+        ) || transcriptDataFromTail(fetched)
+      );
+    } finally {
+      const latest = transcriptRequestState(threadId);
+      if (latest.tailController === request.controller)
+        latest.tailController = null;
+    }
+  })();
+  state.tailRefreshPromise = pending;
+  void pending
+    .finally(() => {
+      const latest = transcriptRequestState(threadId);
+      if (latest.tailRefreshPromise === pending) {
+        latest.tailRefreshPromise = null;
+        latest.tailRefreshGeneration = null;
+      }
+    })
+    .catch(() => {
+      // The caller owns the original rejection. This cleanup branch only
+      // prevents the bookkeeping promise from becoming unhandled.
+    });
+  return pending;
 }
 
 export function mergeOlderTranscriptPage(
@@ -282,15 +473,11 @@ export function mergeOlderTranscriptPage(
   requestedBefore: string,
   fetched: TranscriptPage,
 ): TranscriptData | undefined {
-  if (!current?.pages.length) return current;
-  const lastPage = current.pages.at(-1)!;
-  // An authoritative reset, another paginator, or a route-local retry may have
-  // moved the frontier while this request was in flight. Never append stale data.
-  if (lastPage.next_before !== requestedBefore) return current;
-  return {
-    pages: [...current.pages, fetched],
-    pageParams: [...current.pageParams, requestedBefore],
-  };
+  if (!current) return current;
+  const history = transcriptHistory(current);
+  const frontier = history.oldest?.page.next_before || history.tail.next_before;
+  if (frontier !== requestedBefore) return current;
+  return appendTranscriptHistoryData(current, fetched);
 }
 
 /** Fetch one explicit history page and merge it into the latest cache atomically. */
@@ -298,89 +485,206 @@ export async function fetchOlderTranscriptPage(
   queryClient: QueryClient,
   threadId: string,
 ): Promise<TranscriptData | undefined> {
-  const before = queryClient.getQueryData<TranscriptData>(transcriptQueryKey(threadId))
-    ?.pages.at(-1)?.next_before;
-  if (!before) return queryClient.getQueryData<TranscriptData>(transcriptQueryKey(threadId));
-  const fetched = (await fetchMessages(threadId, {
-    limit: TRANSCRIPT_PAGE_SIZE,
-    beforeId: before,
-  })) as TranscriptPage;
-  queryClient.setQueryData<TranscriptData>(
+  const cached = queryClient.getQueryData<TranscriptData>(
     transcriptQueryKey(threadId),
-    (current) => mergeOlderTranscriptPage(current, before, fetched),
   );
-  return queryClient.getQueryData<TranscriptData>(transcriptQueryKey(threadId));
+  const history = transcriptHistory(cached);
+  const before = history.oldest?.page.next_before || history.tail.next_before;
+  if (!before)
+    return queryClient.getQueryData<TranscriptData>(
+      transcriptQueryKey(threadId),
+    );
+  const request = beginOlderRequest(threadId);
+  try {
+    const fetched = (await fetchMessages(threadId, {
+      limit: TRANSCRIPT_PAGE_SIZE,
+      beforeId: before,
+      signal: request.controller.signal,
+    })) as TranscriptPage;
+    if (!requestGenerationMatches(threadId, request.generation)) {
+      return queryClient.getQueryData<TranscriptData>(
+        transcriptQueryKey(threadId),
+      );
+    }
+    queryClient.setQueryData<TranscriptData>(
+      transcriptQueryKey(threadId),
+      (current) =>
+        requestGenerationMatches(threadId, request.generation)
+          ? mergeOlderTranscriptPage(current, before, fetched)
+          : current,
+    );
+    return queryClient.getQueryData<TranscriptData>(
+      transcriptQueryKey(threadId),
+    );
+  } finally {
+    transcriptRequestState(threadId).olderControllers.delete(
+      request.controller,
+    );
+  }
 }
 
-export function transcriptInfiniteQueryOptions(threadId: string, queryClient: QueryClient) {
+export function transcriptInfiniteQueryOptions(
+  threadId: string,
+  queryClient: QueryClient,
+) {
   return {
     queryKey: transcriptQueryKey(threadId),
     initialPageParam: null as string | null,
     staleTime: Infinity,
+    retryOnMount: true,
+    // The linked history/index is intentionally mutable so bounded updates do
+    // not clone every retained page. TanStack's deep structural sharing would
+    // recursively traverse that graph, both violating boundedness and reusing a
+    // stale root after the shared index was advanced in place.
+    structuralSharing: false,
     queryFn: async ({ pageParam }: { pageParam: string | null }) => {
-      const fetched = (await fetchMessages(threadId, {
-        limit: TRANSCRIPT_PAGE_SIZE,
-        ...(pageParam ? { beforeId: pageParam } : {}),
-      })) as TranscriptPage;
-      if (pageParam) return fetched;
-      const previous = queryClient.getQueryData<TranscriptData>(transcriptQueryKey(threadId));
-      return reconcileTranscriptTail(fetched, previous?.pages[0]);
+      // Do not consume TanStack's observer-owned AbortSignal here. React Strict
+      // Mode deliberately unmounts/remounts the observer once; consuming that
+      // signal aborts the first durable tail read and starts a second request,
+      // so two different snapshots can race as if both were initial authority.
+      // Our per-thread generation owns cancellation instead: destructive events
+      // abort this controller and the generation check fences a response that
+      // crossed the abort boundary, while a transient observer remount reuses
+      // TanStack's still-in-flight promise.
+      const state = transcriptRequestState(threadId);
+      const generation = state.generation;
+      const controller = new AbortController();
+      if (pageParam) {
+        state.olderControllers.add(controller);
+      } else {
+        // This is TanStack's initial cache fill, not an explicit refresh. Keep it
+        // distinct so a destructive invalidation can abort/fence it without an
+        // overlapping explicit refresh replacing its controller ownership.
+        state.initialController?.abort();
+        state.initialController = controller;
+        state.initialGeneration = generation;
+      }
+      try {
+        const fetched = (await fetchMessages(threadId, {
+          limit: TRANSCRIPT_PAGE_SIZE,
+          ...(pageParam ? { beforeId: pageParam } : {}),
+          signal: controller.signal,
+        })) as TranscriptPage;
+        if (!requestGenerationMatches(threadId, generation)) {
+          throw new DOMException("Stale transcript request", "AbortError");
+        }
+        if (pageParam) return fetched;
+        const previous = queryClient.getQueryData<TranscriptData>(
+          transcriptQueryKey(threadId),
+        );
+        if (!previous) return fetched;
+        const previousTail = transcriptHistory(previous).tail;
+        if (
+          Number.isSafeInteger(previousTail.snapshot_cursor) &&
+          previousTail.snapshot_cursor >= fetched.snapshot_cursor
+        ) {
+          return previousTail;
+        }
+        return reconcileTranscriptTail(fetched, previousTail);
+      } finally {
+        const latest = transcriptRequestState(threadId);
+        if (pageParam) {
+          latest.olderControllers.delete(controller);
+        } else if (
+          latest.initialController === controller &&
+          latest.initialGeneration === generation
+        ) {
+          latest.initialController = null;
+          latest.initialGeneration = null;
+        }
+      }
     },
-    getNextPageParam: (lastPage: TranscriptPage) => lastPage.next_before || undefined,
+    getNextPageParam: (lastPage: TranscriptPage) =>
+      lastPage.next_before || undefined,
   };
 }
 
 /** Explicit authority for destructive history changes (for example msg.delete). */
-export function invalidateTranscriptAuthoritatively(queryClient: QueryClient, threadId: string): void {
-  queryClient.removeQueries({ queryKey: transcriptQueryKey(threadId), exact: true });
+export function invalidateTranscriptAuthoritatively(
+  queryClient: QueryClient,
+  threadId: string,
+): void {
+  advanceTranscriptGeneration(threadId);
+  void queryClient.cancelQueries({
+    queryKey: transcriptQueryKey(threadId),
+    exact: true,
+  });
+  // Reset, rather than remove, the active Query object. Removing an observed
+  // query leaves its mounted observer attached to an orphan that never sees the
+  // replacement cache entry; reset keeps observer identity and immediately
+  // refetches the post-invalidation generation.
+  void queryClient.resetQueries({
+    queryKey: transcriptQueryKey(threadId),
+    exact: true,
+  });
 }
 
-export function flattenTranscript(data: InfiniteData<TranscriptPage, unknown> | undefined): Message[] {
-  if (!data) return [];
-  const authoritativeById = new Map<string, Message>();
-  for (const page of data.pages) {
-    for (const message of page.items) {
-      if (message.id && !authoritativeById.has(message.id)) {
-        authoritativeById.set(message.id, message);
-      }
-    }
-  }
-
-  const messages: Message[] = [];
-  const seenIds = new Set<string>();
-  // Infinite-query pages are [newest tail, progressively older pages]. Iterate
-  // oldest-to-newest for chronology, but render the newest value on overlap.
-  for (const page of [...data.pages].reverse()) {
-    for (const message of page.items) {
-      const id = message.id;
-      if (id && seenIds.has(id)) continue;
-      if (id) seenIds.add(id);
-      messages.push(id ? authoritativeById.get(id) || message : message);
-    }
-  }
-  return messages;
+/**
+ * Rebuild from the canonical post-continue projection.
+ *
+ * Ordinary tail refreshes deliberately retain a disjoint old tail as reachable
+ * bridge history. A continuation reverses that rule: messages after the chosen
+ * boundary are explicitly skipped, so no pre-continue page or response may be
+ * merged into the rebuilt chain. The fresh backend frontier remains responsible
+ * for reaching legitimate messages before the boundary.
+ */
+export function rewindTranscriptForContinuation(
+  queryClient: QueryClient,
+  threadId: string,
+): void {
+  invalidateTranscriptAuthoritatively(queryClient, threadId);
 }
 
-export function transcriptSnapshotCursor(data: InfiniteData<TranscriptPage, unknown> | undefined): number {
-  const cursor = data?.pages[0]?.snapshot_cursor;
+/** Apply the command response's reload contract without overloading reload=true. */
+export function reloadTranscriptFromCommand(
+  queryClient: QueryClient,
+  threadId: string,
+  reloadMode: unknown,
+): Promise<TranscriptData | void> {
+  if (reloadMode === "continuation") {
+    rewindTranscriptForContinuation(queryClient, threadId);
+    return Promise.resolve();
+  }
+  return refreshTranscriptTail(queryClient, threadId);
+}
+
+export function flattenTranscript(
+  data: InfiniteData<TranscriptPage, unknown> | undefined,
+): Message[] {
+  return flattenIndexedTranscript(data);
+}
+
+export function transcriptSnapshotCursor(
+  data: InfiniteData<TranscriptPage, unknown> | undefined,
+): number {
+  if (!data) return -1;
+  const cursor = transcriptHistory(data as TranscriptData).tail.snapshot_cursor;
   return Number.isSafeInteger(cursor) ? Number(cursor) : -1;
 }
 
 function emptyTranscriptData(): TranscriptData {
-  return {
-    pages: [{ items: [], snapshot_cursor: -1, next_before: null }],
-    pageParams: [null],
-  };
+  return transcriptDataFromTail({
+    items: [],
+    snapshot_cursor: -1,
+    next_before: null,
+  });
 }
 
-function updateTranscript(
+function updateTranscriptTail(
   queryClient: QueryClient,
   threadId: string,
-  update: (data: TranscriptData) => TranscriptData,
+  update: (tail: TranscriptPage, data: TranscriptData) => TranscriptPage,
 ): void {
   queryClient.setQueryData<TranscriptData>(
     transcriptQueryKey(threadId),
-    (current) => update(current || emptyTranscriptData()),
+    (current) => {
+      const previous = current || emptyTranscriptData();
+      const tail = transcriptHistory(previous).tail;
+      const nextTail = update(tail, previous);
+      return nextTail === tail
+        ? previous
+        : replaceTranscriptPageData(previous, tail, nextTail);
+    },
   );
 }
 
@@ -395,29 +699,16 @@ export function upsertTranscriptTailMessage(
   message: Message,
 ): void {
   if (!message.id) return;
-  updateTranscript(queryClient, threadId, (data) => {
-    const pages = data.pages.length ? [...data.pages] : emptyTranscriptData().pages;
-    const tail = pages[0];
-    const tailIndex = tail.items.findIndex((candidate) => candidate.id === message.id);
-    pages[0] = {
-      ...tail,
-      items: tailIndex >= 0
-        ? tail.items.map((candidate, index) => index === tailIndex ? message : candidate)
-        : [...tail.items, message],
-    };
-    for (let index = 1; index < pages.length; index += 1) {
-      const page = pages[index];
-      if (!page.items.some((candidate) => candidate.id === message.id)) continue;
-      pages[index] = {
-        ...page,
-        items: page.items.filter((candidate) => candidate.id !== message.id),
-      };
-    }
-    return { ...data, pages };
-  });
+  queryClient.setQueryData<TranscriptData>(
+    transcriptQueryKey(threadId),
+    (current) => {
+      const previous = current || emptyTranscriptData();
+      return upsertTranscriptTailData(previous, message);
+    },
+  );
 }
 
-/** Apply one canonical msg.edit in place without moving transcript chronology. */
+/** Apply one canonical msg.edit in its indexed owning page. */
 export function patchTranscriptMessage(
   queryClient: QueryClient,
   threadId: string,
@@ -426,15 +717,23 @@ export function patchTranscriptMessage(
   eventSeq: number,
 ): void {
   if (!messageId) return;
-  updateTranscript(queryClient, threadId, (data) => ({
-    ...data,
-    pages: data.pages.map((page) => ({
-      ...page,
-      items: page.items.map((message) => message.id === messageId
-        ? { ...message, ...patch, id: messageId, event_seq: eventSeq }
-        : message),
-    })),
-  }));
+  queryClient.setQueryData<TranscriptData>(
+    transcriptQueryKey(threadId),
+    (current) => {
+      const previous = current || emptyTranscriptData();
+      const owner = transcriptOwnerPage(previous, messageId);
+      if (!owner) return previous;
+      const nextPage = {
+        ...owner,
+        items: owner.items.map((message) =>
+          message.id === messageId
+            ? { ...message, ...patch, id: messageId, event_seq: eventSeq }
+            : message,
+        ),
+      };
+      return replaceTranscriptPageData(previous, owner, nextPage);
+    },
+  );
 }
 
 export function appendClientTranscriptMessage(
@@ -442,20 +741,41 @@ export function appendClientTranscriptMessage(
   threadId: string,
   message: Message,
 ): void {
-  updateTranscript(queryClient, threadId, (data) => {
-    const pages = [...data.pages];
-    const tail = pages[0] || emptyTranscriptData().pages[0];
-    pages[0] = {
-      ...tail,
-      items: isCommandClientMessage(message)
-        ? mergeMessagesByTimestamp(
-            tail.items.filter((candidate) => !isCommandClientMessage(candidate)),
-            [...tail.items.filter(isCommandClientMessage), message],
-          )
-        : [...tail.items, message],
-    };
-    return { ...data, pages };
-  });
+  updateTranscriptTail(queryClient, threadId, (tail) => ({
+    ...tail,
+    items: isCommandClientMessage(message)
+      ? mergeMessagesByTimestamp(
+          tail.items.filter((candidate) => !isCommandClientMessage(candidate)),
+          [...tail.items.filter(isCommandClientMessage), message],
+        )
+      : [...tail.items, message],
+  }));
+}
+
+function updateClientOperation(
+  queryClient: QueryClient,
+  threadId: string,
+  operationId: string,
+  update: (messages: Message[]) => Message[],
+): void {
+  queryClient.setQueryData<TranscriptData>(
+    transcriptQueryKey(threadId),
+    (current) => {
+      const previous = current || emptyTranscriptData();
+      // Client-owned operations are always installed in the bounded live tail.
+      const tail = transcriptHistory(previous).tail;
+      if (
+        !tail.items.some(
+          (message) => message.client_operation_id === operationId,
+        )
+      )
+        return previous;
+      return replaceTranscriptPageData(previous, tail, {
+        ...tail,
+        items: update(tail.items),
+      });
+    },
+  );
 }
 
 export function replaceClientTranscriptMessage(
@@ -464,17 +784,17 @@ export function replaceClientTranscriptMessage(
   operationId: string,
   messageId: string,
 ): void {
-  updateTranscript(queryClient, threadId, (data) => ({
-    ...data,
-    pages: data.pages.map((page) => ({
-      ...page,
-      items: page.items.map((message) => {
-        if (message.client_operation_id !== operationId) return message;
-        const { client_only: _clientOnly, client_operation_id: _operationId, ...persisted } = message;
-        return { ...persisted, id: messageId };
-      }),
-    })),
-  }));
+  updateClientOperation(queryClient, threadId, operationId, (messages) =>
+    messages.map((message) => {
+      if (message.client_operation_id !== operationId) return message;
+      const {
+        client_only: _clientOnly,
+        client_operation_id: _operationId,
+        ...persisted
+      } = message;
+      return { ...persisted, id: messageId };
+    }),
+  );
 }
 
 export function removeClientTranscriptMessage(
@@ -482,11 +802,7 @@ export function removeClientTranscriptMessage(
   threadId: string,
   operationId: string,
 ): void {
-  updateTranscript(queryClient, threadId, (data) => ({
-    ...data,
-    pages: data.pages.map((page) => ({
-      ...page,
-      items: page.items.filter((message) => message.client_operation_id !== operationId),
-    })),
-  }));
+  updateClientOperation(queryClient, threadId, operationId, (messages) =>
+    messages.filter((message) => message.client_operation_id !== operationId),
+  );
 }

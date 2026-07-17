@@ -1313,7 +1313,8 @@ test.describe('Scroll intent state machines', () => {
     // The restoration leaves the scrollport clamped at top. A second upward
     // wheel still carries demand even though it need not emit a scroll event.
     await page.mouse.wheel(0, -900);
-    await expect(page.locator('.eggw-message-card')).toHaveCount(180);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(120);
+    await expect(page.getByTestId('return-to-live-tail')).toBeVisible();
     expect(messageRequests).toBe(1);
     await chat.evaluate((element) => { element.scrollTop = 0; });
 
@@ -1341,7 +1342,6 @@ test.describe('Scroll intent state machines', () => {
 
     await page.goto(`/${threadId}`);
     const chat = page.getByTestId('chat-panel');
-    await expect(page.getByTestId('load-older-messages')).toBeVisible();
     await chat.evaluate((element) => {
       const filler = document.createElement('div');
       filler.style.height = '900px';
@@ -1374,10 +1374,9 @@ test.describe('Scroll intent state machines', () => {
 
     await page.goto(`/${threadId}`);
     const chat = page.getByTestId('chat-panel');
-    const loadOlder = page.getByTestId('load-older-messages');
-    await loadOlder.click();
+    await chat.focus();
+    await page.keyboard.press('Home');
     await expect.poll(() => messageRequests).toBe(2);
-    await expect(loadOlder).not.toBeVisible();
     await expect(chat).not.toHaveAttribute('aria-busy', 'true');
     await expect(chat).toContainText('overlap newest');
   });
@@ -1429,7 +1428,10 @@ test.describe('Scroll intent state machines', () => {
       await page.getByTestId('show-more-loaded-messages').click();
     }
     await expect(page.getByTestId('chat-panel')).toContainText('OLDEST DISPLACED TAIL ENTRY');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('new tail 299');
+    await page.getByTestId('return-to-live-tail').click();
     await expect(page.getByTestId('chat-panel')).toContainText('new tail 299');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('OLDEST DISPLACED TAIL ENTRY');
   });
 
   test('retains loaded pages across a shorter tail refresh and route return', async ({ page }) => {
@@ -1469,8 +1471,10 @@ test.describe('Scroll intent state machines', () => {
     });
 
     await page.goto(`/${threadId}`);
-    await page.getByTestId('load-older-messages').click();
-    await expect(page.getByTestId('chat-panel')).toContainText('OLDER PAGE MUST REMAIN');
+    const monotonicChat = page.getByTestId('chat-panel');
+    await monotonicChat.focus();
+    await page.keyboard.press('Home');
+    await expect(monotonicChat).toContainText('OLDER PAGE MUST REMAIN');
     await page.getByRole('button', { name: /Other monotonic route/ }).click();
     await expect(page.getByTestId('chat-panel')).toContainText('other route');
     await page.getByRole('button', { name: /Parent/ }).click();
@@ -1584,6 +1588,466 @@ test.describe('Scroll intent state machines', () => {
   });
 });
 
+test.describe('Destructive transcript authority', () => {
+  for (const eventType of ['msg.delete', 'thread.compaction'] as const) {
+    test(`${eventType} fences stale same-frontier pages and converges markers`, async ({ page }) => {
+      const threadId = `destructive-${eventType.replace('.', '-')}`;
+      let messageRequests = 0;
+      let eventRequests = 0;
+      let releaseStale!: () => void;
+      const staleReady = new Promise<void>((resolve) => { releaseStale = resolve; });
+      await mockThreadShell(page, threadId);
+      await page.unroute(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`));
+      await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { state: 'running', streaming_kind: 'llm', streaming_invoke_id: null, live_replay_cursor: 5 } }));
+      await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+      await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+      await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+        messageRequests += 1;
+        if (messageRequests === 2) {
+          // This application-owned refresh starts at the old generation from
+          // stream.open. It deliberately ignores cancellation long enough for
+          // the destructive event and fresh generation to overtake it.
+          await staleReady;
+          await route.fulfill({ status: 200, headers: mockApiHeaders, json: {
+            items: [{ id: 'stale-page', role: 'user', content: 'STALE MUST NOT RETURN' }],
+            snapshot_cursor: 5,
+            next_before: null,
+          } });
+          return;
+        }
+        await route.fulfill({ status: 200, headers: mockApiHeaders, json: {
+          items: messageRequests === 1
+            ? [{ id: 'original-page', role: 'user', content: 'ORIGINAL' }]
+            : [
+                ...(eventType === 'thread.compaction' ? [{
+                  id: 'compaction-7', role: 'compaction_marker', kind: 'compaction_marker',
+                  content: 'COMPACTION CONVERGED', marker_event_seq: 7, start_event_seq: 1,
+                }] : []),
+                { id: 'fresh-page', role: 'assistant', content: 'FRESH AUTHORITY' },
+              ],
+          snapshot_cursor: messageRequests === 1 ? 5 : 7,
+          next_before: null,
+        } });
+      });
+      await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+        eventRequests += 1;
+        const streamOpen = {
+          event_id: `destructive-open-${eventType}`, event_seq: 6, type: 'stream.open',
+          ts: new Date().toISOString(), msg_id: null, invoke_id: `destructive-invoke-${eventType}`,
+          chunk_seq: null, payload: { stream_kind: 'llm' },
+        };
+        const destructive = {
+          event_id: `destructive-${eventType}`, event_seq: 7, type: eventType,
+          ts: new Date().toISOString(), msg_id: eventType === 'msg.delete' ? 'original-page' : null,
+          invoke_id: null, chunk_seq: null,
+          payload: eventType === 'thread.compaction'
+            ? { start_msg_id: 'fresh-page', start_event_seq: 1 }
+            : { reason: 'test' },
+        };
+        const body = eventRequests === 1
+          ? ['id: 6', 'event: stream.open', `data: ${JSON.stringify(streamOpen)}`, '', ''].join('\n')
+          : eventRequests === 2
+            ? ['id: 7', `event: ${eventType}`, `data: ${JSON.stringify(destructive)}`, '', ''].join('\n')
+            : '';
+        await route.fulfill({
+          status: 200,
+          headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+          body,
+        });
+      });
+
+      await page.goto(`/${threadId}`);
+      // The first stream response starts request 2 at generation 0. Its closed
+      // transport reconnects and delivers the destructive event, which must
+      // cancel/fence request 2 and let generation 1 install request 3 first.
+      await expect.poll(() => messageRequests, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+      const chat = page.getByTestId('chat-panel');
+      await expect(chat).toContainText('FRESH AUTHORITY');
+      releaseStale();
+      await expect(chat).toContainText('FRESH AUTHORITY');
+      await expect(chat).not.toContainText('STALE MUST NOT RETURN');
+      if (eventType === 'thread.compaction') await expect(chat).toContainText('Compaction boundary');
+      else await expect(chat).not.toContainText('ORIGINAL');
+    });
+  }
+});
+
+test.describe('Continuation transcript authority', () => {
+  test('rewinds a fully displaced loaded tail, fences stale pages, and reaches pre-boundary history', async ({
+    page,
+  }) => {
+    const threadId = 'continue-disjoint-rewind';
+    const skippedTail = Array.from({ length: 300 }, (_, index) => ({
+      id: `skipped-tail-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `SKIPPED LOADED ${index}`,
+    }));
+    let initialTailServed = false;
+    let staleTailStarted = false;
+    let freshTailRequests = 0;
+    const requestedBeforeIds: Array<string | null> = [];
+    let releaseContinuation!: () => void;
+    const continuationReady = new Promise<void>((resolve) => {
+      releaseContinuation = resolve;
+    });
+    let eventRequests = 0;
+    let releaseStaleTail!: () => void;
+    const staleTailReady = new Promise<void>((resolve) => {
+      releaseStaleTail = resolve;
+    });
+
+    await mockThreadShell(page, threadId);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`));
+    await page.route(
+      new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`),
+      (route) =>
+        route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: {
+            state: 'waiting_user',
+            streaming_invoke_id: null,
+            live_replay_cursor: 40,
+            active_get_user_wait: false,
+          },
+        }),
+    );
+    await page.unroute(
+      new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`),
+    );
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.route(
+      new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`),
+      async (route, request) => {
+        const beforeId = new URL(request.url()).searchParams.get('before_id');
+        requestedBeforeIds.push(beforeId);
+        if (!beforeId && initialTailServed && !staleTailStarted) {
+          // A generation-zero refresh started by stream.open. The mock deliberately
+          // completes after continuation even though its AbortSignal was cancelled.
+          staleTailStarted = true;
+          await staleTailReady;
+          await route.fulfill({
+            status: 200,
+            headers: mockApiHeaders,
+            json: {
+              items: [
+                {
+                  id: 'stale-skipped-tail',
+                  role: 'assistant',
+                  content: 'STALE SKIPPED TAIL',
+                },
+              ],
+              snapshot_cursor: 41,
+              next_before: null,
+            },
+          });
+          return;
+        }
+        if (beforeId === 'legitimate-pre-boundary') {
+          await route.fulfill({
+            status: 200,
+            headers: mockApiHeaders,
+            json: {
+              items: [
+                {
+                  id: 'legitimate-before',
+                  role: 'user',
+                  content: 'LEGITIMATE BEFORE BOUNDARY',
+                },
+              ],
+              snapshot_cursor: 43,
+              next_before: null,
+            },
+          });
+          return;
+        }
+        if (!beforeId && initialTailServed) {
+          freshTailRequests += 1;
+          await route.fulfill({
+            status: 200,
+            headers: mockApiHeaders,
+            json: {
+              items: [
+                {
+                  id: 'continue-boundary',
+                  role: 'user',
+                  content: 'CONTINUE BOUNDARY',
+                },
+              ],
+              snapshot_cursor: 43,
+              next_before: 'legitimate-pre-boundary',
+            },
+          });
+          return;
+        }
+        initialTailServed = true;
+        await route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: {
+            items: skippedTail,
+            snapshot_cursor: 40,
+            next_before: 'old-pre-boundary',
+          },
+        });
+      },
+    );
+    await page.route(
+      new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`),
+      async (route) => {
+        eventRequests += 1;
+        const envelope = (
+          eventSeq: number,
+          type: string,
+          payload: Record<string, unknown>,
+          msgId: string | null = null,
+          invokeId: string | null = null,
+        ) => ({
+          event_id: `continue-${eventSeq}`,
+          event_seq: eventSeq,
+          type,
+          ts: new Date().toISOString(),
+          msg_id: msgId,
+          invoke_id: invokeId,
+          chunk_seq: null,
+          payload,
+        });
+        const block = (event: ReturnType<typeof envelope>) => [
+          `id: ${event.event_seq}`,
+          `event: ${event.type}`,
+          `data: ${JSON.stringify(event)}`,
+          '',
+        ];
+        if (eventRequests === 2) await continuationReady;
+        const body =
+          eventRequests === 1
+            ? [
+                ...block(
+                  envelope(
+                    41,
+                    'stream.open',
+                    { stream_kind: 'llm' },
+                    null,
+                    'continue-old-invoke',
+                  ),
+                ),
+                '',
+              ].join('\n')
+            : eventRequests === 2
+              ? [
+                  ...block(
+                    envelope(
+                      42,
+                      'msg.edit',
+                      {
+                        skipped_on_continue: true,
+                        continue_event_id: 'continue-transaction-1',
+                      },
+                      'skipped-tail-299',
+                    ),
+                  ),
+                  ...block(
+                    envelope(43, 'control.interrupt', {
+                      purpose: 'continue',
+                      reason: 'continue_thread',
+                      continue_from_msg_id: 'continue-boundary',
+                      skipped_count: 300,
+                    }),
+                  ),
+                  '',
+                ].join('\n')
+              : '';
+        await route.fulfill({
+          status: 200,
+          headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+          body,
+        });
+      },
+    );
+
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    await expect(chat).toContainText('SKIPPED LOADED 299');
+    releaseContinuation();
+    // stream.open starts a generation-zero tail refresh. The delayed response
+    // deliberately ignores cancellation so continuation must fence it by generation.
+    await expect.poll(() => staleTailStarted).toBe(true);
+
+    // Canonical skipped edit + control boundary must rebuild, not bridge, even
+    // though the post-continue tail is completely disjoint from the loaded tail.
+    await expect
+      .poll(() => freshTailRequests, { timeout: 10_000 })
+      .toBeGreaterThanOrEqual(1);
+    await expect(chat).toContainText('CONTINUE BOUNDARY');
+    await expect(chat).not.toContainText('SKIPPED LOADED');
+    await expect(page.getByText(/Chat Messages · 1 loaded/)).toBeVisible();
+
+    releaseStaleTail();
+    await expect(chat).toContainText('CONTINUE BOUNDARY');
+    await expect(chat).not.toContainText('STALE SKIPPED TAIL');
+    await expect(chat).not.toContainText('SKIPPED LOADED');
+    await expect(page.getByText(/Chat Messages · 1 loaded/)).toBeVisible();
+
+    // Allow the stale generation to finish its ignored-abort response before
+    // requesting legitimate pre-boundary history from the rebuilt frontier.
+    await page.waitForTimeout(100);
+    await chat.focus();
+    await page.keyboard.press('Home');
+    await expect
+      .poll(() => requestedBeforeIds.filter(Boolean))
+      .toContain('legitimate-pre-boundary');
+    await expect(chat).toContainText('LEGITIMATE BEFORE BOUNDARY');
+    await expect(chat).toContainText('CONTINUE BOUNDARY');
+    await expect(chat).not.toContainText('SKIPPED LOADED');
+  });
+});
+
+test.describe('Continuation command without SSE authority', () => {
+  test('rewinds command reload, preserves pre-boundary history, and fences stale tail', async ({ page }) => {
+    const threadId = 'continue-command-no-sse';
+    const skippedTail = Array.from({ length: 300 }, (_, index) => ({
+      id: `command-skipped-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `COMMAND SKIPPED ${index}`,
+    }));
+    let initialTailServed = false;
+    let staleTailStarted = false;
+    let commandApplied = false;
+    let freshTailRequests = 0;
+    let releaseStale!: () => void;
+    const staleReady = new Promise<void>((resolve) => { releaseStale = resolve; });
+    const requestedBeforeIds: Array<string | null> = [];
+
+    await mockThreadShell(page, threadId);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.route(`**/api/threads/${threadId}/events*`, async (route) => {
+      await route.fulfill({
+        status: 503,
+        headers: mockApiHeaders,
+        json: { detail: 'SSE unavailable' },
+      });
+    });
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      const beforeId = new URL(request.url()).searchParams.get('before_id');
+      requestedBeforeIds.push(beforeId);
+      if (beforeId === 'command-pre-boundary') {
+        await route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: {
+            items: [{ id: 'command-legitimate-before', role: 'user', content: 'COMMAND LEGITIMATE BEFORE' }],
+            snapshot_cursor: 43,
+            next_before: null,
+          },
+        });
+        return;
+      }
+      if (!beforeId && initialTailServed && !commandApplied && !staleTailStarted) {
+        staleTailStarted = true;
+        await staleReady;
+        await route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: {
+            items: [{ id: 'command-stale-skipped', role: 'assistant', content: 'COMMAND STALE SKIPPED' }],
+            snapshot_cursor: 41,
+            next_before: null,
+          },
+        });
+        return;
+      }
+      if (!beforeId && commandApplied) {
+        freshTailRequests += 1;
+        await route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: {
+            items: [{ id: 'command-continue-boundary', role: 'user', content: 'COMMAND CONTINUE BOUNDARY' }],
+            snapshot_cursor: 43,
+            next_before: 'command-pre-boundary',
+          },
+        });
+        return;
+      }
+      initialTailServed = true;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          items: skippedTail,
+          snapshot_cursor: 40,
+          next_before: 'old-command-history',
+        },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route, request) => {
+      const command = String((request.postDataJSON() as { command?: string }).command || '');
+      if (command === '/attachments') {
+        await route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: {
+            success: true,
+            message: 'Ordinary reload started',
+            command_id: 'ordinary-reload-before-continue',
+            command_name: 'attachments',
+            data: { action: 'list_attachments', reload: true },
+          },
+        });
+        return;
+      }
+      expect(command).toBe('/continue command-skipped-0');
+      commandApplied = true;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'Continued from command-skipped-0',
+          command_id: 'continue-command-no-sse-result',
+          command_name: 'continue',
+          data: {
+            continue_from: 'command-skipped-0',
+            skipped_count: 299,
+            reload: true,
+            reload_mode: 'continuation',
+          },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    await expect(chat).toContainText('COMMAND SKIPPED 299');
+
+    // SSE remains unavailable; command response is the only continuation authority.
+    // Hold an ordinary reload's disjoint response across the continuation result.
+    const input = page.getByTestId('message-input');
+    await input.fill('/attachments');
+    await input.press('Enter');
+    await expect.poll(() => staleTailStarted).toBe(true);
+    await input.fill('/continue command-skipped-0');
+    await input.press('Enter');
+
+    await expect.poll(() => freshTailRequests, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    await expect(chat).toContainText('COMMAND CONTINUE BOUNDARY');
+    await expect(chat).not.toContainText('COMMAND SKIPPED');
+
+    releaseStale();
+    await expect(chat).toContainText('COMMAND CONTINUE BOUNDARY');
+    await expect(chat).not.toContainText('COMMAND STALE SKIPPED');
+    await expect(chat).not.toContainText('COMMAND SKIPPED');
+
+    await chat.focus();
+    await page.keyboard.press('Home');
+    await expect.poll(() => requestedBeforeIds.filter(Boolean)).toContain('command-pre-boundary');
+    await expect(chat).toContainText('COMMAND LEGITIMATE BEFORE');
+    await expect(chat).toContainText('COMMAND CONTINUE BOUNDARY');
+    await expect(chat).not.toContainText('COMMAND SKIPPED');
+  });
+});
+
 test.describe('Per-thread transcript state', () => {
   test('preserves paginated thread A while navigating to thread B and back', async ({ page }) => {
     await page.addInitScript(() => {
@@ -1638,8 +2102,10 @@ test.describe('Per-thread transcript state', () => {
 
     await page.goto(`/${threadA}`);
     await expect(page.getByTestId('chat-panel')).toContainText('thread a new');
-    await page.getByTestId('load-older-messages').click();
-    await expect(page.getByTestId('chat-panel')).toContainText('thread a old');
+    const threadAChat = page.getByTestId('chat-panel');
+    await threadAChat.focus();
+    await page.keyboard.press('Home');
+    await expect(threadAChat).toContainText('thread a old');
 
     await page.getByRole('button', { name: new RegExp(threadB) }).click();
     await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
@@ -1796,18 +2262,19 @@ test.describe('Per-thread transcript state', () => {
 
     // Expose the already-loaded 10-message prefix before requesting older data.
     await page.getByTestId('show-more-loaded-messages').click();
-    await expect(page.getByTestId('load-older-messages')).toBeVisible();
-    expect(messageRequests).toBe(1);
+    const requestsBeforeOlder = messageRequests;
 
-    await page.getByTestId('load-older-messages').click();
-    await expect.poll(() => messageRequests).toBe(2);
+    const minChat = page.getByTestId('chat-panel');
+    await minChat.focus();
+    await page.keyboard.press('Home');
+    await expect.poll(() => messageRequests).toBe(requestsBeforeOlder + 1);
     await expect(page.getByTestId('show-more-loaded-messages')).toContainText('30 earlier');
     await expect(page.getByTestId('chat-panel')).not.toContainText('ROOT SYSTEM PROMPT CONTENT');
 
     await page.getByTestId('show-more-loaded-messages').click();
     await expect(page.getByTestId('chat-panel')).toContainText('ROOT SYSTEM PROMPT CONTENT');
     await expect(page.getByText('System', { exact: true }).first()).toBeVisible();
-    expect(messageRequests).toBe(2);
+    expect(messageRequests).toBe(requestsBeforeOlder + 1);
   });
 });
 
@@ -1907,6 +2374,65 @@ test.describe('SSE reconnect integration', () => {
   });
 });
 
+test.describe('Authoritative same-version transcript refresh', () => {
+  test('updates content, optimizer, and consumed metadata for the same id and create sequence', async ({ page }) => {
+    const threadId = 'same-version-projection-refresh';
+    const getUserName = 'get_user_message_while_preserving_llm_turn';
+    let messageRequests = 0;
+    let releaseRefresh!: () => void;
+    const refreshReady = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    await mockThreadShell(page, threadId);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.unroute(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`));
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      messageRequests += 1;
+      if (messageRequests > 1) await refreshReady;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          items: [{
+            id: 'same-version-message',
+            role: 'user',
+            content: messageRequests === 1 ? 'BEFORE AUTHORITATIVE REFRESH' : 'AFTER AUTHORITATIVE REFRESH',
+            event_seq: 7,
+            ...(messageRequests > 1 ? {
+              output_optimizer: { optimized: true, summary: 'OPTIMIZED ON REFRESH' },
+              consumed_by_tool_name: getUserName,
+              consumed_by_tool_call_id: 'call-refreshed-answer',
+            } : {}),
+          }],
+          snapshot_cursor: messageRequests === 1 ? 7 : 8,
+          next_before: null,
+        },
+      });
+    });
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'waiting_user', streaming_invoke_id: null, live_replay_cursor: 7, active_get_user_wait: false },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      releaseRefresh();
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: '',
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const message = page.locator('[data-message-id="same-version-message"]');
+    await expect(message).toContainText('BEFORE AUTHORITATIVE REFRESH');
+    await expect.poll(() => messageRequests).toBeGreaterThanOrEqual(2);
+    await expect(message).toContainText('AFTER AUTHORITATIVE REFRESH');
+    await expect(message).not.toContainText('BEFORE AUTHORITATIVE REFRESH');
+    await expect(message.getByTestId('output-optimizer-badge')).toContainText('OPTIMIZED ON REFRESH');
+    await expect(message).toHaveAttribute('data-consumed-by-tool-call-id', 'call-refreshed-answer');
+  });
+});
+
 test.describe('Live Tool Streaming', () => {
   test('keeps simultaneous live tools separated by exact call identity', async ({ page }) => {
     await page.addInitScript(() => {
@@ -2001,16 +2527,48 @@ test.describe('Live Tool Streaming', () => {
     await page.goto(`/${threadId}`);
     const chat = page.getByTestId('chat-panel');
     const timer = page.getByTestId('streaming-tool-timeout-summary');
+    // The fixed-width slot exists on first render, before its first timer effect.
+    await expect(timer).toBeAttached();
+    await expect(timer).toHaveCSS('width', /[1-9][0-9]*px/);
     await expect(timer).toContainText('timeout in');
     await chat.hover();
     await page.mouse.wheel(0, -700);
     await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(100);
+    // Fence every mocked background query before measuring the timing-only leaf.
+    // Two animation frames after stable transcript/page counters prove the query
+    // owner has settled rather than merely sleeping for an arbitrary interval.
+    let settledCounters = { page: -1, transcript: -1 };
+    let stableSamples = 0;
+    await expect.poll(async () => {
+      const next = await page.evaluate(() => ({
+        page: window.__EGGW_PERFORMANCE__?.chatPanelCommits || 0,
+        transcript: window.__EGGW_PERFORMANCE__?.transcriptCommits || 0,
+      }));
+      if (next.page === settledCounters.page && next.transcript === settledCounters.transcript) {
+        stableSamples += 1;
+      } else {
+        stableSamples = 0;
+      }
+      settledCounters = next;
+      return stableSamples;
+    }, { intervals: [100, 100, 100, 100, 100] }).toBeGreaterThanOrEqual(3);
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    }));
+    await page.evaluate(() => {
+      if (!window.__EGGW_PERFORMANCE__) return;
+      window.__EGGW_PERFORMANCE__.chatPanelCommits = 0;
+      window.__EGGW_PERFORMANCE__.transcriptCommits = 0;
+      window.__EGGW_PERFORMANCE__.liveTimingCommits = 0;
+    });
     const before = await page.evaluate(() => ({
       top: document.querySelector<HTMLElement>('[data-testid="chat-panel"]')!.scrollTop,
       height: document.querySelector<HTMLElement>('[data-testid="chat-panel"]')!.scrollHeight,
       pageCommits: window.__EGGW_PERFORMANCE__?.chatPanelCommits || 0,
       transcriptCommits: window.__EGGW_PERFORMANCE__?.transcriptCommits || 0,
       timingCommits: window.__EGGW_PERFORMANCE__?.liveTimingCommits || 0,
+      timerWidth: document.querySelector<HTMLElement>('[data-testid="streaming-tool-timeout-summary"]')!.getBoundingClientRect().width,
+      transcriptNode: document.querySelector('[data-testid="static-transcript-owner"]'),
     }));
     const timerBefore = await timer.innerText();
     await expect.poll(() => timer.innerText(), { timeout: 3_000 }).not.toBe(timerBefore);
@@ -2020,13 +2578,17 @@ test.describe('Live Tool Streaming', () => {
       pageCommits: window.__EGGW_PERFORMANCE__?.chatPanelCommits || 0,
       transcriptCommits: window.__EGGW_PERFORMANCE__?.transcriptCommits || 0,
       timingCommits: window.__EGGW_PERFORMANCE__?.liveTimingCommits || 0,
+      timerWidth: document.querySelector<HTMLElement>('[data-testid="streaming-tool-timeout-summary"]')!.getBoundingClientRect().width,
+      transcriptNode: document.querySelector('[data-testid="static-transcript-owner"]'),
     }));
+    expect(after.timerWidth).toBe(before.timerWidth);
+    expect(after.transcriptNode).toBe(before.transcriptNode);
     expect(after.top).toBeCloseTo(before.top, 0);
     expect(after.height).toBe(before.height);
     expect(after.timingCommits).toBeGreaterThan(before.timingCommits);
-    expect(after.transcriptCommits).toBe(before.transcriptCommits);
-    // Timing commits are isolated to the leaf; geometry is unchanged. The page
-    // owner may still commit unrelated background query state.
+    expect(after.transcriptCommits - before.transcriptCommits).toBe(0);
+    // Timing commits are isolated to the fixed-geometry leaf; static transcript
+    // identity, geometry, and scroll ownership remain unchanged.
     await expect(timer).toHaveCSS('font-variant-numeric', 'tabular-nums');
   });
 

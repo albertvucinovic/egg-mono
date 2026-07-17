@@ -2160,6 +2160,8 @@ class TestMessageOperations:
         body = response.json()
         assert body["success"] is True
         assert body["data"]["skipped_count"] == 2
+        assert body["data"]["reload"] is True
+        assert body["data"]["reload_mode"] == "continuation"
 
         rows = core_state.db.conn.execute(
             "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",

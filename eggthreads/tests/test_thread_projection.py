@@ -698,3 +698,181 @@ def test_runner_persists_provider_metadata_on_get_user_tool_declaration(tmp_path
     }
     assert declaration["reasoning_content"] == {"opaque": "encrypted"}
     assert declaration["thought_signature"] == "message-signature"
+
+
+def _optimizer_approval(tool_call_id: str, savings_pct: float, *, successful: bool = True):
+    return {
+        "tool_call_id": tool_call_id,
+        "decision": "whole",
+        "channels": {
+            "raw": {"stored_in_finished_event": True},
+            "optimizer": {
+                "optimized": successful,
+                "fallback": not successful,
+                "filter_name": "generic",
+                "published_savings_pct": savings_pct,
+            },
+        },
+    }
+
+
+def test_output_optimizer_pending_metadata_survives_snapshot_boundary(tmp_path) -> None:
+    """Approval-before-snapshot and message-after-snapshot stay canonical."""
+
+    db = _make_db(tmp_path, "optimizer-snapshot-boundary.sqlite")
+    thread_id = ts.create_root_thread(db, name="optimizer-snapshot-boundary")
+    tool_call_id = "call-optimizer-snapshot-boundary"
+    db.append_event(
+        "optimizer-before-snapshot",
+        thread_id,
+        "tool_call.output_approval",
+        _optimizer_approval(tool_call_id, 91.0),
+    )
+
+    snapshot = ts.create_snapshot(db, thread_id)
+    assert snapshot["_thread_projection"]["version"] == 2
+    assert snapshot["_thread_projection"]["pending_optimizer_metadata"][tool_call_id][
+        "savings_pct"
+    ] == 91.0
+
+    msg_id = ts.append_message(
+        db,
+        thread_id,
+        "tool",
+        "late tool output",
+        extra={"name": "bash", "tool_call_id": tool_call_id},
+    )
+    target = db.max_event_seq(thread_id)
+    accelerated = ts.load_thread_projection(db, thread_id, target)
+    full = ts.load_thread_projection(db, thread_id, target, use_snapshot=False)
+
+    for projection in (accelerated, full):
+        metadata = next(
+            message for message in projection.messages if message.msg_id == msg_id
+        ).payload["output_optimizer"]
+        assert metadata["savings_pct"] == 91.0
+
+
+def test_output_optimizer_pending_snapshot_keeps_latest_success_and_ignores_quiet_approvals(tmp_path) -> None:
+    """Latest successful metadata wins; default/failed approvals stay quiet."""
+
+    db = _make_db(tmp_path, "optimizer-snapshot-order.sqlite")
+    thread_id = ts.create_root_thread(db, name="optimizer-snapshot-order")
+    tool_call_id = "call-optimizer-snapshot-order"
+    db.append_event(
+        "optimizer-success-old",
+        thread_id,
+        "tool_call.output_approval",
+        _optimizer_approval(tool_call_id, 70.0),
+    )
+    db.append_event(
+        "optimizer-default-between",
+        thread_id,
+        "tool_call.output_approval",
+        {"tool_call_id": tool_call_id, "decision": "whole"},
+    )
+    db.append_event(
+        "optimizer-failed-between",
+        thread_id,
+        "tool_call.output_approval",
+        _optimizer_approval(tool_call_id, 80.0, successful=False),
+    )
+    db.append_event(
+        "optimizer-success-latest",
+        thread_id,
+        "tool_call.output_approval",
+        _optimizer_approval(tool_call_id, 93.0),
+    )
+    quiet_tool_call_id = "call-optimizer-snapshot-quiet"
+    db.append_event(
+        "optimizer-quiet-default",
+        thread_id,
+        "tool_call.output_approval",
+        {"tool_call_id": quiet_tool_call_id, "decision": "whole"},
+    )
+    ts.create_snapshot(db, thread_id)
+
+    winner = ts.append_message(
+        db,
+        thread_id,
+        "tool",
+        "winner",
+        extra={"name": "bash", "tool_call_id": tool_call_id},
+    )
+    quiet = ts.append_message(
+        db,
+        thread_id,
+        "tool",
+        "quiet",
+        extra={"name": "bash", "tool_call_id": quiet_tool_call_id},
+    )
+    target = db.max_event_seq(thread_id)
+    accelerated = ts.load_thread_projection(db, thread_id, target)
+    full = ts.load_thread_projection(db, thread_id, target, use_snapshot=False)
+
+    for projection in (accelerated, full):
+        winner_payload = next(
+            message for message in projection.messages if message.msg_id == winner
+        ).payload
+        quiet_payload = next(
+            message for message in projection.messages if message.msg_id == quiet
+        ).payload
+        assert winner_payload["output_optimizer"]["savings_pct"] == 93.0
+        assert "output_optimizer" not in quiet_payload
+
+
+def test_output_optimizer_latest_success_after_snapshot_wins(tmp_path) -> None:
+    """A successful tail approval supersedes serialized pending metadata."""
+
+    db = _make_db(tmp_path, "optimizer-snapshot-tail-winner.sqlite")
+    thread_id = ts.create_root_thread(db, name="optimizer-snapshot-tail-winner")
+    tool_call_id = "call-optimizer-snapshot-tail-winner"
+    db.append_event(
+        "optimizer-before-snapshot-old",
+        thread_id,
+        "tool_call.output_approval",
+        _optimizer_approval(tool_call_id, 72.0),
+    )
+    ts.create_snapshot(db, thread_id)
+    db.append_event(
+        "optimizer-after-snapshot-latest",
+        thread_id,
+        "tool_call.output_approval",
+        _optimizer_approval(tool_call_id, 96.0),
+    )
+    msg_id = ts.append_message(
+        db,
+        thread_id,
+        "tool",
+        "tail winner",
+        extra={"name": "bash", "tool_call_id": tool_call_id},
+    )
+    target = db.max_event_seq(thread_id)
+
+    accelerated = ts.load_thread_projection(db, thread_id, target)
+    full = ts.load_thread_projection(db, thread_id, target, use_snapshot=False)
+    for projection in (accelerated, full):
+        payload = next(
+            message for message in projection.messages if message.msg_id == msg_id
+        ).payload
+        assert payload["output_optimizer"]["savings_pct"] == 96.0
+
+
+def test_projection_snapshot_v1_is_replayed_for_explicit_compatibility(tmp_path) -> None:
+    """Version-1 acceleration is rejected and canonically replayed, not trusted."""
+
+    db = _make_db(tmp_path, "optimizer-snapshot-v1.sqlite")
+    thread_id = ts.create_root_thread(db, name="optimizer-snapshot-v1")
+    anchor = ts.append_message(db, thread_id, "user", "anchor")
+    snapshot = ts.create_snapshot(db, thread_id)
+    snapshot["_thread_projection"]["version"] = 1
+    snapshot["_thread_projection"].pop("pending_optimizer_metadata", None)
+    watermark = db.max_event_seq(thread_id)
+    db.conn.execute(
+        "UPDATE threads SET snapshot_json=?, snapshot_last_event_seq=? WHERE thread_id=?",
+        (json.dumps(snapshot), watermark, thread_id),
+    )
+
+    projection = ts.load_thread_projection(db, thread_id, watermark)
+    assert projection.started_from_snapshot_event_seq == -1
+    assert [message.msg_id for message in projection.messages] == [anchor]

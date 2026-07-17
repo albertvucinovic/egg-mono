@@ -10,7 +10,11 @@ import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttac
 import { useAppStore } from "@/lib/store";
 import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { clearLiveToolsForThread } from "@/lib/liveToolContinuity";
-import { appendClientTranscriptMessage, refreshTranscriptTail } from "@/lib/transcript";
+import {
+  appendClientTranscriptMessage,
+  refreshTranscriptTail,
+  reloadTranscriptFromCommand,
+} from "@/lib/transcript";
 import { AutocompleteRequestCoordinator, isAutocompleteEligible } from "@/lib/autocomplete";
 import { ComposerDraftBuffer, restoreFailedDraft } from "@/lib/composerDraft";
 import { beginOptimisticSend, completeOptimisticSend, createClientOperationId, rollbackOptimisticSend, type SendMessageOperation } from "@/lib/messageOperations";
@@ -421,8 +425,13 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         }
 
         if (response.data?.reload) {
-          // Command requests a full refresh (e.g., /continue)
-          refreshMessages(variables.threadId);
+          void reloadTranscriptFromCommand(
+            queryClient,
+            variables.threadId,
+            response.data?.reload_mode,
+          ).catch((error) => {
+            console.error("Failed to reload transcript after command:", error);
+          });
           queryClient.invalidateQueries({ queryKey: ["toolCalls", variables.threadId] });
         }
 
