@@ -3904,6 +3904,118 @@ test.describe('Get-user lifecycle', () => {
   });
 });
 
+test.describe('Cross-client model synchronization', () => {
+  test('terminal and web model writes converge by event order despite stale settings responses and reconnect', async ({ page }) => {
+    const threadId = 'cross-client-model-sync';
+    const models = ['Initial Model', 'Terminal Model', 'Web Model', 'Terminal Final'];
+    let canonicalModel = models[0];
+    let settingsRequests = 0;
+    let releaseStaleSettings!: () => void;
+    const staleSettingsReady = new Promise<void>((resolve) => { releaseStaleSettings = resolve; });
+    let staleSettingsRequestSeen!: () => void;
+    const staleSettingsRequested = new Promise<void>((resolve) => { staleSettingsRequestSeen = resolve; });
+    let releaseEvents!: () => void;
+    const eventsReady = new Promise<void>((resolve) => { releaseEvents = resolve; });
+    let eventConnection = 0;
+
+    await mockThreadShell(page, threadId);
+    await page.unroute(`${TEST_API_BASE}/api/models`);
+    await page.route(`${TEST_API_BASE}/api/models`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: {
+        models: models.map((key) => ({ key, provider: 'fixture', model_id: key })),
+        default_model: models[0],
+      },
+    }));
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/settings`);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
+      settingsRequests += 1;
+      const requestNumber = settingsRequests;
+      const captured = canonicalModel;
+      if (requestNumber === 2) {
+        staleSettingsRequestSeen();
+        await staleSettingsReady;
+      }
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { auto_approval: false, model_key: captured },
+      });
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/model`);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/model`, async (route, request) => {
+      canonicalModel = String(request.postDataJSON().model_key);
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'ok', model_key: canonicalModel } });
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'waiting_user', streaming_invoke_id: null, live_replay_cursor: 0, active_get_user_wait: false },
+    }));
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      eventConnection += 1;
+      const frame = (eventSeq: number, modelKey: string) => [
+        `id: ${eventSeq}`,
+        'event: model.switch',
+        `data: ${JSON.stringify({
+          event_id: `model-event-${eventSeq}`,
+          event_seq: eventSeq,
+          type: 'model.switch',
+          ts: new Date().toISOString(),
+          msg_id: null,
+          invoke_id: null,
+          chunk_seq: null,
+          payload: { model_key: modelKey, reason: eventSeq === 10 ? 'ui /model' : 'web selector' },
+        })}`,
+        '',
+      ];
+      if (eventConnection === 1) await eventsReady;
+      const body = eventConnection === 1
+        ? [
+            ...frame(10, 'Terminal Model'),
+            ...frame(11, 'Web Model'),
+            // Deliberately stale replay after the newer canonical write.
+            ...frame(10, 'Terminal Model'),
+            '',
+          ].join('\n')
+        : eventConnection === 2
+          ? [...frame(12, 'Terminal Final'), ''].join('\n')
+          : '';
+      if (eventConnection === 1) canonicalModel = 'Web Model';
+      if (eventConnection === 2) canonicalModel = 'Terminal Final';
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body,
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const selector = page.getByLabel('Model');
+    await staleSettingsRequested;
+    releaseEvents();
+    await expect.poll(() => eventConnection).toBeGreaterThanOrEqual(1);
+    await expect(selector).toHaveValue('Web Model');
+    releaseStaleSettings();
+    await expect(selector).toHaveValue('Web Model');
+
+    // The event stream reconnects from event 11 and observes the later terminal
+    // writer's event 12 without polling or reloading the page.
+    await expect.poll(() => eventConnection, { timeout: 8000 }).toBeGreaterThanOrEqual(2);
+    await expect(selector).toHaveValue('Terminal Final');
+
+    await selector.selectOption('Web Model');
+    await expect.poll(() => canonicalModel).toBe('Web Model');
+    await expect(selector).toHaveValue('Web Model');
+    await page.reload();
+    await expect(page.getByLabel('Model')).toHaveValue('Web Model');
+  });
+});
+
 test.describe('Settings and Controls', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');

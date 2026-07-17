@@ -115,16 +115,16 @@ Inventory matrix: `plans/eggw-header-parity-matrix.md`.
 
 ## Phase 7 — Cross-client model synchronization
 
-- [ ] Reproduce `/model` in Egg not updating EggW's selected model dropdown.
-- [ ] Identify and use the canonical settings/event authority; do not repair this
+- [x] Reproduce `/model` in Egg not updating EggW's selected model dropdown.
+- [x] Identify and use the canonical settings/event authority; do not repair this
   with a client-local optimistic assumption.
-- [ ] Ensure Egg-initiated and EggW-initiated model changes publish/consume the
+- [x] Ensure Egg-initiated and EggW-initiated model changes publish/consume the
   same canonical state or invalidate/refetch the exact query.
-- [ ] Fence stale responses and handle simultaneous clients without dropdown
+- [x] Fence stale responses and handle simultaneous clients without dropdown
   rollback.
-- [ ] Cover inherited/default model behavior, explicit thread override, reload,
+- [x] Cover inherited/default model behavior, explicit thread override, reload,
   reconnect, simultaneous writes, and cross-process schedulers.
-- [ ] Add shared backend/event tests plus Egg and EggW presentation tests.
+- [x] Add shared backend/event tests plus Egg and EggW presentation tests.
 
 ## Phase 8 — EggW startup/navigation and child identity
 
@@ -262,6 +262,27 @@ policy.
   commit ledger below.
 
 ## Status notes / commit ledger
+
+- 2026-07-17: Phase 7 cross-client model synchronization completed using the
+  existing canonical authority. `set_thread_model()` already appends durable
+  `model.switch`, `current_thread_model()` already resolves the newest per-thread
+  switch by `event_seq` with `initial_model_key` fallback, child creation snapshots
+  inheritance into the child's own switch, and every runner rereads that authority
+  before an RA1 call. The reproduced regression was frontend-only: a historical
+  EggW `model.switch` listener had been removed in favor of one-second settings
+  polling, then polling was later removed, leaving terminal Egg events unconsumed.
+  EggW now consumes the ordered canonical event, cancels stale model-bearing HTTP
+  queries, applies its model immediately across settings/thread/tree caches, and
+  fences asynchronous handlers by event sequence so older events/responses cannot
+  roll back rapid opposing writes. SSE reconnect reconciles the bounded settings
+  snapshot, and successful EggW selector writes target-refresh the same caches. The
+  settings route uses a short-lived reader so another process's committed event is
+  visible independently of scheduler residency. Literal tests cover default/initial
+  selection, snapshotted child inheritance and explicit override, two DB/process
+  writers, resident scheduler use, terminal event transport, stale settings HTTP,
+  rapid opposing writes, reconnect, reload, and EggW writes. No polling, schema,
+  new setting/lifecycle event, scheduler semantics, or optimistic model authority
+  was added.
 
 - 2026-07-17: Phase 6 operational/error/recovery inventory and safe shared
   presentation subset completed under the existing-public-data/no-protocol

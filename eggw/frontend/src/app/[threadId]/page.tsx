@@ -21,6 +21,7 @@ import { refreshTranscriptTail } from "@/lib/transcript";
 import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { createClientOperationId } from "@/lib/messageOperations";
 import { clearLiveToolsForThread } from "@/lib/liveToolContinuity";
+import { refreshThreadModelQueries } from "@/lib/modelSync";
 import { HelpDialog } from "@/components/HelpDialog";
 import { OverlayPanel } from "@/components/ui/OverlayPanel";
 import { ControlGroup, IconButton, Select, StatusChip, Switch } from "@/components/ui/primitives";
@@ -107,7 +108,7 @@ export default function ThreadPage() {
   // Fetch thread settings for model and auto-approval
   const { data: threadSettings } = useQuery({
     queryKey: ["threadSettings", threadId],
-    queryFn: () => fetchThreadSettings(threadId),
+    queryFn: ({ signal }) => fetchThreadSettings(threadId, signal),
     enabled: !!threadId,
   });
 
@@ -117,7 +118,7 @@ export default function ThreadPage() {
       setThreadModel(threadId, modelKey),
     onSuccess: (_data, variables) => {
       addSystemLog("Model changed", "success");
-      queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
+      void refreshThreadModelQueries(queryClient, variables.threadId);
     },
     onError: (_error, variables) => {
       addSystemLog("Failed to change model", "error");

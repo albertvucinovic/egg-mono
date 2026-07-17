@@ -43,6 +43,7 @@ import {
 } from "@/lib/transcript";
 import { emptyThreadStreamingState } from "@/lib/store";
 import { canEvictThreadEphemeralState } from "@/lib/threadEphemeral";
+import { applyCanonicalModelSwitch, reconcileThreadModelSnapshot } from "@/lib/modelSync";
 
 const TOOL_TIMEOUT_KEYS = [
   "timeout",
@@ -425,6 +426,9 @@ export function useSSE(threadId: string | null) {
         openEvent instanceof CustomEvent &&
         Boolean(openEvent.detail?.reconnect);
       if (!isReconnect) return;
+      void reconcileThreadModelSnapshot(queryClient, threadId).catch((error) => {
+        console.error("Failed to reconcile model settings after SSE reconnect:", error);
+      });
       // Refresh durable messages independently. Neither their projection cursor
       // nor /state may acknowledge queued transport frames; Last-Event-ID and
       // reducer sequence advance only inside the ordered listener below.
@@ -849,6 +853,27 @@ export function useSSE(threadId: string | null) {
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse tool_call.output_approval:", err);
+      }
+    });
+
+    // model.switch is the persisted cross-client authority. Apply its model
+    // immediately in canonical event order; targeted snapshots fill the other
+    // model-bearing query surfaces without polling or optimistic authority.
+    addThreadEventListener("model.switch", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        const modelKey = typeof payload.model_key === "string" ? payload.model_key.trim() : "";
+        if (!modelKey) return;
+        void applyCanonicalModelSwitch(queryClient, threadId, {
+          eventSeq: Number(data.event_seq),
+          modelKey,
+        }).catch((error) => {
+          console.error("Failed to apply model.switch:", error);
+        });
+        addSystemLog(`Model changed: ${modelKey}`, "info");
+      } catch (err) {
+        console.error("Failed to parse model.switch:", err);
       }
     });
 

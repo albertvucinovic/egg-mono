@@ -38,7 +38,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
 
   const { data: threadSettings } = useQuery({
     queryKey: ["threadSettings", currentThreadId],
-    queryFn: () => fetchThreadSettings(currentThreadId!),
+    queryFn: ({ signal }) => fetchThreadSettings(currentThreadId!, signal),
     enabled: !!currentThreadId,
   });
 

@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 
 from eggthreads import (
+    ThreadsDB,
     current_thread_model,
     approve_tool_calls_for_thread,
     get_thread_auto_approval_status,
@@ -30,19 +31,25 @@ async def get_thread_settings(thread_id: str):
     if not core.db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    t = core.db.get_thread(thread_id)
-    if not t:
-        raise HTTPException(status_code=404, detail="Thread not found")
+    # A short-lived reader observes another Egg process's committed switch
+    # independently of EggW scheduler work. SQLite events remain the authority;
+    # this route is only the bounded snapshot used for attach/reconnect.
+    settings_db = ThreadsDB(core.db.path)
+    try:
+        thread = settings_db.get_thread_metadata(thread_id)
+        if not thread:
+            raise HTTPException(status_code=404, detail="Thread not found")
 
-    get_user_waiting_note = get_active_get_user_message_waiting_note(core.db, thread_id)
-
-    return {
-        "auto_approval": get_thread_auto_approval_status(core.db, thread_id),
-        "autoContinueOnError": get_thread_recovery(core.db, thread_id).auto_continue_on_error,
-        "model_key": current_thread_model(core.db, thread_id),
-        "active_get_user_wait": get_user_waiting_note is not None,
-        "get_user_waiting_note": get_user_waiting_note,
-    }
+        get_user_waiting_note = get_active_get_user_message_waiting_note(settings_db, thread_id)
+        return {
+            "auto_approval": get_thread_auto_approval_status(settings_db, thread_id),
+            "autoContinueOnError": get_thread_recovery(settings_db, thread_id).auto_continue_on_error,
+            "model_key": current_thread_model(settings_db, thread_id),
+            "active_get_user_wait": get_user_waiting_note is not None,
+            "get_user_waiting_note": get_user_waiting_note,
+        }
+    finally:
+        settings_db.conn.close()
 
 
 @router.get("/{thread_id}/sandbox")

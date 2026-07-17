@@ -566,5 +566,137 @@ def test_model_switch_inheritance_with_concrete_info(eggthreads, tmp_path):
     assert current_thread_model_info(db, parent) != current_thread_model_info(db, child)
 
 
+def test_two_process_model_switches_resolve_by_canonical_event_order(eggthreads, tmp_path):
+    """Independent Egg/EggW connections observe the newest durable switch."""
+    from eggthreads import ThreadsDB, current_thread_model, set_thread_model
+
+    db_path = tmp_path / "threads.sqlite"
+    egg_db = ThreadsDB(db_path)
+    egg_db.init_schema()
+    thread_id = "cross-client-model-thread"
+    egg_db.create_thread(
+        thread_id=thread_id,
+        name="cross client",
+        parent_id=None,
+        initial_model_key="Initial Model",
+        depth=0,
+    )
+    web_db = ThreadsDB(db_path)
+    try:
+        set_thread_model(
+            egg_db,
+            thread_id,
+            "Egg Model",
+            concrete_model_info={},
+            reason="ui /model",
+        )
+        egg_seq = egg_db.max_event_seq(thread_id)
+        assert current_thread_model(web_db, thread_id) == "Egg Model"
+
+        set_thread_model(
+            web_db,
+            thread_id,
+            "EggW Model",
+            concrete_model_info={},
+            reason="web selector",
+        )
+        web_seq = web_db.max_event_seq(thread_id)
+        assert web_seq > egg_seq
+        assert current_thread_model(egg_db, thread_id) == "EggW Model"
+
+        switches = egg_db.conn.execute(
+            "SELECT event_seq, payload_json FROM events "
+            "WHERE thread_id=? AND type='model.switch' ORDER BY event_seq ASC",
+            (thread_id,),
+        ).fetchall()
+        assert [row["event_seq"] for row in switches] == [egg_seq, web_seq]
+    finally:
+        web_db.conn.close()
+
+
+def test_initial_and_inherited_model_selection_have_durable_switch_authority(eggthreads, tmp_path):
+    """Default/initial and child inheritance are snapshots with their own events."""
+    from eggthreads import ThreadsDB, create_child_thread, current_thread_model, set_thread_model
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    parent = "model-parent"
+    db.create_thread(
+        thread_id=parent,
+        name="parent",
+        parent_id=None,
+        initial_model_key="Default Model",
+        depth=0,
+    )
+    assert current_thread_model(db, parent) == "Default Model"
+
+    set_thread_model(db, parent, "Parent Explicit", concrete_model_info={}, reason="ui /model")
+    child = create_child_thread(db, parent, name="child")
+    assert current_thread_model(db, child) == "Parent Explicit"
+    inherited = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='model.switch'",
+        (child,),
+    ).fetchone()
+    assert json.loads(inherited[0])["reason"] == "inherited"
+
+    set_thread_model(db, parent, "Parent Later", concrete_model_info={}, reason="ui /model")
+    assert current_thread_model(db, child) == "Parent Explicit"
+    set_thread_model(db, child, "Child Explicit", concrete_model_info={}, reason="ui /model")
+    assert current_thread_model(db, child) == "Child Explicit"
+
+
+def test_runner_connection_uses_terminal_writer_latest_model(eggthreads, tmp_path):
+    """A resident scheduler resolves a model switch committed by another process."""
+    import asyncio
+    from unittest.mock import Mock
+
+    from eggthreads import ThreadsDB, append_message, set_thread_model
+    from eggthreads.runner import ThreadRunner
+
+    db_path = tmp_path / "threads.sqlite"
+    scheduler_db = ThreadsDB(db_path)
+    scheduler_db.init_schema()
+    thread_id = "cross-process-runner-model"
+    scheduler_db.create_thread(
+        thread_id=thread_id,
+        name="runner",
+        parent_id=None,
+        initial_model_key="Initial Model",
+        depth=0,
+    )
+    terminal_db = ThreadsDB(db_path)
+    concrete = {
+        "providers": {
+            "fixture": {
+                "models": {"Terminal Model": {"model_name": "terminal-model"}}
+            }
+        }
+    }
+    try:
+        set_thread_model(
+            terminal_db,
+            thread_id,
+            "Terminal Model",
+            concrete_model_info=concrete,
+            reason="ui /model",
+        )
+    finally:
+        terminal_db.conn.close()
+
+    llm = Mock()
+    llm.current_model_key = "Initial Model"
+    llm.set_model_with_config = Mock()
+    llm.set_model = Mock()
+
+    async def stream(*_args, **_kwargs):
+        yield {"type": "done", "message": {"role": "assistant", "content": "done"}}
+
+    llm.astream_chat = stream
+    append_message(scheduler_db, thread_id, "user", "use latest")
+
+    assert asyncio.run(ThreadRunner(scheduler_db, thread_id, llm=llm).run_once()) is True
+    llm.set_model_with_config.assert_called_once_with("Terminal Model", concrete)
+    llm.set_model.assert_not_called()
+
 if __name__ == '__main__':
     pytest.main([__file__])

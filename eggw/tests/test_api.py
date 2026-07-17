@@ -212,6 +212,40 @@ class TestThreadOperations:
         thread = next(t for t in response.json() if t["id"] == thread_id)
         assert thread["model_key"] == "Switched Model"
 
+    def test_settings_observe_cross_process_model_switches_in_canonical_order(self, client):
+        """EggW snapshots see terminal Egg writes through a fresh DB reader."""
+        from eggthreads import ThreadsDB, set_thread_model
+
+        response = client.post("/api/threads", json={"name": "Cross Process Model"})
+        assert response.status_code == 200
+        thread_id = response.json()["id"]
+        external_db = ThreadsDB(core_state.db.path)
+        try:
+            set_thread_model(
+                external_db,
+                thread_id,
+                "Terminal Model",
+                concrete_model_info={},
+                reason="ui /model",
+            )
+            terminal_seq = external_db.max_event_seq(thread_id)
+
+            settings = client.get(f"/api/threads/{thread_id}/settings")
+            assert settings.status_code == 200
+            assert settings.json()["model_key"] == "Terminal Model"
+
+            set_thread_model(
+                core_state.db,
+                thread_id,
+                "Web Model",
+                concrete_model_info={},
+                reason="web selector",
+            )
+            assert core_state.db.max_event_seq(thread_id) > terminal_seq
+            assert client.get(f"/api/threads/{thread_id}/settings").json()["model_key"] == "Web Model"
+        finally:
+            external_db.conn.close()
+
     def test_root_threads_keep_legacy_orphan_runtime_rows_visible_and_sort_by_activity(self, client):
         """Legacy orphan runtime rows remain inspectable in the root list."""
         from eggthreads import append_message
@@ -2466,6 +2500,34 @@ class TestEventStreaming:
             "invoke_id",
             "chunk_seq",
             "payload",
+        }
+
+    def test_model_switch_streams_from_terminal_writer_with_canonical_sequence(self, client):
+        from eggthreads import ThreadsDB, set_thread_model
+
+        thread_id = client.post("/api/threads", json={"name": "model event"}).json()["id"]
+        cursor = core_state.db.max_event_seq(thread_id)
+        terminal_db = ThreadsDB(core_state.db.path)
+        try:
+            set_thread_model(
+                terminal_db,
+                thread_id,
+                "Terminal Model",
+                concrete_model_info={},
+                reason="ui /model",
+            )
+        finally:
+            terminal_db.conn.close()
+
+        response = self._finite_get(
+            client, f"/api/threads/{thread_id}/events?after_seq={cursor}"
+        )
+        event = self._sse_events(response)[0]
+        assert event["event"] == "model.switch"
+        assert event["id"] == event["data"]["event_seq"]
+        assert event["data"]["payload"] == {
+            "model_key": "Terminal Model",
+            "reason": "ui /model",
         }
 
     def test_consumed_get_user_edit_streams_exact_display_identity(self, client):
