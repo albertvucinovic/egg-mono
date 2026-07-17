@@ -13,6 +13,17 @@ from eggthreads.runner import ThreadRunner
 from eggthreads.tools import ToolRegistry
 
 
+@pytest.fixture(autouse=True)
+def _reset_process_output_recovery_budget():
+    """Keep literal process-local retry tests isolated from one another."""
+
+    from eggthreads import runner as runner_module
+
+    runner_module._PROCESS_TOOL_OUTPUT_RECOVERY_RETRIES.reset_for_tests()
+    yield
+    runner_module._PROCESS_TOOL_OUTPUT_RECOVERY_RETRIES.reset_for_tests()
+
+
 def _event_rows(db: ts.ThreadsDB, thread_id: str) -> list[tuple[str, dict, str | None]]:
     rows = db.conn.execute(
         "SELECT type, payload_json, invoke_id FROM events WHERE thread_id=? ORDER BY event_seq",
@@ -167,6 +178,7 @@ def test_phase10_policy_failure_retries_after_restart_and_second_scheduler(
                 llm=object(),
                 tools=_registry(output),
                 owner="egg-restart",
+                manual_output_recovery=True,
             )
             winner_result.append(asyncio.run(runner.run_once()))
         except BaseException as exc:  # pragma: no cover - asserted below
@@ -250,7 +262,12 @@ def test_phase10_live_lease_suppresses_successful_tc4_recovery(tmp_path) -> None
 
     assert ts.discover_runner_actionable(db, thread_id) is None
     assert asyncio.run(
-        ThreadRunner(db, thread_id, llm=object(), owner="eggw").run_once()
+        ThreadRunner(
+            db,
+            thread_id,
+            llm=object(),
+            owner="eggw",
+        ).run_once()
     ) is False
     assert ts.build_tool_call_states(db, thread_id)[tool_call_id].state == "TC4"
     assert _payloads(db, thread_id, "tool_call.output_approval") == []
@@ -560,7 +577,13 @@ def test_phase10_long_output_artifact_failure_retries_from_raw_tc4(
         real_stash,
     )
     assert asyncio.run(
-        ThreadRunner(db, thread_id, llm=object(), owner="eggw").run_once()
+        ThreadRunner(
+            db,
+            thread_id,
+            llm=object(),
+            owner="eggw",
+            manual_output_recovery=True,
+        ).run_once()
     ) is True
 
     recovered = ts.build_tool_call_states(db, thread_id)[tool_call_id]
@@ -631,7 +654,13 @@ def test_phase10_capped_finish_metadata_survives_recovery(
         real_decide,
     )
     assert asyncio.run(
-        ThreadRunner(db, thread_id, llm=object(), owner="restart").run_once()
+        ThreadRunner(
+            db,
+            thread_id,
+            llm=object(),
+            owner="restart",
+            manual_output_recovery=True,
+        ).run_once()
     ) is True
 
     approval = _payloads(db, thread_id, "tool_call.output_approval")
@@ -719,6 +748,8 @@ def test_phase10_scheduler_bounds_unchanged_persistent_policy_failure(
     )
 
     attempts = 0
+    runner_calls = 0
+    real_run_once = runner_module.ThreadRunner.run_once
 
     def fail_policy(*_args, **_kwargs):
         nonlocal attempts
@@ -729,15 +760,25 @@ def test_phase10_scheduler_bounds_unchanged_persistent_policy_failure(
         "eggthreads.output_policy.decide_output_publication",
         fail_policy,
     )
-    real_retry_init = runner_module._ToolOutputRecoveryRetries
+
+    async def counted_run_once(self):  # type: ignore[no-untyped-def]
+        nonlocal runner_calls
+        runner_calls += 1
+        return await real_run_once(self)
+
     monkeypatch.setattr(
-        runner_module,
-        "_ToolOutputRecoveryRetries",
-        lambda: real_retry_init(base_delay_sec=0.0, max_delay_sec=0.0),
+        runner_module.ThreadRunner,
+        "run_once",
+        counted_run_once,
+    )
+    retries = runner_module._ToolOutputRecoveryRetries(
+        base_delay_sec=0.0,
+        max_delay_sec=0.0,
     )
 
     async def exercise():  # type: ignore[no-untyped-def]
         scheduler = runner_module.SubtreeScheduler(db, thread_id, llm=object())
+        scheduler._output_recovery_retries = retries
         task = asyncio.create_task(scheduler.run_forever(poll_sec=0.001))
         try:
             await asyncio.sleep(0.08)
@@ -752,6 +793,7 @@ def test_phase10_scheduler_bounds_unchanged_persistent_policy_failure(
     after = len(_event_rows(db, thread_id))
 
     assert attempts == runner_module.TOOL_OUTPUT_RECOVERY_MAX_ATTEMPTS
+    assert runner_calls == attempts
     recovery_key = runner_module._tool_output_recovery_key_for_call(
         db, thread_id, tool_call_id
     )
@@ -836,3 +878,329 @@ def test_phase10_recovery_retry_budget_is_process_local_and_watermark_scoped(
     assert next_key is not None
     assert next_key != first_key
     assert process_a.disposition(next_key, now=0.0).allowed is True
+
+
+def _seed_successful_tc4(
+    db: ts.ThreadsDB,
+    thread_id: str,
+    tool_call_id: str,
+    *,
+    output: str = "durable output",
+    suffix: str = "seed",
+) -> None:
+    _enqueue(db, thread_id, tool_call_id=tool_call_id)
+    db.append_event(
+        f"phase10-{suffix}-approval",
+        thread_id,
+        "tool_call.approval",
+        {"tool_call_id": tool_call_id, "decision": "granted"},
+    )
+    db.append_event(
+        f"phase10-{suffix}-start",
+        thread_id,
+        "tool_call.execution_started",
+        {"tool_call_id": tool_call_id},
+        invoke_id=f"phase10-{suffix}-owner",
+    )
+    db.append_event(
+        f"phase10-{suffix}-finish",
+        thread_id,
+        "tool_call.finished",
+        {"tool_call_id": tool_call_id, "reason": "success", "output": output},
+        invoke_id=f"phase10-{suffix}-owner",
+    )
+
+
+def test_phase10_overlapping_schedulers_share_one_process_retry_budget(
+    tmp_path, monkeypatch
+) -> None:
+    """Resident schedulers in one process must share three attempts total."""
+
+    from eggthreads import runner as runner_module
+
+    db = ts.ThreadsDB(tmp_path / "overlapping-schedulers.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, name="phase10 overlapping schedulers")
+    tool_call_id = "phase10-overlapping-schedulers-call"
+    _seed_successful_tc4(db, thread_id, tool_call_id, suffix="overlapping")
+
+    attempts = 0
+
+    def fail_policy(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("phase10 overlapping persistent failure")
+
+    monkeypatch.setattr(
+        "eggthreads.output_policy.decide_output_publication",
+        fail_policy,
+    )
+    shared = runner_module._ToolOutputRecoveryRetries(
+        base_delay_sec=0.0,
+        max_delay_sec=0.0,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_PROCESS_TOOL_OUTPUT_RECOVERY_RETRIES",
+        shared,
+    )
+
+    async def exercise() -> None:
+        schedulers = [
+            runner_module.SubtreeScheduler(db, thread_id, llm=object(), owner=owner)
+            for owner in ("egg", "eggw")
+        ]
+        assert schedulers[0]._output_recovery_retries is shared
+        assert schedulers[1]._output_recovery_retries is shared
+        tasks = [
+            asyncio.create_task(scheduler.run_forever(poll_sec=0.001))
+            for scheduler in schedulers
+        ]
+        try:
+            await asyncio.sleep(0.12)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+    assert attempts == runner_module.TOOL_OUTPUT_RECOVERY_MAX_ATTEMPTS
+    assert len(_payloads(db, thread_id, "stream.open")) == attempts
+    assert len(_payloads(db, thread_id, "stream.close")) == attempts
+    assert _payloads(db, thread_id, "tool_call.output_approval") == []
+
+
+def test_phase10_scheduler_wakes_at_deadline_then_parks_exhausted(
+    tmp_path, monkeypatch
+) -> None:
+    """Backoff has one timed wake; exhausted work creates no runner tasks."""
+
+    from eggthreads import runner as runner_module
+
+    db = ts.ThreadsDB(tmp_path / "deadline-wake.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, name="phase10 deadline wake")
+    tool_call_id = "phase10-deadline-wake-call"
+    _seed_successful_tc4(db, thread_id, tool_call_id, suffix="deadline")
+
+    attempts = 0
+    runner_calls = 0
+    real_run_once = runner_module.ThreadRunner.run_once
+
+    def fail_policy(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("phase10 deadline persistent failure")
+
+    async def counted_run_once(self):  # type: ignore[no-untyped-def]
+        nonlocal runner_calls
+        runner_calls += 1
+        return await real_run_once(self)
+
+    monkeypatch.setattr(
+        "eggthreads.output_policy.decide_output_publication",
+        fail_policy,
+    )
+    monkeypatch.setattr(
+        runner_module.ThreadRunner,
+        "run_once",
+        counted_run_once,
+    )
+    retries = runner_module._ToolOutputRecoveryRetries(
+        max_attempts=2,
+        base_delay_sec=0.05,
+        max_delay_sec=0.05,
+    )
+
+    async def exercise():  # type: ignore[no-untyped-def]
+        scheduler = runner_module.SubtreeScheduler(db, thread_id, llm=object())
+        scheduler._output_recovery_retries = retries
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=0.001))
+        try:
+            await asyncio.sleep(0.025)
+            assert attempts == 1
+            assert runner_calls == 1
+            await asyncio.sleep(0.07)
+            assert attempts == 2
+            calls_at_exhaustion = runner_calls
+            await asyncio.sleep(0.05)
+            assert runner_calls == calls_at_exhaustion
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        return scheduler
+
+    scheduler = asyncio.run(exercise())
+    assert runner_calls == 2
+    recovery_key = runner_module._tool_output_recovery_key_for_call(
+        db, thread_id, tool_call_id
+    )
+    assert recovery_key is not None
+    assert scheduler._output_recovery_retries.disposition(recovery_key).exhausted
+    assert len(_payloads(db, thread_id, "stream.open")) == 2
+    assert len(_payloads(db, thread_id, "stream.close")) == 2
+
+
+def test_phase10_exhausted_scheduler_wakes_for_new_finish_watermark(
+    tmp_path, monkeypatch
+) -> None:
+    """A new durable finish version bypasses the exhausted old-key parking."""
+
+    from eggthreads import runner as runner_module
+
+    db = ts.ThreadsDB(tmp_path / "watermark-wake.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, name="phase10 watermark wake")
+    tool_call_id = "phase10-watermark-wake-call"
+    _seed_successful_tc4(db, thread_id, tool_call_id, suffix="watermark")
+
+    attempts = 0
+    first_exhausted = asyncio.Event()
+    second_watermark_attempted = asyncio.Event()
+
+    def fail_policy(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            first_exhausted.set()
+        elif attempts == 3:
+            second_watermark_attempted.set()
+        raise RuntimeError("phase10 watermark persistent failure")
+
+    monkeypatch.setattr(
+        "eggthreads.output_policy.decide_output_publication",
+        fail_policy,
+    )
+    retries = runner_module._ToolOutputRecoveryRetries(
+        max_attempts=2,
+        base_delay_sec=0.0,
+        max_delay_sec=0.0,
+    )
+
+    async def exercise() -> None:
+        scheduler = runner_module.SubtreeScheduler(db, thread_id, llm=object())
+        scheduler._output_recovery_retries = retries
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=0.001))
+        try:
+            await asyncio.wait_for(first_exhausted.wait(), timeout=1)
+            await asyncio.sleep(0.02)
+            assert attempts == 2
+            db.append_event(
+                "phase10-watermark-refinish",
+                thread_id,
+                "tool_call.finished",
+                {
+                    "tool_call_id": tool_call_id,
+                    "reason": "success",
+                    "output": "new durable output",
+                },
+                invoke_id="phase10-new-owner",
+            )
+            await asyncio.wait_for(second_watermark_attempted.wait(), timeout=1)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise())
+    assert attempts == 3
+    assert len(_payloads(db, thread_id, "stream.open")) == 3
+    assert ts.build_tool_call_states(db, thread_id)[tool_call_id].state == "TC4"
+
+
+def test_phase10_ordinary_standalone_runners_share_budget_and_manual_override(
+    tmp_path, monkeypatch
+) -> None:
+    """Runner reconstruction cannot reset the bound; manual retry is explicit."""
+
+    db = ts.ThreadsDB(tmp_path / "standalone-budget.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, name="phase10 standalone budget")
+    tool_call_id = "phase10-standalone-budget-call"
+    _seed_successful_tc4(db, thread_id, tool_call_id, suffix="standalone")
+
+    attempts = 0
+
+    def fail_policy(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("phase10 standalone persistent failure")
+
+    monkeypatch.setattr(
+        "eggthreads.output_policy.decide_output_publication",
+        fail_policy,
+    )
+
+    results = [
+        asyncio.run(
+            ThreadRunner(db, thread_id, llm=object(), owner=f"ordinary-{index}").run_once()
+        )
+        for index in range(6)
+    ]
+    assert results[:3] == [True, False, False]
+    assert results[3:] == [False, False, False]
+    assert attempts == 1
+
+    # Force the shared retry deadlines due without replacing the shared store;
+    # two more ordinary runner constructions consume the remaining budget.
+    from eggthreads import runner as runner_module
+
+    recovery_key = runner_module._tool_output_recovery_key_for_call(
+        db, thread_id, tool_call_id
+    )
+    assert recovery_key is not None
+    state = runner_module._PROCESS_TOOL_OUTPUT_RECOVERY_RETRIES._states[recovery_key]
+    state.retry_at = 0.0
+    assert asyncio.run(ThreadRunner(db, thread_id, llm=object()).run_once()) is True
+    state.retry_at = 0.0
+    assert asyncio.run(ThreadRunner(db, thread_id, llm=object()).run_once()) is True
+    assert attempts == runner_module.TOOL_OUTPUT_RECOVERY_MAX_ATTEMPTS
+    assert asyncio.run(ThreadRunner(db, thread_id, llm=object()).run_once()) is False
+
+    assert asyncio.run(
+        ThreadRunner(
+            db,
+            thread_id,
+            llm=object(),
+            manual_output_recovery=True,
+        ).run_once()
+    ) is True
+    assert attempts == runner_module.TOOL_OUTPUT_RECOVERY_MAX_ATTEMPTS + 1
+
+
+def test_phase10_retry_store_is_bounded_and_prunes_completed_keys(tmp_path) -> None:
+    """Process state has a hard cap and successful/deleted work is removable."""
+
+    from eggthreads import runner as runner_module
+
+    retries = runner_module._ToolOutputRecoveryRetries(
+        max_attempts=1,
+        base_delay_sec=0.0,
+        max_delay_sec=0.0,
+        max_tracked=2,
+    )
+    keys = [
+        runner_module._ToolOutputRecoveryKey(
+            db_path=str(tmp_path / "threads.sqlite"),
+            thread_id=f"thread-{index}",
+            tool_call_id=f"call-{index}",
+            state_event_seq=index,
+        )
+        for index in range(3)
+    ]
+    retries.record_failure(keys[0], now=0.0)
+    retries.record_failure(keys[1], now=0.0)
+    saturated = retries.record_failure(keys[2], now=0.0)
+    assert saturated.attempts == 1
+    assert len(retries._states) == 2
+    assert retries.disposition(keys[2], now=0.0).exhausted is True
+
+    retries.record_success(keys[0])
+    assert len(retries._states) == 1
+    retries.record_failure(keys[2], now=0.0)
+    assert len(retries._states) == 2
+
+    retries.clear_thread(keys[1].db_path, keys[1].thread_id)
+    assert keys[1] not in retries._states

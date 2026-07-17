@@ -191,6 +191,7 @@ LONG_OUTPUT_CHUNK_CHARS = 40_000
 TOOL_OUTPUT_RECOVERY_MAX_ATTEMPTS = 3
 TOOL_OUTPUT_RECOVERY_BASE_DELAY_SEC = 1.0
 TOOL_OUTPUT_RECOVERY_MAX_DELAY_SEC = 30.0
+TOOL_OUTPUT_RECOVERY_MAX_TRACKED = 4096
 
 # Size of the preview that gets embedded in the tool message when
 # the full output is stored as an artifact.
@@ -221,19 +222,6 @@ class _ToolOutputRecoveryRetryDisposition:
     exhausted: bool = False
 
 
-class _ToolOutputRecoveryDeferred(RuntimeError):
-    """The process-local retry window is not currently runnable."""
-
-    def __init__(
-        self,
-        key: _ToolOutputRecoveryKey,
-        disposition: _ToolOutputRecoveryRetryDisposition,
-    ) -> None:
-        self.key = key
-        self.disposition = disposition
-        super().__init__("automatic tool-output recovery is deferred")
-
-
 class _ToolOutputRecoveryRetries:
     """Process-local retry budget for unchanged successful TC4 recovery."""
 
@@ -243,12 +231,28 @@ class _ToolOutputRecoveryRetries:
         max_attempts: int = TOOL_OUTPUT_RECOVERY_MAX_ATTEMPTS,
         base_delay_sec: float = TOOL_OUTPUT_RECOVERY_BASE_DELAY_SEC,
         max_delay_sec: float = TOOL_OUTPUT_RECOVERY_MAX_DELAY_SEC,
+        max_tracked: int = TOOL_OUTPUT_RECOVERY_MAX_TRACKED,
     ) -> None:
         self.max_attempts = max(1, int(max_attempts))
         self.base_delay_sec = max(0.0, float(base_delay_sec))
         self.max_delay_sec = max(self.base_delay_sec, float(max_delay_sec))
+        self.max_tracked = max(1, int(max_tracked))
         self._states: Dict[_ToolOutputRecoveryKey, _ToolOutputRecoveryRetryState] = {}
+        # Capacity exhaustion fails closed for unknown keys rather than evicting
+        # a live exhausted key and silently resetting its safety budget.
+        self._saturated = False
         self._lock = threading.RLock()
+
+    def _drop_obsolete_call_versions(self, key: _ToolOutputRecoveryKey) -> None:
+        for existing in list(self._states):
+            if (
+                existing.db_path == key.db_path
+                and existing.thread_id == key.thread_id
+                and existing.tool_call_id == key.tool_call_id
+                and existing != key
+            ):
+                self._states.pop(existing, None)
+        self._saturated = len(self._states) >= self.max_tracked
 
     def disposition(
         self,
@@ -258,8 +262,14 @@ class _ToolOutputRecoveryRetries:
     ) -> _ToolOutputRecoveryRetryDisposition:
         current = time.monotonic() if now is None else float(now)
         with self._lock:
+            self._drop_obsolete_call_versions(key)
             state = self._states.get(key)
             if state is None:
+                if self._saturated:
+                    return _ToolOutputRecoveryRetryDisposition(
+                        False,
+                        exhausted=True,
+                    )
                 return _ToolOutputRecoveryRetryDisposition(True)
             if state.attempts >= self.max_attempts:
                 return _ToolOutputRecoveryRetryDisposition(False, exhausted=True)
@@ -280,14 +290,13 @@ class _ToolOutputRecoveryRetries:
         with self._lock:
             # A later lifecycle watermark is new recovery work and must not
             # inherit the obsolete attempt budget for this call.
-            for existing in list(self._states):
-                if (
-                    existing.db_path == key.db_path
-                    and existing.thread_id == key.thread_id
-                    and existing.tool_call_id == key.tool_call_id
-                    and existing != key
-                ):
-                    self._states.pop(existing, None)
+            self._drop_obsolete_call_versions(key)
+            if key not in self._states and len(self._states) >= self.max_tracked:
+                self._saturated = True
+                return _ToolOutputRecoveryRetryState(
+                    attempts=self.max_attempts,
+                    retry_at=float("inf"),
+                )
             state = self._states.setdefault(key, _ToolOutputRecoveryRetryState())
             state.attempts += 1
             delay = min(
@@ -297,11 +306,37 @@ class _ToolOutputRecoveryRetries:
             state.retry_at = current + delay
             return _ToolOutputRecoveryRetryState(state.attempts, state.retry_at)
 
+    def record_success(self, key: _ToolOutputRecoveryKey) -> None:
+        """Release a completed key and any obsolete versions of that call."""
+
+        with self._lock:
+            self._drop_obsolete_call_versions(key)
+            self._states.pop(key, None)
+            self._saturated = len(self._states) >= self.max_tracked
+
     def clear(self, key: Optional[_ToolOutputRecoveryKey]) -> None:
         if key is None:
             return
         with self._lock:
             self._states.pop(key, None)
+            self._saturated = len(self._states) >= self.max_tracked
+
+    def clear_thread(self, db_path: str, thread_id: str) -> None:
+        """Prune budgets only after a thread is confirmed deleted."""
+
+        normalized_path = str(Path(db_path).resolve())
+        with self._lock:
+            for key in list(self._states):
+                if key.db_path == normalized_path and key.thread_id == str(thread_id):
+                    self._states.pop(key, None)
+            self._saturated = len(self._states) >= self.max_tracked
+
+    def reset_for_tests(self) -> None:
+        """Clear process-local state; production callers must never reset it."""
+
+        with self._lock:
+            self._states.clear()
+            self._saturated = False
 
 
 _PROCESS_TOOL_OUTPUT_RECOVERY_RETRIES = _ToolOutputRecoveryRetries()
@@ -1255,7 +1290,8 @@ class ThreadRunner:
     def __init__(self, db: ThreadsDB, thread_id: str, llm: Optional[LLMClient] = None, owner: Optional[str] = None, purpose: str = "assistant_stream", config: Optional[RunnerConfig] = None,
                  models_path: Optional[str] = None, all_models_path: Optional[str] = None, tools: Optional[ToolRegistry] = None,
                  image_generation_models_path: Optional[str] = None,
-                 output_recovery_retries: Optional[_ToolOutputRecoveryRetries] = None):
+                 output_recovery_retries: Optional[_ToolOutputRecoveryRetries] = None,
+                 manual_output_recovery: bool = False):
         self.db = db
         self.thread_id = thread_id
         if llm is not None:
@@ -1279,10 +1315,13 @@ class ThreadRunner:
             except Exception:
                 self.image_generation_models_path = str(Path(self.models_path).with_name('image-generation-models.json'))
         self._invocation_writer: Optional[InvocationEventWriter] = None
-        # Standalone runners model a fresh/manual runner pass and are not
-        # process schedulers. Resident SubtreeScheduler instances inject their
-        # shared process-local budget explicitly.
-        self._output_recovery_retries = output_recovery_retries
+        # Ordinary standalone runners and every resident scheduler share one
+        # process-wide safety budget. Explicit UI/manual recovery may opt out;
+        # constructing another ordinary ThreadRunner must not reset the bound.
+        self._output_recovery_retries = (
+            output_recovery_retries or _PROCESS_TOOL_OUTPUT_RECOVERY_RETRIES
+        )
+        self._manual_output_recovery = bool(manual_output_recovery)
 
     def _owned_writer(self, invoke_id: str) -> InvocationEventWriter:
         writer = self._invocation_writer
@@ -1620,10 +1659,10 @@ class ThreadRunner:
             return False
 
         recovery_key = _tool_output_recovery_key(self.db, ra)
-        if recovery_key is not None and self._output_recovery_retries is not None:
+        if recovery_key is not None and not self._manual_output_recovery:
             disposition = self._output_recovery_retries.disposition(recovery_key)
             if not disposition.allowed:
-                raise _ToolOutputRecoveryDeferred(recovery_key, disposition)
+                return False
 
         # Block RA1 and RA2 in NO_API_CALLS mode (read-only viewing mode)
         if _no_api_calls_mode(self.cfg):
@@ -1818,6 +1857,14 @@ class ThreadRunner:
                 # via additional LLM calls; we simply execute tools for
                 # approved tool calls and advance their states.
                 await self._run_ra_tools(invoke_id, current_model, ra)
+                if recovery_key is not None:
+                    remaining_key = _tool_output_recovery_key_for_call(
+                        self.db,
+                        recovery_key.thread_id,
+                        recovery_key.tool_call_id,
+                    )
+                    if remaining_key != recovery_key:
+                        self._output_recovery_retries.record_success(recovery_key)
 
         except LeaseLost:
             # Database fencing, not cooperative cancellation, is authoritative.
@@ -1838,7 +1885,7 @@ class ThreadRunner:
                 getattr(e, "tool_call_id", ""),
             )
             retry_key = failure_key or recovery_key
-            if retry_key is not None and self._output_recovery_retries is not None:
+            if retry_key is not None and not self._manual_output_recovery:
                 self._output_recovery_retries.record_failure(retry_key)
             print(f"Tool output finalization pending retry: {e}")
         except Exception as e:
@@ -4794,7 +4841,7 @@ class SubtreeScheduler:
             except Exception:
                 self.image_generation_models_path = str(Path(self.models_path).with_name('image-generation-models.json'))
         self._tasks: Set[asyncio.Task] = set()
-        self._output_recovery_retries = _ToolOutputRecoveryRetries()
+        self._output_recovery_retries = _PROCESS_TOOL_OUTPUT_RECOVERY_RETRIES
 
     async def shutdown(self) -> None:
         """Cancel and await runner tasks spawned by this scheduler."""
@@ -4874,6 +4921,13 @@ class SubtreeScheduler:
         last_checked_seq: Dict[str, int] = {}
         last_active_lease: Dict[str, str] = {}
         previous_subtree_threads: Set[str] = set()
+        # Successful-TC4 recovery is parked here instead of spawning deferred
+        # runner tasks. None means exhausted until the durable event watermark
+        # changes; a float is the monotonic retry deadline.
+        output_recovery_wake: Dict[
+            str,
+            tuple[_ToolOutputRecoveryKey, int, Optional[float]],
+        ] = {}
 
         # Sticky scheduling state
         last_run_end: Dict[str, float] = {}  # thread_id -> monotonic time when last run ended
@@ -4924,8 +4978,6 @@ class SubtreeScheduler:
                     output_recovery_retries=self._output_recovery_retries,
                 )
                 await runner.run_once()
-            except _ToolOutputRecoveryDeferred:
-                pass
             except Exception:
                 # Preserve the scheduler's longstanding resilience for
                 # unrelated runner failures. The TC4 finalization exceptions
@@ -4946,8 +4998,24 @@ class SubtreeScheduler:
                     disposition = self._output_recovery_retries.disposition(
                         remaining_key
                     )
-                    if disposition.allowed or disposition.retry_at is not None:
+                    max_seq = self.db.max_event_seq(tid)
+                    if disposition.exhausted:
+                        output_recovery_wake[tid] = (
+                            remaining_key,
+                            max_seq,
+                            None,
+                        )
+                    elif disposition.retry_at is not None:
+                        output_recovery_wake[tid] = (
+                            remaining_key,
+                            max_seq,
+                            disposition.retry_at,
+                        )
+                    else:
+                        output_recovery_wake.pop(tid, None)
                         last_checked_seq.pop(tid, None)
+                else:
+                    output_recovery_wake.pop(tid, None)
                 # Reserve slot (actual idle check happens in scheduling loop)
                 if self.cfg.sticky_scheduling and resource_class == "llm":
                     reserved_slots.add(tid)
@@ -4970,6 +5038,7 @@ class SubtreeScheduler:
                 | set(last_checked_seq)
                 | set(last_active_lease)
                 | set(last_run_end)
+                | set(output_recovery_wake)
                 | set(reserved_slots)
             ) - known_threads
             if stale_scheduler_threads:
@@ -4977,6 +5046,11 @@ class SubtreeScheduler:
                     last_checked_seq.pop(tid, None)
                     last_active_lease.pop(tid, None)
                     last_run_end.pop(tid, None)
+                    output_recovery_wake.pop(tid, None)
+                    if self.db.get_thread(tid) is None:
+                        self._output_recovery_retries.clear_thread(
+                            str(self.db.path), tid
+                        )
                 reserved_slots -= stale_scheduler_threads
                 _prune_reducer_cache_for_threads(str(self.db.path), stale_scheduler_threads)
             previous_subtree_threads = known_threads
@@ -5081,6 +5155,36 @@ class SubtreeScheduler:
                 except Exception:
                     max_seq = -1
 
+                parked_recovery = output_recovery_wake.get(tid)
+                if parked_recovery is not None:
+                    parked_key, parked_event_seq, retry_at = parked_recovery
+                    if max_seq != parked_event_seq:
+                        # Any durable event change is an explicit wake boundary.
+                        # The lifecycle-scoped retry store decides whether this
+                        # is a new key or the same exhausted recovery.
+                        output_recovery_wake.pop(tid, None)
+                        last_checked_seq.pop(tid, None)
+                    elif retry_at is None or now < retry_at:
+                        last_checked_seq[tid] = max_seq
+                        await checkpoint_scheduler_fairness()
+                        continue
+                    else:
+                        disposition = self._output_recovery_retries.disposition(
+                            parked_key,
+                            now=now,
+                        )
+                        if not disposition.allowed:
+                            output_recovery_wake[tid] = (
+                                parked_key,
+                                max_seq,
+                                disposition.retry_at,
+                            )
+                            last_checked_seq[tid] = max_seq
+                            await checkpoint_scheduler_fairness()
+                            continue
+                        output_recovery_wake.pop(tid, None)
+                        last_checked_seq.pop(tid, None)
+
                 # Skip active leased threads before actionability discovery.
                 # Keep a lease-specific watermark so an unchanged active lease
                 # does not keep reaching this branch, but clear that watermark
@@ -5099,6 +5203,21 @@ class SubtreeScheduler:
 
                 ra = discover_runner_actionable_cached(self.db, tid)
                 if ra is not None:
+                    recovery_key = _tool_output_recovery_key(self.db, ra)
+                    if recovery_key is not None:
+                        disposition = self._output_recovery_retries.disposition(
+                            recovery_key,
+                            now=now,
+                        )
+                        if not disposition.allowed:
+                            output_recovery_wake[tid] = (
+                                recovery_key,
+                                max_seq,
+                                disposition.retry_at,
+                            )
+                            last_checked_seq[tid] = max_seq
+                            await checkpoint_scheduler_fairness()
+                            continue
                     runnable_candidates.append((tid, ra, runner_actionable_resource_class(ra)))
                 else:
                     # Thread is NOT runnable - mark as checked so we skip it
