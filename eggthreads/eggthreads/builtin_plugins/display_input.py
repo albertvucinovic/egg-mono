@@ -105,7 +105,7 @@ def display_verbosity_command(context: Any, arg: str):
         return CommandResult(clear_input=False)
     level = (arg or "").strip().lower()
     allowed = {"max", "medium", "min"}
-    current = getattr(app, "_display_verbosity", "max")
+    current = getattr(app, "_display_verbosity", "min")
     if not level:
         message = f"Usage: /displayVerbosity <max|medium|min>   (current: {current})"
         _log(context, message)

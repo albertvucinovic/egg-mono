@@ -985,10 +985,11 @@ class TestConsolePrintMessage:
         return console.export_text(styles=False)
 
 
-    def test_display_verbosity_default_max_keeps_detail_bodies(self, egg_app, monkeypatch):
-        """Default max panels should keep reasoning and tool-result bodies."""
+    def test_explicit_max_keeps_detail_bodies(self, egg_app, monkeypatch):
+        """An explicit max override keeps reasoning and tool-result bodies."""
         printed = []
         monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+        egg_app._display_verbosity = "max"
 
         egg_app.console_print_message({
             'role': 'assistant',

@@ -171,15 +171,15 @@ class TestCmdToggleBorders:
 class TestCmdDisplayVerbosity:
     """Tests for /displayVerbosity."""
 
-    def test_default_display_verbosity_is_max(self, egg_app):
-        assert egg_app._display_verbosity == "max"
+    def test_default_display_verbosity_is_min(self, egg_app):
+        assert egg_app._display_verbosity == "min"
 
     def test_no_argument_reports_current_level_and_usage(self, egg_app):
         egg_app.handle_command("/displayVerbosity")
 
-        assert egg_app._display_verbosity == "max"
+        assert egg_app._display_verbosity == "min"
         assert any(
-            "/displayVerbosity <max|medium|min>" in msg and "current: max" in msg
+            "/displayVerbosity <max|medium|min>" in msg and "current: min" in msg
             for msg in egg_app._system_log
         )
 
@@ -204,15 +204,27 @@ class TestCmdDisplayVerbosity:
             "reuse_transcript_source": True,
         }]
 
-    def test_same_display_verbosity_is_truthful_noop_without_redraw(self, egg_app, monkeypatch):
+    def test_explicit_max_remains_an_in_session_override(self, egg_app, monkeypatch):
         redrawn = []
         monkeypatch.setattr(egg_app, "redraw_static_view", lambda **kwargs: redrawn.append(kwargs))
 
         egg_app.handle_command("/displayVerbosity max")
 
         assert egg_app._display_verbosity == "max"
+        assert redrawn == [{
+            "reason": "display verbosity changed",
+            "reuse_transcript_source": True,
+        }]
+
+    def test_same_display_verbosity_is_truthful_noop_without_redraw(self, egg_app, monkeypatch):
+        redrawn = []
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda **kwargs: redrawn.append(kwargs))
+
+        egg_app.handle_command("/displayVerbosity min")
+
+        assert egg_app._display_verbosity == "min"
         assert redrawn == []
-        assert any("Display verbosity already max." in msg for msg in egg_app._system_log)
+        assert any("Display verbosity already min." in msg for msg in egg_app._system_log)
 
     def test_invalid_display_verbosity_reports_usage_without_changing_state(self, egg_app):
         egg_app.handle_command("/displayVerbosity min")

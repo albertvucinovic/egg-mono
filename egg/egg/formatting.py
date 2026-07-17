@@ -456,7 +456,7 @@ class FormattingMixin:
 
     def _display_verbosity_level(self) -> str:
         """Return the current terminal display verbosity level."""
-        level = str(getattr(self, '_display_verbosity', 'max') or 'max').strip().lower()
+        level = str(getattr(self, '_display_verbosity', 'min') or 'min').strip().lower()
         return level if level in {'max', 'medium', 'min'} else 'max'
 
     def _one_line_display_preview(self, text: Any, *, max_chars: int = 160) -> str:

@@ -195,7 +195,7 @@ class TranscriptScrollbackSource:
         try:
             verbosity = self._panels._panel_display_verbosity_level()
         except Exception:
-            verbosity = str(getattr(self._panels, '_display_verbosity', 'max') or 'max')
+            verbosity = str(getattr(self._panels, '_display_verbosity', 'min') or 'min')
         verbosity = str(verbosity or 'max').strip().lower()
         if verbosity not in {'max', 'medium', 'min'}:
             verbosity = 'max'
@@ -1266,7 +1266,7 @@ class PanelsMixin:
         try:
             level = self._display_verbosity_level()
         except Exception:
-            level = getattr(self, '_display_verbosity', 'max')
+            level = getattr(self, '_display_verbosity', 'min')
         level = str(level or 'max').strip().lower()
         return level if level in {'max', 'medium', 'min'} else 'max'
 

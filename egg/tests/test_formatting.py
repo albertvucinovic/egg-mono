@@ -206,8 +206,8 @@ class TestFormatMessagesText:
         assert "[Continue Status" in text
         assert "[System" not in text
 
-    def test_display_verbosity_default_max_preserves_reasoning_and_tool_output(self, isolated_db):
-        """Default max text should match the existing full-body transcript format."""
+    def test_explicit_max_preserves_reasoning_and_tool_output(self, isolated_db):
+        """An explicit max override preserves the full-body transcript format."""
         from eggthreads import append_message, create_root_thread, create_snapshot
         from egg.formatting import FormattingMixin
 
@@ -244,6 +244,7 @@ class TestFormatMessagesText:
             def __init__(self):
                 self.db = isolated_db
                 self.current_thread = tid
+                self._display_verbosity = "max"
 
         class TestApp(FormattingMixin, MinimalApp):
             pass

@@ -517,7 +517,7 @@ export const useAppStore = create<AppState>((set) => ({
   toggleBorders: () => set((state) => ({ showBorders: !state.showBorders })),
   enterMode: "send",
   setEnterMode: (mode) => set({ enterMode: mode }),
-  displayVerbosity: "max",
+  displayVerbosity: "min",
   setDisplayVerbosity: (level) => set({ displayVerbosity: level }),
 
   // Theme

@@ -258,6 +258,36 @@ test.describe('Launcher quick start', () => {
   });
 });
 
+test.describe('Fresh display verbosity default', () => {
+  test('starts at min and keeps explicit session overrides until reload', async ({ page }) => {
+    const threadId = 'fresh-display-verbosity';
+    await mockThreadShell(page, threadId, {
+      messages: [{
+        id: 'fresh-verbosity-assistant',
+        role: 'assistant',
+        content: 'FRESH VERBOSITY ANSWER',
+        reasoning: 'FRESH VERBOSITY REASONING',
+      }],
+    });
+
+    await page.goto(`/${threadId}`);
+    const verbosity = page.locator('select[title="Transcript display verbosity"]');
+    await expect(verbosity).toHaveValue('min');
+    await expect(page.getByTestId('hidden-details')).toBeVisible();
+    await expect(page.getByText('FRESH VERBOSITY REASONING', { exact: true })).not.toBeVisible();
+
+    await verbosity.selectOption('medium');
+    await expect(verbosity).toHaveValue('medium');
+    await verbosity.selectOption('max');
+    await expect(verbosity).toHaveValue('max');
+    await expect(page.getByText('FRESH VERBOSITY REASONING', { exact: true })).toBeVisible();
+
+    await page.reload();
+    await expect(page.locator('select[title="Transcript display verbosity"]')).toHaveValue('min');
+    await expect(page.getByText('FRESH VERBOSITY REASONING', { exact: true })).not.toBeVisible();
+  });
+});
+
 test.describe('Basic Operations', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');

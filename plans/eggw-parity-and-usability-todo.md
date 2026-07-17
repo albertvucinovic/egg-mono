@@ -84,12 +84,15 @@ Inventory matrix: `plans/eggw-header-parity-matrix.md`.
 
 ### Default minimum verbosity
 
-- [ ] Change the default display verbosity to `min` for fresh/unconfigured use in
-  both clients through the existing canonical settings authority.
-- [ ] Preserve an explicit existing user setting and cross-client changes; do not
-  reset configured users to `min` on every startup.
-- [ ] Test fresh state, legacy state without a setting, configured medium/max,
-  simultaneous clients, reload, and restart.
+- [x] Change the existing session-local absence defaults to `min` for fresh
+  terminal Egg and EggW frontend instances.
+- [x] Preserve explicit in-session `min`/`medium`/`max` command and selector
+  overrides without introducing persistence or cross-client synchronization.
+- [x] Test fresh terminal/frontend state, explicit in-session medium/max, and
+  browser reload returning to the fresh session-local default.
+- [ ] Canonical persistence, restart survival, inheritance, malformed-state
+  policy, and cross-client synchronization remain an unapproved design question.
+  No shared setting authority exists today; do not imply these guarantees.
 
 ### `/show <id_hint>` command
 
@@ -256,6 +259,20 @@ policy.
   commit ledger below.
 
 ## Status notes / commit ledger
+
+- 2026-07-17: Phase 6 default-min scope was narrowed by manager decision after
+  investigation found no canonical/persisted display-verbosity authority.
+  Terminal Egg and EggW previously held independent process-local defaults and
+  mutations; EggW's backend command is explicitly frontend-only. This slice
+  changes only those existing absence defaults to `min`, aligns terminal fallback
+  rendering/command reads, and preserves explicit in-session medium/max/min
+  overrides. Browser reload/new frontend state returns to `min` by design; no
+  persistence, event/API field, inheritance, malformed-state policy, or
+  cross-client synchronization was added. Future canonical persistence remains
+  open and unapproved. Validation: terminal display tests 21 passed; shared
+  command-registry tests 2 passed; EggW unit tests 123 passed; TypeScript and
+  production build passed; focused Playwright 1 passed. The commit hash is
+  reported in the final handoff. No other Phase 6 or excluded work started.
 
 - 2026-07-17: Phase 6 header-parity inventory and first bounded implementation
   completed. The explicit matrix in `plans/eggw-header-parity-matrix.md` traces
