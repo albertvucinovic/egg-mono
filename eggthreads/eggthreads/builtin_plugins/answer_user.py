@@ -240,6 +240,10 @@ def register_answer_user_tool(registry: ToolRegistry) -> None:
         },
         get_user_message_while_preserving_llm_turn_tool,
         accepts_context=True,
+        capabilities={
+            "supports_cancellation": True,
+            "resumes_after_lease_loss": True,
+        },
     )
 
 

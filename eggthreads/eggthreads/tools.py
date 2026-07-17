@@ -182,6 +182,7 @@ class ToolCapabilities:
 
     supports_streaming: bool = False
     supports_cancellation: bool = False
+    resumes_after_lease_loss: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -190,10 +191,11 @@ class ToolCapabilities:
             return value
         if not value:
             return cls()
-        known = {"supports_streaming", "supports_cancellation"}
+        known = {"supports_streaming", "supports_cancellation", "resumes_after_lease_loss"}
         return cls(
             supports_streaming=bool(value.get("supports_streaming", False)),
             supports_cancellation=bool(value.get("supports_cancellation", False)),
+            resumes_after_lease_loss=bool(value.get("resumes_after_lease_loss", False)),
             metadata={k: v for k, v in value.items() if k not in known},
         )
 
@@ -201,6 +203,8 @@ class ToolCapabilities:
         data = dict(self.metadata)
         data["supports_streaming"] = self.supports_streaming
         data["supports_cancellation"] = self.supports_cancellation
+        if self.resumes_after_lease_loss:
+            data["resumes_after_lease_loss"] = True
         return data
 
 

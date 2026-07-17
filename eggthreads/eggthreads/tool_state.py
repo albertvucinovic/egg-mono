@@ -84,6 +84,11 @@ class ToolCallState:
     claimed_user_content: Optional[str] = None
     result_msg_id: Optional[str] = None
     result_skipped_on_continue: bool = False
+    execution_started_ts: Optional[str] = None
+    execution_timeout_sec: Optional[float] = None
+    execution_timeout_deadline: Optional[str] = None
+    execution_resumes_after_lease_loss: bool = False
+    finished_event_seq: Optional[int] = None
     # Event watermark of the latest lifecycle event applied to this call, and
     # the event that currently owns the authoritative output decision.
     state_event_seq: int = -1
@@ -111,9 +116,14 @@ class RunnerActionable:
     """Describes a unit of work the ThreadRunner can perform.
 
     kind:
-      - "RA1_llm"            -> call LLM (assistant turn)
+      - "RA1_llm"             -> call LLM (assistant turn)
       - "RA2_tools_assistant" -> process assistant-originated tool calls
       - "RA3_tools_user"      -> process user-originated tool calls (user commands)
+
+    ``recovery_mode`` describes why otherwise non-runnable tool-call states are
+    actionable.  It is deliberately separate from ``kind`` so recovery keeps
+    the assistant/user publication semantics while allowing a later per-tool
+    policy (for example, resuming a durable wait instead of terminalizing it).
     """
 
     kind: str
@@ -121,6 +131,7 @@ class RunnerActionable:
     triggering_event_seq: int
     msg_id: Optional[str] = None
     tool_calls: Optional[List[ToolCallState]] = None
+    recovery_mode: Optional[str] = None
 
 
 @dataclass
@@ -670,10 +681,40 @@ def _try_reduce_thread_events_incrementally(
                 return None
         elif ev_type == "tool_call.execution_started":
             inv = ev.get("invoke_id")
+            raw_timeout = payload.get("timeout")
+            try:
+                timeout_sec = float(raw_timeout) if raw_timeout is not None else None
+            except (TypeError, ValueError):
+                timeout_sec = None
+            resume_after_lease_loss = bool(payload.get("resume_after_lease_loss"))
             tool_call_states[tcid] = replace(
                 tc,
                 execution_started=True,
                 owner_invoke_id=inv if isinstance(inv, str) and inv else tc.owner_invoke_id,
+                execution_started_ts=str(ev.get("ts") or "") or tc.execution_started_ts,
+                execution_timeout_sec=(
+                    timeout_sec if timeout_sec is not None and timeout_sec > 0 else tc.execution_timeout_sec
+                ),
+                execution_timeout_deadline=(
+                    str(payload.get("timeout_deadline") or "") or tc.execution_timeout_deadline
+                ),
+                execution_resumes_after_lease_loss=(
+                    bool(payload.get("resumes_after_lease_loss"))
+                    if "resumes_after_lease_loss" in payload
+                    else tc.execution_resumes_after_lease_loss
+                ),
+                finished_reason=None if resume_after_lease_loss else tc.finished_reason,
+                finished_output=None if resume_after_lease_loss else tc.finished_output,
+                output_decision=None if resume_after_lease_loss else tc.output_decision,
+                last_output_approval_payload=(
+                    None if resume_after_lease_loss else tc.last_output_approval_payload
+                ),
+                output_decision_event_seq=(
+                    None if resume_after_lease_loss else tc.output_decision_event_seq
+                ),
+                finished_event_seq=(
+                    None if resume_after_lease_loss else tc.finished_event_seq
+                ),
                 state_event_seq=ev_seq,
             )
         elif ev_type == "tool_call.finished":
@@ -690,6 +731,7 @@ def _try_reduce_thread_events_incrementally(
                 payload.get("publication_presentation")
             )
             changes["state_event_seq"] = ev_seq
+            changes["finished_event_seq"] = ev_seq
             tool_call_states[tcid] = replace(tc, **changes)
         elif ev_type == "tool_call.output_approval":
             decision = payload.get("decision")
@@ -959,10 +1001,33 @@ def _reduce_loaded_thread_events(
             if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
                 tc = states[tcid]
                 if ev_seq > tc.parent_event_seq:
+                    resume_after_lease_loss = bool(payload.get("resume_after_lease_loss"))
                     tc.execution_started = True
                     inv = ev.get("invoke_id")
                     if isinstance(inv, str) and inv:
                         tc.owner_invoke_id = inv
+                    raw_timeout = payload.get("timeout")
+                    try:
+                        timeout_sec = float(raw_timeout) if raw_timeout is not None else None
+                    except (TypeError, ValueError):
+                        timeout_sec = None
+                    tc.execution_started_ts = str(ev.get("ts") or "") or tc.execution_started_ts
+                    if timeout_sec is not None and timeout_sec > 0:
+                        tc.execution_timeout_sec = timeout_sec
+                    tc.execution_timeout_deadline = (
+                        str(payload.get("timeout_deadline") or "") or tc.execution_timeout_deadline
+                    )
+                    if "resumes_after_lease_loss" in payload:
+                        tc.execution_resumes_after_lease_loss = bool(
+                            payload.get("resumes_after_lease_loss")
+                        )
+                    if resume_after_lease_loss:
+                        tc.finished_reason = None
+                        tc.finished_output = None
+                        tc.output_decision = None
+                        tc.last_output_approval_payload = None
+                        tc.output_decision_event_seq = None
+                        tc.finished_event_seq = None
                     tc.state_event_seq = ev_seq
         elif ev_type == "tool_call.summary":
             tcid = payload.get("tool_call_id")
@@ -990,6 +1055,7 @@ def _reduce_loaded_thread_events(
                         payload.get("publication_presentation")
                     )
                     tc.state_event_seq = ev_seq
+                    tc.finished_event_seq = ev_seq
         elif ev_type == "tool_call.output_approval":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
@@ -1637,123 +1703,104 @@ def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Itera
         yield ev
 
 
-def discover_runner_actionable_cached(db: ThreadsDB, thread_id: str) -> Optional[RunnerActionable]:
-    """Return the next actionable item using the cached thread reducer."""
+def _orphaned_tc3_actionable(
+    db: ThreadsDB,
+    reduction: _ThreadEventReduction,
+) -> Optional[RunnerActionable]:
+    """Return recovery work for executing calls that have no live owner lease.
 
-    return _reduce_thread_events(db, thread_id).next_runner_actionable
+    Lease state is intentionally read outside the event reducer: lease expiry or
+    deletion does not append an event and therefore cannot be cached by the
+    reducer's event watermark.  Any live lease suppresses recovery for the
+    thread.  The runner must first acquire a fresh lease, which is the durable
+    fence that makes this observation safe under contention.
+    """
+
+    try:
+        lease = db.current_open(reduction.thread_id)
+        if lease is not None and str(lease["lease_until"] or "") > _utcnow_iso():
+            return None
+    except Exception:
+        # Uncertain lease ownership must fail closed; a later poll can retry.
+        return None
+
+    def recovery_interrupt_exists(owner_invoke_id: Optional[str]) -> bool:
+        if not owner_invoke_id:
+            return False
+        try:
+            row = db.conn.execute(
+                """
+                SELECT 1 FROM events
+                 WHERE thread_id=? AND type='control.interrupt'
+                   AND json_extract(payload_json, '$.old_invoke_id')=?
+                   AND json_extract(payload_json, '$.reason') IN (
+                        'expired_lease_takeover',
+                        'orphaned_tool_execution_recovery'
+                   )
+                 LIMIT 1
+                """,
+                (reduction.thread_id, owner_invoke_id),
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
+    candidates = [
+        tc
+        for tc in reduction.tool_call_states.values()
+        if tc.parent_role in {"assistant", "user"}
+        and (
+            tc.state == "TC3"
+            or (
+                tc.state == "TC4"
+                and tc.finished_reason == "interrupted"
+                and tc.output_decision is None
+                and tc.finished_event_seq is None
+                and recovery_interrupt_exists(tc.owner_invoke_id)
+            )
+        )
+    ]
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda tc: (tc.parent_event_seq, tc.index, tc.tool_call_id))
+    first = candidates[0]
+    same_parent = [tc for tc in candidates if tc.parent_msg_id == first.parent_msg_id]
+    return RunnerActionable(
+        kind=("RA3_tools_user" if first.parent_role == "user" else "RA2_tools_assistant"),
+        thread_id=reduction.thread_id,
+        triggering_event_seq=first.parent_event_seq,
+        msg_id=first.parent_msg_id,
+        tool_calls=same_parent,
+        recovery_mode="orphaned_tc3",
+    )
+
+
+def _runner_actionable_from_reduction(
+    db: ThreadsDB,
+    reduction: _ThreadEventReduction,
+) -> Optional[RunnerActionable]:
+    # Recovery has priority over starting any additional tool side effects in
+    # the same parent batch.  Normal actionability resumes after recovery has
+    # published the interrupted result.
+    recovery = _orphaned_tc3_actionable(db, reduction)
+    return recovery if recovery is not None else reduction.next_runner_actionable
+
+
+def discover_runner_actionable_cached(db: ThreadsDB, thread_id: str) -> Optional[RunnerActionable]:
+    """Return the next actionable item using the cached event reduction.
+
+    The final lease check remains uncached because open-stream leases can expire
+    without changing the event-log watermark.
+    """
+
+    return _runner_actionable_from_reduction(db, _reduce_thread_events(db, thread_id))
 
 
 def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[RunnerActionable]:
-    """Determine the next actionable work item for a thread.
+    """Determine the next runner action, including lease-orphan recovery."""
 
-    This function encapsulates the Runner Actionables (RA1/RA2/RA3) logic
-    based on the event log and tool call states.
-
-    RA1 (LLM) uses messages *after* the last stream.close, while RA2/RA3
-    operate directly on tool call states so that they can act on tool
-    calls whose parent message may have been emitted before the last
-    stream.close (e.g. assistant tool calls created by a prior LLM turn
-    or user commands that have already finished execution).
-    """
-    last_close = _last_stream_close_seq(db, thread_id)
-    all_states = build_tool_call_states(db, thread_id)
-
-    # -------- RA3: user-originated tool calls (user commands) --------
-    user_tcs = [
-        tc for tc in all_states.values()
-        if tc.parent_role == 'user' and tc.state in ("TC2.1", "TC2.2", "TC5")
-    ]
-    if user_tcs:
-        # Pick earliest parent message and group its runnable tool calls
-        user_tcs.sort(key=lambda tc: tc.parent_event_seq)
-        msg_id = user_tcs[0].parent_msg_id
-        parent_seq = user_tcs[0].parent_event_seq
-        tcs_for_msg = [tc for tc in user_tcs if tc.parent_msg_id == msg_id]
-        return RunnerActionable(
-            kind="RA3_tools_user",
-            thread_id=thread_id,
-            triggering_event_seq=parent_seq,
-            msg_id=msg_id,
-            tool_calls=tcs_for_msg,
-        )
-
-    # -------- RA2: assistant-originated tool calls --------
-    # Consider tool calls whose parent assistant message occurred at or
-    # before the last stream.close (i.e. produced by a prior LLM turn).
-    assistant_tcs = [
-        tc for tc in all_states.values()
-        if tc.parent_role == 'assistant'
-        and tc.state in ("TC2.1", "TC2.2", "TC5")
-        # Consider assistant tool calls that have already been approved,                                                                         │ │ │
-        # denied, or are ready to be published. RA2 operates purely on tool                                                                      │ │ │
-        # call state; we do not need to gate by last LLM boundary here                                                                           │ │ │
-        # because the per-thread lease (open_streams) ensures that RA2 does                                                                      │ │ │
-        # not run concurrently with an active RA1 stream.
-        #and tc.parent_event_seq <= last_close
-    ]
-    if assistant_tcs:
-        assistant_tcs.sort(key=lambda tc: tc.parent_event_seq)
-        msg_id = assistant_tcs[0].parent_msg_id
-        parent_seq = assistant_tcs[0].parent_event_seq
-        tcs_for_msg = [tc for tc in assistant_tcs if tc.parent_msg_id == msg_id]
-        return RunnerActionable(
-            kind="RA2_tools_assistant",
-            thread_id=thread_id,
-            triggering_event_seq=parent_seq,
-            msg_id=msg_id,
-            tool_calls=tcs_for_msg,
-        )
-
-    # Before we consider a new LLM turn (RA1), ensure there are no
-    # assistant-originated tool calls that are still unresolved from the
-    # provider's point of view. The OpenAI tools protocol requires that
-    # every assistant tool_call has a corresponding tool message before
-    # the next assistant call.
-    has_unpublished_assistant_tool = any(
-        tc.parent_role == 'assistant' and not tc.published
-        for tc in all_states.values()
-    )
-    if has_unpublished_assistant_tool:
-        return None
-
-    # -------- RA1: LLM call --------
-    # Scan messages after the last stream.close to find a user or tool
-    # message that should trigger an LLM turn.
-    for ev in _iter_messages_after(db, thread_id, last_close):
-        ev_seq = int(ev["event_seq"])
-        msg_id = ev.get("msg_id") or ""
-        try:
-            payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
-        except Exception:
-            payload = {}
-        role = payload.get("role")
-        keep_user_turn = bool(payload.get("keep_user_turn"))
-        no_api = bool(payload.get("no_api"))
-        tool_calls = payload.get("tool_calls") or []
-
-        # RA1: LLM call
-        # - user messages without tool_calls and without keep_user_turn
-        #   and not marked no_api (no_api user messages are metadata and
-        #   must not trigger an LLM turn)
-        # - tool messages that are not no_api and not keep_user_turn
-        if role == "user" and not tool_calls and not keep_user_turn and not no_api:
-            return RunnerActionable(
-                kind="RA1_llm",
-                thread_id=thread_id,
-                triggering_event_seq=ev_seq,
-                msg_id=msg_id,
-                tool_calls=None,
-            )
-        if role == "tool" and not no_api and not keep_user_turn:
-            return RunnerActionable(
-                kind="RA1_llm",
-                thread_id=thread_id,
-                triggering_event_seq=ev_seq,
-                msg_id=msg_id,
-                tool_calls=None,
-            )
-
-    return None
+    return _runner_actionable_from_reduction(db, _reduce_thread_events(db, thread_id))
 
 
 def thread_state(db: ThreadsDB, thread_id: str) -> str:
@@ -1786,4 +1833,7 @@ def thread_state(db: ThreadsDB, thread_id: str) -> str:
         except Exception:
             return "running"
 
-    return _reduce_thread_events(db, thread_id).coarse_thread_state_without_lease
+    reduction = _reduce_thread_events(db, thread_id)
+    if _orphaned_tc3_actionable(db, reduction) is not None:
+        return "running"
+    return reduction.coarse_thread_state_without_lease

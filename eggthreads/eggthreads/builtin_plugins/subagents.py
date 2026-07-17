@@ -727,7 +727,10 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
         impl=wait_tool,
         local_only=False,
         accepts_context=True,
-        capabilities={"supports_cancellation": True},
+        capabilities={
+            "supports_cancellation": True,
+            "resumes_after_lease_loss": True,
+        },
     )
 
 

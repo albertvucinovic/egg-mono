@@ -6,7 +6,7 @@ import os
 import sqlite3
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
 from pathlib import Path
@@ -47,6 +47,7 @@ from .content_parts import content_has_artifacts, content_has_attachments, conte
 
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
 ISO = "%Y-%m-%d %H:%M:%S"
+GET_USER_MESSAGE_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
 
 
 def _utcnow() -> datetime:
@@ -826,6 +827,34 @@ def resolve_tool_timeout_sec(
     return None
 
 
+def _event_ts_epoch(ts_value: Any) -> Optional[float]:
+    """Parse the canonical SQLite event timestamp formats as UTC epoch seconds."""
+
+    if not ts_value:
+        return None
+    text = str(ts_value)
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", ISO):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def orphaned_tool_remaining_timeout(tc: ToolCallState, *, now: Optional[float] = None) -> Optional[float]:
+    """Return the original tool deadline budget remaining after lease loss."""
+
+    deadline_at = _event_ts_epoch(tc.execution_timeout_deadline)
+    current = time.time() if now is None else float(now)
+    if deadline_at is not None:
+        return max(0.0, deadline_at - current)
+    timeout_sec = tc.execution_timeout_sec
+    started_at = _event_ts_epoch(tc.execution_started_ts)
+    if timeout_sec is None or started_at is None:
+        return None
+    return max(0.0, float(timeout_sec) - max(0.0, current - started_at))
+
+
 def emit_tool_summary_event(
     db,
     *,
@@ -1379,8 +1408,8 @@ class ThreadRunner:
 
         # Block RA1 and RA2 in NO_API_CALLS mode (read-only viewing mode)
         if _no_api_calls_mode(self.cfg):
-            if ra.kind in ('RA1_llm', 'RA2_tools_assistant'):
-                return False  # Skip silently - thread appears idle
+            if ra.kind in ('RA1_llm', 'RA2_tools_assistant') and ra.recovery_mode is None:
+                return False  # Skip API/tool side effects; recovery itself is side-effect-free.
             # RA3_tools_user is allowed through
 
         # Acquire lease with fresh invoke_id
@@ -3109,10 +3138,258 @@ class ThreadRunner:
             emit_summary=_emit_summary,
         )
 
+    async def _recover_orphaned_tool(
+        self,
+        invoke_id: str,
+        current_model: Optional[str],
+        ra: RunnerActionable,
+    ) -> None:
+        """Terminalize orphaned executions without repeating tool side effects.
+
+        ``run_once`` has already acquired the fresh per-thread lease.  Append a
+        takeover interrupt first so the old invocation is durably fenced in the
+        event log, then synthesize the missing finish/decision and use the normal
+        TC5 publication path.  Every write is authorized by the new lease.
+        """
+
+        writer = self._owned_writer(invoke_id)
+        allow_resumption = not _no_api_calls_mode(self.cfg)
+        for observed in ra.tool_calls or []:
+            # Reserve SQLite's writer lock before validating the observed TC3.
+            # This makes the re-check, durable interrupt, finish, and output
+            # decision one atomic claim against API finalizers on other
+            # connections.  ``try_open_stream`` already excluded other runners.
+            savepoint = f"recover_orphaned_tool_{os.urandom(8).hex()}"
+            self.db.conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                locked = self.db.conn.execute(
+                    "UPDATE threads SET status=status WHERE thread_id=?",
+                    (self.thread_id,),
+                )
+                if locked.rowcount != 1:
+                    self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    continue
+
+                current = build_tool_call_states(self.db, self.thread_id).get(observed.tool_call_id)
+                unchanged = bool(
+                    current is not None
+                    and current.state_event_seq == observed.state_event_seq
+                )
+                # Expired-lease acquisition records a control.interrupt before
+                # this method runs.  The reducer reconstructs that as TC4 even
+                # though no durable tool_call.finished exists yet; the unchanged
+                # lifecycle watermark proves it is still this observed orphan.
+                recoverable = bool(
+                    unchanged
+                    and current is not None
+                    and (
+                        current.state == "TC3"
+                        or (
+                            current.state == "TC4"
+                            and current.finished_reason == "interrupted"
+                            and current.output_decision is None
+                        )
+                    )
+                )
+                if not recoverable or current is None:
+                    self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    continue
+
+                old_invoke_id = str(current.owner_invoke_id or "") or None
+                try:
+                    resumes_after_lease_loss = self.tools.capabilities(
+                        current.name
+                    ).resumes_after_lease_loss
+                except KeyError:
+                    resumes_after_lease_loss = False
+                remaining_timeout = orphaned_tool_remaining_timeout(current)
+                self._owned_append(
+                    invoke_id,
+                    type_="control.interrupt",
+                    payload={
+                        "reason": "orphaned_tool_execution_recovery",
+                        "old_invoke_id": old_invoke_id,
+                        "new_invoke_id": invoke_id,
+                        "purpose": "tool",
+                        "tool_call_id": current.tool_call_id,
+                    },
+                )
+                if (
+                    current.name == GET_USER_MESSAGE_TOOL_NAME
+                    and current.claimed_user_msg_id
+                ):
+                    output = str(current.claimed_user_content or "")
+                    finished_seq = self._owned_append(
+                        invoke_id,
+                        type_="tool_call.finished",
+                        payload={
+                            "tool_call_id": current.tool_call_id,
+                            "reason": "success",
+                            "output": output,
+                            "recovered_from_invoke_id": old_invoke_id,
+                            "recovered_from_claimed_user_message": current.claimed_user_msg_id,
+                        },
+                    )
+                    finalize_tool_output(
+                        self.db,
+                        self.thread_id,
+                        current.tool_call_id,
+                        decision="whole",
+                        source="automatic_synthetic",
+                        reason="Recovered claimed user reply after owner lease loss",
+                        expected_event_seq=finished_seq,
+                        publication_plan=ToolOutputPublicationPlan(
+                            decision="whole",
+                            preview=output,
+                            reason="Recovered claimed user reply after owner lease loss",
+                            metadata={
+                                "orphaned_execution_recovery": True,
+                                "recovered_from_invoke_id": old_invoke_id,
+                                "recovered_from_claimed_user_message": current.claimed_user_msg_id,
+                            },
+                        ),
+                        invocation_writer=writer,
+                    )
+                    self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    continue
+                can_resume = bool(
+                    allow_resumption
+                    and old_invoke_id
+                    and current.execution_resumes_after_lease_loss
+                    and resumes_after_lease_loss
+                    and (
+                        (
+                            current.execution_timeout_sec is None
+                            and current.execution_timeout_deadline is None
+                        )
+                        or remaining_timeout is not None
+                    )
+                )
+                if can_resume and (
+                    (
+                        current.execution_timeout_sec is None
+                        and current.execution_timeout_deadline is None
+                    )
+                    or (remaining_timeout is not None and remaining_timeout > 0)
+                ):
+                    started_payload: Dict[str, Any] = {
+                        "tool_call_id": current.tool_call_id,
+                        "name": current.name,
+                        "arguments": current.arguments,
+                        "resume_after_lease_loss": True,
+                        "resumes_after_lease_loss": True,
+                        "recovered_from_invoke_id": old_invoke_id,
+                    }
+                    if current.execution_timeout_sec is not None:
+                        started_payload["timeout"] = current.execution_timeout_sec
+                    if current.execution_timeout_deadline:
+                        started_payload["timeout_deadline"] = current.execution_timeout_deadline
+                    self._owned_append(
+                        invoke_id,
+                        type_="tool_call.execution_started",
+                        payload=started_payload,
+                    )
+                    self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    current = build_tool_call_states(self.db, self.thread_id).get(
+                        current.tool_call_id
+                    )
+                    if (
+                        current is None
+                        or current.state != "TC3"
+                        or current.owner_invoke_id != invoke_id
+                    ):
+                        continue
+                    arguments = parse_tool_arguments(current.arguments)
+                    remaining_timeout = orphaned_tool_remaining_timeout(current)
+                    if remaining_timeout is not None:
+                        arguments["timeout"] = remaining_timeout
+                    await self._run_ra_tools(
+                        invoke_id,
+                        current_model,
+                        RunnerActionable(
+                            kind=ra.kind,
+                            thread_id=ra.thread_id,
+                            triggering_event_seq=ra.triggering_event_seq,
+                            msg_id=ra.msg_id,
+                            tool_calls=[replace(current, arguments=arguments)],
+                            recovery_mode="resumed_tc3",
+                        ),
+                    )
+                    continue
+                if can_resume and remaining_timeout is not None and remaining_timeout <= 0:
+                    original_limit = float(current.execution_timeout_sec or 0)
+                    limit = f"{original_limit:g}"
+                    output = (
+                        "--- TIMEOUT ---\n"
+                        f"Tool execution timed out after {limit} seconds while its owner lease was lost."
+                    )
+                    finish_reason = "timeout"
+                else:
+                    output = (
+                        "--- INTERRUPTED ---\n"
+                        "Tool execution was interrupted after its owner invocation lost its lease. "
+                        "The tool was not run again because its side effects may already have occurred."
+                    )
+                    finish_reason = "interrupted"
+                finished_seq = self._owned_append(
+                    invoke_id,
+                    type_="tool_call.finished",
+                    payload={
+                        "tool_call_id": current.tool_call_id,
+                        "reason": finish_reason,
+                        "output": output,
+                        "recovered_from_invoke_id": old_invoke_id,
+                    },
+                )
+                finalize_tool_output(
+                    self.db,
+                    self.thread_id,
+                    current.tool_call_id,
+                    decision="whole",
+                    source="automatic_synthetic",
+                    reason="Recovered orphaned tool execution without re-execution",
+                    expected_event_seq=finished_seq,
+                    publication_plan=ToolOutputPublicationPlan(
+                        decision="whole",
+                        preview=output,
+                        reason="Recovered orphaned tool execution without re-execution",
+                        metadata={
+                            "orphaned_execution_recovery": True,
+                            "recovered_from_invoke_id": old_invoke_id,
+                        },
+                    ),
+                    invocation_writer=writer,
+                )
+                self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception:
+                self.db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
+
+        # Publish through the existing TC5 path; it preserves RA2/RA3 message
+        # semantics and avoids duplicating output rendering rules here.
+        refreshed = build_tool_call_states(self.db, self.thread_id)
+        publishable = [
+            refreshed[tc.tool_call_id]
+            for tc in ra.tool_calls or []
+            if tc.tool_call_id in refreshed and refreshed[tc.tool_call_id].state == "TC5"
+        ]
+        if publishable:
+            publication_ra = RunnerActionable(
+                kind=ra.kind,
+                thread_id=ra.thread_id,
+                triggering_event_seq=ra.triggering_event_seq,
+                msg_id=ra.msg_id,
+                tool_calls=publishable,
+            )
+            await self._run_ra_tools(invoke_id, current_model, publication_ra)
+
     async def _run_ra_tools(self, invoke_id: str, current_model: Optional[str], ra: RunnerActionable) -> None:
-        """Handle RA2/RA3: process tool calls that are already approved or denied
-        (TC2.1/TC2.2/TC5) and advance them along the state machine."""
+        """Handle RA2/RA3 execution, publication, and orphan recovery."""
         tool_calls = ra.tool_calls or []
+        if ra.recovery_mode == "orphaned_tc3":
+            await self._recover_orphaned_tool(invoke_id, current_model, ra)
+            return
         # Thread-level tools configuration (disables, etc.) is respected
         # both for assistant-originated tool calls (RA2) and
         # user-initiated ones (RA3).
@@ -3125,6 +3402,95 @@ class ThreadRunner:
         else:
             policy_error_message = ""
         for tc in tool_calls:
+            resuming_owned = bool(
+                ra.recovery_mode == "resumed_tc3"
+                and tc.state == "TC3"
+                and tc.owner_invoke_id == invoke_id
+            )
+            if resuming_owned:
+                fresh = build_tool_call_states(self.db, self.thread_id).get(tc.tool_call_id)
+                if (
+                    fresh is None
+                    or fresh.state != "TC3"
+                    or fresh.owner_invoke_id != invoke_id
+                    or fresh.output_decision is not None
+                    or fresh.finished_event_seq is not None
+                ):
+                    continue
+                remaining_timeout = orphaned_tool_remaining_timeout(fresh)
+                has_deadline = bool(
+                    fresh.execution_timeout_sec is not None
+                    or fresh.execution_timeout_deadline is not None
+                )
+                if fresh.name == GET_USER_MESSAGE_TOOL_NAME and fresh.claimed_user_msg_id:
+                    output = str(fresh.claimed_user_content or "")
+                    finished_seq = self._owned_append(
+                        invoke_id,
+                        type_="tool_call.finished",
+                        payload={
+                            "tool_call_id": fresh.tool_call_id,
+                            "reason": "success",
+                            "output": output,
+                            "recovered_from_claimed_user_message": fresh.claimed_user_msg_id,
+                        },
+                    )
+                    finalize_tool_output(
+                        self.db,
+                        self.thread_id,
+                        fresh.tool_call_id,
+                        decision="whole",
+                        source="automatic_synthetic",
+                        reason="Recovered claimed user reply after owner lease loss",
+                        expected_event_seq=finished_seq,
+                        publication_plan=ToolOutputPublicationPlan(
+                            decision="whole",
+                            preview=output,
+                            reason="Recovered claimed user reply after owner lease loss",
+                            metadata={"orphaned_execution_recovery": True},
+                        ),
+                        invocation_writer=self._owned_writer(invoke_id),
+                    )
+                    continue
+                if has_deadline and (
+                    remaining_timeout is None or remaining_timeout <= 0
+                ):
+                    original_limit = float(fresh.execution_timeout_sec or 0)
+                    output = (
+                        "--- TIMEOUT ---\n"
+                        f"Tool execution timed out after {original_limit:g} seconds "
+                        "while its owner lease was lost."
+                    )
+                    finished_seq = self._owned_append(
+                        invoke_id,
+                        type_="tool_call.finished",
+                        payload={
+                            "tool_call_id": fresh.tool_call_id,
+                            "reason": "timeout",
+                            "output": output,
+                        },
+                    )
+                    finalize_tool_output(
+                        self.db,
+                        self.thread_id,
+                        fresh.tool_call_id,
+                        decision="whole",
+                        source="automatic_synthetic",
+                        reason="Recovered orphaned tool after its original deadline",
+                        expected_event_seq=finished_seq,
+                        publication_plan=ToolOutputPublicationPlan(
+                            decision="whole",
+                            preview=output,
+                            reason="Recovered orphaned tool after its original deadline",
+                            metadata={"orphaned_execution_recovery": True},
+                        ),
+                        invocation_writer=self._owned_writer(invoke_id),
+                    )
+                    continue
+                arguments = parse_tool_arguments(fresh.arguments)
+                if remaining_timeout is not None:
+                    arguments["timeout"] = remaining_timeout
+                tc = replace(fresh, arguments=arguments)
+
             # Denied -> publish denial message and move to TC6
             if tc.state == 'TC2.2' and not tc.published:
                 reason = 'Tool call execution denied.'
@@ -3145,8 +3511,10 @@ class ThreadRunner:
                 )
                 continue
 
-            # Approved, not yet executed -> execution_started -> finished
-            if tc.state == 'TC2.1':
+            # Approved, not yet executed -> execution_started -> finished. A
+            # lease-recovery call remains TC3 in durable history until the new
+            # execution_started event transfers ownership to this invocation.
+            if tc.state == 'TC2.1' or resuming_owned:
                 # Respect per-thread tool capabilities: instead of
                 # executing the tool, immediately mark it finished with
                 # a synthetic "not allowed" output. This applies equally
@@ -3199,24 +3567,33 @@ class ThreadRunner:
                     self.cfg.tool_timeout_sec if self.cfg is not None else None,
                     _default_tool_timeout_sec,
                 )
-                started_payload: Dict[str, Any] = {
-                    'tool_call_id': tc.tool_call_id,
-                    # A live UI may attach after the LLM tool-call argument
-                    # deltas have streamed and after the RA1 stream has
-                    # closed. Repeat the declaration metadata on execution
-                    # start so a running tool remains inspectable without
-                    # waiting for a final transcript redraw.
-                    'name': tc.name,
-                    'arguments': tc.arguments,
-                }
-                if tool_timeout_sec is not None:
-                    started_payload['timeout'] = tool_timeout_sec
-                self._owned_append(
-                    invoke_id,
-                    type_='tool_call.execution_started',
-                    msg_id=None,
-                    payload=started_payload,
-                )
+                if not resuming_owned:
+                    started_payload: Dict[str, Any] = {
+                        'tool_call_id': tc.tool_call_id,
+                        # A live UI may attach after the LLM tool-call argument
+                        # deltas have streamed and after the RA1 stream has
+                        # closed. Repeat the declaration metadata on execution
+                        # start so a running tool remains inspectable without
+                        # waiting for a final transcript redraw.
+                        'name': tc.name,
+                        'arguments': tc.arguments,
+                        'resumes_after_lease_loss': self.tools.capabilities(
+                            tc.name
+                        ).resumes_after_lease_loss,
+                    }
+                    if tool_timeout_sec is not None:
+                        started_payload['timeout'] = tool_timeout_sec
+                        started_payload['timeout_deadline'] = (
+                            _utcnow() + timedelta(seconds=tool_timeout_sec)
+                        ).strftime(
+                            "%Y-%m-%dT%H:%M:%S.%fZ"
+                        )
+                    self._owned_append(
+                        invoke_id,
+                        type_='tool_call.execution_started',
+                        msg_id=None,
+                        payload=started_payload,
+                    )
 
                 # Create a cancel check that returns True if lease is lost (e.g., Ctrl+C)
                 def make_cancel_check(db_path, thread_id, invoke_id):
