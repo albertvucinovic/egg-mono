@@ -3329,6 +3329,77 @@ class TestCommands:
         assert data["message"] == "Usage: /displayVerbosity <max|medium|min>"
         assert data["data"]["action"] == "display_verbosity_usage"
 
+    def test_show_command_returns_shared_full_record_target(self, client):
+        """EggW uses shared resolution; the browser only presents its target."""
+        create_resp = client.post("/api/threads", json={"name": "Show command"})
+        thread_id = create_resp.json()["id"]
+        from eggthreads import append_message
+
+        message_id = append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "SHOW FULL ANSWER",
+            extra={
+                "reasoning": "SHOW FULL REASONING",
+                "model_key": "show-model",
+                "tps": 12.5,
+            },
+        )
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": f"/show {message_id[-8:]}"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["data"]["action"] == "show_record"
+        assert payload["data"]["suppress_transcript"] is True
+        target = payload["data"]["target"]
+        assert target["record_id"] == message_id
+        assert target["message"]["content"] == "SHOW FULL ANSWER"
+        assert target["message"]["reasoning"] == "SHOW FULL REASONING"
+        assert target["message"]["model_key"] == "show-model"
+        assert target["message"]["tps"] == 12.5
+
+    def test_show_command_ambiguous_or_other_thread_id_does_not_select(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Show ambiguity"})
+        thread_id = create_resp.json()["id"]
+        other_resp = client.post("/api/threads", json={"name": "Other thread"})
+        other_id = other_resp.json()["id"]
+        for message_id, owner in (
+            ("first-browser-shared-tail", thread_id),
+            ("second-browser-shared-tail", thread_id),
+            ("other-thread-secret-id", other_id),
+        ):
+            core_state.db.append_event(
+                event_id=f"event-{message_id}",
+                thread_id=owner,
+                type_="msg.create",
+                msg_id=message_id,
+                payload={"role": "assistant", "content": message_id},
+            )
+
+        ambiguous = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/show shared-tail"},
+        ).json()
+        assert ambiguous["success"] is False
+        assert ambiguous["data"] is None
+        assert "matched 2 inspectable records" in ambiguous["message"]
+
+        inaccessible = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/show other-thread-secret-id"},
+        ).json()
+        assert inaccessible["success"] is False
+        assert inaccessible["data"] is None
+        assert inaccessible["message"] == (
+            "No inspectable record matched 'other-thread-secret-id' in the current thread."
+        )
+
     def test_execute_help_command(self, client):
         """Test executing /help command."""
         # Create thread
@@ -3350,6 +3421,7 @@ class TestCommands:
         assert "/compactWithSummary" in data["message"]
         assert "/setAutoCompactThreshold" in data["message"]
         assert "/btw <message>" in data["message"]
+        assert "/show <id_hint>" in data["message"]
         assert "/cost" in data["message"]
         assert "Threads/Agents/Subagents:" in data["message"]
         assert "/spawnChildThread <text>" in data["message"]
@@ -3799,6 +3871,26 @@ class TestAutocomplete:
         displays = {s["display"] for s in response.json()["suggestions"]}
         assert "/spawnChildThread" in displays
         assert "/spawn" not in displays
+
+    def test_show_autocomplete_uses_shared_bounded_record_catalog(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Show completion"})
+        thread_id = create_resp.json()["id"]
+        from eggthreads import append_message
+
+        message_id = append_message(core_state.db, thread_id, "assistant", "AUTOCOMPLETE SHOW BODY")
+        line = f"/show {message_id[-6:]}"
+        response = client.get(
+            "/api/autocomplete",
+            params={"line": line, "cursor": len(line), "thread_id": thread_id},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["suggestions"] == [{
+            "display": f"[{message_id[-8:]}] Assistant · AUTOCOMPLETE SHOW BODY",
+            "insert": message_id,
+            "replace": 6,
+            "meta": f"message · {message_id}",
+        }]
 
     def test_eggw_advertises_all_meaningful_terminal_egg_commands(self, client):
         """Keep EggW's textual command surface in sync with terminal Egg."""

@@ -82,6 +82,7 @@ from ..core import ensure_scheduler_for
 
 _SHARED_COMMAND_ADAPTER_COMMANDS = {
     "btw",
+    "show",
     "waitForThreads",
     "outputOptimizerStatus",
     "outputOptimizerOn",
@@ -107,11 +108,13 @@ def _execute_shared_command(thread_id: str, command_name: str, command_arg: str)
         ),
         command_arg,
     )
-    data = {"start_schedulers": list(result.start_schedulers)} if result.start_schedulers else None
+    data = dict(result.data) if result.data is not None else {}
+    if result.start_schedulers:
+        data["start_schedulers"] = list(result.start_schedulers)
     return CommandResponse(
         success=bool(result.clear_input),
         message=result.message or f"/{command_name} completed.",
-        data=data,
+        data=data or None,
     )
 
 __all__ = [
@@ -227,6 +230,8 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
         elif command_name == "help":
             return cmd_help()
         elif command_name == "btw":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "show":
             return _execute_shared_command(thread_id, command_name, command_arg)
         elif command_name == "skills":
             return await cmd_skills(thread_id, command_arg)

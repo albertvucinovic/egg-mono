@@ -31,6 +31,7 @@ class CommandResult:
     switched_thread: str | None = None
     start_schedulers: tuple[str, ...] = ()
     message: str | None = None
+    data: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -381,9 +382,10 @@ def create_default_command_registry() -> CommandRegistry:
     register_plugins(CommandPluginContext(command_registry=registry), [OutputOptimizerAdminPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [DiagnosticsPlugin()])
 
-    from .builtin_plugins import AnswerUserPlugin, CompactionPlugin, DisplayInputPlugin, SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin, WebPlugin
+    from .builtin_plugins import AnswerUserPlugin, CompactionPlugin, DisplayInputPlugin, InspectionPlugin, SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin, WebPlugin
 
     register_plugins(CommandPluginContext(command_registry=registry), [ThreadUiPlugin()])
+    register_plugins(CommandPluginContext(command_registry=registry), [InspectionPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [AnswerUserPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [CompactionPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SubagentsPlugin()])

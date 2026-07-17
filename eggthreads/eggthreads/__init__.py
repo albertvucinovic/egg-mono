@@ -45,6 +45,14 @@ from .projection import (
     ThreadProjectionError,
     load_thread_projection,
 )
+from .inspection import (
+    ShowRecordCandidate,
+    ShowRecordResolution,
+    list_show_record_candidates,
+    resolve_show_record,
+    show_record_completion_items,
+    show_record_target,
+)
 from .api import (
     validate_model_handle,
     create_root_thread,
@@ -414,6 +422,8 @@ __all__ = [
     'ThreadEventFeedNotFound', 'ThreadReplayCursor', 'parse_event_cursor', 'resolve_event_cursor',
     'ThreadsDB', 'InvocationEventWriter', 'LeaseLost', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
     'ProjectedMessage', 'ThreadProjection', 'ThreadProjectionError', 'load_thread_projection',
+    'ShowRecordCandidate', 'ShowRecordResolution', 'list_show_record_candidates',
+    'resolve_show_record', 'show_record_completion_items', 'show_record_target',
     'set_default_tool_timeout', 'get_default_tool_timeout',
     'validate_model_handle', 'create_root_thread', 'create_child_thread', 'append_message', 'append_normal_user_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable', 'get_thread_status', 'get_thread_statuses_bulk', 'get_thread_auto_approval_status',
     'list_threads', 'list_root_threads', 'get_parent', 'list_children_with_meta', 'list_children_ids', 'current_open_invoke',

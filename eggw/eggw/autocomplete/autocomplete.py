@@ -18,7 +18,7 @@ from eggthreads.artifact_completion import (
     provider_artifact_completion_items,
 )
 from eggthreads.content_parts import content_to_plain_text
-from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, SESSION_ON_COMPLETIONS, SESSION_TARGET_COMPLETIONS
+from eggthreads.command_catalog import CommandContext, EGGW_COMMAND_COMPLETIONS, SESSION_ON_COMPLETIONS, SESSION_TARGET_COMPLETIONS, create_default_command_registry
 from eggthreads.image_generation import complete_image_generate_args
 from eggthreads.skills import list_skills
 
@@ -90,6 +90,27 @@ async def get_autocomplete(
             cmd = prefix[:sp]
             arg = prefix[sp+1:]
             arg_tok = last_token(arg)
+
+            try:
+                registry_items = create_default_command_registry().complete(
+                    cmd,
+                    CommandContext(db=core.db, current_thread=thread_id),
+                    arg,
+                )
+            except KeyError:
+                registry_items = []
+            if registry_items:
+                suggestions.extend(
+                    dict(item)
+                    if isinstance(item, dict)
+                    else {
+                        "display": str(item),
+                        "insert": str(item),
+                        "replace": len(arg_tok),
+                    }
+                    for item in registry_items
+                )
+                return {"suggestions": suggestions[:20]}
 
             if cmd == '/model':
                 # Model name suggestions - replace entire argument (supports multi-word search)

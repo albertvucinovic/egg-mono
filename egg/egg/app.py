@@ -11,7 +11,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -862,6 +862,7 @@ class EggDisplayApp(
             return None
 
         result = registry.execute(cmd, replace(context, console_print_block=capture_console_print_block), arg)
+        self._present_command_result(result)
         try:
             message = getattr(result, 'message', None)
         except Exception:
@@ -877,6 +878,16 @@ class EggDisplayApp(
                 self.log_system(text)
             if block_count == 0:
                 _visible_feedback(text)
+
+    def _present_command_result(self, result: Any) -> None:
+        """Apply frontend presentation actions returned by shared commands."""
+
+        data = getattr(result, 'data', None)
+        if not isinstance(data, Mapping) or data.get('action') != 'show_record':
+            return
+        target = data.get('target')
+        if isinstance(target, dict) and target.get('thread_id') == self.current_thread:
+            self.show_inspectable_record(target)
 
     async def handle_command_async(self, text: str) -> None:
         """Dispatch /command through the command registry without blocking the UI loop."""
@@ -923,6 +934,7 @@ class EggDisplayApp(
             result = await registry.execute_async(cmd, replace(context, console_print_block=capture_console_print_block), arg)
         finally:
             self._end_user_command_stream()
+        self._present_command_result(result)
         try:
             message = getattr(result, 'message', None)
         except Exception:

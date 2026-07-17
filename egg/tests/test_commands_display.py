@@ -311,3 +311,67 @@ class TestCmdTheme:
 
         assert egg_app._theme == "matrix"
         assert any("Unknown theme: no-such-theme" in msg for msg in egg_app._system_log)
+
+
+class TestCmdShow:
+    """Tests for shared read-only /show presentation."""
+
+    def test_show_renders_full_record_without_changing_min_verbosity(self, egg_app, monkeypatch):
+        from eggthreads import append_message
+
+        msg_id = append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "VISIBLE ANSWER",
+            extra={"reasoning": "FULL REASONING BODY"},
+        )
+        shown = []
+        monkeypatch.setattr(egg_app, "show_inspectable_record", shown.append)
+        egg_app._display_verbosity = "min"
+
+        egg_app.handle_command(f"/show {msg_id[-8:]}")
+
+        assert egg_app._display_verbosity == "min"
+        assert len(shown) == 1
+        assert shown[0]["record_id"] == msg_id
+        assert shown[0]["message"]["reasoning"] == "FULL REASONING BODY"
+
+    def test_async_command_result_uses_the_same_show_presentation_path(self, egg_app, monkeypatch):
+        import asyncio
+
+        shown = []
+        monkeypatch.setattr(egg_app, "show_inspectable_record", shown.append)
+        target = {"record_id": "async-show", "thread_id": egg_app.current_thread}
+
+        async def async_show(_context, _arg):
+            from eggthreads.command_catalog import CommandResult
+
+            return CommandResult(
+                message="Showing async record.",
+                data={"action": "show_record", "target": target},
+            )
+
+        from eggthreads.command_catalog import CommandSpec
+
+        egg_app.command_registry.register(CommandSpec("asyncShow", async_show))
+        asyncio.run(egg_app.handle_command_async("/asyncShow"))
+
+        assert shown == [target]
+
+    def test_show_ambiguous_hint_does_not_present_any_record(self, egg_app, monkeypatch):
+        shown = []
+        monkeypatch.setattr(egg_app, "show_inspectable_record", shown.append)
+        for msg_id in ("first-shared-tail", "second-shared-tail"):
+            egg_app.db.append_event(
+                event_id=f"event-{msg_id}",
+                thread_id=egg_app.current_thread,
+                type_="msg.create",
+                msg_id=msg_id,
+                payload={"role": "assistant", "content": msg_id},
+            )
+
+        egg_app.handle_command("/show shared-tail")
+
+        assert shown == []
+        assert any("matched 2 inspectable records" in message for message in egg_app._system_log)

@@ -32,6 +32,12 @@ export interface Message {
   model_key?: string;
   timestamp?: string;  // ISO datetime string
   tokens?: number;     // Per-message token count
+  token_stats?: {
+    content_tokens: number;
+    reasoning_tokens: number;
+    tool_calls_tokens: number;
+    total_tokens: number;
+  };
   tps?: number;
   answer_user_preserve_turn?: boolean;
   consumed_by_tool_call_id?: string;
@@ -39,6 +45,10 @@ export interface Message {
   origin?: string;
   from_thread_id?: string;
   recovery_notice?: boolean;
+  runner_error?: string;
+  incomplete?: boolean;
+  incomplete_reason?: string;
+  user_tool_call?: boolean;
   command_name?: string;
   command_data?: Record<string, any>;
   client_only?: "optimistic" | "command";
@@ -59,6 +69,21 @@ export interface ToolCall {
 }
 
 export type DisplayVerbosity = "max" | "medium" | "min";
+
+export interface ShowRecordTarget {
+  record_id: string;
+  kind: "message" | "assistant_note" | "tool_declaration" | "tool_result";
+  thread_id: string;
+  message_id: string;
+  tool_call_id?: string | null;
+  event_seq: number;
+  watermark_event_seq: number;
+  label: string;
+  preview: string;
+  paired_message_ids: string[];
+  message: Message;
+  tool_call?: Record<string, any> | null;
+}
 
 export interface StreamingToolTimeout {
   startedAtMs: number;
@@ -225,6 +250,8 @@ interface AppState {
   setEnterMode: (mode: "send" | "newline") => void;
   displayVerbosity: DisplayVerbosity;
   setDisplayVerbosity: (level: DisplayVerbosity) => void;
+  showRecordTargetByThread: Record<string, ShowRecordTarget>;
+  setShowRecordTarget: (threadId: string, target: ShowRecordTarget | null) => void;
 
   // Theme
   theme: ThemeName;
@@ -519,6 +546,13 @@ export const useAppStore = create<AppState>((set) => ({
   setEnterMode: (mode) => set({ enterMode: mode }),
   displayVerbosity: "min",
   setDisplayVerbosity: (level) => set({ displayVerbosity: level }),
+  showRecordTargetByThread: {},
+  setShowRecordTarget: (threadId, target) => set((state) => {
+    const next = { ...state.showRecordTargetByThread };
+    if (target) next[threadId] = target;
+    else delete next[threadId];
+    return { showRecordTargetByThread: next };
+  }),
 
   // Theme
   theme: DEFAULT_THEME,

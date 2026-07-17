@@ -9,6 +9,7 @@ import { MessageInput } from "@/components/MessageInput";
 import { SystemPanel } from "@/components/SystemPanel";
 import { ApprovalPanel } from "@/components/ApprovalPanel";
 import { EditAnswerModal } from "@/components/EditAnswerModal";
+import { ShowRecordModal } from "@/components/ShowRecordModal";
 import { useAppStore } from "@/lib/store";
 import { useSSE } from "@/hooks/useSSE";
 import { createThread, openThread, interruptThread, fetchThread, executeCommand, fetchSandboxStatus, SandboxStatus, fetchModels, fetchThreadSettings, setThreadModel, setAutoApproval, fetchTokenStats } from "@/lib/api";
@@ -516,6 +517,7 @@ export default function ThreadPage() {
         </OverlayPanel>
       </div>
       <EditAnswerModal />
+      <ShowRecordModal threadId={threadId} />
     </main>
   );
 }

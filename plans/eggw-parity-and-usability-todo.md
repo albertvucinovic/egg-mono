@@ -96,17 +96,17 @@ Inventory matrix: `plans/eggw-header-parity-matrix.md`.
 
 ### `/show <id_hint>` command
 
-- [ ] Define `/show` as a shared command, not an EggW-only local shortcut.
-- [ ] Resolve an ID-autocompletion hint against currently accessible rendered
+- [x] Define `/show` as a shared command, not an EggW-only local shortcut.
+- [x] Resolve an ID-autocompletion hint against currently accessible rendered
   messages, assistant notes, tool declarations/results, and other inspectable
   records using exact access/descendant rules.
-- [ ] Specify deterministic outcomes for exact match, unique prefix/suffix hint,
+- [x] Specify deterministic outcomes for exact match, unique prefix/suffix hint,
   ambiguous hint, missing/hidden/deleted item, and ID reuse across record kinds.
-- [ ] Render the selected record with complete inspectable headers and content
+- [x] Render the selected record with complete inspectable headers and content
   regardless of current compact verbosity, without mutating transcript state.
-- [ ] Add suggestions and interactive autocomplete using the existing shared
+- [x] Add suggestions and interactive autocomplete using the existing shared
   command/catalog completion path; keep completion bounded and stale-safe.
-- [ ] Implement parity in Egg and EggW and test suggestion, autocomplete,
+- [x] Implement parity in Egg and EggW and test suggestion, autocomplete,
   ambiguity, access denial, long output/artifact references, and all verbosity
   levels.
 
@@ -259,6 +259,29 @@ policy.
   commit ledger below.
 
 ## Status notes / commit ledger
+
+- 2026-07-17: Phase 6 shared `/show <id_hint>` slice implemented without schema,
+  persistence, or transcript mutation. One shared resolver uses the canonical
+  effective message projection for the explicitly selected current thread/view;
+  it never scans descendants, ancestors, or siblings implicitly. Exact full ID
+  wins, otherwise a unique case-sensitive prefix/suffix selects; ambiguity
+  returns at most 10 newest candidates with no selection, and inaccessible,
+  deleted, skipped, or missing IDs share one non-leaking miss result. Candidate
+  identities are existing durable message/Assistant Note IDs, assistant
+  tool-call IDs, and durable tool-result message IDs; exact call/result pairing
+  remains `tool_call_id` based. Shared catalog completions are bounded to 20 and
+  reuse Egg's async completion generation fence and EggW's abort/sequence fence.
+  Terminal Egg renders the shared target at full detail while restoring the
+  current verbosity; EggW receives the same authoritative target and opens a
+  read-only full-detail modal without appending command output or changing
+  verbosity. Optimized long output stays bounded and retains its existing raw
+  artifact recovery hint. Validation: shared command/projection tests 62 passed;
+  Egg display/completion/panel tests 186 passed; EggW backend
+  show/autocomplete/display/help tests 12 passed; frontend unit tests 124
+  passed; TypeScript and production build passed; focused Playwright 1 passed;
+  full EggThreads 1530, Egg 612, and EggW backend 235 passed (plus one existing
+  skip); compileall and `git diff --check` passed. Commit hash follows after
+  final review; no other phase work started.
 
 - 2026-07-17: Phase 6 default-min scope was narrowed by manager decision after
   investigation found no canonical/persisted display-verbosity authority.

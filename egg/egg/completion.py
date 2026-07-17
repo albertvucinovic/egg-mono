@@ -355,6 +355,41 @@ class EggCompleter(Completer):
                     yield Completion(command, start_position=-len(prefix))
             return
 
+        # Shared command-owned completions (for example /show record IDs) take
+        # precedence over the legacy command-specific compatibility branches.
+        if text.startswith('/') and ' ' in text:
+            command_text, sub = text.split(' ', 1)
+            command_name = command_text[1:]
+            try:
+                items = self.command_registry.complete(
+                    command_name,
+                    CommandContext(db=self.db, current_thread=tid, llm_client=self.llm),
+                    sub,
+                )
+            except KeyError:
+                items = []
+            if items:
+                fragment = sub.split()[-1] if sub.split() else ''
+                for item in items:
+                    if isinstance(item, Mapping):
+                        insert = str(item.get('insert') or '')
+                        display = str(item.get('display') or insert)
+                        meta = str(item.get('meta') or '')
+                        try:
+                            replace_chars = int(item.get('replace', len(fragment)) or 0)
+                        except Exception:
+                            replace_chars = len(fragment)
+                        if insert:
+                            yield Completion(
+                                insert,
+                                start_position=-replace_chars,
+                                display=display,
+                                display_meta=meta,
+                            )
+                    elif isinstance(item, str) and item:
+                        yield Completion(item, start_position=-len(fragment))
+                return
+
         # 1) Delegate /model completion to the original completer
         if text.startswith('/model '):
             yield from self.model_completer.get_completions(document, complete_event)

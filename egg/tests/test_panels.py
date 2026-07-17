@@ -765,6 +765,7 @@ class TestConsolePrintMessage:
 
     def test_prints_tool_message(self, egg_app, monkeypatch):
         """Should print tool message with yellow style."""
+        egg_app._display_verbosity = "max"
         printed = []
         monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
 
@@ -823,6 +824,7 @@ class TestConsolePrintMessage:
         assert str(assistant_panels[0].border_style) == 'egg.assistant'
 
     def test_themed_static_panel_titles_use_semantic_theme_style(self, egg_app):
+        egg_app._display_verbosity = "max"
         egg_app.apply_theme("sunset")
 
         cases = [
@@ -851,6 +853,7 @@ class TestConsolePrintMessage:
 
     def test_prints_tps_in_reasoning_and_assistant_titles(self, egg_app, monkeypatch):
         """Reasoning and assistant panels should show TPS when present."""
+        egg_app._display_verbosity = "max"
         printed = []
         monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
 
@@ -870,6 +873,7 @@ class TestConsolePrintMessage:
 
     def test_prints_tool_calls_if_present(self, egg_app, monkeypatch):
         """Should print tool calls if present."""
+        egg_app._display_verbosity = "max"
         printed = []
         monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
 
@@ -883,6 +887,7 @@ class TestConsolePrintMessage:
 
     def test_prints_tps_in_tool_calls_title(self, egg_app, monkeypatch):
         """Tool calls panel should show TPS when present on the assistant message."""
+        egg_app._display_verbosity = "max"
         printed = []
         monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
 
@@ -900,6 +905,7 @@ class TestConsolePrintMessage:
 
     def test_themed_tool_call_arguments_use_tool_call_style(self, egg_app):
         """Tool call argument panels should use the distinct theme tool-call color."""
+        egg_app._display_verbosity = "max"
         egg_app.apply_theme("cyberpunk")
 
         items = egg_app._static_transcript_message_renderables({
@@ -915,6 +921,7 @@ class TestConsolePrintMessage:
         assert str(tool_call_panels[0].border_style) == 'egg.tool_call'
 
     def test_themed_streamed_tool_call_arguments_use_tool_call_style(self, egg_app):
+        egg_app._display_verbosity = "max"
         egg_app.apply_theme("cyberpunk")
 
         items = egg_app._static_transcript_message_renderables({
@@ -930,6 +937,7 @@ class TestConsolePrintMessage:
 
     def test_prints_tps_in_tool_message_title(self, egg_app, monkeypatch):
         """Tool message panel should show TPS when present."""
+        egg_app._display_verbosity = "max"
         printed = []
         monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
 
@@ -942,6 +950,7 @@ class TestConsolePrintMessage:
 
     def test_prints_optimizer_metadata_in_tool_message_title(self, egg_app, monkeypatch):
         """Optimized tool messages should expose concise metadata in titles."""
+        egg_app._display_verbosity = "max"
         printed = []
         monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
 
@@ -984,6 +993,64 @@ class TestConsolePrintMessage:
         console.print(panel)
         return console.export_text(styles=False)
 
+    def test_show_renderer_uses_target_token_stats_without_snapshot_lookup(self, egg_app, monkeypatch):
+        captured = []
+        monkeypatch.setattr(
+            egg_app,
+            "_static_transcript_message_renderables",
+            lambda message, _hidden, **kwargs: captured.append((message, kwargs)) or [],
+        )
+        monkeypatch.setattr(egg_app, "console_print_block", lambda *_args, **_kwargs: None)
+        egg_app._display_verbosity = "min"
+
+        egg_app.show_inspectable_record({
+            "record_id": "message-show",
+            "kind": "message",
+            "message": {
+                "id": "message-show",
+                "role": "assistant",
+                "content": "answer",
+                "token_stats": {
+                    "content_tokens": 4,
+                    "reasoning_tokens": 2,
+                    "tool_calls_tokens": 0,
+                    "total_tokens": 6,
+                },
+            },
+        })
+
+        message, kwargs = captured[0]
+        assert message["msg_id"] == "message-show"
+        assert kwargs["per_message_token_stats"] == {
+            "message-show": message["token_stats"],
+        }
+        assert egg_app._display_verbosity == "min"
+
+    def test_show_renderer_exposes_pairing_and_raw_output_recovery(self, egg_app, monkeypatch):
+        blocks = []
+        monkeypatch.setattr(egg_app, "console_print_block", lambda title, text, **_kwargs: blocks.append((title, text)))
+        monkeypatch.setattr(egg_app, "_print_static_transcript_renderable", lambda _item: None)
+
+        egg_app.show_inspectable_record({
+            "record_id": "tool-result-message",
+            "kind": "tool_result",
+            "paired_message_ids": ["assistant-declaration-message"],
+            "message": {
+                "id": "tool-result-message",
+                "role": "tool",
+                "name": "bash",
+                "content": "bounded preview",
+                "output_optimizer": {
+                    "optimized": True,
+                    "summary_with_artifact": "Egg optimized · raw artifact rawabc123",
+                    "raw_hint": "read_long_tool_output('rawabc123', chunk_number=1)",
+                },
+            },
+        })
+
+        rendered = "\n".join(text for _title, text in blocks)
+        assert "Exact paired message IDs: assistant-declaration-message" in rendered
+        assert "Raw output: read_long_tool_output('rawabc123', chunk_number=1)" in rendered
 
     def test_explicit_max_keeps_detail_bodies(self, egg_app, monkeypatch):
         """An explicit max override keeps reasoning and tool-result bodies."""
@@ -1932,6 +1999,7 @@ class TestTranscriptScrollbackSource:
 
     def test_rows_are_cached_by_width_and_verbosity(self, egg_app, monkeypatch):
         """Rendered rows are reused for the same width/verbosity cache key."""
+        egg_app._display_verbosity = "max"
         from egg.panels import TranscriptScrollbackSource, _StaticTranscriptRenderable
         from eggthreads import append_message, create_snapshot
 

@@ -609,6 +609,27 @@ class TestEggCompleterHelpers:
         assert 'temperature' not in matches  # doesn't start with 'test'
 
 
+def test_show_completion_uses_shared_record_catalog(isolated_db):
+    from eggthreads import append_message, create_root_thread
+
+    thread = create_root_thread(isolated_db, name="show completion")
+    msg_id = append_message(isolated_db, thread, "assistant", "completion body")
+    items = get_autocomplete_items(
+        f"/show {msg_id[-5:]}",
+        len(f"/show {msg_id[-5:]}"),
+        isolated_db,
+        lambda: thread,
+        None,
+    )
+
+    assert items == [{
+        "display": f"[{msg_id[-8:]}] Assistant · completion body",
+        "insert": msg_id,
+        "replace": 5,
+        "meta": f"message · {msg_id}",
+    }]
+
+
 def test_thread_selector_completion_uses_lightweight_list_rows(isolated_db, monkeypatch):
     """Thread completion must not reload snapshot blobs to read row status."""
     from eggthreads import create_root_thread, create_snapshot

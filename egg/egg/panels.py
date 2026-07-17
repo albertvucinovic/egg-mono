@@ -1962,6 +1962,65 @@ class PanelsMixin:
                 self._print_static_transcript_renderable(item)
             self._reset_static_min_run_tracking()
 
+    def show_inspectable_record(self, target: Dict[str, Any]) -> None:
+        """Render one shared ``/show`` target at full detail without UI mutation."""
+
+        message = target.get("message")
+        if not isinstance(message, dict):
+            raise ValueError("/show target is missing its source message")
+        selected = dict(message)
+        selected["msg_id"] = str(selected.get("id") or target.get("message_id") or "")
+        selected["ts"] = selected.get("timestamp")
+        record_id = str(target.get("record_id") or "")
+        kind = str(target.get("kind") or "message")
+        if kind == "tool_declaration":
+            tool_call = target.get("tool_call")
+            if not isinstance(tool_call, dict):
+                raise ValueError("/show tool declaration is missing its tool call")
+            selected["content"] = ""
+            selected["reasoning"] = ""
+            selected["tool_calls"] = [tool_call]
+            selected["tool_stream"] = {}
+            selected["tool_calls_stream"] = {}
+
+        previous = getattr(self, "_display_verbosity", "min")
+        self._display_verbosity = "max"
+        try:
+            token_stats = selected.get("token_stats")
+            per_message_token_stats = None
+            if isinstance(token_stats, dict):
+                per_message_token_stats = {str(selected.get("msg_id") or ""): token_stats}
+            items = self._static_transcript_message_renderables(
+                selected,
+                self._new_static_hidden_details_state(),
+                per_message_token_stats=per_message_token_stats,
+            )
+        finally:
+            self._display_verbosity = previous
+
+        heading = f"/show {kind.replace('_', ' ')}: {record_id}"
+        paired_ids = target.get("paired_message_ids")
+        details = ["Full current-thread record; display verbosity is unchanged."]
+        if selected.get("user_tool_call"):
+            details.append("Origin: user tool call")
+        if selected.get("incomplete"):
+            details.append(f"Incomplete: {selected.get('incomplete_reason') or 'yes'}")
+        if selected.get("runner_error"):
+            details.append(f"Runner error: {selected.get('runner_error')}")
+        if isinstance(paired_ids, list) and paired_ids:
+            details.append(f"Exact paired message IDs: {', '.join(map(str, paired_ids))}")
+        self.console_print_block(heading, "\n".join(details))
+        for item in items:
+            self._print_static_transcript_renderable(item)
+        optimizer = selected.get("output_optimizer")
+        if isinstance(optimizer, dict) and optimizer.get("optimized"):
+            recovery = str(optimizer.get("summary_with_artifact") or optimizer.get("summary") or "").strip()
+            raw_hint = str(optimizer.get("raw_hint") or "").strip()
+            if raw_hint:
+                recovery = f"{recovery}\nRaw output: {raw_hint}" if recovery else f"Raw output: {raw_hint}"
+            if recovery:
+                self.console_print_block("Output recovery", recovery)
+
     def flush_deferred_min_summary(self) -> bool:
         """Publish the aggregate for a watcher batch's completed hidden run."""
 

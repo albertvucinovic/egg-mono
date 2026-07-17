@@ -7,7 +7,7 @@ import { Paperclip, Send, Loader2, Terminal, StopCircle, X, ImageIcon } from "lu
 import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, uploadAttachment, generateThreadImage, attachmentUrl, fetchImageGenerationModels } from "@/lib/api";
 import type { AutocompleteSuggestion, ImageGenerationRequest } from "@/lib/api";
 import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, isImageContentPart, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
-import { useAppStore } from "@/lib/store";
+import { useAppStore, type ShowRecordTarget } from "@/lib/store";
 import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { clearLiveToolsForThread } from "@/lib/liveToolContinuity";
 import {
@@ -33,6 +33,22 @@ function commandNameFromText(command: string): string {
   if (text.startsWith("$")) return "$";
   if (text.startsWith("/")) return text.slice(1).split(/\s+/, 1)[0] || "/";
   return "command";
+}
+
+function isShowRecordTarget(value: unknown, threadId: string): value is ShowRecordTarget {
+  if (!value || typeof value !== "object") return false;
+  const target = value as Partial<ShowRecordTarget>;
+  return target.thread_id === threadId
+    && typeof target.record_id === "string"
+    && typeof target.message_id === "string"
+    && typeof target.kind === "string"
+    && ["message", "assistant_note", "tool_declaration", "tool_result"].includes(target.kind)
+    && typeof target.label === "string"
+    && typeof target.preview === "string"
+    && typeof target.event_seq === "number"
+    && typeof target.watermark_event_seq === "number"
+    && Array.isArray(target.paired_message_ids)
+    && Boolean(target.message && typeof target.message === "object");
 }
 
 interface MessageInputProps {
@@ -104,6 +120,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   const pendingImageOpsRef = useRef(new Map<string, number>());
   const router = useRouter();
   const queryClient = useQueryClient();
+  const setShowRecordTarget = useAppStore((state) => state.setShowRecordTarget);
   const refreshMessages = useCallback((targetThreadId: string) => {
     void refreshTranscriptTail(queryClient, targetThreadId).catch((error) => {
       console.error("Failed to refresh transcript tail:", error);
@@ -361,6 +378,16 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
           });
         }
 
+        const isShowRecordAction = response.data?.action === "show_record";
+        const showRecordTarget = response.data?.target;
+        if (
+          isShowRecordAction &&
+          variables.threadId === currentThreadId &&
+          isShowRecordTarget(showRecordTarget, variables.threadId)
+        ) {
+          setShowRecordTarget(variables.threadId, showRecordTarget);
+        }
+
         // Show every command response in Chat Messages. The System Log stays
         // as a compact event log, but command output should be visible in the
         // transcript area consistently (like /help).
@@ -377,7 +404,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
             client_operation_id: variables.operationId,
           });
         }
-        if (isEditAnswerModalAction) {
+        if (isEditAnswerModalAction || isShowRecordAction) {
           addSystemLog(response.message || "Command completed", "success");
           return;
         }

@@ -288,6 +288,110 @@ test.describe('Fresh display verbosity default', () => {
   });
 });
 
+test.describe('Shared show inspection', () => {
+  test('opens the authoritative full record at every verbosity without changing the global level', async ({ page }) => {
+    const threadId = 'shared-show-record';
+    const messageId = 'show-message-full-00000001';
+    const toolCallId = 'show-tool-call-full-00000001';
+    await mockThreadShell(page, threadId, {
+      messages: [{
+        id: messageId,
+        role: 'assistant',
+        content: 'SHOW ANSWER BODY',
+        reasoning: 'SHOW PRIVATE REASONING',
+        model_key: 'show-model',
+        tokens: 321,
+        tps: 12.5,
+        timestamp: '2026-01-02T03:04:05.000Z',
+        tool_calls: [{ id: toolCallId, name: 'bash', arguments: { script: 'echo SHOW TOOL ARGUMENTS' } }],
+      }],
+    });
+    await page.route(`${TEST_API_BASE}/api/autocomplete**`, async (route, request) => {
+      const line = new URL(request.url()).searchParams.get('line') || '';
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          suggestions: line.startsWith('/show ')
+            ? [{ display: `[00000001] Tool declaration: bash`, insert: toolCallId, replace: 4, meta: `tool_declaration · ${toolCallId}` }]
+            : [],
+        },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route, request) => {
+      const command = String(request.postDataJSON()?.command || '');
+      expect(command).toBe(`/show ${toolCallId}`);
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: `Showing Tool declaration: bash ${toolCallId}.`,
+          command_id: 'show-command-1',
+          command_name: 'show',
+          started_at: '2026-01-02T03:04:06.000Z',
+          finished_at: '2026-01-02T03:04:06.010Z',
+          elapsed_sec: 0.01,
+          data: {
+            action: 'show_record',
+            suppress_transcript: true,
+            target: {
+              record_id: toolCallId,
+              kind: 'tool_declaration',
+              thread_id: threadId,
+              message_id: messageId,
+              tool_call_id: toolCallId,
+              event_seq: 42,
+              watermark_event_seq: 45,
+              label: 'Tool declaration: bash',
+              preview: 'bash(echo SHOW TOOL ARGUMENTS)',
+              paired_message_ids: ['show-tool-result-message'],
+              message: {
+                id: messageId,
+                role: 'assistant',
+                content: 'SHOW ANSWER BODY',
+                reasoning: 'SHOW PRIVATE REASONING',
+                model_key: 'show-model',
+                tokens: 321,
+                tps: 12.5,
+                timestamp: '2026-01-02T03:04:05.000Z',
+                tool_calls: [{ id: toolCallId, name: 'bash', arguments: { script: 'echo SHOW TOOL ARGUMENTS' } }],
+              },
+              tool_call: { id: toolCallId, name: 'bash', arguments: { script: 'echo SHOW TOOL ARGUMENTS' } },
+            },
+          },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const verbosity = page.locator('select[title="Transcript display verbosity"]');
+    const input = page.getByTestId('message-input');
+    for (const level of ['min', 'medium', 'max'] as const) {
+      await verbosity.selectOption(level);
+      await input.fill('/show 0001');
+      await expect(page.getByRole('option', { name: /Tool declaration: bash/ })).toBeVisible();
+      await input.press('Tab');
+      await expect(input).toHaveValue(`/show ${toolCallId}`);
+      await input.press('Enter');
+
+      const modal = page.getByTestId('show-record-modal');
+      await expect(modal).toBeVisible();
+      await expect(modal).toContainText(`record_id: ${toolCallId}`);
+      await expect(modal).toContainText(`message_id: ${messageId}`);
+      await expect(modal).toContainText('model: show-model');
+      await expect(modal).toContainText('321 tok');
+      await expect(modal).toContainText('13 tps');
+      await expect(modal).toContainText('Exact paired message IDs: show-tool-result-message');
+      await expect(modal).toContainText('echo SHOW TOOL ARGUMENTS');
+      await expect(verbosity).toHaveValue(level);
+      await modal.getByRole('button', { name: 'Close', exact: true }).click();
+      await expect(modal).not.toBeVisible();
+      await expect(input).toBeFocused();
+    }
+  });
+});
+
 test.describe('Basic Operations', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');

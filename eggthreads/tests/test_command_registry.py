@@ -104,11 +104,21 @@ def test_default_command_registry_contains_existing_ui_commands() -> None:
         "startSearxng",
         "displayMode",
         "authStatus",
+        "show",
     ]:
         assert name in names
 
     assert "/help" in command_completion_names(registry)
     assert "/sessionStatus" in command_completion_names(registry)
+
+
+def test_show_command_is_registered_from_shared_inspection_plugin() -> None:
+    from eggthreads.builtin_plugins import inspection
+
+    registry = create_default_command_registry()
+
+    assert registry.get("show").handler is inspection.show_command
+    assert registry.get("show").complete is inspection.show_completions
 
 
 def test_plugins_expose_common_provider_policy_context_fields() -> None:
