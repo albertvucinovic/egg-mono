@@ -147,12 +147,12 @@ reported approval issue is Phase 10 even though it is investigated first.
 
 ### Child identity
 
-- [ ] Show an explicit thread ID for every child even when it has a name.
-- [ ] A compact unique suffix is acceptable only when the complete ID remains
+- [x] Show an explicit thread ID for every child even when it has a name.
+- [x] A compact unique suffix is acceptable only when the complete ID remains
   available through title, copy, details, or `/show`.
-- [ ] Preserve identity across duplicate child names, renamed children, nested
+- [x] Preserve identity across duplicate child names, renamed children, nested
   descendants, route switches, and all verbosity levels.
-- [ ] Add backend/frontend tests for duplicate names and full-ID access.
+- [x] Add backend/frontend tests for duplicate names and full-ID access.
 
 ## Phase 9 — README normalization (discussion and approval required)
 
@@ -253,6 +253,23 @@ policy.
   commit ledger below.
 
 ## Status notes / commit ledger
+
+- 2026-07-17: Phase 8 child-identity slice implemented. Every Children panel
+  row now shows an explicit compact thread-ID suffix independently of the
+  optional name, exposes the canonical full ID through row/ID titles and
+  accessibility labels, and provides a full-ID copy control that does not
+  navigate. Unnamed children use a neutral label instead of duplicating the
+  suffix; duplicate names remain distinguishable by ID. The same panel behavior
+  applies to nested descendants, route switches, and all transcript verbosity
+  settings because it is outside transcript presentation. Literal backend
+  coverage verifies duplicate-name children retain distinct full canonical IDs;
+  Playwright verifies duplicate/unnamed rows, full-ID keyboard copy, navigation
+  isolation, all-theme geometry/focus, and mobile visuals. Validation before
+  commit: full EggW backend `232 passed, 1 skipped`; frontend unit `121 passed`;
+  TypeScript and production build passed; full Playwright `100 passed` (including
+  the 5M-token-equivalent performance fixture); Python compile and
+  `git diff --check` passed. Commit hash follows after creation. No chronology
+  work started.
 
 - 2026-07-17: Phase 10 first investigation stopped at bounded evidence on user priority change; no product repair or broad validation was attempted. Canonical lifecycle is `tool_call.finished` (durable raw output/TC4) → runner `_finalize_auto_tool_output()` → shared output-policy/optimizer registry → transactional lease/version-fenced `finalize_tool_output()` → one durable `tool_call.output_approval` (TC5) → final `role=tool` message (TC6); long whole output is automatically routed to a bounded preview plus thread-owned artifact/read instructions. Execution/security approval is the separate TC1 `tool_call.approval` authority. EggW GET/API/SSE reads do not write approval policy; its only approval writes are explicit user POST/WebSocket actions, while visiting/sending starts the same shared `SubtreeScheduler`. Existing exact-once tests cover competing finalizers and one long-output artifact. The literal unwanted prompt is reachable whenever Terminal Egg observes any durable TC4: `compute_pending_prompt()` still converts every TC4 with output into the legacy “include all?” prompt, and EggW similarly renders every TC4 as output approval. The likely trigger is a crash/lease-loss window after `tool_call.finished` but before the same invocation commits automatic policy: ordinary TC4 is not scheduler-actionable, so another scheduler cannot finalize it; current orphan recovery is limited to TC3 and a narrow interrupted/no-finished-event TC4. Open questions for later Phase 10 work: reproduce that exact inter-statement crash across Egg/EggW schedulers, decide whether successful durable TC4 should become lease-fenced recovery work versus suppressing obsolete UI prompts, and define explicit manual-policy configuration (none was found in current output-policy config) before removing manual fallback. Historical commits show automatic long-output handling was established before the legacy prompt was re-exposed by `e67ba30`. No SQLite/schema change is implicated.
 

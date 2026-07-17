@@ -1889,6 +1889,16 @@ code {
   display: grid;
 }
 
+.eggw-thread-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.eggw-thread-row .eggw-thread-link {
+  padding-right: 2.65rem;
+}
+
 .eggw-thread-link {
   width: 100%;
   min-height: 2.5rem;
@@ -1911,6 +1921,37 @@ code {
 .eggw-thread-link small {
   color: var(--text-secondary);
   font-size: 0.72rem;
+}
+
+.eggw-thread-link code {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.eggw-thread-id-copy {
+  position: absolute;
+  right: 0.45rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.35rem;
+  color: var(--text-secondary);
+}
+
+.eggw-thread-id-copy:hover {
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+@media (max-width: 639px) {
+  .eggw-thread-row .eggw-thread-link {
+    padding-right: 3.4rem;
+  }
+
+  .eggw-thread-id-copy {
+    right: 0.2rem;
+    width: 2.75rem;
+    height: 2.75rem;
+  }
 }
 
 .eggw-compact-state {

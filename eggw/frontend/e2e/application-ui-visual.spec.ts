@@ -180,6 +180,20 @@ test("all 31 themes expose safe application geometry and focus", async ({ page }
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await page.waitForTimeout(180);
     if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) failures.push(`${theme}: document overflow`);
+    const childRow = page.locator(".eggw-thread-row").first();
+    const childLink = childRow.locator(".eggw-thread-link");
+    const childCopy = childRow.getByRole("button", { name: `Copy thread ID ${childId}` });
+    if (!(await childRow.evaluate((element) => element.scrollWidth <= element.clientWidth))) failures.push(`${theme}: child row overflow`);
+    if (!(await childLink.evaluate((element) => element.scrollWidth <= element.clientWidth))) failures.push(`${theme}: child link overflow`);
+    if (!(await childCopy.isVisible())) failures.push(`${theme}: child ID copy hidden`);
+    await childCopy.focus();
+    const childCopyFocus = await childCopy.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { width: style.outlineWidth, style: style.outlineStyle, color: style.outlineColor };
+    });
+    if (childCopyFocus.width !== "3px" || childCopyFocus.style !== "solid" || childCopyFocus.color === "rgba(0, 0, 0, 0)") {
+      failures.push(`${theme}: child ID copy focus ${JSON.stringify(childCopyFocus)}`);
+    }
     const composer = page.getByTestId("message-input");
     const help = page.getByRole("button", { name: "Help" });
     await help.focus();

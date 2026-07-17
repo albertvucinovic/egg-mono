@@ -789,7 +789,7 @@ test.describe('Composer draft and autocomplete ownership', () => {
     const input = page.getByTestId('message-input');
     await expect(input).toBeVisible();
     await input.fill('a'.repeat(200));
-    await page.getByRole('button', { name: new RegExp(threadB) }).click();
+    await page.locator('.eggw-thread-link').filter({ hasText: threadB }).click();
     await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
     await page.getByTestId('message-input').fill('thread b draft');
     await page.goBack();
@@ -2048,6 +2048,57 @@ test.describe('Continuation command without SSE authority', () => {
   });
 });
 
+test.describe('Children panel identity', () => {
+  test('shows every child thread ID with full-ID access when names are ambiguous', async ({ page }) => {
+    const parentId = 'children-identity-parent';
+    const firstChildId = '01JCHILDIDENTITY00000000000001';
+    const secondChildId = '01JCHILDIDENTITY00000000000002';
+    const unnamedChildId = '01JCHILDIDENTITY00000000000003';
+    await mockThreadShell(page, parentId);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${parentId}/children`);
+    await page.route(`${TEST_API_BASE}/api/threads/${parentId}/children`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [
+        { id: firstChildId, name: 'Duplicate child', parent_id: parentId, model_key: 'provider:first', has_children: false },
+        { id: secondChildId, name: 'Duplicate child', parent_id: parentId, model_key: 'provider:second', has_children: true },
+        { id: unnamedChildId, parent_id: parentId, has_children: false },
+      ],
+    }));
+
+    await page.goto(`/${parentId}`);
+
+    const children = page.locator('.eggw-children-list .eggw-thread-row');
+    await expect(children).toHaveCount(3);
+    await expect(children.nth(0).getByText('Duplicate child', { exact: true })).toBeVisible();
+    await expect(children.nth(1).getByText('Duplicate child', { exact: true })).toBeVisible();
+    await expect(children.nth(2).getByText('Unnamed child', { exact: true })).toBeVisible();
+    const childIds = [firstChildId, secondChildId, unnamedChildId];
+    for (let index = 0; index < childIds.length; index += 1) {
+      const childId = childIds[index];
+      const identity = children.nth(index).locator('code');
+      await expect(identity).toHaveText(childId.slice(-8));
+      await expect(identity).toHaveAttribute('title', childId);
+      await expect(identity).toHaveAttribute('aria-label', `Thread ID ${childId}`);
+      await expect(children.nth(index).locator('.eggw-thread-link')).toHaveAttribute('title', `Open child thread ${childId}`);
+      await expect(children.nth(index).getByRole('button', { name: `Copy thread ID ${childId}` })).toHaveAttribute('title', 'Copy full thread ID');
+    }
+
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: (value: string) => { (window as typeof window & { copiedThreadId?: string }).copiedThreadId = value; } },
+      });
+    });
+    const copySecondId = children.nth(1).getByRole('button', { name: `Copy thread ID ${secondChildId}` });
+    await copySecondId.focus();
+    await expect(copySecondId).toBeFocused();
+    await copySecondId.press('Enter');
+    await expect.poll(() => page.evaluate(() => (window as typeof window & { copiedThreadId?: string }).copiedThreadId)).toBe(secondChildId);
+    await expect(page).toHaveURL(new RegExp(`/${parentId}$`));
+  });
+});
+
 test.describe('Per-thread transcript state', () => {
   test('preserves paginated thread A while navigating to thread B and back', async ({ page }) => {
     await page.addInitScript(() => {
@@ -2107,7 +2158,7 @@ test.describe('Per-thread transcript state', () => {
     await page.keyboard.press('Home');
     await expect(threadAChat).toContainText('thread a old');
 
-    await page.getByRole('button', { name: new RegExp(threadB) }).click();
+    await page.locator('.eggw-thread-link').filter({ hasText: threadB }).click();
     await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
     await expect(page.getByTestId('chat-panel')).toContainText('thread b only');
     await expect(page.getByTestId('chat-panel')).not.toContainText('thread a old');

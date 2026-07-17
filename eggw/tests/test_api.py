@@ -303,6 +303,25 @@ class TestThreadOperations:
         assert [m["content"] for m in self._system_messages(client, parent_id)] == ["EGGW ROOT ONLY PROMPT"]
         assert self._system_messages(client, child_id) == []
 
+    def test_children_endpoint_preserves_full_ids_for_duplicate_names(self, client):
+        """Children remain distinguishable by the canonical IDs returned to EggW."""
+        parent_id = client.post("/api/threads", json={"name": "Parent"}).json()["id"]
+        child_ids = [
+            client.post(
+                "/api/threads",
+                json={"name": "Duplicate child", "parent_id": parent_id},
+            ).json()["id"]
+            for _ in range(2)
+        ]
+
+        response = client.get(f"/api/threads/{parent_id}/children")
+
+        assert response.status_code == 200
+        children = response.json()
+        assert [child["name"] for child in children] == ["Duplicate child", "Duplicate child"]
+        assert [child["id"] for child in children] == child_ids
+        assert all(child["parent_id"] == parent_id for child in children)
+
     def test_api_rejects_child_thread_with_missing_parent(self, client):
         """Failed child creation must not leave orphan non-root rows."""
         response = client.post("/api/threads", json={"name": "Orphan", "parent_id": "missing-parent"})

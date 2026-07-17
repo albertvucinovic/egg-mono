@@ -2,10 +2,10 @@
 
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUp, ChevronRight, GitBranch, Plus } from "lucide-react";
+import { ArrowUp, ChevronRight, Copy, GitBranch, Plus } from "lucide-react";
 import { fetchThread, fetchThreadChildren } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
-import { Button } from "@/components/ui/primitives";
+import { Button, IconButton } from "@/components/ui/primitives";
 import clsx from "clsx";
 
 interface ChildThread {
@@ -41,12 +41,31 @@ export function ChildrenPanel({ showBorders = true }: { showBorders?: boolean })
       ) : (
         <div className="eggw-children-list">
           {children.map((child: ChildThread) => (
-            <Button key={child.id} variant="ghost" onClick={() => router.push(`/${child.id}`)} className="eggw-thread-link">
-              <ChevronRight className="h-4 w-4" aria-hidden="true" />
-              <span>{child.name || child.id.slice(-8)}</span>
-              {child.model_key && <small>{child.model_key}</small>}
-              {child.has_children && <Plus className="h-3.5 w-3.5" aria-label="Has children" />}
-            </Button>
+            <div key={child.id} className="eggw-thread-row">
+              <Button
+                variant="ghost"
+                onClick={() => router.push(`/${child.id}`)}
+                className="eggw-thread-link"
+                title={`Open child thread ${child.id}`}
+              >
+                <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                <span>{child.name || "Unnamed child"}</span>
+                {child.model_key && <small>{child.model_key}</small>}
+                <code title={child.id} aria-label={`Thread ID ${child.id}`}>{child.id.slice(-8)}</code>
+                {child.has_children && <Plus className="h-3.5 w-3.5" aria-label="Has children" />}
+              </Button>
+              <IconButton
+                className="eggw-thread-id-copy"
+                aria-label={`Copy thread ID ${child.id}`}
+                title="Copy full thread ID"
+                onClick={() => {
+                  if (!navigator.clipboard?.writeText) return;
+                  void navigator.clipboard.writeText(child.id);
+                }}
+              >
+                <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+              </IconButton>
+            </div>
           ))}
         </div>
       )}
