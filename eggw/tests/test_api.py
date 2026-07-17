@@ -4138,3 +4138,93 @@ def test_output_finalization_failure_returns_conflict_and_keeps_tc4(client, monk
     assert response.status_code == 409
     assert "artifact unavailable" in response.json()["detail"]
     assert build_tool_call_states(core_state.db, thread_id)[tool_call_id].state == "TC4"
+
+
+def test_phase10_read_only_web_paths_project_stranded_tc4_without_mutation(
+    client, monkeypatch
+):
+    """EggW reads expose, but do not decide or publish, successful TC4 output."""
+    from eggthreads import (
+        append_message,
+        build_tool_call_states,
+        create_root_thread,
+        discover_runner_actionable,
+    )
+
+    monkeypatch.setattr("eggw.core.scheduler.start_scheduler", lambda _root_id: None)
+    thread_id = create_root_thread(core_state.db, name="phase10 web read only")
+    tool_call_id = "phase10-web-stranded-call"
+    output = "successful output stranded before automatic publication"
+    append_message(
+        core_state.db,
+        thread_id,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{}"},
+                }
+            ]
+        },
+    )
+    core_state.db.append_event(
+        "phase10-web-exec-approval",
+        thread_id,
+        "tool_call.approval",
+        {"tool_call_id": tool_call_id, "decision": "granted"},
+    )
+    core_state.db.append_event(
+        "phase10-web-execution-started",
+        thread_id,
+        "tool_call.execution_started",
+        {"tool_call_id": tool_call_id},
+        invoke_id="phase10-web-owner",
+    )
+    core_state.db.append_event(
+        "phase10-web-finished",
+        thread_id,
+        "tool_call.finished",
+        {"tool_call_id": tool_call_id, "reason": "success", "output": output},
+        invoke_id="phase10-web-owner",
+    )
+    assert build_tool_call_states(core_state.db, thread_id)[tool_call_id].state == "TC4"
+    assert discover_runner_actionable(core_state.db, thread_id) is None
+    before = [
+        (row["event_seq"], row["type"], row["payload_json"])
+        for row in core_state.db.conn.execute(
+            "SELECT event_seq, type, payload_json FROM events "
+            "WHERE thread_id=? ORDER BY event_seq",
+            (thread_id,),
+        ).fetchall()
+    ]
+
+    assert client.get(f"/api/threads/{thread_id}").status_code == 200
+    messages = client.get(f"/api/threads/{thread_id}/messages?envelope=true")
+    state = client.get(f"/api/threads/{thread_id}/state")
+    tools = client.get(f"/api/threads/{thread_id}/tools")
+    settings = client.get(f"/api/threads/{thread_id}/settings")
+    opened = client.post(f"/api/threads/{thread_id}/open")
+
+    assert all(
+        response.status_code == 200
+        for response in (messages, state, tools, settings, opened)
+    )
+    assert state.json()["state"] == "waiting_output_approval"
+    tool = next(item for item in tools.json() if item["id"] == tool_call_id)
+    assert tool["state"] == "TC4"
+    assert tool["output"] == output
+    assert tool["output_decision"] is None
+    assert opened.json()["root_id"] == thread_id
+    after = [
+        (row["event_seq"], row["type"], row["payload_json"])
+        for row in core_state.db.conn.execute(
+            "SELECT event_seq, type, payload_json FROM events "
+            "WHERE thread_id=? ORDER BY event_seq",
+            (thread_id,),
+        ).fetchall()
+    ]
+    assert after == before
+    assert build_tool_call_states(core_state.db, thread_id)[tool_call_id].state == "TC4"

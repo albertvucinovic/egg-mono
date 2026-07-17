@@ -321,3 +321,73 @@ def test_output_finalization_failure_keeps_terminal_prompt_and_input(egg_app, mo
     assert egg_app._pending_prompt == {"kind": "output", "tool_call_ids": [tcid]}
     assert egg_app.input_panel.get_text() == "n"
     assert build_tool_call_states(egg_app.db, tid)[tcid].state == "TC4"
+
+
+def test_phase10_successful_tc4_surfaces_legacy_long_output_prompt(tmp_path):
+    """Characterize the user-visible prompt produced by a stranded TC4."""
+    from egg.approval import ApprovalMixin
+
+    class DummyApprovalApp(ApprovalMixin):
+        def __init__(self):
+            self.db = ts.ThreadsDB(tmp_path / "phase10-cli-prompt.sqlite")
+            self.db.init_schema()
+            self.current_thread = ts.create_root_thread(
+                self.db, name="phase10 CLI prompt"
+            )
+            self._pending_prompt = {}
+            self.logs = []
+
+        def log_system(self, message):
+            self.logs.append(message)
+
+    app = DummyApprovalApp()
+    tool_call_id = "phase10-cli-stranded-call"
+    output = "long output line\n" * 900
+    ts.append_message(
+        app.db,
+        app.current_thread,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{}"},
+                }
+            ]
+        },
+    )
+    app.db.append_event(
+        "phase10-cli-exec-approval",
+        app.current_thread,
+        "tool_call.approval",
+        {"tool_call_id": tool_call_id, "decision": "granted"},
+    )
+    app.db.append_event(
+        "phase10-cli-execution-started",
+        app.current_thread,
+        "tool_call.execution_started",
+        {"tool_call_id": tool_call_id},
+        invoke_id="phase10-cli-owner",
+    )
+    app.db.append_event(
+        "phase10-cli-finished",
+        app.current_thread,
+        "tool_call.finished",
+        {"tool_call_id": tool_call_id, "reason": "success", "output": output},
+        invoke_id="phase10-cli-owner",
+    )
+
+    app.compute_pending_prompt()
+
+    assert app._pending_prompt == {
+        "kind": "output",
+        "tool_call_ids": [tool_call_id],
+    }
+    assert app.logs[0] == (
+        f"This output is very long (900 lines, {len(output)} chars), "
+        "do you want to include all of it?([y]es/[n]o/[o]mit)"
+    )
+    assert app.logs[1].startswith("Preview (shortened):\n")
+    assert ts.discover_runner_actionable(app.db, app.current_thread) is None
