@@ -1660,7 +1660,12 @@ class PanelsMixin:
                 append_hidden_details()
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
-            panel(Text(content, no_wrap=False, overflow='fold', style=style), title, style)
+            display_content = (
+                self._panel_one_line_preview(content)
+                if verbosity == 'min' and is_recovery_notice
+                else content
+            )
+            panel(Text(display_content, no_wrap=False, overflow='fold', style=style), title, style)
             return items
 
         if role == 'user':

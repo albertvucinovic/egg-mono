@@ -1,0 +1,127 @@
+{
+  "description": "Literal Phase 6 characterization fixture. The public fields are the current EggW /messages intersection; canonical_payload documents durable distinctions that are not currently exposed to both clients and must not be inferred from content.",
+  "records": [
+    {
+      "event_seq": 10,
+      "id": "phase6-user-00000010",
+      "role": "user",
+      "content": "Please continue the work.",
+      "canonical_payload": {},
+      "expected_presentation": {
+        "label": "User",
+        "min_content": "Please continue the work.",
+        "medium_max_content": "Please continue the work."
+      }
+    },
+    {
+      "event_seq": 20,
+      "id": "phase6-error-00000020",
+      "role": "system",
+      "content": "LLM/runner error: HTTP 503 Service Unavailable",
+      "canonical_payload": {
+        "runner_error": true
+      },
+      "expected_presentation": {
+        "label": "System",
+        "min_content": "LLM/runner error: HTTP 503 Service Unavailable",
+        "medium_max_content": "LLM/runner error: HTTP 503 Service Unavailable"
+      }
+    },
+    {
+      "event_seq": 30,
+      "id": "phase6-retry-scheduled-00000030",
+      "role": "system",
+      "content": "Recovery: auto-continue scheduled.\nDecision: retry (server) after 5 seconds.\nReason: retryable upstream server failure\nPrevious error summary: LLM/runner error: HTTP 503 Service Unavailable",
+      "recovery_notice": true,
+      "canonical_payload": {
+        "auto_continue": true,
+        "action": "scheduled",
+        "decision_category": "server",
+        "delay_sec": 5.0,
+        "source_msg_id": "phase6-error-00000020",
+        "trigger_msg_id": "phase6-user-00000010"
+      },
+      "expected_presentation": {
+        "label": "Continue Status",
+        "min_content": "Recovery: auto-continue scheduled. Decision: retry (server) after 5 seconds. Reason: retryable upstream server failure Previous error summary: LLM/runner err...",
+        "medium_max_content": "Recovery: auto-continue scheduled.\nDecision: retry (server) after 5 seconds.\nReason: retryable upstream server failure\nPrevious error summary: LLM/runner error: HTTP 503 Service Unavailable"
+      }
+    },
+    {
+      "event_seq": 40,
+      "id": "phase6-system-00000040",
+      "role": "system",
+      "content": "Nearby ordinary system message.",
+      "canonical_payload": {},
+      "expected_presentation": {
+        "label": "System",
+        "min_content": "Nearby ordinary system message.",
+        "medium_max_content": "Nearby ordinary system message."
+      }
+    },
+    {
+      "event_seq": 50,
+      "id": "phase6-retry-applied-00000050",
+      "role": "system",
+      "content": "Recovery: auto-continue applied.\nDecision: retry (server) after 5 seconds.\nReason: retryable upstream server failure\nDetail: automatic continuation applied",
+      "recovery_notice": true,
+      "canonical_payload": {
+        "auto_continue": true,
+        "action": "applied",
+        "decision_category": "server",
+        "source_msg_id": "phase6-error-00000020",
+        "trigger_msg_id": "phase6-user-00000010"
+      },
+      "expected_presentation": {
+        "label": "Continue Status",
+        "min_content": "Recovery: auto-continue applied. Decision: retry (server) after 5 seconds. Reason: retryable upstream server failure Detail: automatic continuation applied",
+        "medium_max_content": "Recovery: auto-continue applied.\nDecision: retry (server) after 5 seconds.\nReason: retryable upstream server failure\nDetail: automatic continuation applied"
+      }
+    },
+    {
+      "event_seq": 60,
+      "id": "phase6-retry-stopped-00000060",
+      "role": "system",
+      "content": "Recovery: auto-continue stopped.\nDecision: stop (bad_request).\nReason: permanent request failure\nStop reason: bad_request",
+      "recovery_notice": true,
+      "canonical_payload": {
+        "auto_continue": true,
+        "action": "stopped",
+        "decision_category": "bad_request",
+        "stop_reason": "bad_request",
+        "source_msg_id": "phase6-error-00000020",
+        "trigger_msg_id": "phase6-user-00000010"
+      },
+      "expected_presentation": {
+        "label": "Continue Status",
+        "min_content": "Recovery: auto-continue stopped. Decision: stop (bad_request). Reason: permanent request failure Stop reason: bad_request",
+        "medium_max_content": "Recovery: auto-continue stopped.\nDecision: stop (bad_request).\nReason: permanent request failure\nStop reason: bad_request"
+      }
+    },
+    {
+      "event_seq": 70,
+      "id": "phase6-manual-continue-00000070",
+      "role": "system",
+      "content": "Recovery: manual /continue succeeded.\nContinue point: 00000010 (phase6-user-00000010).\nSkipped: 1 message (system=1).",
+      "recovery_notice": true,
+      "canonical_payload": {},
+      "expected_presentation": {
+        "label": "Continue Status",
+        "min_content": "Recovery: manual /continue succeeded. Continue point: 00000010 (phase6-user-00000010). Skipped: 1 message (system=1).",
+        "medium_max_content": "Recovery: manual /continue succeeded.\nContinue point: 00000010 (phase6-user-00000010).\nSkipped: 1 message (system=1)."
+      }
+    },
+    {
+      "event_seq": 80,
+      "id": "phase6-assistant-00000080",
+      "role": "assistant",
+      "content": "Work resumed.",
+      "canonical_payload": {},
+      "expected_presentation": {
+        "label": "Assistant",
+        "min_content": "Work resumed.",
+        "medium_max_content": "Work resumed."
+      }
+    }
+  ]
+}

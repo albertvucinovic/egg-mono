@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
+import operationalRecoveryFixture from '../../../eggthreads/tests/fixtures/phase6-operational-recovery-interleaved.json';
 
 /**
  * E2E tests for eggw web UI.
@@ -3112,6 +3113,42 @@ test.describe('Message header parity', () => {
     await verbosity.selectOption('min');
     await page.locator('[data-source-message-id="header-tool-result-00000004"]').getByTestId('tool-call-id').click();
     await expect.poll(() => page.evaluate(() => (window as typeof window & { copiedHeaderId?: string }).copiedHeaderId)).toBe('header-tool-call-00000004');
+  });
+});
+
+test.describe('Operational recovery presentation', () => {
+  test('keeps interleaved error/recovery/system chronology and compacts only generic notices at min', async ({ page }) => {
+    const threadId = 'operational-recovery-interleaved';
+    const records = operationalRecoveryFixture.records;
+    const messages = records.map((record) => ({
+      id: record.id,
+      role: record.role,
+      content: record.content,
+      event_seq: record.event_seq,
+      ...("recovery_notice" in record && record.recovery_notice ? { recovery_notice: true } : {}),
+    }));
+    await mockThreadShell(page, threadId, { messages });
+    await page.goto(`/${threadId}`);
+
+    const verbosity = page.locator('select[title="Transcript display verbosity"]');
+    const transcript = page.getByTestId('static-transcript-owner');
+    const expectedOrder = records.map((record) => record.id);
+    for (const level of ['max', 'medium', 'min'] as const) {
+      await verbosity.selectOption(level);
+      await expect.poll(() => transcript.locator(':scope > .eggw-message-card').evaluateAll((cards) =>
+        cards.map((card) => card.getAttribute('data-message-id')),
+      )).toEqual(expectedOrder);
+      for (const record of records) {
+        const card = transcript.locator(`[data-message-id="${record.id}"]`);
+        await expect(card.locator('.eggw-role-label')).toHaveText(record.expected_presentation.label);
+        if (record.role !== 'system') continue;
+        await expect(card.locator('pre')).toHaveText(
+          level === 'min'
+            ? record.expected_presentation.min_content
+            : record.expected_presentation.medium_max_content,
+        );
+      }
+    }
   });
 });
 

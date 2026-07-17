@@ -681,8 +681,14 @@ class FormattingMixin:
                         continue
                     if verbosity == 'min':
                         flush_hidden()
-                    label = 'Continue Status' if m.get('recovery_notice') else 'System'
-                    lines.append(f"[{label}{msg_id_text}]\n{content}")
+                    is_recovery_notice = bool(m.get('recovery_notice'))
+                    label = 'Continue Status' if is_recovery_notice else 'System'
+                    display_content = (
+                        self._one_line_display_preview(content)
+                        if verbosity == 'min' and is_recovery_notice
+                        else content
+                    )
+                    lines.append(f"[{label}{msg_id_text}]\n{display_content}")
         flush_hidden()
         return "\n\n".join(lines)
 

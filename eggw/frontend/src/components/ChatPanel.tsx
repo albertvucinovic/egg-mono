@@ -916,7 +916,13 @@ const MessageBlock = memo(function MessageBlock({
   // Check if this is a shell command (starts with $ or $$)
   // Handle cases: "$ cmd", "$$ cmd", "$cmd" (no space)
   const contentText = contentToPlainText(message.content, message.content_text || "");
-  const stringContent = typeof message.content === "string" ? message.content : contentText;
+  const compactRecoveryNotice = displayVerbosity === "min" && message.role === "system" && message.recovery_notice;
+  const displayedContentText = compactRecoveryNotice ? oneLinePreview(contentText) : contentText;
+  const stringContent = typeof message.content === "string"
+    ? compactRecoveryNotice
+      ? displayedContentText
+      : message.content
+    : displayedContentText;
   const isShellCommand = message.role === "user" && typeof message.content === "string" && message.content.match(/^\$\$?\s*\S/);
 
   // Check if this is a system/command message (should render as monospace)
@@ -1016,7 +1022,7 @@ const MessageBlock = memo(function MessageBlock({
             isThreadsCommandOutput ? (
               <ThreadCommandOutput content={contentText} threadIds={message.command_data?.thread_ids} />
             ) : (
-              <pre className="eggw-code-block whitespace-pre-wrap">{contentText}</pre>
+              <pre className="eggw-code-block whitespace-pre-wrap">{displayedContentText}</pre>
             )
           ) : isContentPartArray(message.content) ? (
             <ContentPartsView parts={message.content} showBorders={showBorders} onStageAttachment={onStageAttachment} />

@@ -49,11 +49,13 @@ reported approval issue is Phase 10 even though it is investigated first.
 
 ### Shared compact semantics
 
-- [ ] Inventory errors, retry/auto-continue notices, manual continuation,
+- [x] Inventory errors, retry/auto-continue notices, manual continuation,
   assistant notes, assistant messages, tool declarations/results, and other
-  operational records in both Egg and EggW at every verbosity.
-- [ ] Define or reuse one shared semantic representation for compact operational
-  and error output rather than inferring chronology separately in each client.
+  operational records in both Egg and EggW at every verbosity. Exact recovery
+  action/error-label parity gaps are documented below and require approval.
+- [x] Reuse the existing shared `recovery_notice` marker for the safe compact
+  subset: one bounded min preview at the canonical source position in both
+  clients. Do not infer unavailable action/error semantics from notice text.
 - [x] Preserve canonical event chronology in EggW: assistant notes/messages and
   tool declarations/results must not be grouped or reordered incorrectly,
   including at `displayVerbosity=min`.
@@ -61,8 +63,9 @@ reported approval issue is Phase 10 even though it is investigated first.
   Assistant Note/message → tool result → recovery/error) and require EggW min,
   medium, and max to retain the shared canonical message order. Cross-client Egg
   fixture parity remains part of the broader shared-semantics inventory.
-- [ ] Keep active errors, approval/recovery decisions, and manual continuation
-  inspectable without repeating large verbose cards.
+- [x] Keep active errors and generic recovery/manual-continuation notices
+  inspectable without repeating large verbose cards at min. Exact approval and
+  recovery-decision labels remain pending the explicitly unapproved fields below.
 
 ### Header parity
 
@@ -259,6 +262,28 @@ policy.
   commit ledger below.
 
 ## Status notes / commit ledger
+
+- 2026-07-17: Phase 6 operational/error/recovery inventory and safe shared
+  presentation subset completed under the existing-public-data/no-protocol
+  boundary. Canonical chronology was already shared, and all system messages,
+  including errors and recovery notices, were already visible at min. The only
+  meaningful common semantic marker is `recovery_notice`; both clients now use it
+  identically to collapse each recovery notice's existing content to one bounded
+  160-character line at min while retaining its `Continue Status` label, exact
+  source position and message ID for `/show`. Medium/max remain byte-for-byte full,
+  and active errors plus ordinary system records remain full at every level. No
+  text classification or cross-record grouping was added. A literal interleaved
+  fixture covers active error, retry scheduled/applied/stopped, manual
+  continuation, nearby ordinary system records, and final assistant order at all
+  verbosity levels. Because these are generic notices at the shared boundary,
+  `/show` remains the full-detail authority when a min preview is truncated. The
+  fixture also characterizes the bounded remaining gap:
+  EggW's current `/messages` intersection does not expose durable auto-continue
+  action/category/source metadata, manual continuation has no distinct shared
+  marker, and `runner_error` is outside EggW's response model. Exact semantic
+  labels beyond generic `Continue Status` therefore require future public
+  payload/API decisions and explicit approval. No lifecycle, payload, schema,
+  approval policy, response model, or API field changed in this slice.
 
 - 2026-07-17: Phase 6 shared `/show <id_hint>` slice implemented without schema,
   persistence, or transcript mutation. One shared resolver uses the canonical
