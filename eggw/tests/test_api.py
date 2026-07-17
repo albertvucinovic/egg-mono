@@ -4140,18 +4140,20 @@ def test_output_finalization_failure_returns_conflict_and_keeps_tc4(client, monk
     assert build_tool_call_states(core_state.db, thread_id)[tool_call_id].state == "TC4"
 
 
-def test_phase10_read_only_web_paths_project_stranded_tc4_without_mutation(
+def test_phase10_read_only_web_paths_defer_stranded_tc4_to_shared_scheduler(
     client, monkeypatch
 ):
-    """EggW reads expose, but do not decide or publish, successful TC4 output."""
+    """EggW reads stay passive while the shared scheduler recovers TC4."""
     from eggthreads import (
         append_message,
         build_tool_call_states,
         create_root_thread,
         discover_runner_actionable,
+        ThreadRunner,
     )
 
     monkeypatch.setattr("eggw.core.scheduler.start_scheduler", lambda _root_id: None)
+    monkeypatch.setattr("eggw.core.start_scheduler", lambda _root_id: None)
     thread_id = create_root_thread(core_state.db, name="phase10 web read only")
     tool_call_id = "phase10-web-stranded-call"
     output = "successful output stranded before automatic publication"
@@ -4191,7 +4193,9 @@ def test_phase10_read_only_web_paths_project_stranded_tc4_without_mutation(
         invoke_id="phase10-web-owner",
     )
     assert build_tool_call_states(core_state.db, thread_id)[tool_call_id].state == "TC4"
-    assert discover_runner_actionable(core_state.db, thread_id) is None
+    recovery = discover_runner_actionable(core_state.db, thread_id)
+    assert recovery is not None
+    assert recovery.recovery_mode == "stranded_successful_tc4"
     before = [
         (row["event_seq"], row["type"], row["payload_json"])
         for row in core_state.db.conn.execute(
@@ -4212,7 +4216,7 @@ def test_phase10_read_only_web_paths_project_stranded_tc4_without_mutation(
         response.status_code == 200
         for response in (messages, state, tools, settings, opened)
     )
-    assert state.json()["state"] == "waiting_output_approval"
+    assert state.json()["state"] == "running"
     tool = next(item for item in tools.json() if item["id"] == tool_call_id)
     assert tool["state"] == "TC4"
     assert tool["output"] == output
@@ -4228,3 +4232,16 @@ def test_phase10_read_only_web_paths_project_stranded_tc4_without_mutation(
     ]
     assert after == before
     assert build_tool_call_states(core_state.db, thread_id)[tool_call_id].state == "TC4"
+
+    runner = ThreadRunner(core_state.db, thread_id, llm=object(), owner="eggw")
+    assert asyncio.run(runner.run_once()) is True
+
+    recovered = build_tool_call_states(core_state.db, thread_id)[tool_call_id]
+    assert recovered.state == "TC6"
+    rows = core_state.db.conn.execute(
+        "SELECT payload_json FROM events "
+        "WHERE thread_id=? AND type='tool_call.output_approval'",
+        (thread_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert json.loads(rows[0][0])["decision_source"] == "automatic_policy"

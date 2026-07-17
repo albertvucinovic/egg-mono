@@ -211,34 +211,36 @@ policy.
 
 ### Required behavior
 
-- [ ] Successful long-output handling automatically chooses and durably records
+- [x] Successful long-output handling automatically chooses and durably records
   the appropriate whole/partial/omit/extracted/artifact-backed publication
   decision without interactive user approval under the established default
   policy.
-- [ ] Exactly one scheduler/lease-fenced authority finalizes each output decision;
+- [x] Exactly one scheduler/lease-fenced authority finalizes each output decision;
   concurrent Egg/EggW schedulers converge on the same durable result.
-- [ ] EggW renders canonical approval/optimizer state but cannot create a parallel
+- [x] EggW renders canonical approval/optimizer state but cannot create a parallel
   policy or scheduling path.
 - [ ] Optimizer failure, malformed output, storage failure, explicitly configured
   manual policy, denial, cancellation, and recovery remain fail-closed and
-  inspectable; automatic behavior must not silently discard output.
-- [ ] Large raw output remains reachable through the existing long-output
+  inspectable; automatic behavior must not silently discard output. R1 covers
+  successful-policy/artifact retry; the unsupported explicit manual-policy mode
+  and broader failure matrix remain open.
+- [x] Large raw output remains reachable through the existing long-output
   storage/extraction affordances while provider/UI payloads stay bounded.
 
 ### Regression coverage
 
-- [ ] Add event-level tests for automatic output decision and exact-once
+- [x] Add event-level tests for automatic output decision and exact-once
   publication across two competing schedulers. Healthy automatic publication,
-  concurrent finalizer exact-once behavior, and the non-actionable stranded-TC4
-  gap are now characterized; recovery behavior remains unapproved.
-- [ ] Add Egg and EggW integration tests proving that merely running/connecting
-  EggW does not change the decision or introduce an approval prompt. Read-only
-  EggW projection and shared-scheduler non-recovery are characterized; a repaired
-  no-prompt path cannot be asserted before a repair is approved.
-- [ ] Cover process restart, lease expiry/takeover, orphan recovery, duplicate
+  lease contention, restart recovery, and one decision/result are literal.
+- [x] Add Egg and EggW integration tests proving that merely running/connecting
+  EggW does not change the decision or introduce an approval prompt. Read paths
+  remain event-neutral, the shared scheduler owns recovery, and any transient
+  TC4 prompt clears after the automatic transition.
+- [x] Cover process restart, lease expiry/takeover, orphan recovery, duplicate
   completion, optimizer success/fallback/failure, and explicit manual policy.
-  Restart/expired-lease non-recovery and existing neighboring coverage are now
-  recorded; no explicit manual output-policy configuration exists.
+  Existing TC3/manual/finalizer coverage plus successful-TC4 retry, artifact
+  failure/retry, multi-tool ordering, and Egg/EggW contention cover the supported
+  matrix; no explicit manual output-policy configuration exists.
 - [ ] Verify all verbosity levels preserve chronology and inspectability of the
   automatic decision without presenting a false pending approval.
 
@@ -269,7 +271,9 @@ policy.
 
 ## Status notes / commit ledger
 
-- 2026-07-17: Phase 10 bounded reproduction/evidence slice completed; no product, recovery, approval, UI, schema, API, lifecycle, or storage behavior changed. Added literal event-level characterization for the healthy automatic path (below-threshold output reaches one automatic `whole` TC5 decision and TC6; above-threshold output reaches one artifact-backed `partial` TC5 decision and TC6) and for the suspected failure window. Injecting an output-policy failure after a successful durable `tool_call.finished` leaves exactly one successful TC4, no `tool_call.output_approval`, no role=tool publication, no live lease, `waiting_output_approval`, and no runner actionable. Fresh Egg- and EggW-owned `ThreadRunner` instances on independent database connections both return idle, proving restart/a second scheduler does not recover it. A separately constructed successful TC4 with an expired owner lease is likewise non-actionable: a contender does not attempt takeover, so no recovery interrupt or decision is appended. This reproduces the unwanted manual-prompt substrate without changing UI: terminal `compute_pending_prompt()` and EggW's ApprovalPanel both render canonical TC4 as output approval. Read-only EggW message/state/tool/SSE routes were audited as projections (fresh snapshot/event reads); `/open` starts only the same shared scheduler, which the new second-runner evidence shows cannot advance this TC4. TC1 execution approval remains separate, and no configured manual output-policy mode exists; current manual finalization is a legacy UI fallback. Existing focused suites already cover optimizer success/fallback, policy/artifact failure, lease fencing, competing exact-once finalizers, duplicate artifacts, and TC3 recovery. Repair options remain deliberately unimplemented: (A) make successful TC4 lease-fenced scheduler recovery work, with exact ownership/idempotency and artifact retry semantics; (B) suppress legacy prompts only, which would hide but not unblock TC4 and is therefore insufficient alone; or (C) atomically combine finish plus automatic decision, a broader lifecycle/storage transaction change. Manager/user approval is required before choosing a repair.
+- 2026-07-18: Phase 10 R1 repair implemented within the existing schema and authorities. A durable successful/`ok` TC4 with no live lease is now a runner actionable (`stranded_successful_tc4`); the winning Egg/EggW runner acquires the ordinary per-thread tool lease, re-reads the exact TC4 lifecycle/version, applies the established shared output policy to the already-durable raw output, commits through the existing lease/version-fenced `finalize_tool_output()`, and publishes through the existing TC5 path. It never invokes the tool again. TC3 orphan recovery remains higher priority and unchanged; interrupted/error TC4 remains manual/fail-closed. Parent batches retain declaration order and include already-decided TC5 siblings on retry. Policy/artifact failure leaves raw TC4 retryable; restart, expired-lease takeover, two-scheduler contention, long artifact retry, multi-tool ordering, terminal prompt clearing, and passive EggW read parity are covered. No schema, API, lifecycle event, storage authority, approval policy, frontend, or Phase 8 behavior changed. Validation: focused output/recovery/scheduler suites `237 passed`; terminal approval `16 passed`; EggW API `126 passed, 1 skipped`; full EggThreads `1540 passed` with two unrelated process-containment tests failing only in the full run and passing together immediately in isolation (`2 passed`); compileall and `git diff --check` passed. Commit hash follows after final review.
+
+- 2026-07-17: Phase 10 bounded reproduction/evidence slice (commit `c3a33b7`) completed before R1 was authorized; no product behavior changed in that evidence commit. It established the canonical TC4 → shared output policy → lease/version-fenced `finalize_tool_output()` → TC5 → TC6 lifecycle, proved TC1 execution approval is separate, captured the legacy terminal/EggW prompt substrate, and reproduced successful TC4 as non-actionable after policy failure, restart, or lease loss. It also documented that no configured manual output-policy mode exists and compared recovery, prompt-only suppression, and broader atomic-lifecycle options. The subsequent R1 entry above supersedes its non-actionable-state description.
 
 - 2026-07-17: Phase 7 cross-client model synchronization completed using the
   existing canonical authority. `set_thread_model()` already appends durable

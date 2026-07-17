@@ -977,7 +977,10 @@ def test_thread_state_waiting_and_running(tmp_path):
     _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc1", "decision": "granted"})
     _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": "tc1"})
     _append_event(db, tid, "tool_call.finished", {"tool_call_id": "tc1", "reason": "success", "output": "ok"})
-    assert ts.thread_state(db, tid) == "waiting_output_approval"
+    assert ts.thread_state(db, tid) == "running"
+    output_recovery = ts.discover_runner_actionable(db, tid)
+    assert output_recovery is not None
+    assert output_recovery.recovery_mode == "stranded_successful_tc4"
 
     # Provide output approval and final tool message -> RA1 becomes
     # actionable, so the coarse state moves back to "running" until the

@@ -323,8 +323,12 @@ def test_output_finalization_failure_keeps_terminal_prompt_and_input(egg_app, mo
     assert build_tool_call_states(egg_app.db, tid)[tcid].state == "TC4"
 
 
-def test_phase10_successful_tc4_surfaces_legacy_long_output_prompt(tmp_path):
-    """Characterize the user-visible prompt produced by a stranded TC4."""
+def test_phase10_successful_tc4_prompt_clears_after_automatic_recovery(
+    tmp_path, monkeypatch
+):
+    """A transient legacy prompt clears without a manual output decision."""
+    import asyncio
+
     from egg.approval import ApprovalMixin
 
     class DummyApprovalApp(ApprovalMixin):
@@ -340,6 +344,7 @@ def test_phase10_successful_tc4_surfaces_legacy_long_output_prompt(tmp_path):
         def log_system(self, message):
             self.logs.append(message)
 
+    monkeypatch.chdir(tmp_path)
     app = DummyApprovalApp()
     tool_call_id = "phase10-cli-stranded-call"
     output = "long output line\n" * 900
@@ -390,4 +395,21 @@ def test_phase10_successful_tc4_surfaces_legacy_long_output_prompt(tmp_path):
         "do you want to include all of it?([y]es/[n]o/[o]mit)"
     )
     assert app.logs[1].startswith("Preview (shortened):\n")
-    assert ts.discover_runner_actionable(app.db, app.current_thread) is None
+    recovery = ts.discover_runner_actionable(app.db, app.current_thread)
+    assert recovery is not None
+    assert recovery.recovery_mode == "stranded_successful_tc4"
+
+    runner = ts.ThreadRunner(app.db, app.current_thread, llm=object(), owner="egg")
+    assert asyncio.run(runner.run_once()) is True
+    app.compute_pending_prompt()
+
+    assert app._pending_prompt == {}
+    state = ts.build_tool_call_states(app.db, app.current_thread)[tool_call_id]
+    assert state.state == "TC6"
+    approvals = app.db.conn.execute(
+        "SELECT payload_json FROM events "
+        "WHERE thread_id=? AND type='tool_call.output_approval'",
+        (app.current_thread,),
+    ).fetchall()
+    assert len(approvals) == 1
+    assert json.loads(approvals[0][0])["decision_source"] == "automatic_policy"

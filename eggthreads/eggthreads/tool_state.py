@@ -121,9 +121,9 @@ class RunnerActionable:
       - "RA3_tools_user"      -> process user-originated tool calls (user commands)
 
     ``recovery_mode`` describes why otherwise non-runnable tool-call states are
-    actionable.  It is deliberately separate from ``kind`` so recovery keeps
-    the assistant/user publication semantics while allowing a later per-tool
-    policy (for example, resuming a durable wait instead of terminalizing it).
+    actionable. It is deliberately separate from ``kind`` so recovery keeps the
+    assistant/user publication semantics while allowing either per-tool
+    execution recovery or publication of already-durable successful output.
     """
 
     kind: str
@@ -1703,25 +1703,29 @@ def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Itera
         yield ev
 
 
+def _recovery_lease_available(db: ThreadsDB, thread_id: str) -> bool:
+    """Return whether recovery may contend for this thread's lease.
+
+    Lease state is intentionally read outside the event reducer: lease expiry or
+    deletion does not append an event and therefore cannot be cached by the
+    reducer's event watermark. Any live lease suppresses recovery. Uncertain
+    ownership fails closed so a later scheduler poll can retry safely.
+    """
+
+    try:
+        lease = db.current_open(thread_id)
+        return lease is None or str(lease["lease_until"] or "") <= _utcnow_iso()
+    except Exception:
+        return False
+
+
 def _orphaned_tc3_actionable(
     db: ThreadsDB,
     reduction: _ThreadEventReduction,
 ) -> Optional[RunnerActionable]:
-    """Return recovery work for executing calls that have no live owner lease.
+    """Return recovery work for executing calls that have no live owner lease."""
 
-    Lease state is intentionally read outside the event reducer: lease expiry or
-    deletion does not append an event and therefore cannot be cached by the
-    reducer's event watermark.  Any live lease suppresses recovery for the
-    thread.  The runner must first acquire a fresh lease, which is the durable
-    fence that makes this observation safe under contention.
-    """
-
-    try:
-        lease = db.current_open(reduction.thread_id)
-        if lease is not None and str(lease["lease_until"] or "") > _utcnow_iso():
-            return None
-    except Exception:
-        # Uncertain lease ownership must fail closed; a later poll can retry.
+    if not _recovery_lease_available(db, reduction.thread_id):
         return None
 
     def recovery_interrupt_exists(owner_invoke_id: Optional[str]) -> bool:
@@ -1776,14 +1780,81 @@ def _orphaned_tc3_actionable(
     )
 
 
+def _is_stranded_successful_tc4(tc: ToolCallState) -> bool:
+    return bool(
+        tc.parent_role in {"assistant", "user"}
+        and tc.state == "TC4"
+        and str(tc.finished_reason or "").lower() in {"success", "ok"}
+        and tc.finished_event_seq is not None
+        and tc.output_decision is None
+    )
+
+
+def _stranded_successful_tc4_actionable(
+    db: ThreadsDB,
+    reduction: _ThreadEventReduction,
+) -> Optional[RunnerActionable]:
+    """Return automatic-publication recovery for durable successful TC4 calls."""
+
+    if not _recovery_lease_available(db, reduction.thread_id):
+        return None
+
+    candidates = [
+        tc
+        for tc in reduction.tool_call_states.values()
+        if _is_stranded_successful_tc4(tc)
+    ]
+    if not candidates:
+        return None
+
+    first = min(
+        candidates,
+        key=lambda tc: (tc.parent_event_seq, tc.index, tc.tool_call_id),
+    )
+    # Include already-decided siblings so a prior partial recovery attempt does
+    # not publish later calls ahead of earlier TC5 results.
+    same_parent = sorted(
+        (
+            tc
+            for tc in reduction.tool_call_states.values()
+            if tc.parent_msg_id == first.parent_msg_id
+            and tc.parent_role == first.parent_role
+            and (tc.state == "TC5" or _is_stranded_successful_tc4(tc))
+        ),
+        key=lambda tc: (tc.index, tc.tool_call_id),
+    )
+    return RunnerActionable(
+        kind=("RA3_tools_user" if first.parent_role == "user" else "RA2_tools_assistant"),
+        thread_id=reduction.thread_id,
+        triggering_event_seq=first.parent_event_seq,
+        msg_id=first.parent_msg_id,
+        tool_calls=same_parent,
+        recovery_mode="stranded_successful_tc4",
+    )
+
+
+def _recovery_actionable(
+    db: ThreadsDB,
+    reduction: _ThreadEventReduction,
+) -> Optional[RunnerActionable]:
+    # Never repeat uncertain tool side effects merely to recover publication.
+    # Existing TC3 recovery therefore remains ahead of already-finished TC4.
+    # Both helpers re-check the same lease because it can change between calls;
+    # either must independently fail closed under a concurrent owner.
+    orphan = _orphaned_tc3_actionable(db, reduction)
+    if orphan is not None:
+        return orphan
+    return _stranded_successful_tc4_actionable(db, reduction)
+
+
 def _runner_actionable_from_reduction(
     db: ThreadsDB,
     reduction: _ThreadEventReduction,
 ) -> Optional[RunnerActionable]:
     # Recovery has priority over starting any additional tool side effects in
-    # the same parent batch.  Normal actionability resumes after recovery has
-    # published the interrupted result.
-    recovery = _orphaned_tc3_actionable(db, reduction)
+    # the same parent batch. Normal actionability resumes after recovery has
+    # published the interrupted or already-finished result.
+    recovery = _recovery_actionable(db, reduction)
     return recovery if recovery is not None else reduction.next_runner_actionable
 
 
@@ -1834,6 +1905,6 @@ def thread_state(db: ThreadsDB, thread_id: str) -> str:
             return "running"
 
     reduction = _reduce_thread_events(db, thread_id)
-    if _orphaned_tc3_actionable(db, reduction) is not None:
+    if _recovery_actionable(db, reduction) is not None:
         return "running"
     return reduction.coarse_thread_state_without_lease

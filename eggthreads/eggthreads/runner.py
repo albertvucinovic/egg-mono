@@ -1408,8 +1408,14 @@ class ThreadRunner:
 
         # Block RA1 and RA2 in NO_API_CALLS mode (read-only viewing mode)
         if _no_api_calls_mode(self.cfg):
-            if ra.kind in ('RA1_llm', 'RA2_tools_assistant') and ra.recovery_mode is None:
-                return False  # Skip API/tool side effects; recovery itself is side-effect-free.
+            if (
+                ra.kind in ('RA1_llm', 'RA2_tools_assistant')
+                and ra.recovery_mode not in {
+                    "orphaned_tc3",
+                    "stranded_successful_tc4",
+                }
+            ):
+                return False  # Skip API/tool side effects; recovery does not invoke new work.
             # RA3_tools_user is allowed through
 
         # Acquire lease with fresh invoke_id
@@ -3384,11 +3390,90 @@ class ThreadRunner:
             )
             await self._run_ra_tools(invoke_id, current_model, publication_ra)
 
+    async def _recover_stranded_successful_tool_output(
+        self,
+        invoke_id: str,
+        current_model: Optional[str],
+        ra: RunnerActionable,
+    ) -> None:
+        """Apply established output policy to durable successful TC4 calls."""
+
+        writer = self._owned_writer(invoke_id)
+        for observed in ra.tool_calls or []:
+            current = build_tool_call_states(self.db, self.thread_id).get(
+                observed.tool_call_id
+            )
+            if current is None:
+                break
+            if current.state == "TC5":
+                continue
+            if (
+                current.state != "TC4"
+                or str(current.finished_reason or "").lower() not in {"success", "ok"}
+                or current.finished_event_seq is None
+                or current.output_decision is not None
+            ):
+                # Preserve parent-batch result order: do not decide a later call
+                # while an earlier sibling has changed to an unexpected state.
+                break
+
+            parent_no_api = (
+                self._parent_msg_has_no_api(current.parent_msg_id)
+                if ra.kind == "RA3_tools_user"
+                else False
+            )
+            full_output = str(current.finished_output or "")
+            _finalize_auto_tool_output(
+                self.db,
+                self.thread_id,
+                current.tool_call_id,
+                full_output,
+                tool_name=current.name,
+                tool_args=current.arguments,
+                finished_reason=str(current.finished_reason or ""),
+                origin=ra.kind,
+                user_tool_call=bool(ra.kind == "RA3_tools_user"),
+                tool_metadata={
+                    "ra_kind": ra.kind,
+                    "parent_msg_id": current.parent_msg_id,
+                    "parent_role": current.parent_role,
+                    "parent_no_api": parent_no_api,
+                    "tool_index": current.index,
+                    "stranded_output_recovery": True,
+                },
+                original_char_count=len(full_output),
+                output_capped=False,
+                publication_presentation=current.publication_presentation,
+                expected_event_seq=current.state_event_seq,
+                writer=writer,
+            )
+
+        refreshed = build_tool_call_states(self.db, self.thread_id)
+        publishable = []
+        for observed in ra.tool_calls or []:
+            current = refreshed.get(observed.tool_call_id)
+            if current is None or current.state != "TC5":
+                break
+            publishable.append(current)
+        if publishable:
+            await self._run_ra_tools(
+                invoke_id,
+                current_model,
+                replace(ra, tool_calls=publishable, recovery_mode=None),
+            )
+
     async def _run_ra_tools(self, invoke_id: str, current_model: Optional[str], ra: RunnerActionable) -> None:
-        """Handle RA2/RA3 execution, publication, and orphan recovery."""
+        """Handle RA2/RA3 execution, publication, and recovery."""
         tool_calls = ra.tool_calls or []
         if ra.recovery_mode == "orphaned_tc3":
             await self._recover_orphaned_tool(invoke_id, current_model, ra)
+            return
+        if ra.recovery_mode == "stranded_successful_tc4":
+            await self._recover_stranded_successful_tool_output(
+                invoke_id,
+                current_model,
+                ra,
+            )
             return
         # Thread-level tools configuration (disables, etc.) is respected
         # both for assistant-originated tool calls (RA2) and

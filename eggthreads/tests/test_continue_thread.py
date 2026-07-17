@@ -643,7 +643,7 @@ class TestContinuePointWithPendingToolCalls:
 
 
 class TestWaitThreadSettled:
-    def test_wait_thread_settled_distinguishes_waiting_output_approval(self, tmp_path):
+    def test_wait_thread_settled_distinguishes_interrupted_output_approval(self, tmp_path):
         db, _ = _make_temp_db(tmp_path)
         tid = create_root_thread(db, name="test")
 
@@ -682,7 +682,7 @@ class TestWaitThreadSettled:
             event_id=_ulid_like(),
             thread_id=tid,
             type_='tool_call.finished',
-            payload={'tool_call_id': tool_call_id, 'reason': 'success', 'output': 'out'},
+            payload={'tool_call_id': tool_call_id, 'reason': 'interrupted', 'output': 'incomplete'},
         )
 
         import asyncio
