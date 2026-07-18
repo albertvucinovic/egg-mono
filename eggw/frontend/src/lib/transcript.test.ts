@@ -30,6 +30,7 @@ import {
   transcriptIndex,
   transcriptRenderWindow,
 } from "./transcriptIndex";
+import { TRANSCRIPT_WINDOW_MESSAGES } from "./transcriptWindow";
 
 function page(
   ids: string[],
@@ -1028,6 +1029,50 @@ describe("thread-keyed transcript cache", () => {
     expect(window.messages).toHaveLength(60);
     expect(costs.pageVisits).toBe(1);
     expect(costs.messageVisits).toBe(60);
+  });
+
+  it("prepends revealed history without removing the rendered tail", () => {
+    const transcript = data([
+      page(Array.from({ length: 300 }, (_, index) => `retained-${index}`), 1),
+    ]);
+
+    const initial = transcriptRenderWindow(transcript, null);
+    const firstReveal = transcriptRenderWindow(transcript, 180);
+    const secondReveal = transcriptRenderWindow(transcript, 120);
+
+    expect(initial.messages[0].id).toBe("retained-240");
+    expect(firstReveal.messages).toHaveLength(120);
+    expect(secondReveal.messages).toHaveLength(180);
+    expect(secondReveal.messages[0].id).toBe("retained-120");
+    expect(secondReveal.messages.at(-1)?.id).toBe("retained-299");
+    expect(secondReveal.newerHiddenCount).toBe(0);
+    expect(initial.messages.every((message) =>
+      secondReveal.messages.some((candidate) => candidate.id === message.id)
+    )).toBe(true);
+  });
+
+  it("freezes the rendered suffix while detached tail messages arrive", () => {
+    const transcript = data([
+      page(Array.from({ length: 300 }, (_, index) => `detached-${index}`), 1),
+    ]);
+    const detached = transcriptRenderWindow(transcript, 120);
+    const appendedPage = page(
+      [...Array.from({ length: 300 }, (_, index) => `detached-${index}`), "detached-300", "detached-301"],
+      2,
+    );
+    const appended = data([appendedPage]);
+
+    const frozen = transcriptRenderWindow(
+      appended,
+      detached.startIndex,
+      TRANSCRIPT_WINDOW_MESSAGES,
+      detached.endIndex,
+    );
+
+    expect(frozen.messages[0].id).toBe("detached-120");
+    expect(frozen.messages.at(-1)?.id).toBe("detached-299");
+    expect(frozen.newerHiddenCount).toBe(2);
+    expect(frozen.atLiveTail).toBe(false);
   });
 
   it("indexes answered get-user identities across loaded pages without render-window drift", () => {

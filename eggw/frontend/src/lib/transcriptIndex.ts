@@ -4,7 +4,6 @@ import { getUserAnswerToolCallId, getUserToolCallIds, isGetUserMessageTool, tool
 import type { TranscriptData, TranscriptPage } from "./transcript";
 import {
   previousTranscriptStartIndex,
-  TRANSCRIPT_WINDOW_MAX_MESSAGES,
   TRANSCRIPT_WINDOW_MESSAGES,
 } from "./transcriptWindow";
 
@@ -561,24 +560,25 @@ function sameRenderedMessage(left: Message, right: Message): boolean {
   });
 }
 
-/** Visit only enough pages to extract one strict sliding DOM window. */
+/** Visit only the pages needed for the bounded tail or revealed suffix. */
 export function transcriptRenderWindow(
   data: InfiniteData<TranscriptPage, unknown> | undefined,
   startIndex: number | null,
   initialLimit = TRANSCRIPT_WINDOW_MESSAGES,
-  maxMessages = TRANSCRIPT_WINDOW_MAX_MESSAGES,
+  endIndex: number | null = null,
 ): TranscriptRenderWindow {
   const history = transcriptHistory(data);
   const resolvedStart =
     startIndex === null
       ? Math.max(0, history.totalMessages - initialLimit)
       : Math.max(0, Math.min(startIndex, history.totalMessages));
-  const endIndex =
-    startIndex === null
-      ? history.totalMessages
-      : Math.min(history.totalMessages, resolvedStart + maxMessages);
-  const wanted = Math.max(0, endIndex - resolvedStart);
-  const skipNewest = history.totalMessages - endIndex;
+  // A detached viewer freezes its rendered end so genuinely new tail messages
+  // can remain hidden without unmounting anything already present in the DOM.
+  const resolvedEnd = endIndex === null
+    ? history.totalMessages
+    : Math.max(resolvedStart, Math.min(endIndex, history.totalMessages));
+  const wanted = Math.max(0, resolvedEnd - resolvedStart);
+  const skipNewest = history.totalMessages - resolvedEnd;
   const reversed: Message[] = [];
   let newerSeen = 0;
   const collect = (page: TranscriptPage) => {
@@ -609,7 +609,7 @@ export function transcriptRenderWindow(
   const messages =
     cached &&
     cached.startIndex === resolvedStart &&
-    cached.endIndex === endIndex &&
+    cached.endIndex === resolvedEnd &&
     cached.messages.length === nextMessages.length &&
     cached.messages.every((message, index) =>
       sameRenderedMessage(message, nextMessages[index]),
@@ -618,16 +618,16 @@ export function transcriptRenderWindow(
       : nextMessages;
   history.renderWindowCache = {
     startIndex: resolvedStart,
-    endIndex,
+    endIndex: resolvedEnd,
     messages,
   };
   return {
     messages,
     startIndex: resolvedStart,
-    endIndex,
+    endIndex: resolvedEnd,
     hiddenCount: resolvedStart,
-    newerHiddenCount: history.totalMessages - endIndex,
-    atLiveTail: endIndex === history.totalMessages,
+    newerHiddenCount: history.totalMessages - resolvedEnd,
+    atLiveTail: resolvedEnd === history.totalMessages,
     startMessageId: messages[0]?.id || null,
   };
 }

@@ -1485,6 +1485,9 @@ test.describe('Scroll intent state machines', () => {
     await page.goto(`/${threadId}`);
     const chat = page.getByTestId('chat-panel');
     await expect(page.locator('.eggw-message-card')).toHaveCount(60);
+    await page.locator('[data-message-id="loaded-history-179"]').evaluate((element) => {
+      element.setAttribute('data-retained-bottom', 'true');
+    });
     await chat.evaluate((element) => {
       const filler = document.createElement('div');
       filler.dataset.testid = 'top-demand-filler';
@@ -1514,17 +1517,19 @@ test.describe('Scroll intent state machines', () => {
     // The restoration leaves the scrollport clamped at top. A second upward
     // wheel still carries demand even though it need not emit a scroll event.
     await page.mouse.wheel(0, -900);
-    await expect(page.locator('.eggw-message-card')).toHaveCount(120);
-    await expect(page.getByTestId('return-to-live-tail')).toBeVisible();
+    await expect(page.locator('.eggw-message-card')).toHaveCount(180);
+    await expect(page.locator('[data-message-id="loaded-history-179"]')).toHaveAttribute('data-retained-bottom', 'true');
+    await expect(page.getByTestId('return-to-live-tail')).toHaveCount(0);
     expect(messageRequests).toBe(1);
     await chat.evaluate((element) => { element.scrollTop = 0; });
 
     await page.mouse.wheel(0, -900);
     await expect.poll(() => messageRequests).toBe(2);
     await expect(chat).toContainText('NETWORK OLDER PAGE');
+    await expect(page.locator('[data-message-id="loaded-history-179"]')).toHaveAttribute('data-retained-bottom', 'true');
   });
 
-  test('keeps a visible live-tail escape while detached history receives canonical SSE messages', async ({ page }) => {
+  test('retains the rendered bottom and shows only genuinely new detached messages', async ({ page }) => {
     const threadId = 'detached-history-live-tail-escape';
     const initialMessages = Array.from({ length: 300 }, (_, index) => ({
       id: `detached-history-${index}`,
@@ -1574,20 +1579,31 @@ test.describe('Scroll intent state machines', () => {
     await chat.evaluate((element) => { element.scrollTop = 0; });
     await page.mouse.wheel(0, -900);
     await expect(page.locator('[data-message-id="detached-history-120"]')).toBeVisible();
-    await expect(page.getByTestId('live-tail-escape')).toContainText('60 newer messages');
+    await expect(page.getByTestId('live-tail-escape')).toHaveCount(0);
+    await chat.evaluate((element) => {
+      element.scrollTop = Math.max(1, Math.floor((element.scrollHeight - element.clientHeight) / 2));
+    });
+    const detachedScrollTop = await chat.evaluate((element) => element.scrollTop);
+    await page.locator('[data-message-id="detached-history-299"]').evaluate((element) => {
+      element.setAttribute('data-retained-bottom', 'true');
+    });
     const frozenIds = await page.getByTestId('static-transcript-owner').locator(':scope > *').evaluateAll((nodes) =>
       nodes.map((node) => node.getAttribute('data-message-id') || node.getAttribute('data-source-message-id')),
     );
 
-    await chat.evaluate((element) => { element.scrollTop = element.scrollHeight; });
     releaseNewMessages();
     await expect(page.getByText(/Chat Messages · 302 loaded/)).toBeVisible();
-    await expect(page.getByTestId('live-tail-escape')).toContainText('62 newer messages');
+    await expect(page.getByTestId('live-tail-escape')).toContainText('2 newer messages');
     await expect(page.getByTestId('return-to-live-tail')).toBeVisible();
     await expect(page.locator('[data-message-id="detached-newest-302"]')).toHaveCount(0);
     expect(await page.getByTestId('static-transcript-owner').locator(':scope > *').evaluateAll((nodes) =>
       nodes.map((node) => node.getAttribute('data-message-id') || node.getAttribute('data-source-message-id')),
     )).toEqual(frozenIds);
+    await expect(page.locator('[data-message-id="detached-history-299"]')).toHaveAttribute('data-retained-bottom', 'true');
+    expect(Math.abs(await chat.evaluate((element) => element.scrollTop) - detachedScrollTop)).toBeLessThan(120);
+    await expect.poll(() => chat.evaluate(
+      (element) => element.scrollHeight - element.scrollTop - element.clientHeight,
+    )).toBeGreaterThan(16);
     let geometry = await page.getByTestId('live-tail-escape').evaluate((element) => {
       const escapeRect = element.getBoundingClientRect();
       const chatRect = element.parentElement!.getBoundingClientRect();
@@ -1606,33 +1622,97 @@ test.describe('Scroll intent state machines', () => {
     expect(geometry.escapeTop).toBeGreaterThanOrEqual(geometry.chatTop);
     expect(geometry.escapeBottom).toBeLessThanOrEqual(geometry.chatBottom);
 
-    await expect(chat).toHaveScreenshot('detached-history-live-tail-escape.png', {
-      animations: 'disabled',
-      caret: 'hide',
-      maxDiffPixelRatio: 0.015,
-    });
-
-    // Natural downward traversal advances one bounded window at each local
-    // bottom. It must not skip directly to the tail or oscillate backward.
-    await chat.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-    await chat.hover();
-    await page.mouse.wheel(0, 900);
-    await expect(page.getByTestId('live-tail-escape')).toContainText('2 newer messages');
-    await expect(page.locator('[data-message-id="detached-history-180"]')).toBeVisible();
-    await expect.poll(() => chat.evaluate((element) => element.scrollTop)).toBe(0);
-    await expect(page.locator('[data-message-id="detached-newest-302"]')).toHaveCount(0);
-    expect(await page.getByTestId('static-transcript-owner').locator(':scope > *').count()).toBeLessThanOrEqual(120);
-
-    await chat.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-    await chat.hover();
-    await page.mouse.wheel(0, 900);
+    await page.getByTestId('return-to-live-tail').click();
     await expect(page.getByTestId('live-tail-escape')).toHaveCount(0);
-    await expect(page.getByTestId('static-transcript-owner').locator(':scope > *').first()).toHaveAttribute('data-message-id', 'detached-history-182');
-    await expect(page.getByTestId('static-transcript-owner').locator(':scope > *').last()).toHaveAttribute('data-message-id', 'detached-newest-302');
-    expect(await page.getByTestId('static-transcript-owner').locator(':scope > *').count()).toBeLessThanOrEqual(120);
-
     await expect(page.locator('[data-message-id="detached-newest-301"]')).toBeVisible();
     await expect(page.locator('[data-message-id="detached-newest-302"]')).toBeVisible();
+  });
+
+  test('does not jump to the live edge while an older page is loading', async ({ page }) => {
+    const threadId = 'older-load-never-auto-follows';
+    const tail = Array.from({ length: 60 }, (_, index) => ({
+      id: `no-jump-tail-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `${index}: ${'long history row '.repeat(10)}`,
+    }));
+    let releaseOlder!: () => void;
+    const olderReady = new Promise<void>((resolve) => { releaseOlder = resolve; });
+    let olderWasRequested = false;
+
+    await mockThreadShell(page, threadId);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      const before = new URL(request.url()).searchParams.get('before_id');
+      if (!before) {
+        await route.fulfill({ status: 200, headers: mockApiHeaders, json: { items: tail, snapshot_cursor: 60, next_before: 'older-page' } });
+        return;
+      }
+      olderWasRequested = true;
+      await olderReady;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          items: Array.from({ length: 60 }, (_, index) => ({
+            id: `no-jump-older-${index}`,
+            role: index % 2 ? 'assistant' : 'user',
+            content: `${index}: ${'loaded older row '.repeat(10)}`,
+          })),
+          snapshot_cursor: 60,
+          next_before: null,
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    await expect(page.locator('[data-message-id="no-jump-tail-59"]')).toBeVisible();
+    await chat.evaluate((element) => { element.scrollTop = 0; });
+    await chat.hover();
+    await page.mouse.wheel(0, -900);
+    await expect.poll(() => olderWasRequested).toBe(true);
+
+    // Exercise the exact regression: layout/stream metadata updates occur while
+    // the network page is unresolved. Neither may reclassify user detachment.
+    await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+    await page.waitForTimeout(100);
+    expect(await chat.evaluate((element) => ({
+      top: element.scrollTop,
+      distance: element.scrollHeight - element.scrollTop - element.clientHeight,
+    }))).toMatchObject({ top: 0 });
+    expect(await chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(16);
+
+    releaseOlder();
+    await expect(page.locator('[data-message-id="no-jump-older-59"]')).toBeAttached();
+    await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(16);
+    await expect(page.locator('[data-message-id="no-jump-tail-59"]')).toBeAttached();
+  });
+
+  test('an upward reversal cancels a queued automatic live-edge check', async ({ page }) => {
+    const threadId = 'stale-live-edge-check';
+    const messages = Array.from({ length: 180 }, (_, index) => ({
+      id: `stale-check-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `${index}: ${'stale live-edge row '.repeat(8)}`,
+    }));
+    await mockThreadShell(page, threadId, { messages });
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+
+    await chat.focus();
+    await page.keyboard.press('Home');
+    await expect(page.locator('[data-message-id="stale-check-60"]')).toBeVisible();
+    await chat.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    // Queue the downward post-scroll check, then reverse before its RAF runs.
+    await chat.dispatchEvent('wheel', { deltaY: 900 });
+    await chat.dispatchEvent('wheel', { deltaY: -900 });
+    await chat.evaluate((element) => { element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight - 900); });
+
+    await expect.poll(() => chat.evaluate(
+      (element) => element.scrollHeight - element.scrollTop - element.clientHeight,
+    )).toBeGreaterThan(16);
+    await expect(page.locator('[data-message-id="stale-check-60"]')).toBeAttached();
+    await expect(page.getByTestId('live-tail-escape')).toHaveCount(0);
   });
 
   test('reattaches live following when a large wheel lands at the live bottom', async ({ page }) => {
@@ -1663,8 +1743,9 @@ test.describe('Scroll intent state machines', () => {
     await page.goto(`/${threadId}`);
     const chat = page.getByTestId('chat-panel');
     await connected;
+    await expect(page.locator('[data-message-id="live-wheel-59"]')).toBeVisible();
     await chat.hover();
-    await page.mouse.wheel(0, -60);
+    await page.mouse.wheel(0, -600);
     await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(16);
     await page.mouse.wheel(0, 10_000);
     await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(16);
@@ -1673,7 +1754,7 @@ test.describe('Scroll intent state machines', () => {
     await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(16);
   });
 
-  test('captures the downward key scrollport and advances one window', async ({ page }) => {
+  test('downward keyboard navigation retains the revealed transcript', async ({ page }) => {
     const threadId = 'downward-key-captured-target';
     const messages = Array.from({ length: 240 }, (_, index) => ({ id: `key-newer-${index}`, role: index % 2 ? 'assistant' : 'user', content: `key ${index}` }));
     await mockThreadShell(page, threadId, { messages });
@@ -1692,7 +1773,7 @@ test.describe('Scroll intent state machines', () => {
     await expect(page.getByTestId('live-tail-escape')).toHaveCount(0);
   });
 
-  test('coalesces a downward wheel burst to one window', async ({ page }) => {
+  test('downward wheel traversal keeps the previously rendered bottom mounted', async ({ page }) => {
     const threadId = 'downward-wheel-burst';
     const messages = Array.from({ length: 360 }, (_, index) => ({ id: `burst-newer-${index}`, role: index % 2 ? 'assistant' : 'user', content: `burst ${index}` }));
     await mockThreadShell(page, threadId, { messages });
@@ -1707,8 +1788,8 @@ test.describe('Scroll intent state machines', () => {
     await chat.dispatchEvent('wheel', { deltaY: 900 });
     await chat.dispatchEvent('wheel', { deltaY: 900 });
     await expect(page.locator('[data-message-id="burst-newer-180"]')).toBeVisible();
-    await expect(page.locator('[data-message-id="burst-newer-359"]')).toHaveCount(0);
-    await expect(page.getByTestId('live-tail-escape')).toContainText('60 newer messages');
+    await expect(page.locator('[data-message-id="burst-newer-359"]')).toHaveCount(1);
+    await expect(page.getByTestId('live-tail-escape')).toHaveCount(0);
   });
 
   test('direction reversal invalidates an in-flight older fetch before returning live', async ({ page }) => {
@@ -1740,7 +1821,7 @@ test.describe('Scroll intent state machines', () => {
     await expect(page.getByTestId('live-tail-escape')).toHaveCount(0);
   });
 
-  test('route switch cancels stale newer boundary work', async ({ page }) => {
+  test('route switch cancels stale downward boundary work', async ({ page }) => {
     const threadId = 'stale-newer-route-a';
     const otherThread = 'stale-newer-route-b';
     const messages = Array.from({ length: 180 }, (_, index) => ({ id: `route-a-${index}`, role: index % 2 ? 'assistant' : 'user', content: `route a ${index}` }));
@@ -1864,10 +1945,8 @@ test.describe('Scroll intent state machines', () => {
       await page.getByTestId('show-more-loaded-messages').click();
     }
     await expect(page.getByTestId('chat-panel')).toContainText('OLDEST DISPLACED TAIL ENTRY');
-    await expect(page.getByTestId('chat-panel')).not.toContainText('new tail 299');
-    await page.getByTestId('return-to-live-tail').click();
     await expect(page.getByTestId('chat-panel')).toContainText('new tail 299');
-    await expect(page.getByTestId('chat-panel')).not.toContainText('OLDEST DISPLACED TAIL ENTRY');
+    await expect(page.getByTestId('return-to-live-tail')).toHaveCount(0);
   });
 
   test('retains loaded pages across a shorter tail refresh and route return', async ({ page }) => {
@@ -3168,7 +3247,7 @@ test.describe('Live Tool Streaming', () => {
     const compactTimeout = page.getByTestId('chat-panel').getByTestId('hidden-details');
     await expect(compactTimeout).toContainText('got 1 tool result');
     await expect(compactTimeout).toContainText('Tools: wait');
-    await compactTimeout.getByRole('button', { name: 'wait' }).click();
+    await compactTimeout.getByRole('button', { name: 'wait', exact: true }).click();
     await expect(page.getByRole('dialog')).toContainText('Wait timed out after 60 seconds.');
   });
 
