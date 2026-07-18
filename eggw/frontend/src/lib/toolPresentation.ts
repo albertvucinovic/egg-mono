@@ -8,6 +8,8 @@ export interface HiddenToolDetail {
   header: string;
   name?: string;
   tool_call_id?: string;
+  source_message_id?: string;
+  source_event_seq?: number;
   tokens?: number;
   body?: string;
   source?: HiddenDetailSource;
@@ -97,7 +99,7 @@ export function resolveToolResultNames(messages: Message[]): Message[] {
 /**
  * Collapse duplicate streamed/durable representations for min-summary counts
  * while retaining every raw detail for exact popup inspection. Tool names
- * use call names when a source message has calls, otherwise result names.
+ * use call names when a compact run has calls, otherwise result names.
  */
 export function summarizeHiddenActivity(details: HiddenToolDetail[]): HiddenActivitySummary {
   const structuredCallIds = new Set(
@@ -194,7 +196,14 @@ export function correlateHiddenToolDetails(details: HiddenToolDetail[]): HiddenT
     bodyParts.push(
       "",
       "Result:",
-      result?.body || (result ? "(empty)" : "(not present in this source message)"),
+      result
+        ? [
+            result.header,
+            result.tool_call_id ? `tool_call_id: ${result.tool_call_id}` : "",
+            "",
+            result.body || "(empty)",
+          ].filter((part) => part !== "").join("\n")
+        : "(not present in this compact run)",
     );
     return { ...call, body: bodyParts.join("\n") };
   });

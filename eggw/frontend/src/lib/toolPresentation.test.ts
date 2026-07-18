@@ -46,7 +46,7 @@ describe("tool transcript presentation", () => {
 
     expect(details).toHaveLength(4);
     expect(details[0].body).toContain("ARG_FIRST");
-    expect(details[0].body).toContain("(not present in this source message)");
+    expect(details[0].body).toContain("(not present in this compact run)");
     expect(details[0].body).not.toContain("RESULT_FIRST");
     expect(details[1].body).toContain("ARG_SECOND");
     expect(details[1].body).not.toContain("RESULT_SECOND");
@@ -65,7 +65,7 @@ describe("tool transcript presentation", () => {
     ]);
 
     expect(details).toHaveLength(4);
-    expect(details[0].body).toContain("(not present in this source message)");
+    expect(details[0].body).toContain("(not present in this compact run)");
     expect(details[0].body).not.toContain("STREAM_PREVIEW");
     expect(details[1].body).toContain("tool_call_id: call-orphan");
     expect(details[1].body).toContain("ORPHAN_RESULT");

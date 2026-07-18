@@ -446,16 +446,33 @@ function hiddenSummaryCountsText(details: HiddenDetail[]): string {
 
 function HiddenDetailsBlock({
   details,
-  sourceMessage,
+  sourceMessages,
   showBorders = true,
 }: {
   details: HiddenDetail[];
-  sourceMessage: Message;
+  sourceMessages: Message[];
   showBorders?: boolean;
 }) {
   const [selectedDetail, setSelectedDetail] = useState<HiddenDetail | null>(null);
   if (!details.length) return null;
   const summary = summarizeHiddenActivity(details);
+  const seenSourceIds = new Set<string>();
+  const seenSourceObjects = new Set<Message>();
+  const uniqueSourceMessages = sourceMessages.filter((message) => {
+    if (message.id) {
+      if (seenSourceIds.has(message.id)) return false;
+      seenSourceIds.add(message.id);
+      return true;
+    }
+    if (seenSourceObjects.has(message)) return false;
+    seenSourceObjects.add(message);
+    return true;
+  });
+  const singleSourceMessage = uniqueSourceMessages.length === 1 ? uniqueSourceMessages[0] : null;
+  const sourceMessageIds = uniqueSourceMessages.map((message) => message.id).filter(Boolean);
+  const sourceEventSeqs = uniqueSourceMessages
+    .map((message) => message.event_seq)
+    .filter((eventSeq): eventSeq is number => typeof eventSeq === "number");
   const toolDetails = correlateHiddenToolDetails(details);
   const claimedToolDetails = new Set<number>();
   const summaryEntries = summary.toolEntries.map((entry) => {
@@ -481,21 +498,26 @@ function HiddenDetailsBlock({
     <div
       className={clsx("eggw-message-card eggw-role-card eggw-role-tool", !showBorders && "eggw-role-card-borderless")}
       data-testid="hidden-details"
-      data-source-message-id={sourceMessage.id || undefined}
-      data-source-event-seq={sourceMessage.event_seq ?? undefined}
+      data-source-message-id={singleSourceMessage?.id || undefined}
+      data-source-event-seq={singleSourceMessage?.event_seq ?? undefined}
+      data-source-message-count={uniqueSourceMessages.length}
+      data-source-message-ids={sourceMessageIds.length ? sourceMessageIds.join(" ") : undefined}
+      data-source-event-seqs={sourceEventSeqs.length ? sourceEventSeqs.join(" ") : undefined}
     >
       <div className="eggw-message-header eggw-compact-detail-header">
         <span className="eggw-role-marker" aria-hidden="true" />
         <span className="eggw-role-label">
-          {details.some((detail) => detail.kind === "reasoning")
-            ? "Reasoning"
-            : sourceMessage.role === "tool"
-              ? sourceMessage.name
-                ? `Tool Result: ${sourceMessage.name}`
-                : "Tool Result"
-              : "Tool Calls"}
+          {singleSourceMessage
+            ? details.some((detail) => detail.kind === "reasoning")
+              ? "Reasoning"
+              : singleSourceMessage.role === "tool"
+                ? singleSourceMessage.name
+                  ? `Tool Result: ${singleSourceMessage.name}`
+                  : "Tool Result"
+                : "Tool Calls"
+            : "Activity"}
         </span>
-        <MessageHeaderFields message={sourceMessage} displayVerbosity="min" />
+        {singleSourceMessage && <MessageHeaderFields message={singleSourceMessage} displayVerbosity="min" />}
       </div>
       <div className="eggw-hidden-summary">{hiddenSummaryCountsText(summary.details)}</div>
       {summary.toolEntries.length > 0 && (
@@ -1199,6 +1221,8 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
     details.push({
       kind: "reasoning",
       header: messageMetadataText(message, "Reasoning"),
+      source_message_id: message.id,
+      source_event_seq: message.event_seq,
       tokens: takeTokens(),
       source: "reasoning",
     });
@@ -1212,8 +1236,10 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
         kind: "tool_calls",
         name,
         tool_call_id: toolCallIdText,
+        source_message_id: message.id,
+        source_event_seq: message.event_seq,
         tokens: takeTokens(),
-        header: name ? `ToolCall: ${name}` : "ToolCall",
+        header: messageMetadataText(message, name ? `ToolCall: ${name}` : "ToolCall"),
         body: formatHiddenDetailBody({
           ...(toolCallIdText ? { id: toolCallIdText } : {}),
           name,
@@ -1230,8 +1256,10 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
       kind: "tool_results",
       name,
       tool_call_id: message.tool_call_id,
+      source_message_id: message.id,
+      source_event_seq: message.event_seq,
       tokens: takeTokens(),
-      header: name ? `Tool Result: ${name}` : "Tool Result",
+      header: messageMetadataText(message, name ? `Tool Result: ${name}` : "Tool Result"),
       body: contentText,
       source: "tool_result",
     });
@@ -1240,8 +1268,10 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
     details.push({
       kind: "tool_results",
       name,
+      source_message_id: message.id,
+      source_event_seq: message.event_seq,
       tokens: takeTokens(),
-      header: name ? `Tool Output: ${name}` : "Tool Output",
+      header: messageMetadataText(message, name ? `Tool Output: ${name}` : "Tool Output"),
       body: text,
       source: "tool_stream",
     });
@@ -1254,8 +1284,10 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
       // Historical snapshots sometimes keyed this dictionary by tool name
       // rather than ID. Only claim identity when the same message proves it.
       tool_call_id: structuredName ? streamKey : undefined,
+      source_message_id: message.id,
+      source_event_seq: message.event_seq,
       tokens: takeTokens(),
-      header: streamKey ? `Tool Call Args: ${streamKey}` : "Tool Call Args",
+      header: messageMetadataText(message, streamKey ? `Tool Call Args: ${streamKey}` : "Tool Call Args"),
       body: text,
       source: "tool_call_stream",
     });
@@ -1284,14 +1316,39 @@ function renderMessagesForVerbosity(
     ));
   }
 
-  // Keep minimum-verbosity details source-message-local. The ordered
-  // transcript remains the chronology authority; exact tool identity is used
-  // only for inspection within one source record, never to relocate or merge
-  // activity across durable messages or mounted-window boundaries.
+  // Match terminal Egg's minimum-verbosity contract: consecutive hidden
+  // reasoning/tool records form one compact run. Every visible transcript
+  // record (including Assistant Notes, commands/system output, and user or
+  // assistant messages) and every compaction marker is a hard chronology
+  // boundary. Runs therefore compact adjacent activity without moving it
+  // across an interleaved visible record or a mounted-window boundary.
   const nodes: ReactNode[] = [];
+  let hidden: HiddenDetail[] = [];
+  let hiddenSources: Message[] = [];
+  const appendHidden = (message: Message, details: HiddenDetail[]) => {
+    if (!details.length) return;
+    hidden.push(...details);
+    hiddenSources.push(message);
+  };
+  const flushHidden = (key: string) => {
+    if (!hidden.length) return;
+    const details = hidden;
+    const sourceMessages = hiddenSources;
+    hidden = [];
+    hiddenSources = [];
+    nodes.push(
+      <HiddenDetailsBlock
+        key={`hidden-${key}-${nodes.length}`}
+        details={details}
+        sourceMessages={sourceMessages}
+        showBorders={showBorders}
+      />
+    );
+  };
 
   displayMessages.forEach((msg, idx) => {
     if (msg.kind === "compaction_marker" || msg.role === "compaction_marker") {
+      flushHidden(`marker-${idx}`);
       nodes.push(<CompactionMarker key={msg.id || `marker-${idx}`} message={msg} />);
       return;
     }
@@ -1306,22 +1363,19 @@ function renderMessagesForVerbosity(
           (getUserCallIds.has(detail.tool_call_id) || detail.source === "tool_result" || detail.source === "tool_call_stream")
         )
     );
-    const reasoningDetails = hiddenDetails.filter((detail) => detail.kind === "reasoning");
-    const operationalDetails = hiddenDetails.filter((detail) => detail.kind !== "reasoning");
+    const isAssistantRecord = msg.role === "assistant" || msg.role === "assistant_note";
     const hasVisibleConversationBody =
-      (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
+      (msg.role === "user" || isAssistantRecord) && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
 
-    if (reasoningDetails.length) {
-      nodes.push(
-        <HiddenDetailsBlock
-          key={`reasoning-${msg.id || idx}`}
-          details={reasoningDetails}
-          sourceMessage={msg}
-          showBorders={showBorders}
-        />
-      );
-    }
     if (hasVisibleConversationBody || isImportantSystemMessage(msg)) {
+      const beforeVisibleDetails = isAssistantRecord
+        ? hiddenDetails.filter((detail) => detail.kind === "reasoning")
+        : [];
+      const afterVisibleDetails = isAssistantRecord
+        ? hiddenDetails.filter((detail) => detail.kind !== "reasoning")
+        : hiddenDetails;
+      appendHidden(msg, beforeVisibleDetails);
+      flushHidden(`before-${msg.id || idx}`);
       nodes.push(
         <MessageBlock
           key={msg.id || idx}
@@ -1331,19 +1385,14 @@ function renderMessagesForVerbosity(
           onStageAttachment={onStageAttachment}
         />
       );
+      appendHidden(msg, afterVisibleDetails);
+      return;
     }
-    if (operationalDetails.length) {
-      nodes.push(
-        <HiddenDetailsBlock
-          key={`details-${msg.id || idx}`}
-          details={operationalDetails}
-          sourceMessage={msg}
-          showBorders={showBorders}
-        />
-      );
-    }
+
+    appendHidden(msg, hiddenDetails);
   });
 
+  flushHidden("end");
   return nodes;
 }
 

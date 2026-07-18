@@ -102,7 +102,7 @@ const toolHeavyMessages = Array.from({ length: 20 }, (_, turn) => {
           id: `tool-heavy-note-${suffix}`,
           role: "assistant",
           answer_user_preserve_turn: true,
-          content: `Checkpoint ${suffix}: verified source-local transcript ordering.`,
+          content: `Checkpoint ${suffix}: verified grouped-run transcript ordering.`,
           timestamp,
           tokens: 12,
         }
@@ -258,7 +258,7 @@ test("visible mobile transcript interactions meet the WCAG minimum target size",
 });
 
 
-test("tool-heavy 60-record minimum transcript stays source-identifiable", async ({ page }) => {
+test("tool-heavy minimum transcript groups runs without crossing visible records", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.addInitScript(() => localStorage.setItem("eggw-theme", "dark"));
   await mockToolHeavyTranscript(page);
@@ -267,23 +267,21 @@ test("tool-heavy 60-record minimum transcript stays source-identifiable", async 
 
   const transcript = page.getByTestId("static-transcript-owner");
   const hidden = transcript.getByTestId("hidden-details");
-  await expect(hidden).toHaveCount(40, { timeout: 15_000 });
+  await expect(hidden).toHaveCount(20, { timeout: 15_000 });
   await expect(transcript.locator('[data-message-role="assistant_note"]')).toHaveCount(10);
   await expect(transcript.locator('[data-message-role="user"]')).toHaveCount(10);
-  await expect(transcript.locator(':scope > *')).toHaveCount(60);
+  await expect(transcript.locator(':scope > *')).toHaveCount(40);
 
-  const sourceIds = await hidden.evaluateAll((cards) => cards.map((card) => card.getAttribute("data-source-message-id")));
-  expect(sourceIds).toEqual(Array.from({ length: 20 }, (_, turn) => {
-    const suffix = String(turn + 1).padStart(2, "0");
-    return [`tool-heavy-call-message-${suffix}`, `tool-heavy-result-message-${suffix}`];
-  }).flat());
-  await expect(hidden.first()).toContainText("Tool Calls");
-  await expect(hidden.nth(1)).toContainText("Tool Result: bash");
-  await expect(hidden.last()).toContainText("Tool Result: python_repl");
+  expect(await hidden.evaluateAll((cards) => cards.every((card) => !card.hasAttribute("data-source-message-id")))).toBe(true);
+  await expect(hidden.first()).toHaveAttribute("data-source-message-count", "2");
+  await expect(hidden.first()).toContainText("Executed 1 tool, got 1 tool result");
+  await expect(hidden.first()).toContainText("Tools: bash");
+  await expect(hidden.last()).toContainText("Executed 1 tool, got 1 tool result");
+  await expect(hidden.last()).toContainText("Tools: python_repl");
 
   const chat = page.getByTestId("chat-panel");
   await chat.evaluate((element) => { element.scrollTop = 0; });
-  await expect(chat).toHaveScreenshot("tool-heavy-min-source-local.png", {
+  await expect(chat).toHaveScreenshot("tool-heavy-min-grouped-runs.png", {
     animations: "disabled",
     caret: "hide",
     maxDiffPixelRatio: 0.015,

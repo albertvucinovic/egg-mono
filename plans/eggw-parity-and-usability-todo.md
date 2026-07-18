@@ -458,14 +458,17 @@ policy.
 
 - 2026-07-18: Reopened the Phase 6 min-chronology acceptance after actual
   rendered-thread inspection showed that `8b3dd47` made tool-heavy threads
-  unrecognizable. EggW min keeps each reasoning/call/result summary attached to
-  its exact source message, restores explicit Reasoning/Tool Calls/Tool Result
-  labels and source headers, and never pairs or relocates details across source
-  records or mounted-window boundaries. Current global get-user lifecycle and
-  ambiguity indexing remains authoritative across loaded pages; source-local
-  streamed/durable de-duplication and exact-ID popup safeguards remain intact.
-  A realistic 60-record screenshot fixture requires all source IDs, 40 compact
-  call/result cards, ten Assistant Notes, and ten User records in literal order.
+  unrecognizable. That source-message-local repair was subsequently rejected:
+  it discarded the established minimum-verbosity philosophy of grouping each
+  consecutive hidden reasoning/tool run. EggW min now groups adjacent hidden
+  records, preserves full declaration/result identity inside the inspectable
+  aggregate, and flushes at every visible user/assistant/Assistant Note,
+  command/system, recovery, and compaction boundary. It therefore cannot move
+  activity across genuine interleaving or mounted-window boundaries. Current
+  global get-user lifecycle and ambiguity indexing remains authoritative across
+  loaded pages; streamed/durable de-duplication and exact-ID popup safeguards
+  remain intact. A realistic tool-heavy screenshot fixture requires 20 grouped
+  call/result runs split by ten Assistant Notes and ten User records.
   Separately, a detached historical window now has a sticky live-tail escape
   that reports the exact newer-message count as SSE updates advance the cache,
   without auto-jumping the reader. Explicit downward boundary intent advances
