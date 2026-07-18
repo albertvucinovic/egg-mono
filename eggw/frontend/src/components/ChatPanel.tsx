@@ -58,6 +58,7 @@ import {
   type HiddenDetailKind,
 } from "@/lib/toolPresentation";
 import {
+  cancelOlderTranscriptRequests,
   cancelTranscriptRequests,
   fetchOlderTranscriptPage,
   refreshTranscriptTail,
@@ -445,9 +446,11 @@ function hiddenSummaryCountsText(details: HiddenDetail[]): string {
 
 function HiddenDetailsBlock({
   details,
+  sourceMessage,
   showBorders = true,
 }: {
   details: HiddenDetail[];
+  sourceMessage: Message;
   showBorders?: boolean;
 }) {
   const [selectedDetail, setSelectedDetail] = useState<HiddenDetail | null>(null);
@@ -478,7 +481,22 @@ function HiddenDetailsBlock({
     <div
       className={clsx("eggw-message-card eggw-role-card eggw-role-tool", !showBorders && "eggw-role-card-borderless")}
       data-testid="hidden-details"
+      data-source-message-id={sourceMessage.id || undefined}
+      data-source-event-seq={sourceMessage.event_seq ?? undefined}
     >
+      <div className="eggw-message-header eggw-compact-detail-header">
+        <span className="eggw-role-marker" aria-hidden="true" />
+        <span className="eggw-role-label">
+          {details.some((detail) => detail.kind === "reasoning")
+            ? "Reasoning"
+            : sourceMessage.role === "tool"
+              ? sourceMessage.name
+                ? `Tool Result: ${sourceMessage.name}`
+                : "Tool Result"
+              : "Tool Calls"}
+        </span>
+        <MessageHeaderFields message={sourceMessage} displayVerbosity="min" />
+      </div>
       <div className="eggw-hidden-summary">{hiddenSummaryCountsText(summary.details)}</div>
       {summary.toolEntries.length > 0 && (
         <div className="eggw-hidden-tools">
@@ -1266,22 +1284,14 @@ function renderMessagesForVerbosity(
     ));
   }
 
-  // Match terminal Egg's minimum-verbosity contract: one compact summary for
-  // each consecutive hidden run. Visible transcript records and compaction
-  // markers are chronology boundaries; they split runs instead of moving
-  // hidden activity across the visible record.
+  // Keep minimum-verbosity details source-message-local. The ordered
+  // transcript remains the chronology authority; exact tool identity is used
+  // only for inspection within one source record, never to relocate or merge
+  // activity across durable messages or mounted-window boundaries.
   const nodes: ReactNode[] = [];
-  let hidden: HiddenDetail[] = [];
-  const flushHidden = (key: string) => {
-    if (!hidden.length) return;
-    const details = hidden;
-    hidden = [];
-    nodes.push(<HiddenDetailsBlock key={`hidden-${key}-${nodes.length}`} details={details} showBorders={showBorders} />);
-  };
 
   displayMessages.forEach((msg, idx) => {
     if (msg.kind === "compaction_marker" || msg.role === "compaction_marker") {
-      flushHidden(`marker-${idx}`);
       nodes.push(<CompactionMarker key={msg.id || `marker-${idx}`} message={msg} />);
       return;
     }
@@ -1296,14 +1306,22 @@ function renderMessagesForVerbosity(
           (getUserCallIds.has(detail.tool_call_id) || detail.source === "tool_result" || detail.source === "tool_call_stream")
         )
     );
+    const reasoningDetails = hiddenDetails.filter((detail) => detail.kind === "reasoning");
+    const operationalDetails = hiddenDetails.filter((detail) => detail.kind !== "reasoning");
     const hasVisibleConversationBody =
       (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
 
+    if (reasoningDetails.length) {
+      nodes.push(
+        <HiddenDetailsBlock
+          key={`reasoning-${msg.id || idx}`}
+          details={reasoningDetails}
+          sourceMessage={msg}
+          showBorders={showBorders}
+        />
+      );
+    }
     if (hasVisibleConversationBody || isImportantSystemMessage(msg)) {
-      const beforeVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind === "reasoning") : [];
-      const afterVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind !== "reasoning") : hiddenDetails;
-      hidden.push(...beforeVisibleDetails);
-      flushHidden(`before-${msg.id || idx}`);
       nodes.push(
         <MessageBlock
           key={msg.id || idx}
@@ -1313,14 +1331,19 @@ function renderMessagesForVerbosity(
           onStageAttachment={onStageAttachment}
         />
       );
-      hidden.push(...afterVisibleDetails);
-      return;
     }
-
-    hidden.push(...hiddenDetails);
+    if (operationalDetails.length) {
+      nodes.push(
+        <HiddenDetailsBlock
+          key={`details-${msg.id || idx}`}
+          details={operationalDetails}
+          sourceMessage={msg}
+          showBorders={showBorders}
+        />
+      );
+    }
   });
 
-  flushHidden("end");
   return nodes;
 }
 
@@ -1398,13 +1421,25 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
   const revealingLoadedRef = useRef(false);
   const historyDemandRef = useRef<HistoryDemandState>(IDLE_HISTORY_DEMAND);
   const historyDemandRunRef = useRef<(() => void) | null>(null);
+  const newerHistoryDemandRef = useRef<{
+    phase: "idle" | "advancing";
+    targetStart: number | null;
+    operation: number;
+  }>({ phase: "idle", targetStart: null, operation: 0 });
   const historyBoundaryRafRef = useRef<number | null>(null);
   const pendingHistoryBoundaryRef = useRef<{
     token: number;
     scrollport: HTMLDivElement;
   } | null>(null);
   const historyBoundaryTokenRef = useRef(0);
-  const historyOperationRef = useRef(0);
+  const newerHistoryBoundaryRafRef = useRef<number | null>(null);
+  const pendingNewerHistoryBoundaryRef = useRef<{
+    token: number;
+    scrollport: HTMLDivElement;
+  } | null>(null);
+  const newerHistoryBoundaryTokenRef = useRef(0);
+  const navigationOperationRef = useRef(0);
+  const navigationDirectionRef = useRef<"idle" | "older" | "newer" | "live">("idle");
   const pendingHistoryAnchorRef = useRef<{
     anchor: { id: string; offset: number } | null;
     fallbackTop: number;
@@ -1456,6 +1491,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     routeIdentityRef.current = threadId;
     liveEdgeStateRef.current = "following";
     historyDemandRef.current = IDLE_HISTORY_DEMAND;
+    newerHistoryDemandRef.current = { phase: "idle", targetStart: null, operation: 0 };
     loadingOlderRef.current = false;
     revealingLoadedRef.current = false;
     pendingHistoryAnchorRef.current = null;
@@ -1498,23 +1534,80 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     }
   }, []);
 
-  const followBottom = useCallback(() => {
-    // Re-entering live mode is explicit. A historical window's local bottom is
-    // never evidence that the user reached the true transcript live edge.
-    setRenderStartIndex(null);
+  const beginNavigation = useCallback((direction: "idle" | "older" | "newer" | "live") => {
+    const operation = navigationOperationRef.current + 1;
+    navigationOperationRef.current = operation;
+    navigationDirectionRef.current = direction;
+    return operation;
+  }, []);
+
+  const clearOlderBoundary = useCallback(() => {
+    historyBoundaryTokenRef.current += 1;
+    pendingHistoryBoundaryRef.current = null;
+    if (historyBoundaryRafRef.current !== null) {
+      cancelAnimationFrame(historyBoundaryRafRef.current);
+      historyBoundaryRafRef.current = null;
+    }
+  }, []);
+
+  const clearNewerBoundary = useCallback(() => {
+    newerHistoryBoundaryTokenRef.current += 1;
+    pendingNewerHistoryBoundaryRef.current = null;
+    if (newerHistoryBoundaryRafRef.current !== null) {
+      cancelAnimationFrame(newerHistoryBoundaryRafRef.current);
+      newerHistoryBoundaryRafRef.current = null;
+    }
+  }, []);
+
+  const resetOlderNavigationState = useCallback(() => {
+    historyDemandRef.current = IDLE_HISTORY_DEMAND;
+    loadingOlderRef.current = false;
+    pendingHistoryAnchorRef.current = null;
+    setIsLoadingOlder(false);
+    clearOlderBoundary();
+  }, [clearOlderBoundary]);
+
+  const resetNewerNavigationState = useCallback(() => {
+    newerHistoryDemandRef.current = { phase: "idle", targetStart: null, operation: 0 };
+    clearNewerBoundary();
+  }, [clearNewerBoundary]);
+
+  const cancelOlderForDirectionChange = useCallback(() => {
+    const wasActive = navigationDirectionRef.current === "older";
+    resetOlderNavigationState();
+    if (wasActive) {
+      cancelOlderTranscriptRequests(threadId);
+      beginNavigation("idle");
+    }
+  }, [beginNavigation, resetOlderNavigationState, threadId]);
+
+  const cancelNewerForDirectionChange = useCallback(() => {
+    const wasActive = navigationDirectionRef.current === "newer" || newerHistoryDemandRef.current.phase === "advancing";
+    resetNewerNavigationState();
+    if (wasActive) beginNavigation("idle");
+  }, [beginNavigation, resetNewerNavigationState]);
+
+  const enterLiveNavigation = useCallback((resetWindow: boolean) => {
+    cancelOlderTranscriptRequests(threadId);
+    resetOlderNavigationState();
+    resetNewerNavigationState();
+    revealingLoadedRef.current = false;
+    beginNavigation("live");
+    if (resetWindow) setRenderStartIndex(null);
     liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, {
       type: "user_reached_live_edge",
     });
     requestAnimationFrame(scrollToBottom);
-  }, [scrollToBottom]);
+  }, [beginNavigation, resetNewerNavigationState, resetOlderNavigationState, scrollToBottom, threadId]);
+
+  const followBottom = useCallback(() => {
+    enterLiveNavigation(true);
+  }, [enterLiveNavigation]);
 
   const followLocalLiveEdge = useCallback(() => {
     if (!renderedTranscript.atLiveTail) return;
-    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, {
-      type: "user_reached_live_edge",
-    });
-    scrollToBottom();
-  }, [renderedTranscript.atLiveTail, scrollToBottom]);
+    enterLiveNavigation(false);
+  }, [enterLiveNavigation, renderedTranscript.atLiveTail]);
 
   const captureHistoryAnchor = useCallback(() => {
     const scrollport = scrollRef.current;
@@ -1550,8 +1643,8 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
   }, []);
 
   const settleHistoryDemand = useCallback(
-    (operation = historyOperationRef.current) => {
-      if (operation !== historyOperationRef.current) return;
+    (operation: number) => {
+      if (operation !== navigationOperationRef.current || navigationDirectionRef.current !== "older") return;
       if (pendingHistoryAnchorRef.current?.operation === operation) pendingHistoryAnchorRef.current = null;
       revealingLoadedRef.current = false;
       loadingOlderRef.current = false;
@@ -1561,24 +1654,21 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
         canFetch: renderedTranscript.hiddenCount === 0 && hasOlderTranscript,
       };
       historyDemandRef.current = reduceHistoryDemand(historyDemandRef.current, { type: "settled" }, historyAvailabilityRef.current);
-      if (historyDemandRef.current.phase !== "idle") queueMicrotask(() => historyDemandRunRef.current?.());
+      if (historyDemandRef.current.phase === "idle") navigationDirectionRef.current = "idle";
+      else queueMicrotask(() => historyDemandRunRef.current?.());
     },
     [renderedTranscript.hiddenCount, hasOlderTranscript]
   );
 
-  const revealFromIndex = useCallback(
-    (startIndex: number) => {
+  const revealOlderFromIndex = useCallback(
+    (startIndex: number, operation: number) => {
       const el = scrollRef.current;
       const anchor = captureHistoryAnchor();
-      const previousScrollHeight = el?.scrollHeight ?? 0;
-      const previousScrollTop = el?.scrollTop ?? 0;
       revealingLoadedRef.current = true;
-      const operation = historyOperationRef.current + 1;
-      historyOperationRef.current = operation;
       pendingHistoryAnchorRef.current = {
         anchor,
-        fallbackTop: previousScrollTop,
-        fallbackHeight: previousScrollHeight,
+        fallbackTop: el?.scrollTop ?? 0,
+        fallbackHeight: el?.scrollHeight ?? 0,
         operation,
       };
       setRenderStartIndex(startIndex);
@@ -1586,26 +1676,9 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     [captureHistoryAnchor]
   );
 
-  const expandLoadedTranscript = useCallback(() => {
-    revealFromIndex(expandedTranscriptStartIndex(renderedTranscript.startIndex));
-  }, [renderedTranscript.startIndex, revealFromIndex]);
-
-  const showNewerTranscript = useCallback(() => {
-    const nextStart = nextTranscriptStartIndex(
-      renderedTranscript.startIndex,
-      totalMessages,
-    );
-    if (nextStart === null) followBottom();
-    else revealFromIndex(nextStart);
-  }, [followBottom, renderedTranscript.startIndex, revealFromIndex, totalMessages]);
-
-  const showLiveTranscript = useCallback(() => {
-    followBottom();
-  }, [followBottom]);
-
-  const loadOlderMessages = useCallback(async () => {
+  const loadOlderMessages = useCallback(async (operation: number) => {
     if (!hasOlderTranscript) {
-      settleHistoryDemand();
+      settleHistoryDemand(operation);
       return;
     }
     const el = scrollRef.current;
@@ -1615,10 +1688,9 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     loadingOlderRef.current = true;
     setIsLoadingOlder(true);
     detachFromBottom();
-    const operation = historyOperationRef.current + 1;
-    historyOperationRef.current = operation;
     try {
       const updated = await fetchOlderTranscriptPage(queryClient, threadId);
+      if (operation !== navigationOperationRef.current || navigationDirectionRef.current !== "older") return;
       if (!updated) {
         restoreHistoryAnchor(anchor, previousScrollTop, previousScrollHeight);
         requestAnimationFrame(() => settleHistoryDemand(operation));
@@ -1638,6 +1710,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
       };
       setRenderStartIndex(nextStartIndex);
     } catch (error) {
+      if (operation !== navigationOperationRef.current || navigationDirectionRef.current !== "older") return;
       console.error("Failed to load older messages:", error);
       settleHistoryDemand(operation);
     }
@@ -1654,16 +1727,21 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
   ]);
 
   const runHistoryDemand = useCallback(() => {
-    if (historyDemandRef.current.phase === "revealing") {
-      expandLoadedTranscript();
-    } else if (historyDemandRef.current.phase === "fetching") {
-      void loadOlderMessages();
+    const phase = historyDemandRef.current.phase;
+    if (phase === "idle") return;
+    cancelNewerForDirectionChange();
+    const operation = beginNavigation("older");
+    if (phase === "revealing") {
+      revealOlderFromIndex(expandedTranscriptStartIndex(renderedTranscript.startIndex), operation);
+    } else {
+      void loadOlderMessages(operation);
     }
-  }, [expandLoadedTranscript, loadOlderMessages]);
+  }, [beginNavigation, cancelNewerForDirectionChange, loadOlderMessages, renderedTranscript.startIndex, revealOlderFromIndex]);
   historyDemandRunRef.current = runHistoryDemand;
 
   const demandOlderHistory = useCallback(() => {
     detachFromBottom();
+    cancelNewerForDirectionChange();
     const previous = historyDemandRef.current;
     const next = reduceHistoryDemand(
       previous,
@@ -1675,29 +1753,67 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     );
     historyDemandRef.current = next;
     if (previous.phase === "idle" && next.phase !== "idle") runHistoryDemand();
-  }, [detachFromBottom, renderedTranscript.hiddenCount, runHistoryDemand, hasOlderTranscript]);
+  }, [cancelNewerForDirectionChange, detachFromBottom, renderedTranscript.hiddenCount, runHistoryDemand, hasOlderTranscript]);
 
   useEffect(() => {
     const pending = pendingHistoryAnchorRef.current;
     if (!pending) return;
+    if (pending.operation !== navigationOperationRef.current || navigationDirectionRef.current !== "older") {
+      pendingHistoryAnchorRef.current = null;
+      return;
+    }
     pendingHistoryAnchorRef.current = null;
     restoreHistoryAnchor(pending.anchor, pending.fallbackTop, pending.fallbackHeight);
     requestAnimationFrame(() => settleHistoryDemand(pending.operation));
   }, [renderStartIndex, renderedTranscript.startIndex, restoreHistoryAnchor, settleHistoryDemand]);
 
+  const demandNewerHistory = useCallback(() => {
+    // Repeated events in one wheel/touch burst belong to the boundary currently
+    // being consumed. Drop them; the next window requires fresh explicit input.
+    if (newerHistoryDemandRef.current.phase === "advancing") return;
+    cancelOlderForDirectionChange();
+    const nextStart = nextTranscriptStartIndex(renderedTranscript.startIndex, totalMessages);
+    if (nextStart === null) {
+      followBottom();
+      return;
+    }
+    const operation = beginNavigation("newer");
+    newerHistoryDemandRef.current = { phase: "advancing", targetStart: nextStart, operation };
+    revealingLoadedRef.current = true;
+    setRenderStartIndex(nextStart);
+  }, [beginNavigation, cancelOlderForDirectionChange, followBottom, renderedTranscript.startIndex, totalMessages]);
+
+  useLayoutEffect(() => {
+    const current = newerHistoryDemandRef.current;
+    if (
+      current.phase !== "advancing"
+      || current.operation !== navigationOperationRef.current
+      || navigationDirectionRef.current !== "newer"
+      || current.targetStart !== renderedTranscript.startIndex
+    ) return;
+    revealingLoadedRef.current = false;
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    requestAnimationFrame(() => {
+      const latest = newerHistoryDemandRef.current;
+      if (latest.phase !== "advancing" || latest.operation !== current.operation) return;
+      newerHistoryDemandRef.current = { phase: "idle", targetStart: null, operation: 0 };
+      if (renderedTranscript.atLiveTail) followLocalLiveEdge();
+      else navigationDirectionRef.current = "idle";
+    });
+  }, [followLocalLiveEdge, renderedTranscript.atLiveTail, renderedTranscript.startIndex]);
+
+  const showLiveTranscript = useCallback(() => {
+    followBottom();
+  }, [followBottom]);
+
   const consumeHistoryBoundary = useCallback(
     (token: number, scrollport: HTMLDivElement) => {
       const pending = pendingHistoryBoundaryRef.current;
       if (!pending || pending.token !== token || pending.scrollport !== scrollport) return;
-      pendingHistoryBoundaryRef.current = null;
-      historyBoundaryTokenRef.current += 1;
-      if (historyBoundaryRafRef.current !== null) {
-        cancelAnimationFrame(historyBoundaryRafRef.current);
-        historyBoundaryRafRef.current = null;
-      }
+      clearOlderBoundary();
       demandOlderHistory();
     },
-    [demandOlderHistory]
+    [clearOlderBoundary, demandOlderHistory]
   );
 
   const scheduleHistoryBoundaryCheck = useCallback(
@@ -1706,8 +1822,6 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
       historyBoundaryTokenRef.current = token;
       pendingHistoryBoundaryRef.current = { token, scrollport };
       if (historyBoundaryRafRef.current !== null) cancelAnimationFrame(historyBoundaryRafRef.current);
-      // The scroll event services a moving input. This single input-owned frame is
-      // solely the fallback for an already-clamped gesture that emits no scroll.
       historyBoundaryRafRef.current = requestAnimationFrame(() => {
         historyBoundaryRafRef.current = null;
         if (scrollRef.current === scrollport && scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
@@ -1718,28 +1832,69 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     [consumeHistoryBoundary]
   );
 
+  const consumeNewerHistoryBoundary = useCallback(
+    (token: number, scrollport: HTMLDivElement) => {
+      const pending = pendingNewerHistoryBoundaryRef.current;
+      if (!pending || pending.token !== token || pending.scrollport !== scrollport) return;
+      clearNewerBoundary();
+      if (renderedTranscript.atLiveTail) followLocalLiveEdge();
+      else demandNewerHistory();
+    },
+    [clearNewerBoundary, demandNewerHistory, followLocalLiveEdge, renderedTranscript.atLiveTail]
+  );
+
+  const scheduleNewerHistoryBoundaryCheck = useCallback(
+    (scrollport: HTMLDivElement) => {
+      const token = newerHistoryBoundaryTokenRef.current + 1;
+      newerHistoryBoundaryTokenRef.current = token;
+      pendingNewerHistoryBoundaryRef.current = { token, scrollport };
+      if (newerHistoryBoundaryRafRef.current !== null) cancelAnimationFrame(newerHistoryBoundaryRafRef.current);
+      if (scrollport.scrollHeight - scrollport.scrollTop - scrollport.clientHeight <= STICKY_BOTTOM_THRESHOLD_PX) {
+        consumeNewerHistoryBoundary(token, scrollport);
+        return;
+      }
+      newerHistoryBoundaryRafRef.current = requestAnimationFrame(() => {
+        newerHistoryBoundaryRafRef.current = null;
+        if (
+          scrollRef.current === scrollport
+          && scrollport.scrollHeight - scrollport.scrollTop - scrollport.clientHeight <= STICKY_BOTTOM_THRESHOLD_PX
+        ) consumeNewerHistoryBoundary(token, scrollport);
+      });
+    },
+    [consumeNewerHistoryBoundary]
+  );
+
   const handleScroll = useCallback(() => {
-    const pending = pendingHistoryBoundaryRef.current;
-    if (!pending || scrollRef.current !== pending.scrollport) return;
-    if (pending.scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
-      consumeHistoryBoundary(pending.token, pending.scrollport);
-    }
-  }, [consumeHistoryBoundary]);
+    const olderPending = pendingHistoryBoundaryRef.current;
+    if (
+      olderPending
+      && scrollRef.current === olderPending.scrollport
+      && olderPending.scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX
+    ) consumeHistoryBoundary(olderPending.token, olderPending.scrollport);
+    const newerPending = pendingNewerHistoryBoundaryRef.current;
+    if (
+      newerPending
+      && scrollRef.current === newerPending.scrollport
+      && newerPending.scrollport.scrollHeight - newerPending.scrollport.scrollTop - newerPending.scrollport.clientHeight <= STICKY_BOTTOM_THRESHOLD_PX
+    ) consumeNewerHistoryBoundary(newerPending.token, newerPending.scrollport);
+  }, [consumeHistoryBoundary, consumeNewerHistoryBoundary]);
 
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLDivElement>) => {
       if (nestedScrollportConsumesWheel(event.target, event.currentTarget, event.deltaY)) return;
+      const scrollport = event.currentTarget;
       if (event.deltaY < 0) {
+        cancelNewerForDirectionChange();
         detachFromBottom();
-        scheduleHistoryBoundaryCheck(event.currentTarget);
+        scheduleHistoryBoundaryCheck(scrollport);
         return;
       }
-      if (event.deltaY > 0)
-        requestAnimationFrame(() => {
-          if (renderedTranscript.atLiveTail && isAtBottom()) followLocalLiveEdge();
-        });
+      if (event.deltaY > 0) {
+        cancelOlderForDirectionChange();
+        scheduleNewerHistoryBoundaryCheck(scrollport);
+      }
     },
-    [detachFromBottom, followLocalLiveEdge, isAtBottom, renderedTranscript.atLiveTail, scheduleHistoryBoundaryCheck]
+    [cancelNewerForDirectionChange, cancelOlderForDirectionChange, detachFromBottom, scheduleHistoryBoundaryCheck, scheduleNewerHistoryBoundaryCheck]
   );
 
   const handlePointerDown = useCallback(
@@ -1752,12 +1907,16 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
 
   const handlePointerUp = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
-      const rect = event.currentTarget.getBoundingClientRect();
+      const scrollport = event.currentTarget;
+      const rect = scrollport.getBoundingClientRect();
       if (event.clientX < rect.right - 20) return;
-      if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
-      else if (renderedTranscript.atLiveTail && isAtBottom()) followLocalLiveEdge();
+      if (scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
+      else if (scrollport.scrollHeight - scrollport.scrollTop - scrollport.clientHeight <= STICKY_BOTTOM_THRESHOLD_PX) {
+        if (renderedTranscript.atLiveTail) followLocalLiveEdge();
+        else demandNewerHistory();
+      }
     },
-    [demandOlderHistory, followLocalLiveEdge, isAtBottom, renderedTranscript.atLiveTail]
+    [demandNewerHistory, demandOlderHistory, followLocalLiveEdge, renderedTranscript.atLiveTail]
   );
 
   const lastTouchYRef = useRef<number | null>(null);
@@ -1767,40 +1926,42 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
 
   const handleTouchMove = useCallback(
     (event: TouchEvent<HTMLDivElement>) => {
+      const scrollport = event.currentTarget;
       const nextY = event.touches[0]?.clientY;
       const previousY = lastTouchYRef.current;
       lastTouchYRef.current = nextY ?? null;
       if (nextY !== undefined && previousY !== null && nextY > previousY) {
+        cancelNewerForDirectionChange();
         detachFromBottom();
-        scheduleHistoryBoundaryCheck(event.currentTarget);
+        scheduleHistoryBoundaryCheck(scrollport);
       } else if (nextY !== undefined && previousY !== null && nextY < previousY) {
-        requestAnimationFrame(() => {
-          if (renderedTranscript.atLiveTail && isAtBottom()) followLocalLiveEdge();
-        });
+        cancelOlderForDirectionChange();
+        scheduleNewerHistoryBoundaryCheck(scrollport);
       }
     },
-    [detachFromBottom, followLocalLiveEdge, isAtBottom, renderedTranscript.atLiveTail, scheduleHistoryBoundaryCheck]
+    [cancelNewerForDirectionChange, cancelOlderForDirectionChange, detachFromBottom, scheduleHistoryBoundaryCheck, scheduleNewerHistoryBoundaryCheck]
   );
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
+      const scrollport = event.currentTarget;
       if (event.key === "End") {
         followBottom();
         return;
       }
       if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) {
+        cancelNewerForDirectionChange();
         detachFromBottom();
-        if (event.key === "Home") event.currentTarget.scrollTop = 0;
-        scheduleHistoryBoundaryCheck(event.currentTarget);
+        if (event.key === "Home") scrollport.scrollTop = 0;
+        scheduleHistoryBoundaryCheck(scrollport);
         return;
       }
       if (["ArrowDown", "PageDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) {
-        requestAnimationFrame(() => {
-          if (renderedTranscript.atLiveTail && isAtBottom()) followLocalLiveEdge();
-        });
+        cancelOlderForDirectionChange();
+        scheduleNewerHistoryBoundaryCheck(scrollport);
       }
     },
-    [detachFromBottom, followBottom, followLocalLiveEdge, isAtBottom, renderedTranscript.atLiveTail, scheduleHistoryBoundaryCheck]
+    [cancelNewerForDirectionChange, cancelOlderForDirectionChange, detachFromBottom, followBottom, scheduleHistoryBoundaryCheck, scheduleNewerHistoryBoundaryCheck]
   );
 
   const flushStreamingText = useCallback(() => {
@@ -2084,6 +2245,28 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     };
   }, [threadId]);
 
+  useEffect(() => {
+    return () => {
+      // No boundary/navigation callback may outlive this route owner. Request
+      // cancellation is handled separately because Strict Mode can remount the
+      // same route; local RAFs and intent tokens are always safe to invalidate.
+      navigationOperationRef.current += 1;
+      navigationDirectionRef.current = "idle";
+      cancelOlderTranscriptRequests(threadId);
+      historyDemandRef.current = IDLE_HISTORY_DEMAND;
+      newerHistoryDemandRef.current = { phase: "idle", targetStart: null, operation: 0 };
+      pendingHistoryAnchorRef.current = null;
+      historyBoundaryTokenRef.current += 1;
+      pendingHistoryBoundaryRef.current = null;
+      newerHistoryBoundaryTokenRef.current += 1;
+      pendingNewerHistoryBoundaryRef.current = null;
+      if (historyBoundaryRafRef.current !== null) cancelAnimationFrame(historyBoundaryRafRef.current);
+      if (newerHistoryBoundaryRafRef.current !== null) cancelAnimationFrame(newerHistoryBoundaryRafRef.current);
+      historyBoundaryRafRef.current = null;
+      newerHistoryBoundaryRafRef.current = null;
+    };
+  }, [threadId]);
+
   const retryTranscript = useCallback(() => {
     void refreshTranscriptTail(queryClient, threadId).catch((error) => {
       console.error("Failed to retry transcript tail:", error);
@@ -2095,21 +2278,14 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, {
       type: "thread_changed",
     });
-    historyDemandRef.current = reduceHistoryDemand(historyDemandRef.current, { type: "reset" }, { canReveal: false, canFetch: false });
-    loadingOlderRef.current = false;
+    resetOlderNavigationState();
+    resetNewerNavigationState();
     revealingLoadedRef.current = false;
-    pendingHistoryAnchorRef.current = null;
-    historyOperationRef.current += 1;
-    historyBoundaryTokenRef.current += 1;
-    pendingHistoryBoundaryRef.current = null;
-    if (historyBoundaryRafRef.current !== null) {
-      cancelAnimationFrame(historyBoundaryRafRef.current);
-      historyBoundaryRafRef.current = null;
-    }
+    beginNavigation("idle");
     setRenderStartIndex(null);
     setIsLoadingOlder(false);
     scrollToBottomNow();
-  }, [currentThreadId, scrollToBottomNow]);
+  }, [beginNavigation, currentThreadId, resetNewerNavigationState, resetOlderNavigationState, scrollToBottomNow]);
 
   // React can remove live cards and install several durable results in one
   // commit. Correct the following viewport in that commit's layout phase so no
@@ -2180,6 +2356,21 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
         className="eggw-transcript-scroll flex-1 overflow-auto px-4 py-6 md:px-8"
         data-testid="chat-panel"
       >
+        {renderedTranscript.newerHiddenCount > 0 && (
+          <div
+            className="eggw-live-tail-escape"
+            data-testid="live-tail-escape"
+            role="status"
+            aria-live="polite"
+          >
+            <span>
+              {renderedTranscript.newerHiddenCount.toLocaleString()} newer {renderedTranscript.newerHiddenCount === 1 ? "message" : "messages"}
+            </span>
+            <Button variant="primary" onClick={showLiveTranscript} data-testid="return-to-live-tail">
+              Return to live tail
+            </Button>
+          </div>
+        )}
         <div className="eggw-transcript-inner" data-testid="chat-panel-content">
           {isLoading ? (
             <div className="eggw-transcript-state" role="status" aria-live="polite">
@@ -2205,11 +2396,8 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
               )}
               {renderedTranscript.newerHiddenCount > 0 && (
                 <div className="mb-4 flex justify-center gap-2">
-                  <Button variant="secondary" onClick={showNewerTranscript} data-testid="show-newer-loaded-messages">
+                  <Button variant="secondary" onClick={demandNewerHistory} data-testid="show-newer-loaded-messages">
                     Show newer ({renderedTranscript.newerHiddenCount.toLocaleString()} later)
-                  </Button>
-                  <Button variant="secondary" onClick={showLiveTranscript} data-testid="return-to-live-tail">
-                    Return to live tail
                   </Button>
                 </div>
               )}

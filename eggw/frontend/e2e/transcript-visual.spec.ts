@@ -65,6 +65,79 @@ const messages = [
   },
 ];
 
+
+
+const toolHeavyThreadId = "tool-heavy-min-visual-fixture";
+const toolHeavyMessages = Array.from({ length: 20 }, (_, turn) => {
+  const turnNumber = turn + 1;
+  const suffix = String(turnNumber).padStart(2, "0");
+  const toolName = ["bash", "python_repl", "read_long_tool_output"][turn % 3];
+  const toolCallId = `tool-heavy-call-${suffix}`;
+  return [
+    {
+      id: `tool-heavy-call-message-${suffix}`,
+      role: "assistant",
+      content: "",
+      timestamp,
+      tokens: 20 + turnNumber,
+      tool_calls: [{
+        id: toolCallId,
+        name: toolName,
+        arguments: toolName === "bash"
+          ? { script: `printf 'tool-heavy-${suffix}\n'` }
+          : { code: `print("tool-heavy-${suffix}")` },
+      }],
+    },
+    {
+      id: `tool-heavy-result-message-${suffix}`,
+      role: "tool",
+      name: toolName,
+      tool_call_id: toolCallId,
+      content: `Completed tool-heavy operation ${suffix}.`,
+      timestamp,
+      tokens: 8 + turnNumber,
+    },
+    turn % 2 === 0
+      ? {
+          id: `tool-heavy-note-${suffix}`,
+          role: "assistant",
+          answer_user_preserve_turn: true,
+          content: `Checkpoint ${suffix}: verified source-local transcript ordering.`,
+          timestamp,
+          tokens: 12,
+        }
+      : {
+          id: `tool-heavy-user-${suffix}`,
+          role: "user",
+          content: `Continue with operation ${suffix}.`,
+          timestamp,
+          tokens: 7,
+        },
+  ];
+}).flat();
+
+async function mockToolHeavyTranscript(page: Page) {
+  await page.route(`${API_BASE}/api/threads/${toolHeavyThreadId}/events`, (route) => route.fulfill({
+    status: 200, headers: { ...headers, "content-type": "text/event-stream" }, body: "",
+  }));
+  await page.route(`${API_BASE}/api/threads/${toolHeavyThreadId}/open`, (route) => route.fulfill({ status: 200, headers, json: { status: "opened" } }));
+  await page.route(new RegExp(`/api/threads/${toolHeavyThreadId}/messages(?:\\?.*)?$`), (route) => route.fulfill({
+    status: 200, headers, json: { items: toolHeavyMessages, snapshot_cursor: 120, next_before: null },
+  }));
+  await page.route(`${API_BASE}/api/threads/${toolHeavyThreadId}/stats`, (route) => route.fulfill({
+    status: 200, headers, json: { input_tokens: 240, output_tokens: 880, reasoning_tokens: 0, cached_tokens: 0, context_tokens: 1120, full_thread_tokens: 1120, total_tokens: 1120, cost_usd: 0.01 },
+  }));
+  await page.route(`${API_BASE}/api/threads/${toolHeavyThreadId}/tools`, (route) => route.fulfill({ status: 200, headers, json: [] }));
+  await page.route(`${API_BASE}/api/threads/${toolHeavyThreadId}/sandbox`, (route) => route.fulfill({ status: 200, headers, json: { enabled: false, effective: false, available: false, user_control_enabled: true } }));
+  await page.route(`${API_BASE}/api/threads/${toolHeavyThreadId}/state`, (route) => route.fulfill({ status: 200, headers, json: { state: "waiting_user", active_get_user_wait: false } }));
+  await page.route(`${API_BASE}/api/threads/${toolHeavyThreadId}/settings`, (route) => route.fulfill({ status: 200, headers, json: { auto_approval: false, model_key: "fixture:model" } }));
+  await page.route(`${API_BASE}/api/threads/${toolHeavyThreadId}/children`, (route) => route.fulfill({ status: 200, headers, json: [] }));
+  await page.route(`${API_BASE}/api/threads/${toolHeavyThreadId}`, (route) => route.fulfill({ status: 200, headers, json: { id: toolHeavyThreadId, name: "Tool-heavy minimum transcript", has_children: false, model_key: "fixture:model" } }));
+  await page.route(`${API_BASE}/api/threads/roots`, (route) => route.fulfill({ status: 200, headers, json: [{ id: toolHeavyThreadId, name: "Tool-heavy minimum transcript", has_children: false }] }));
+  await page.route(`${API_BASE}/api/models`, (route) => route.fulfill({ status: 200, headers, json: { models: [{ key: "fixture:model" }], default_model: "fixture:model" } }));
+  await page.route(`${API_BASE}/api/threads`, (route) => route.fulfill({ status: 200, headers, json: [{ id: toolHeavyThreadId, name: "Tool-heavy minimum transcript", has_children: false }] }));
+}
+
 async function mockTranscript(page: Page) {
   await page.route(`${API_BASE}/api/threads/${threadId}/events`, (route) => route.fulfill({
     status: 200, headers: { ...headers, "content-type": "text/event-stream" }, body: "",
@@ -182,4 +255,37 @@ test("visible mobile transcript interactions meet the WCAG minimum target size",
     return { label: element.getAttribute("aria-label") || element.textContent?.trim() || element.tagName, width: rect.width, height: rect.height };
   }).filter(({ width, height }) => width < 24 || height < 24));
   expect(undersized, JSON.stringify(undersized, null, 2)).toEqual([]);
+});
+
+
+test("tool-heavy 60-record minimum transcript stays source-identifiable", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.addInitScript(() => localStorage.setItem("eggw-theme", "dark"));
+  await mockToolHeavyTranscript(page);
+  await page.goto(`/${toolHeavyThreadId}`);
+  await expect(page.getByTitle("Transcript display verbosity")).toHaveValue("min");
+
+  const transcript = page.getByTestId("static-transcript-owner");
+  const hidden = transcript.getByTestId("hidden-details");
+  await expect(hidden).toHaveCount(40, { timeout: 15_000 });
+  await expect(transcript.locator('[data-message-role="assistant_note"]')).toHaveCount(10);
+  await expect(transcript.locator('[data-message-role="user"]')).toHaveCount(10);
+  await expect(transcript.locator(':scope > *')).toHaveCount(60);
+
+  const sourceIds = await hidden.evaluateAll((cards) => cards.map((card) => card.getAttribute("data-source-message-id")));
+  expect(sourceIds).toEqual(Array.from({ length: 20 }, (_, turn) => {
+    const suffix = String(turn + 1).padStart(2, "0");
+    return [`tool-heavy-call-message-${suffix}`, `tool-heavy-result-message-${suffix}`];
+  }).flat());
+  await expect(hidden.first()).toContainText("Tool Calls");
+  await expect(hidden.nth(1)).toContainText("Tool Result: bash");
+  await expect(hidden.last()).toContainText("Tool Result: python_repl");
+
+  const chat = page.getByTestId("chat-panel");
+  await chat.evaluate((element) => { element.scrollTop = 0; });
+  await expect(chat).toHaveScreenshot("tool-heavy-min-source-local.png", {
+    animations: "disabled",
+    caret: "hide",
+    maxDiffPixelRatio: 0.015,
+  });
 });

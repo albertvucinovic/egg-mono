@@ -97,7 +97,7 @@ export function resolveToolResultNames(messages: Message[]): Message[] {
 /**
  * Collapse duplicate streamed/durable representations for min-summary counts
  * while retaining every raw detail for exact popup inspection. Tool names
- * follow terminal Egg: call names when a run has calls, otherwise result names.
+ * use call names when a source message has calls, otherwise result names.
  */
 export function summarizeHiddenActivity(details: HiddenToolDetail[]): HiddenActivitySummary {
   const structuredCallIds = new Set(
@@ -194,7 +194,7 @@ export function correlateHiddenToolDetails(details: HiddenToolDetail[]): HiddenT
     bodyParts.push(
       "",
       "Result:",
-      result?.body || (result ? "(empty)" : "(not present in this compact run)"),
+      result?.body || (result ? "(empty)" : "(not present in this source message)"),
     );
     return { ...call, body: bodyParts.join("\n") };
   });

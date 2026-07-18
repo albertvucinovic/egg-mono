@@ -480,6 +480,13 @@ export function mergeOlderTranscriptPage(
   return appendTranscriptHistoryData(current, fetched);
 }
 
+/** Cancel only explicit older-page reads; live-tail/SSE authority stays intact. */
+export function cancelOlderTranscriptRequests(threadId: string): void {
+  const state = transcriptRequestState(threadId);
+  state.olderControllers.forEach((controller) => controller.abort());
+  state.olderControllers.clear();
+}
+
 /** Fetch one explicit history page and merge it into the latest cache atomically. */
 export async function fetchOlderTranscriptPage(
   queryClient: QueryClient,

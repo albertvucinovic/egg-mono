@@ -1171,6 +1171,36 @@ code {
   color: var(--text-primary);
 }
 
+.eggw-live-tail-escape {
+  position: sticky;
+  z-index: 20;
+  top: 0;
+  width: fit-content;
+  max-width: min(100%, 32rem);
+  margin: 0 auto 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  border: 1px solid var(--status-info-border);
+  border-radius: 999px;
+  padding: 0.45rem 0.55rem 0.45rem 0.9rem;
+  background: color-mix(in srgb, var(--surface-panel) 94%, transparent);
+  color: var(--status-info-text);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(0.65rem);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+@media (max-width: 639px) {
+  .eggw-live-tail-escape {
+    width: 100%;
+    justify-content: space-between;
+    border-radius: 0.8rem;
+  }
+}
+
 .eggw-role-card {
   --role-surface: var(--surface-panel);
   --role-border: var(--border-default);
