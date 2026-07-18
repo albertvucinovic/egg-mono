@@ -13,6 +13,11 @@ export interface HiddenToolDetail {
   source?: HiddenDetailSource;
 }
 
+export interface HiddenActivitySummary {
+  details: HiddenToolDetail[];
+  toolEntries: HiddenToolDetail[];
+}
+
 function cleanedText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -90,6 +95,33 @@ export function resolveToolResultNames(messages: Message[]): Message[] {
 }
 
 /**
+ * Collapse duplicate streamed/durable representations for min-summary counts
+ * while retaining every raw detail for exact popup inspection. Tool names
+ * follow terminal Egg: call names when a run has calls, otherwise result names.
+ */
+export function summarizeHiddenActivity(details: HiddenToolDetail[]): HiddenActivitySummary {
+  const structuredCallIds = new Set(
+    details
+      .filter((detail) => detail.source === "tool_call")
+      .map((detail) => detail.tool_call_id)
+      .filter(Boolean),
+  );
+  const counted = details.filter((detail) => {
+    return !(
+      detail.source === "tool_call_stream"
+      && detail.tool_call_id
+      && structuredCallIds.has(detail.tool_call_id)
+    );
+  });
+  const calls = counted.filter((detail) => detail.kind === "tool_calls" && Boolean(cleanedText(detail.name)));
+  const results = counted.filter((detail) => detail.kind === "tool_results" && Boolean(cleanedText(detail.name)));
+  return {
+    details: counted,
+    toolEntries: calls.length ? calls : results,
+  };
+}
+
+/**
  * Build one min-verbosity entry per call and attach results only by exact
  * tool_call_id. Name/position inference can cross-wire concurrent calls, so
  * ID-less legacy previews/results remain separately inspectable.
@@ -106,7 +138,24 @@ export function correlateHiddenToolDetails(details: HiddenToolDetail[]): HiddenT
   ];
   const finalResults = details.filter((detail) => detail.source === "tool_result");
   const streamResults = details.filter((detail) => detail.source === "tool_stream");
-  if (calls.length === 0) return [...finalResults, ...streamResults].filter((detail) => Boolean(detail.name));
+  const inspectableResult = (result: HiddenToolDetail): HiddenToolDetail => {
+    const name = result.name || toolDisplayName("", result.tool_call_id, "Tool result");
+    const header = [
+      `Tool result: ${name}`,
+      result.tool_call_id ? `tool_call_id: ${result.tool_call_id}` : "",
+    ].filter(Boolean).join("\n");
+    return {
+      ...result,
+      name,
+      body: [header, "", "Result:", result.body || "(empty)"].join("\n"),
+    };
+  };
+  if (calls.length === 0) {
+    return [
+      ...finalResults.map(inspectableResult),
+      ...streamResults,
+    ].filter((detail) => Boolean(detail.name));
+  }
 
   const usedFinalResults = new Set<number>();
   const resultByCall = new Map<number, HiddenToolDetail>();
@@ -145,13 +194,13 @@ export function correlateHiddenToolDetails(details: HiddenToolDetail[]): HiddenT
     bodyParts.push(
       "",
       "Result:",
-      result?.body || (result ? "(empty)" : "(not found in the loaded transcript)"),
+      result?.body || (result ? "(empty)" : "(not present in this compact run)"),
     );
     return { ...call, body: bodyParts.join("\n") };
   });
 
   const unmatchedResults = [
-    ...finalResults.filter((_, index) => !usedFinalResults.has(index)),
+    ...finalResults.filter((_, index) => !usedFinalResults.has(index)).map(inspectableResult),
     ...streamResults,
   ].filter((detail) => Boolean(detail.name));
   return [...pairedCalls, ...unmatchedResults];

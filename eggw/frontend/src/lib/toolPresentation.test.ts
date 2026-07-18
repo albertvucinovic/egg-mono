@@ -6,6 +6,7 @@ import {
   getUserToolCallIds,
   isGetUserMessageTool,
   resolveToolResultNames,
+  summarizeHiddenActivity,
   toolDisplayName,
   type HiddenToolDetail,
 } from "./toolPresentation";
@@ -45,11 +46,14 @@ describe("tool transcript presentation", () => {
 
     expect(details).toHaveLength(4);
     expect(details[0].body).toContain("ARG_FIRST");
-    expect(details[0].body).toContain("(not found in the loaded transcript)");
+    expect(details[0].body).toContain("(not present in this compact run)");
     expect(details[0].body).not.toContain("RESULT_FIRST");
     expect(details[1].body).toContain("ARG_SECOND");
     expect(details[1].body).not.toContain("RESULT_SECOND");
-    expect(details.slice(2).map((detail) => detail.body)).toEqual(["RESULT_FIRST", "RESULT_SECOND"]);
+    expect(details[2].body).toContain("tool_call_id: call-duplicate");
+    expect(details[2].body).toContain("RESULT_FIRST");
+    expect(details[3].body).toContain("tool_call_id: call-duplicate");
+    expect(details[3].body).toContain("RESULT_SECOND");
   });
 
   it("keeps missing halves and ID-less legacy previews separate", () => {
@@ -61,13 +65,54 @@ describe("tool transcript presentation", () => {
     ]);
 
     expect(details).toHaveLength(4);
-    expect(details[0].body).toContain("(not found in the loaded transcript)");
+    expect(details[0].body).toContain("(not present in this compact run)");
     expect(details[0].body).not.toContain("STREAM_PREVIEW");
-    expect(details.slice(1).map((detail) => detail.body)).toEqual([
-      "ORPHAN_RESULT",
-      "IDLESS_RESULT",
-      "STREAM_PREVIEW",
+    expect(details[1].body).toContain("tool_call_id: call-orphan");
+    expect(details[1].body).toContain("ORPHAN_RESULT");
+    expect(details[2].body).toContain("IDLESS_RESULT");
+    expect(details[3].body).toBe("STREAM_PREVIEW");
+  });
+
+  it("deduplicates durable and streamed call copies in compact counts", () => {
+    const durable = call("call-shared", "bash", "DURABLE_ARGS");
+    const streamed: HiddenToolDetail = {
+      kind: "tool_calls",
+      source: "tool_call_stream",
+      tool_call_id: "call-shared",
+      name: "bash",
+      header: "streamed",
+      body: "STREAMED_ARGS",
+    };
+    const summary = summarizeHiddenActivity([
+      durable,
+      streamed,
+      result("call-shared", "bash", "RESULT"),
     ]);
+
+    expect(summary.details).toEqual([durable, expect.objectContaining({ kind: "tool_results" })]);
+    expect(summary.toolEntries).toEqual([durable]);
+  });
+
+  it("preserves distinct durable calls when a tool_call_id is reused", () => {
+    const first = call("call-reused", "bash", "FIRST");
+    const second = call("call-reused", "python", "SECOND");
+    const summary = summarizeHiddenActivity([first, second]);
+
+    expect(summary.details).toEqual([first, second]);
+    expect(summary.toolEntries).toEqual([first, second]);
+  });
+
+  it("uses call names when present and only falls back to result names", () => {
+    const withCall = summarizeHiddenActivity([
+      call("call-bash", "bash", "ARGS"),
+      result("call-orphan", "Tool result · call-orphan", "ORPHAN"),
+    ]);
+    expect(withCall.toolEntries.map((detail) => detail.name)).toEqual(["bash"]);
+
+    const resultsOnly = summarizeHiddenActivity([
+      result("call-python", "python", "RESULT"),
+    ]);
+    expect(resultsOnly.toolEntries.map((detail) => detail.name)).toEqual(["python"]);
   });
 
   it("resolves result names by exact ID and rejects ambiguous reused IDs", () => {

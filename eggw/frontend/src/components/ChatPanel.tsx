@@ -45,14 +45,15 @@ import {
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import { liveTimingSnapshot, shouldUpdateLiveTiming, type LiveTimingSnapshot } from "@/lib/liveTiming";
 import {
+  correlateHiddenToolDetails,
   getUserAnswerToolCallId,
   getUserToolCallIds,
   isGetUserMessageTool,
   resolveToolResultNames,
+  summarizeHiddenActivity,
   toolCallId,
   toolCallName,
   toolDisplayName,
-  shortToolCallId,
   type HiddenToolDetail,
   type HiddenDetailKind,
 } from "@/lib/toolPresentation";
@@ -444,73 +445,80 @@ function hiddenSummaryCountsText(details: HiddenDetail[]): string {
 
 function HiddenDetailsBlock({
   details,
-  sourceMessage,
   showBorders = true,
 }: {
   details: HiddenDetail[];
-  sourceMessage?: Message;
   showBorders?: boolean;
 }) {
   const [selectedDetail, setSelectedDetail] = useState<HiddenDetail | null>(null);
   if (!details.length) return null;
-  const toolDetails = details
-    .filter((detail) => (detail.kind === "tool_calls" || detail.kind === "tool_results") && Boolean(detail.name))
-    .map((detail) => {
-      if (detail.source !== "tool_result") return detail;
-      const header = [
-        `Tool result: ${detail.name}`,
-        detail.tool_call_id ? `tool_call_id: ${detail.tool_call_id}` : "",
-      ].filter(Boolean).join("\n");
-      return {
-        ...detail,
-        body: [header, "", "Result:", detail.body || "(empty)"].join("\n"),
-      };
+  const summary = summarizeHiddenActivity(details);
+  const toolDetails = correlateHiddenToolDetails(details);
+  const claimedToolDetails = new Set<number>();
+  const summaryEntries = summary.toolEntries.map((entry) => {
+    const index = toolDetails.findIndex((candidate, candidateIndex) => {
+      if (claimedToolDetails.has(candidateIndex)) return false;
+      if (entry.tool_call_id) {
+        return candidate.tool_call_id === entry.tool_call_id && candidate.source === entry.source;
+      }
+      return candidate.name === entry.name && candidate.source === entry.source;
     });
+    const fallbackIndex = index >= 0 ? index : toolDetails.findIndex((candidate, candidateIndex) => (
+      !claimedToolDetails.has(candidateIndex)
+      && (entry.tool_call_id ? candidate.tool_call_id === entry.tool_call_id : candidate.name === entry.name)
+    ));
+    const resolvedIndex = index >= 0 ? index : fallbackIndex;
+    if (resolvedIndex >= 0) claimedToolDetails.add(resolvedIndex);
+    return { entry, detail: resolvedIndex >= 0 ? toolDetails[resolvedIndex] : undefined };
+  });
+  const unmatchedToolDetails = toolDetails
+    .map((detail, index) => ({ detail, index }))
+    .filter(({ index }) => !claimedToolDetails.has(index));
   return (
     <div
       className={clsx("eggw-message-card eggw-role-card eggw-role-tool", !showBorders && "eggw-role-card-borderless")}
       data-testid="hidden-details"
-      data-source-message-id={sourceMessage?.id || undefined}
-      data-source-event-seq={sourceMessage?.event_seq ?? undefined}
     >
-      {sourceMessage && (
-        <div className="eggw-message-header eggw-compact-detail-header">
-          <span className="eggw-role-marker" aria-hidden="true" />
-          <span className="eggw-role-label">
-            {details.some((detail) => detail.kind === "reasoning")
-              ? "Reasoning"
-              : sourceMessage.role === "tool"
-                ? sourceMessage.name
-                  ? `Tool Result: ${sourceMessage.name}`
-                  : "Tool Result"
-                : "Tool Calls"}
-          </span>
-          <MessageHeaderFields message={sourceMessage} displayVerbosity="min" />
-        </div>
-      )}
-      <div className="eggw-hidden-summary">{hiddenSummaryCountsText(details)}</div>
-      {toolDetails.length > 0 && (
+      <div className="eggw-hidden-summary">{hiddenSummaryCountsText(summary.details)}</div>
+      {summary.toolEntries.length > 0 && (
         <div className="eggw-hidden-tools">
           <span>Tools: </span>
-          {toolDetails.map((detail, index) => (
-            <span key={`${detail.kind}-${index}-${detail.name || "tool"}`}>
-              <button
-                type="button"
-                className="eggw-link"
-                title={detail.body ? `Show ${detail.header}` : detail.header}
-                onClick={() => setSelectedDetail(detail)}
-              >
-                {detail.name}
-              </button>
-              {detail.tool_call_id && (
-                <span className="eggw-message-meta ml-1 font-mono" title={detail.tool_call_id}>
-                  {shortToolCallId(detail.tool_call_id)}
-                </span>
-              )}
-              {index < toolDetails.length - 1 ? ", " : null}
-            </span>
-          ))}
+          {summaryEntries.map(({ entry, detail }, index) => {
+            return (
+              <span key={`${index}-${entry.name || "tool"}`}>
+                <button
+                  type="button"
+                  className="eggw-link"
+                  title={detail?.body ? `Show ${detail.header}` : detail?.header || entry.name}
+                  onClick={() => detail && setSelectedDetail(detail)}
+                >
+                  {entry.name}
+                </button>
+                {index < summary.toolEntries.length - 1 ? ", " : null}
+              </span>
+            );
+          })}
         </div>
+      )}
+      {unmatchedToolDetails.length > 0 && (
+        <details className="eggw-detail-block eggw-detail-borderless mt-2">
+          <summary className="eggw-detail-summary">Inspect unmatched details ({unmatchedToolDetails.length})</summary>
+          <div className="eggw-hidden-tools mt-2">
+            {unmatchedToolDetails.map(({ detail, index }, detailPosition) => (
+              <span key={`${index}-${detail.tool_call_id || detail.name || "detail"}`}>
+                <button
+                  type="button"
+                  className="eggw-link"
+                  title={detail.body ? `Show ${detail.header}` : detail.header}
+                  onClick={() => setSelectedDetail(detail)}
+                >
+                  {detail.name || "detail"}
+                </button>
+                {detailPosition < unmatchedToolDetails.length - 1 ? ", " : null}
+              </span>
+            ))}
+          </div>
+        </details>
       )}
       {selectedDetail && (
         <OverlayPanel
@@ -1241,6 +1249,8 @@ function renderMessagesForVerbosity(
   messages: Message[],
   displayVerbosity: DisplayVerbosity,
   showBorders: boolean,
+  answeredGetUserIds: ReadonlySet<string>,
+  ambiguousGetUserAnswerIds: ReadonlySet<string>,
   onStageAttachment?: (attachment: AttachmentContentPart) => void
 ): ReactNode[] {
   const displayMessages = resolveToolResultNames(messages);
@@ -1256,13 +1266,22 @@ function renderMessagesForVerbosity(
     ));
   }
 
-  // Keep compact details message-local. The ordered transcript is the sole
-  // chronology authority; tool identity is for inspection, never relocation.
+  // Match terminal Egg's minimum-verbosity contract: one compact summary for
+  // each consecutive hidden run. Visible transcript records and compaction
+  // markers are chronology boundaries; they split runs instead of moving
+  // hidden activity across the visible record.
   const nodes: ReactNode[] = [];
-  const answeredGetUserIds = new Set(displayMessages.map(getUserAnswerToolCallId).filter(Boolean));
+  let hidden: HiddenDetail[] = [];
+  const flushHidden = (key: string) => {
+    if (!hidden.length) return;
+    const details = hidden;
+    hidden = [];
+    nodes.push(<HiddenDetailsBlock key={`hidden-${key}-${nodes.length}`} details={details} showBorders={showBorders} />);
+  };
 
   displayMessages.forEach((msg, idx) => {
     if (msg.kind === "compaction_marker" || msg.role === "compaction_marker") {
+      flushHidden(`marker-${idx}`);
       nodes.push(<CompactionMarker key={msg.id || `marker-${idx}`} message={msg} />);
       return;
     }
@@ -1273,25 +1292,18 @@ function renderMessagesForVerbosity(
         !(
           detail.tool_call_id &&
           answeredGetUserIds.has(detail.tool_call_id) &&
+          !ambiguousGetUserAnswerIds.has(detail.tool_call_id) &&
           (getUserCallIds.has(detail.tool_call_id) || detail.source === "tool_result" || detail.source === "tool_call_stream")
         )
     );
-    const reasoningDetails = hiddenDetails.filter((detail) => detail.kind === "reasoning");
-    const operationalDetails = hiddenDetails.filter((detail) => detail.kind !== "reasoning");
     const hasVisibleConversationBody =
       (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
 
-    if (reasoningDetails.length) {
-      nodes.push(
-        <HiddenDetailsBlock
-          key={`reasoning-${msg.id || idx}`}
-          details={reasoningDetails}
-          sourceMessage={msg}
-          showBorders={showBorders}
-        />
-      );
-    }
     if (hasVisibleConversationBody || isImportantSystemMessage(msg)) {
+      const beforeVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind === "reasoning") : [];
+      const afterVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind !== "reasoning") : hiddenDetails;
+      hidden.push(...beforeVisibleDetails);
+      flushHidden(`before-${msg.id || idx}`);
       nodes.push(
         <MessageBlock
           key={msg.id || idx}
@@ -1301,19 +1313,14 @@ function renderMessagesForVerbosity(
           onStageAttachment={onStageAttachment}
         />
       );
+      hidden.push(...afterVisibleDetails);
+      return;
     }
-    if (operationalDetails.length) {
-      nodes.push(
-        <HiddenDetailsBlock
-          key={`details-${msg.id || idx}`}
-          details={operationalDetails}
-          sourceMessage={msg}
-          showBorders={showBorders}
-        />
-      );
-    }
+
+    hidden.push(...hiddenDetails);
   });
 
+  flushHidden("end");
   return nodes;
 }
 
@@ -1321,17 +1328,24 @@ function StaticTranscriptImpl({
   messages,
   displayVerbosity,
   showBorders,
+  answeredGetUserIds,
+  ambiguousGetUserAnswerIds,
   onStageAttachment,
 }: {
   messages: Message[];
   displayVerbosity: DisplayVerbosity;
   showBorders: boolean;
+  answeredGetUserIds: ReadonlySet<string>;
+  transcriptRevision: number;
+  ambiguousGetUserAnswerIds: ReadonlySet<string>;
   onStageAttachment?: (attachment: AttachmentContentPart) => void;
 }) {
   const content = <div data-testid="static-transcript-owner">{renderMessagesForVerbosity(
     messages,
     displayVerbosity,
     showBorders,
+    answeredGetUserIds,
+    ambiguousGetUserAnswerIds,
     onStageAttachment,
   )}</div>;
   if (process.env.NODE_ENV === "production") return content;
@@ -1348,6 +1362,9 @@ const StaticTranscript = memo(
     previous.messages === next.messages &&
     previous.displayVerbosity === next.displayVerbosity &&
     previous.showBorders === next.showBorders &&
+    previous.answeredGetUserIds === next.answeredGetUserIds &&
+    previous.ambiguousGetUserAnswerIds === next.ambiguousGetUserAnswerIds &&
+    previous.transcriptRevision === next.transcriptRevision &&
     previous.onStageAttachment === next.onStageAttachment,
 );
 
@@ -2200,6 +2217,9 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
                 messages={renderedTranscript.messages}
                 displayVerbosity={displayVerbosity}
                 showBorders={showBorders}
+                answeredGetUserIds={transcriptMetadata.answeredGetUserIds}
+                ambiguousGetUserAnswerIds={transcriptMetadata.ambiguousGetUserAnswerIds}
+                transcriptRevision={transcriptMetadata.revision}
                 onStageAttachment={onStageAttachment}
               />
 

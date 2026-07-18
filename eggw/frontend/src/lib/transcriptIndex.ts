@@ -1,5 +1,6 @@
 import type { InfiniteData } from "@tanstack/react-query";
 import type { Message } from "./store";
+import { getUserAnswerToolCallId, getUserToolCallIds, isGetUserMessageTool, toolCallId } from "./toolPresentation";
 import type { TranscriptData, TranscriptPage } from "./transcript";
 import {
   previousTranscriptStartIndex,
@@ -23,6 +24,16 @@ export interface TranscriptHistory {
   nodeByPage: WeakMap<TranscriptPage, TranscriptHistoryNode>;
   totalMessages: number;
   revision: number;
+  answeredGetUserIds: Set<string>;
+  getUserAnswerIdByMessageId: Map<string, string>;
+  getUserAnswerCounts: Map<string, number>;
+  getUserCallIdsByMessageId: Map<string, string[]>;
+  getUserCallCounts: Map<string, number>;
+  getUserResultIdByMessageId: Map<string, string>;
+  getUserResultCounts: Map<string, number>;
+  toolLifecycleIdsByMessageId: Map<string, string[]>;
+  toolLifecycleCounts: Map<string, number>;
+  ambiguousGetUserAnswerIds: Set<string>;
   renderWindowCache?: {
     startIndex: number;
     endIndex: number;
@@ -68,6 +79,104 @@ function effectiveMessages(
     (message) =>
       !message.id || history.ownerByMessageId.get(message.id) === page,
   );
+}
+
+function registerGetUserAnswer(history: TranscriptHistory, message: Message): void {
+  if (!message.id) return;
+  const id = getUserAnswerToolCallId(message);
+  if (!id) return;
+  history.getUserAnswerIdByMessageId.set(message.id, id);
+  history.getUserAnswerCounts.set(id, (history.getUserAnswerCounts.get(id) || 0) + 1);
+  history.answeredGetUserIds.add(id);
+}
+
+function incrementCount(counts: Map<string, number>, id: string): void {
+  counts.set(id, (counts.get(id) || 0) + 1);
+}
+
+function refreshGetUserAmbiguity(history: TranscriptHistory, id: string): void {
+  const answerCount = history.getUserAnswerCounts.get(id) || 0;
+  const getUserCalls = history.getUserCallCounts.get(id) || 0;
+  const getUserResults = history.getUserResultCounts.get(id) || 0;
+  const lifecycleCount = history.toolLifecycleCounts.get(id) || 0;
+  const ambiguous = (
+    answerCount !== 1
+    || getUserCalls > 1
+    || getUserResults > 1
+    || lifecycleCount !== getUserCalls + getUserResults
+  );
+  if (ambiguous) history.ambiguousGetUserAnswerIds.add(id);
+  else history.ambiguousGetUserAnswerIds.delete(id);
+}
+
+function decrementCount(counts: Map<string, number>, id: string): void {
+  const next = (counts.get(id) || 1) - 1;
+  if (next <= 0) counts.delete(id);
+  else counts.set(id, next);
+}
+
+function registerGetUserLifecycle(history: TranscriptHistory, message: Message): void {
+  if (!message.id) return;
+  registerGetUserAnswer(history, message);
+  const callIds = getUserToolCallIds(message);
+  if (callIds.length) {
+    history.getUserCallIdsByMessageId.set(message.id, callIds);
+    callIds.forEach((id) => incrementCount(history.getUserCallCounts, id));
+  }
+  if (message.role === "tool" && isGetUserMessageTool(message.name) && message.tool_call_id) {
+    const id = message.tool_call_id.trim();
+    if (id) {
+      history.getUserResultIdByMessageId.set(message.id, id);
+      incrementCount(history.getUserResultCounts, id);
+    }
+  }
+  const lifecycleIds = [
+    ...(message.tool_calls || []).map((call) => toolCallId(call)).filter(Boolean),
+    ...(message.role === "tool" && message.tool_call_id ? [message.tool_call_id.trim()] : []),
+  ].filter(Boolean);
+  if (lifecycleIds.length) {
+    history.toolLifecycleIdsByMessageId.set(message.id, lifecycleIds);
+    lifecycleIds.forEach((id) => incrementCount(history.toolLifecycleCounts, id));
+  }
+  new Set([idOrEmpty(getUserAnswerToolCallId(message)), ...callIds, ...lifecycleIds, message.tool_call_id || ""])
+    .forEach((id) => { if (id) refreshGetUserAmbiguity(history, id); });
+}
+
+function idOrEmpty(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function unregisterGetUserAnswer(history: TranscriptHistory, message: Message): void {
+  if (!message.id) return;
+  const id = history.getUserAnswerIdByMessageId.get(message.id);
+  if (!id) return;
+  history.getUserAnswerIdByMessageId.delete(message.id);
+  const nextCount = (history.getUserAnswerCounts.get(id) || 1) - 1;
+  if (nextCount <= 0) {
+    history.getUserAnswerCounts.delete(id);
+    history.answeredGetUserIds.delete(id);
+  } else {
+    history.getUserAnswerCounts.set(id, nextCount);
+  }
+}
+
+function unregisterGetUserLifecycle(history: TranscriptHistory, message: Message): void {
+  if (!message.id) return;
+  const answerId = history.getUserAnswerIdByMessageId.get(message.id);
+  unregisterGetUserAnswer(history, message);
+  const callIds = history.getUserCallIdsByMessageId.get(message.id) || [];
+  history.getUserCallIdsByMessageId.delete(message.id);
+  callIds.forEach((id) => decrementCount(history.getUserCallCounts, id));
+  const resultId = history.getUserResultIdByMessageId.get(message.id);
+  if (resultId) {
+    history.getUserResultIdByMessageId.delete(message.id);
+    decrementCount(history.getUserResultCounts, resultId);
+  }
+  const lifecycleIds = history.toolLifecycleIdsByMessageId.get(message.id) || [];
+  history.toolLifecycleIdsByMessageId.delete(message.id);
+  lifecycleIds.forEach((id) => decrementCount(history.toolLifecycleCounts, id));
+  new Set([answerId || "", ...callIds, ...lifecycleIds, resultId || ""])
+    .forEach((candidate) => { if (candidate) refreshGetUserAmbiguity(history, candidate); });
 }
 
 function appendHistoryPage(
@@ -122,11 +231,15 @@ function registerPage(
     if (!existing) {
       history.totalMessages += 1;
       history.ownerByMessageId.set(message.id, page);
+      registerGetUserLifecycle(history, message);
     } else if (override && existing !== page) {
       const fallbacks = history.fallbackOwnersByMessageId.get(message.id) || [];
       if (fallbacks.at(-1) !== existing) fallbacks.push(existing);
       history.fallbackOwnersByMessageId.set(message.id, fallbacks);
+      const existingMessage = existing.items.find((candidate) => candidate.id === message.id);
+      if (existingMessage) unregisterGetUserLifecycle(history, existingMessage);
       history.ownerByMessageId.set(message.id, page);
+      registerGetUserLifecycle(history, message);
     }
   }
 }
@@ -150,8 +263,14 @@ function unregisterPage(
     }
     if (restored) history.ownerByMessageId.set(message.id, restored);
     else {
+      unregisterGetUserLifecycle(history, message);
       history.ownerByMessageId.delete(message.id);
       history.totalMessages -= 1;
+    }
+    if (restored) {
+      unregisterGetUserLifecycle(history, message);
+      const restoredMessage = restored.items.find((candidate) => candidate.id === message.id);
+      if (restoredMessage) registerGetUserLifecycle(history, restoredMessage);
     }
   }
 }
@@ -170,6 +289,16 @@ export function transcriptHistory(
       nodeByPage: new WeakMap(),
       totalMessages: 0,
       revision: 0,
+      answeredGetUserIds: new Set(),
+      getUserAnswerIdByMessageId: new Map(),
+      getUserAnswerCounts: new Map(),
+      getUserCallIdsByMessageId: new Map(),
+      getUserCallCounts: new Map(),
+      getUserResultIdByMessageId: new Map(),
+      getUserResultCounts: new Map(),
+      toolLifecycleIdsByMessageId: new Map(),
+      toolLifecycleCounts: new Map(),
+      ambiguousGetUserAnswerIds: new Set(),
     };
   }
   const indexed = data as IndexedTranscriptData;
@@ -184,6 +313,16 @@ export function transcriptHistory(
     nodeByPage: new WeakMap(),
     totalMessages: 0,
     revision: ++revision,
+    answeredGetUserIds: new Set(),
+    getUserAnswerIdByMessageId: new Map(),
+    getUserAnswerCounts: new Map(),
+    getUserCallIdsByMessageId: new Map(),
+    getUserCallCounts: new Map(),
+    getUserResultIdByMessageId: new Map(),
+    getUserResultCounts: new Map(),
+    toolLifecycleIdsByMessageId: new Map(),
+    toolLifecycleCounts: new Map(),
+    ambiguousGetUserAnswerIds: new Set(),
   };
   // Imported InfiniteData pages are newest -> oldest. Register oldest first so
   // newer pages become overlap authority without any render-time dedupe scan.
@@ -357,6 +496,8 @@ export interface TranscriptIndex {
   totalMessages: number;
   revision: number;
   tailTps: number | null;
+  answeredGetUserIds: ReadonlySet<string>;
+  ambiguousGetUserAnswerIds: ReadonlySet<string>;
 }
 
 function tailTps(page: TranscriptPage): number | null {
@@ -382,6 +523,8 @@ export function transcriptIndex(
     totalMessages: history.totalMessages,
     revision: history.revision,
     tailTps: tailTps(history.tail),
+    answeredGetUserIds: history.answeredGetUserIds,
+    ambiguousGetUserAnswerIds: history.ambiguousGetUserAnswerIds,
   };
 }
 

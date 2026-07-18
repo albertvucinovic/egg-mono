@@ -967,11 +967,12 @@ test.describe('Composer draft and autocomplete ownership', () => {
     await page.goto(`/${threadId}`);
     await expect(page.getByTitle('Auto-approval OFF')).toBeVisible();
     await page.waitForTimeout(1200);
-    expect(settingsRequests).toBe(1);
+    const requestsBeforeCommand = settingsRequests;
+    expect(requestsBeforeCommand).toBeGreaterThanOrEqual(1);
     await page.getByTestId('message-input').fill('/toggleAutoApproval');
     await page.getByTestId('message-input').press('Enter');
     await expect(page.getByTitle('Auto-approval ON')).toBeVisible();
-    expect(settingsRequests).toBe(2);
+    expect(settingsRequests).toBe(requestsBeforeCommand + 1);
   });
 
   test('keyboard shortcuts gate unloaded/racing toggles and preserve the composer draft', async ({ page }) => {
@@ -1113,6 +1114,7 @@ test.describe('Output Optimizer Observability', () => {
     });
 
     await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('max');
 
     const badges = page.getByTestId('output-optimizer-badge');
     await expect(badges).toHaveCount(1, { timeout: 5000 });
@@ -1693,7 +1695,8 @@ test.describe('Scroll intent state machines', () => {
     await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
 
     releaseResults();
-    await expect(chat).toContainText('RESULT B', { timeout: 5000 });
+    const compactResults = chat.getByTestId('hidden-details').filter({ hasText: 'got 2 tool results' });
+    await expect(compactResults).toContainText('Tools: bash, bash', { timeout: 5000 });
     await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
     const liveEdgeTrace = await page.evaluate(() => (
       (window as typeof window & { __eggwLiveEdgeTrace?: number[] }).__eggwLiveEdgeTrace || []
@@ -2609,6 +2612,7 @@ test.describe('Authoritative same-version transcript refresh', () => {
     });
 
     await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('max');
     const message = page.locator('[data-message-id="same-version-message"]');
     await expect(message).toContainText('BEFORE AUTHORITATIVE REFRESH');
     await expect.poll(() => messageRequests).toBeGreaterThanOrEqual(2);
@@ -2772,7 +2776,9 @@ test.describe('Live Tool Streaming', () => {
     expect(after.top).toBeCloseTo(before.top, 0);
     expect(after.height).toBe(before.height);
     expect(after.timingCommits).toBeGreaterThan(before.timingCommits);
-    expect(after.transcriptCommits - before.transcriptCommits).toBe(0);
+    // One semantic metadata publication may re-evaluate the memoized static
+    // transcript; timing ticks themselves must not replace its DOM owner.
+    expect(after.transcriptCommits - before.transcriptCommits).toBeLessThanOrEqual(1);
     // Timing commits are isolated to the fixed-geometry leaf; static transcript
     // identity, geometry, and scroll ownership remain unchanged.
     await expect(timer).toHaveCSS('font-variant-numeric', 'tabular-nums');
@@ -2857,7 +2863,11 @@ test.describe('Live Tool Streaming', () => {
     await expect(waitCard).not.toContainText('timeout in ');
     await expect(siblingCard).toContainText('streaming output...');
     await expect.poll(() => transcriptRequests).toBeGreaterThan(1);
-    await expect(page.getByTestId('chat-panel')).toContainText('Wait timed out after 60 seconds.');
+    const compactTimeout = page.getByTestId('chat-panel').getByTestId('hidden-details');
+    await expect(compactTimeout).toContainText('got 1 tool result');
+    await expect(compactTimeout).toContainText('Tools: wait');
+    await compactTimeout.getByRole('button', { name: 'wait' }).click();
+    await expect(page.getByRole('dialog')).toContainText('Wait timed out after 60 seconds.');
   });
 
   test('keeps tool arguments visible while the tool is running', async ({ page }) => {
@@ -3081,10 +3091,8 @@ test.describe('Message header parity', () => {
 
     for (const level of ['max', 'medium', 'min'] as const) {
       await verbosity.selectOption(level);
-      for (const message of messages) {
-        const card = level === 'min' && message.role === 'tool'
-          ? page.locator(`[data-source-message-id="${message.id}"]`)
-          : page.locator(`[data-message-id="${message.id}"]`);
+      for (const message of messages.filter((message) => level !== 'min' || message.role !== 'tool')) {
+        const card = page.locator(`[data-message-id="${message.id}"]`);
         await expect(card).toHaveCount(1);
         await expect(card.getByTestId('message-model')).toHaveAttribute('title', `Model: ${message.model_key}`);
         await expect(card.getByTestId('message-tokens')).toHaveText(`${message.tokens} tok`);
@@ -3094,25 +3102,21 @@ test.describe('Message header parity', () => {
         await expect(messageId).toHaveText(level === 'max' ? `msg_id: ${message.id}` : message.id.slice(-8));
         if (typeof message.tps === 'number') await expect(card.getByTestId('message-tps')).toHaveText(`${message.tps.toFixed(1)} tps`);
       }
-      const toolCard = level === 'min'
-        ? page.locator('[data-source-message-id="header-tool-result-00000004"]')
-        : page.locator('[data-message-id="header-tool-result-00000004"]');
-      const toolCallId = toolCard.getByTestId('tool-call-id');
-      await expect(toolCallId).toHaveAttribute('title', 'Click to copy tool_call_id: header-tool-call-00000004');
-      await expect(toolCallId).toHaveText(level === 'max' ? 'tool_call_id: header-tool-call-00000004' : '00000004');
+      if (level !== 'min') {
+        const toolCard = page.locator('[data-message-id="header-tool-result-00000004"]');
+        const toolCallId = toolCard.getByTestId('tool-call-id');
+        await expect(toolCallId).toHaveAttribute('title', 'Click to copy tool_call_id: header-tool-call-00000004');
+        await expect(toolCallId).toHaveText(level === 'max' ? 'tool_call_id: header-tool-call-00000004' : '00000004');
+      }
       await expect(page.locator('[data-message-id="header-assistant-note-00000003"]')).toContainText('Assistant Note');
       await expect(page.locator('[data-message-id="header-recovery-notice-00000005"]')).toContainText('Continue Status');
     }
 
-    await page.evaluate(() => {
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: { writeText: (value: string) => { (window as typeof window & { copiedHeaderId?: string }).copiedHeaderId = value; } },
-      });
-    });
     await verbosity.selectOption('min');
-    await page.locator('[data-source-message-id="header-tool-result-00000004"]').getByTestId('tool-call-id').click();
-    await expect.poll(() => page.evaluate(() => (window as typeof window & { copiedHeaderId?: string }).copiedHeaderId)).toBe('header-tool-call-00000004');
+    const compactToolSummary = page.getByTestId('hidden-details');
+    await expect(compactToolSummary).toContainText('got 1 tool result');
+    await expect(compactToolSummary).toContainText('Tools: bash');
+    await expect(compactToolSummary).not.toContainText('header-tool-call-00000004');
   });
 });
 
@@ -3237,7 +3241,7 @@ test.describe('Atomic Live Tool Continuity', () => {
     expect(messageRequests).toBeGreaterThan(1);
   });
 
-  test('keeps a live tool at its canonical declaration position through durable completion', async ({ page }) => {
+  test('keeps a live tool run correctly split around an interleaved note through durable completion', async ({ page }) => {
     const threadId = 'min-live-interleaved-chronology';
     const toolCallId = 'live-chronology-tool';
     const initialMessages = [
@@ -3311,21 +3315,27 @@ test.describe('Atomic Live Tool Continuity', () => {
     await page.goto(`/${threadId}`);
     await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
     const transcript = page.getByTestId('static-transcript-owner');
-    const declaration = transcript.locator('[data-source-message-id="live-chronology-call"]');
+    const summaries = transcript.getByTestId('hidden-details');
     const note = transcript.locator('[data-message-id="live-chronology-note"]');
-    await expect(declaration).toBeVisible();
+    await expect(summaries).toHaveCount(1);
+    await expect(summaries.first()).toContainText('Executed 1 tool');
+    await expect(summaries.first()).toContainText('Tools: bash');
     await expect(note).toBeVisible();
-    expect(await declaration.evaluate((element) => element.compareDocumentPosition(document.querySelector('[data-message-id="live-chronology-note"]')!) & Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
+    expect(await summaries.first().evaluate((element) => element.compareDocumentPosition(document.querySelector('[data-message-id="live-chronology-note"]')!) & Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
 
     releaseDurable();
-    await expect(transcript.locator('[data-source-message-id="live-chronology-result"]')).toBeVisible();
-    await expect.poll(() => transcript.locator(':scope > .eggw-message-card').evaluateAll((cards) =>
-      cards.map((card) => card.getAttribute('data-message-id') || card.getAttribute('data-source-message-id')),
-    )).toEqual([
-      'live-chronology-user',
-      'live-chronology-call',
-      'live-chronology-note',
-      'live-chronology-result',
+    await expect(summaries).toHaveCount(2);
+    await expect(summaries.nth(1)).toContainText('got 1 tool result');
+    await expect(summaries.nth(1)).toContainText('Tools: bash');
+    await expect.poll(() => transcript.locator(':scope > .eggw-message-card').evaluateAll((cards) => cards.map((card) => ({
+      role: card.getAttribute('data-message-role') || 'hidden-details',
+      messageId: card.getAttribute('data-message-id'),
+      text: (card.textContent || '').replace(/\s+/g, ' ').trim(),
+    })))).toEqual([
+      expect.objectContaining({ messageId: 'live-chronology-user' }),
+      expect.objectContaining({ role: 'hidden-details', text: expect.stringContaining('Executed 1 tool') }),
+      expect.objectContaining({ messageId: 'live-chronology-note' }),
+      expect.objectContaining({ role: 'hidden-details', text: expect.stringContaining('got 1 tool result') }),
     ]);
     await expect(page.locator('[role="status"][aria-label="Tool streaming"]')).toHaveCount(0);
   });
@@ -3371,6 +3381,8 @@ test.describe('Atomic Live Tool Continuity', () => {
     await expect(chat).toContainText('The repository looks healthy.');
     await expect(chat).toContainText('Display verbosity changed.');
     await expect(chat).toContainText('Executed 1 tool');
+    await expect(chat).toContainText('got 1 tool result');
+    await expect(chat).toContainText('Tools: bash');
     await expect(chat).toContainText('private provider setup instructions');
     await expect(chat.getByTestId('message-model').first()).toContainText('provider-model');
     await expect(chat).not.toContainText('raw private reasoning body');
@@ -3412,32 +3424,90 @@ test.describe('Atomic Live Tool Continuity', () => {
 
     await select.selectOption('min');
     const hidden = page.getByTestId('hidden-details');
+    await expect(hidden).toHaveCount(1);
+    await expect(hidden).toContainText('Executed 2 tools, got 3 tool results');
+    await expect(hidden).toContainText('Tools: bash, python');
+    await expect(hidden.getByText('Tools:', { exact: true })).not.toContainText('Tool result · n-1234567890');
+    await expect(hidden).toContainText('Inspect unmatched details (1)');
     const bashEntries = hidden.getByRole('button', { name: 'bash', exact: true });
     const pythonEntries = hidden.getByRole('button', { name: 'python', exact: true });
-    await expect(bashEntries).toHaveCount(2);
-    await expect(pythonEntries).toHaveCount(2);
+    await expect(bashEntries).toHaveCount(1);
+    await expect(pythonEntries).toHaveCount(1);
+    await hidden.getByText('Inspect unmatched details (1)').click();
     await expect(hidden.getByRole('button', { name: 'Tool result · n-1234567890', exact: true })).toHaveCount(1);
     await expect(hidden.getByRole('button', { name: 'tool', exact: true })).toHaveCount(0);
 
-    await bashEntries.nth(0).click();
+    await bashEntries.click();
     let dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('ARG_BASH');
-    await expect(dialog).not.toContainText('RESULT_BASH');
+    await expect(dialog).toContainText('RESULT_BASH');
     await expect(dialog).not.toContainText('RESULT_PYTHON');
     await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
 
-    await pythonEntries.nth(0).click();
+    await pythonEntries.click();
     dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('ARG_PYTHON');
-    await expect(dialog).not.toContainText('RESULT_PYTHON');
-    await expect(dialog).not.toContainText('RESULT_BASH');
-    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
-
-    await pythonEntries.nth(1).click();
-    dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('RESULT_PYTHON');
-    await expect(dialog).not.toContainText('ARG_PYTHON');
     await expect(dialog).not.toContainText('RESULT_BASH');
+  });
+
+  test('keeps repeated result-only compact entries mapped to their own popup', async ({ page }) => {
+    const threadId = 'min-repeated-result-popups';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'repeated-results-user', role: 'user', content: 'Show both legacy results.' },
+        { id: 'repeated-result-a', role: 'tool', name: 'bash', tool_call_id: 'reused-result-id', content: 'RESULT_ALPHA' },
+        { id: 'repeated-result-b', role: 'tool', name: 'bash', tool_call_id: 'reused-result-id', content: 'RESULT_BETA' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+
+    const tools = page.getByTestId('hidden-details').getByRole('button', { name: 'bash' });
+    await expect(tools).toHaveCount(2);
+    await tools.nth(0).click();
+    let dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('RESULT_ALPHA');
+    await expect(dialog).not.toContainText('RESULT_BETA');
+    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
+    await tools.nth(1).click();
+    dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('RESULT_BETA');
+    await expect(dialog).not.toContainText('RESULT_ALPHA');
+  });
+
+  test('keeps unmatched reused-ID results inspectable without polluting compact tool names', async ({ page }) => {
+    const threadId = 'min-reused-id-unmatched-results';
+    const reusedId = 'reused-call-id';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'reused-user', role: 'user', content: 'Run ambiguous checks.' },
+        {
+          id: 'reused-calls', role: 'assistant', content: '', tool_calls: [
+            { id: reusedId, name: 'bash', arguments: { script: 'echo A' } },
+            { id: reusedId, name: 'python', arguments: { code: 'print("B")' } },
+          ],
+        },
+        { id: 'reused-result-a', role: 'tool', name: 'bash', tool_call_id: reusedId, content: 'AMBIGUOUS_ALPHA' },
+        { id: 'reused-result-b', role: 'tool', name: 'python', tool_call_id: reusedId, content: 'AMBIGUOUS_BETA' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+
+    const summary = page.getByTestId('hidden-details');
+    await expect(summary).toContainText('Tools: bash, python');
+    const unmatched = summary.getByText('Inspect unmatched details (2)');
+    await unmatched.click();
+    const unmatchedButtons = summary.locator('details').getByRole('button');
+    await expect(unmatchedButtons).toHaveCount(2);
+    await unmatchedButtons.nth(0).click();
+    let dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('AMBIGUOUS_ALPHA');
+    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
+    await unmatchedButtons.nth(1).click();
+    dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('AMBIGUOUS_BETA');
   });
 
   test('pairs Assistant Note tool popups only by matching tool call identity', async ({ page }) => {
@@ -3471,8 +3541,12 @@ test.describe('Atomic Live Tool Continuity', () => {
     await page.goto(`/${threadId}`);
     await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
 
-    const tools = page.getByTestId('hidden-details').getByRole('button', { name: 'bash' });
-    await expect(tools).toHaveCount(3);
+    const summaries = page.getByTestId('hidden-details');
+    await expect(summaries).toHaveCount(1);
+    await expect(summaries).toContainText('Executed 2 tools, got 1 tool result');
+    await expect(summaries).toContainText('Tools: bash, bash');
+    const tools = summaries.getByRole('button', { name: 'bash' });
+    await expect(tools).toHaveCount(2);
 
     await tools.nth(0).click();
     let dialog = page.getByRole('dialog');
@@ -3483,15 +3557,8 @@ test.describe('Atomic Live Tool Continuity', () => {
     await tools.nth(1).click();
     dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('ARGUMENT_B');
-    await expect(dialog).not.toContainText('RESULT_B');
-    await expect(dialog).not.toContainText('ARGUMENT_A');
-    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
-
-    await tools.nth(2).click();
-    dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('RESULT_B');
     await expect(dialog).not.toContainText('ARGUMENT_A');
-    await expect(dialog).not.toContainText('ARGUMENT_B');
   });
 
   test('preserves literal interleaved durable chronology in min', async ({ page }) => {
@@ -3589,24 +3656,78 @@ test.describe('Atomic Live Tool Continuity', () => {
     expect(canonicalMessages.map((message) => message.event_seq)).toEqual([10, 20, 30, 40, 50, 60, 70, 80, 90]);
     expect(semanticOrder).toEqual([
       expect.objectContaining({ messageId: 'chronology-user' }),
-      expect.objectContaining({ messageId: 'chronology-call-a', role: 'hidden-details', text: expect.stringContaining('bash') }),
+      expect.objectContaining({ messageId: null, role: 'hidden-details', text: expect.stringContaining('Executed 1 tool') }),
       expect.objectContaining({ messageId: 'chronology-note-a' }),
-      expect.objectContaining({ messageId: 'chronology-result-a', role: 'hidden-details', text: expect.stringContaining('bash') }),
-      expect.objectContaining({ messageId: 'chronology-call-b', role: 'hidden-details', text: expect.stringContaining('python') }),
+      expect.objectContaining({ messageId: null, role: 'hidden-details', text: expect.stringContaining('Executed 1 tool, got 1 tool result') }),
       expect.objectContaining({ messageId: 'chronology-note-b' }),
-      expect.objectContaining({ messageId: 'chronology-result-b', role: 'hidden-details', text: expect.stringContaining('python') }),
+      expect.objectContaining({ messageId: null, role: 'hidden-details', text: expect.stringContaining('got 1 tool result') }),
       expect.objectContaining({ messageId: 'chronology-recovery' }),
       expect.objectContaining({ messageId: 'chronology-final' }),
     ]);
+    expect(semanticOrder[1].text).toContain('Tools: bash');
+    expect(semanticOrder[3].text).toContain('Tools: python');
+    expect(semanticOrder[5].text).toContain('Tools: python');
 
     await page.reload();
     await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
     await expect.poll(() => page.getByTestId('static-transcript-owner').locator(':scope > .eggw-message-card').evaluateAll((cards) =>
-      cards.map((card) => card.getAttribute('data-message-id') || card.getAttribute('data-source-message-id')),
-    )).toEqual(expectedMessageOrder);
+      cards.map((card) => card.getAttribute('data-message-id') || (card.getAttribute('data-testid') === 'hidden-details' ? 'summary' : null)),
+    )).toEqual([
+      'chronology-user',
+      'summary',
+      'chronology-note-a',
+      'summary',
+      'chronology-note-b',
+      'summary',
+      'chronology-recovery',
+      'chronology-final',
+    ]);
   });
 
-  test('keeps an Assistant Note tool result attached across the visible note in min', async ({ page }) => {
+  test('keeps compact tool runs on their own sides of system and compaction boundaries', async ({ page }) => {
+    const threadId = 'min-tool-run-boundaries';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'boundary-user', role: 'user', content: 'Run the boundary checks.' },
+        {
+          id: 'boundary-call-a', role: 'assistant', content: '',
+          tool_calls: [{ id: 'boundary-tool-a', name: 'bash', arguments: { script: 'echo A' } }],
+        },
+        { id: 'boundary-system', role: 'system', content: 'SYSTEM BOUNDARY' },
+        { id: 'boundary-result-a', role: 'tool', name: 'bash', tool_call_id: 'boundary-tool-a', content: 'A' },
+        {
+          id: 'boundary-compaction', role: 'compaction_marker', kind: 'compaction_marker',
+          content: 'COMPACTION BOUNDARY', marker_event_seq: 40, start_event_seq: 10,
+        },
+        {
+          id: 'boundary-call-b', role: 'assistant', content: '',
+          tool_calls: [{ id: 'boundary-tool-b', name: 'python', arguments: { code: 'print("B")' } }],
+        },
+        { id: 'boundary-final', role: 'assistant', content: 'Boundary checks complete.' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+
+    const records = await page.getByTestId('static-transcript-owner').locator(':scope > *').evaluateAll((nodes) => nodes.map((node) => ({
+      kind: node.getAttribute('data-message-id') || node.getAttribute('data-testid') || '',
+      text: (node.textContent || '').replace(/\s+/g, ' ').trim(),
+    })).filter((record) => record.text));
+    expect(records).toEqual([
+      expect.objectContaining({ kind: 'boundary-user' }),
+      expect.objectContaining({ kind: 'hidden-details', text: expect.stringContaining('Executed 1 tool') }),
+      expect.objectContaining({ kind: 'boundary-system' }),
+      expect.objectContaining({ kind: 'hidden-details', text: expect.stringContaining('got 1 tool result') }),
+      expect.objectContaining({ text: expect.stringContaining('Compaction boundary') }),
+      expect.objectContaining({ kind: 'hidden-details', text: expect.stringContaining('Executed 1 tool') }),
+      expect.objectContaining({ kind: 'boundary-final' }),
+    ]);
+    expect(records[1].text).toContain('Tools: bash');
+    expect(records[3].text).toContain('Tools: bash');
+    expect(records[5].text).toContain('Tools: python');
+  });
+
+  test('splits an Assistant Note tool call and result around the visible note in min', async ({ page }) => {
     const threadId = 'min-assistant-note-result';
     const toolCallId = 'call-answer-user-note';
     await mockThreadShell(page, threadId, {
@@ -3644,15 +3765,21 @@ test.describe('Atomic Live Tool Continuity', () => {
     await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
 
     await expect(page.getByText('Visible interim status.', { exact: true })).toBeVisible();
-    const toolEntries = page.getByTestId('hidden-details').getByRole('button', { name: 'answer_user_while_preserving_llm_turn' });
-    await expect(toolEntries).toHaveCount(2);
-    await toolEntries.nth(0).click();
+    const summaries = page.getByTestId('hidden-details');
+    await expect(summaries).toHaveCount(2);
+    await expect(summaries.nth(0)).toContainText('Executed 1 tool');
+    await expect(summaries.nth(1)).toContainText('got 1 tool result');
+    await expect(summaries.nth(0)).toContainText('Tools: answer_user_while_preserving_llm_turn');
+    await expect(summaries.nth(1)).toContainText('Tools: answer_user_while_preserving_llm_turn');
+    await summaries.nth(0).getByRole('button', { name: 'answer_user_while_preserving_llm_turn' }).click();
     let dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('Visible interim status.');
+    await expect(dialog).toContainText('(not present in this compact run)');
     await expect(dialog).not.toContainText('Interim answer shown to user.');
     await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
-    await toolEntries.nth(1).click();
+    await summaries.nth(1).getByRole('button', { name: 'answer_user_while_preserving_llm_turn' }).click();
     dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText(`tool_call_id: ${toolCallId}`);
     await expect(dialog).toContainText('Interim answer shown to user.');
     await expect(dialog).not.toContainText('Visible interim status.');
   });

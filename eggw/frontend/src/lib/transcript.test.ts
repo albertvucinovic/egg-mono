@@ -1030,6 +1030,94 @@ describe("thread-keyed transcript cache", () => {
     expect(costs.messageVisits).toBe(60);
   });
 
+  it("indexes answered get-user identities across loaded pages without render-window drift", () => {
+    const getUserTool = "get_user_message_while_preserving_llm_turn";
+    const answerId = "answered-get-user";
+    const answerPage = page(["old-answer"], 1);
+    answerPage.items[0] = {
+      id: "old-answer",
+      role: "user",
+      content: "Continue",
+      consumed_by_tool_name: getUserTool,
+      consumed_by_tool_call_id: answerId,
+    };
+    const tail = page(
+      Array.from({ length: 60 }, (_, index) => `tail-${index}`),
+      2,
+    );
+    tail.items.at(-1)!.role = "tool";
+    tail.items.at(-1)!.name = getUserTool;
+    tail.items.at(-1)!.tool_call_id = answerId;
+    const transcript = data([tail, answerPage]);
+
+    expect(transcriptRenderWindow(transcript, null).messages.some((message) => message.id === "old-answer")).toBe(false);
+    expect(transcriptIndex(transcript).answeredGetUserIds.has(answerId)).toBe(true);
+  });
+
+  it("updates the cross-window get-user answer index on authoritative replacement", () => {
+    const getUserTool = "get_user_message_while_preserving_llm_turn";
+    const answerId = "replace-answer";
+    const answerPage = page(["replace-answer-message"], 1);
+    answerPage.items[0] = {
+      id: "replace-answer-message",
+      role: "user",
+      content: "Continue",
+      consumed_by_tool_name: getUserTool,
+      consumed_by_tool_call_id: answerId,
+    };
+    const transcript = data([page(["tail"], 2), answerPage]);
+    transcriptIndex(transcript);
+    const replacement = {
+      ...answerPage,
+      items: [{ id: "replace-answer-message", role: "user", content: "ordinary edit" } satisfies Message],
+    };
+
+    const updated = replaceTranscriptPageData(transcript, answerPage, replacement);
+
+    expect(transcriptIndex(updated).answeredGetUserIds.has(answerId)).toBe(false);
+  });
+
+  it("marks reused get-user lifecycle IDs ambiguous instead of globally suppressing them", () => {
+    const getUserTool = "get_user_message_while_preserving_llm_turn";
+    const reusedId = "reused-get-user-id";
+    const lifecycle = page(["calls-a", "calls-b", "answer", "result"], 1);
+    lifecycle.items = [
+      { id: "calls-a", role: "assistant", tool_calls: [{ id: reusedId, name: getUserTool, arguments: {} }] },
+      { id: "calls-b", role: "assistant", tool_calls: [{ id: reusedId, name: getUserTool, arguments: {} }] },
+      {
+        id: "answer", role: "user", content: "Continue",
+        consumed_by_tool_name: getUserTool, consumed_by_tool_call_id: reusedId,
+      },
+      { id: "result", role: "tool", name: getUserTool, tool_call_id: reusedId, content: "Continue" },
+    ];
+
+    const index = transcriptIndex(data([lifecycle]));
+
+    expect(index.answeredGetUserIds.has(reusedId)).toBe(true);
+    expect(index.ambiguousGetUserAnswerIds.has(reusedId)).toBe(true);
+  });
+
+  it("marks an answered get-user ID ambiguous when an unrelated tool reuses it", () => {
+    const getUserTool = "get_user_message_while_preserving_llm_turn";
+    const reusedId = "cross-tool-reused-id";
+    const lifecycle = page(["get-user-call", "answer", "get-user-result", "bash-call", "bash-result"], 1);
+    lifecycle.items = [
+      { id: "get-user-call", role: "assistant", tool_calls: [{ id: reusedId, name: getUserTool, arguments: {} }] },
+      {
+        id: "answer", role: "user", content: "Continue",
+        consumed_by_tool_name: getUserTool, consumed_by_tool_call_id: reusedId,
+      },
+      { id: "get-user-result", role: "tool", name: getUserTool, tool_call_id: reusedId, content: "Continue" },
+      { id: "bash-call", role: "assistant", tool_calls: [{ id: reusedId, name: "bash", arguments: {} }] },
+      { id: "bash-result", role: "tool", name: "bash", tool_call_id: reusedId, content: "done" },
+    ];
+
+    const index = transcriptIndex(data([lifecycle]));
+
+    expect(index.answeredGetUserIds.has(reusedId)).toBe(true);
+    expect(index.ambiguousGetUserAnswerIds.has(reusedId)).toBe(true);
+  });
+
   it("shares one initial tail authority across a strict-mode observer remount", async () => {
     const client = new QueryClient();
     let resolveFetch!: (value: Response) => void;

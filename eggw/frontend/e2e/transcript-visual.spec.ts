@@ -92,6 +92,14 @@ async function openFixture(page: Page, theme: string, viewport = { width: 1440, 
   await page.addInitScript((value) => localStorage.setItem("eggw-theme", value), theme);
   await mockTranscript(page);
   await page.goto(`/${threadId}`);
+  const desktopVerbosity = page.getByTitle("Transcript display verbosity");
+  if (await desktopVerbosity.isVisible()) {
+    await desktopVerbosity.selectOption("max");
+  } else {
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.locator("#drawer-verbosity").selectOption("max");
+    await page.getByRole("button", { name: "Close settings" }).click();
+  }
   await expect(page.locator(".eggw-message-card")).toHaveCount(4, { timeout: 15_000 });
   await page.getByTestId("chat-panel").evaluate((element) => { element.scrollTop = 0; });
 }
@@ -119,6 +127,7 @@ test("all 31 themes render the deterministic transcript fixture", async ({ page 
   await mockTranscript(page);
   await page.setViewportSize({ width: 1440, height: 1100 });
   await page.goto(`/${threadId}`);
+  await page.getByTitle("Transcript display verbosity").selectOption("max");
   await expect(page.locator(".eggw-message-card")).toHaveCount(4, { timeout: 15_000 });
   for (const theme of allThemes) {
     await page.evaluate((name) => {

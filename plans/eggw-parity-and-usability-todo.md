@@ -56,9 +56,10 @@ reported approval issue is Phase 10 even though it is investigated first.
 - [x] Reuse the existing shared `recovery_notice` marker for the safe compact
   subset: one bounded min preview at the canonical source position in both
   clients. Do not infer unavailable action/error semantics from notice text.
-- [x] Preserve canonical event chronology in EggW: assistant notes/messages and
-  tool declarations/results must not be grouped or reordered incorrectly,
-  including at `displayVerbosity=min`.
+- [x] Preserve canonical event chronology in EggW without changing minimum-
+  verbosity semantics: assistant notes/messages are visible boundaries that
+  split consecutive hidden tool/reasoning runs; each run remains one terminal-
+  style count summary with compact tool names.
 - [x] Add a literal interleaved chronology fixture (assistant message/tool call →
   Assistant Note/message → tool result → recovery/error) and require EggW min,
   medium, and max to retain the shared canonical message order. Cross-client Egg
@@ -455,6 +456,25 @@ policy.
   the 5M-token-equivalent performance fixture); Python compile and
   `git diff --check` passed. Commit hash follows after creation. No chronology
   work started.
+
+- 2026-07-17: Corrected the Phase 6 min-chronology implementation after review
+  found that `c26960e` had solved ordering by changing the established compact
+  contract. EggW min again aggregates each consecutive hidden activity run into
+  one terminal-style summary (`Executed …`, `got …`, reasoning count, tokens,
+  and `Tools: <compact names>`). Visible user/assistant/Assistant Note/system
+  records and compaction markers split runs at their canonical positions, so
+  tool groups no longer cross a visible chronology boundary. Exact call/result
+  identity is still used to pair popup details within a run; IDs and full
+  records remain available through the existing inspection paths rather than
+  expanding the min transcript. Regression coverage now requires both one
+  combined summary for consecutive calls/results and separate summaries when
+  an interleaved visible record splits the run. Popups do not pair across those
+  boundaries: a declaration reports that its result is not present in the
+  compact run, while a result-only popup retains the exact tool-call ID. No
+  duplicate durable/streamed call representation can inflate the execution
+  count, and get-user answer suppression is indexed across all loaded pages so
+  revealing history does not change an answered lifecycle's compact output. No
+  API, projection, protocol, schema, scheduler, or approval behavior changed.
 
 - 2026-07-17: Phase 10 first investigation stopped at bounded evidence on user priority change; no product repair or broad validation was attempted. Canonical lifecycle is `tool_call.finished` (durable raw output/TC4) → runner `_finalize_auto_tool_output()` → shared output-policy/optimizer registry → transactional lease/version-fenced `finalize_tool_output()` → one durable `tool_call.output_approval` (TC5) → final `role=tool` message (TC6); long whole output is automatically routed to a bounded preview plus thread-owned artifact/read instructions. Execution/security approval is the separate TC1 `tool_call.approval` authority. EggW GET/API/SSE reads do not write approval policy; its only approval writes are explicit user POST/WebSocket actions, while visiting/sending starts the same shared `SubtreeScheduler`. Existing exact-once tests cover competing finalizers and one long-output artifact. The literal unwanted prompt is reachable whenever Terminal Egg observes any durable TC4: `compute_pending_prompt()` still converts every TC4 with output into the legacy “include all?” prompt, and EggW similarly renders every TC4 as output approval. The likely trigger is a crash/lease-loss window after `tool_call.finished` but before the same invocation commits automatic policy: ordinary TC4 is not scheduler-actionable, so another scheduler cannot finalize it; current orphan recovery is limited to TC3 and a narrow interrupted/no-finished-event TC4. Open questions for later Phase 10 work: reproduce that exact inter-statement crash across Egg/EggW schedulers, decide whether successful durable TC4 should become lease-fenced recovery work versus suppressing obsolete UI prompts, and define explicit manual-policy configuration (none was found in current output-policy config) before removing manual fallback. Historical commits show automatic long-output handling was established before the legacy prompt was re-exposed by `e67ba30`. No SQLite/schema change is implicated.
 
