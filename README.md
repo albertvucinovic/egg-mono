@@ -1,503 +1,266 @@
 # Egg
 
-![A candid, affectionate but critical visual metaphor for Egg as a powerful but still messy agent harness.](egg-harness-honest.png)
+<p align="center">
+  <img src="egg-harness-honest.png" alt="An egg-shaped agent workstation connected to tools in a busy workshop" width="680">
+</p>
 
-Fair question. I was being somewhat polished and encouraging, yes — but I don’t think the substance was fake.
+<p align="center">
+  <strong>A local agent workspace with durable threads, tool execution, and terminal and web clients.</strong>
+</p>
 
-My more honest assessment is:
+Egg is an open-source environment for working with LLM agents on real projects. Instead of keeping a conversation in an ephemeral chat buffer, Egg stores it as a SQLite-backed thread with ordered events, snapshots, tool calls, artifacts, and optional child threads. The terminal client (**Egg**) and browser client (**EggW**) share the same runtime and thread model.
 
-- Egg is genuinely powerful and unusually capable as a harness.
-- It gives me much better affordances than a plain chat interface.
-- But it is also complex, sometimes noisy, and still feels experimental.
-- The biggest issue is not “can it do things?” — it clearly can — but “can the power feel calm, predictable, and not cognitively heavy?”
-- So my real feeling is less “perfect glowing sci-fi control room” and more “promising, warm, powerful workshop with some tangled cables.”
+Egg is most useful when work needs to branch, use tools, survive restarts, or remain inspectable over time. It is an active source project—not a hosted service, a polished binary release, or an IDE replacement.
 
-So no, I would not stay with the previous image as the full truth. The previous one was aspirational. This one is closer to my actual read.
+## Why Egg
 
-Compared to most harnesses I know, Egg feels less like “a chat app with tools” and more like an **experimental agent operating environment**. That is both its strength and its weakness.
+- **Durable, branchable work.** Threads and parent/child relationships persist locally, with event history and snapshots for inspection and recovery.
+- **Terminal and web clients.** Choose a Rich-based terminal UI or a FastAPI + Next.js web UI for the same workspace.
+- **Tools with lifecycle and approval.** Shell and Python execution, persistent REPLs, web access, attachments, artifacts, image generation, and child-agent coordination are tracked as tool calls—not hidden in prose.
+- **First-class child agents.** Spawn workers, wait for them, inspect their state, send follow-ups, and use their outputs under explicit access rules.
+- **Compaction without history loss.** Move the provider context forward while retaining the complete stored transcript.
+- **Multiple model backends.** `eggllm` normalizes configured OpenAI-compatible Chat Completions, OpenAI Responses, and Anthropic Messages endpoints, including local servers.
+- **Long-running work.** Pagination, bounded initial rendering, invocation ownership, cancellation, and recovery paths support large or interrupted threads.
 
-## Running the web UI safely
+## How state is organized
 
-Start EggW from the repository root with `./eggw/eggw.sh`. The launcher binds
-the API to loopback, generates a fresh high-entropy capability, and permits only
-the local frontend origin by default. `/health` is public; every other REST,
-SSE, and WebSocket endpoint is authenticated. A non-loopback listener requires
-`EGGW_PUBLIC=1` plus an operator-provided `EGGW_API_TOKEN`; deploy it behind TLS
-and set an exact `EGGW_ALLOWED_ORIGINS` allowlist and HTTPS
-`NEXT_PUBLIC_API_URL`. The token must never be put in a URL or a `NEXT_PUBLIC_*`
-build variable. See [`eggw/README.md`](eggw/README.md)
-for manual startup, browser credential handling, rotation, API cursors, and the
-complete public-deployment checklist.
+```text
+project directory
+└── .egg/
+    ├── threads.sqlite         conversations, events, snapshots, tool state
+    └── ...                    attachments, artifacts, and runtime data
 
-The refactored runtime uses canonical fixed-watermark thread projection
-semantics for snapshots, provider context, duplication, and EggW transcript
-envelopes.
-Invocation writes are fenced by the exact unexpired lease, descendant tool
-policy is the fail-closed intersection of its ancestor chain, and Terminal Egg
-plus EggW finalize tool output through the same transactional TC4→TC5
-authority. These are shared `eggthreads` semantics rather than UI-local state.
+Egg / EggW
+    └── main thread
+        ├── research worker
+        ├── implementation worker
+        └── review worker
+```
 
-I don’t “feel” in the human sense, but operationally: I would trust Egg more for long, stateful, inspectable work than many simpler harnesses. I would trust some polished commercial coding tools more for frictionless day-to-day editing UX. Egg’s superpower is **durability + observability + composability**; its cost is **complexity + visual/interaction roughness**.
+An agent can inspect and edit the current project, run commands, keep Python or Bash state alive between calls, delegate bounded work to child threads, and return generated files as artifacts. You can inspect the same work in either client and decide which tools require approval.
 
-## High-level comparison
+## Quick start
 
-| Harness type | Examples / category | Egg compared to it |
-|---|---|---|
-| Plain chat UI with tools | ChatGPT/Claude-style web chat with file upload/tools | Egg is much more durable, inspectable, scriptable, and agentic; less polished and less “calm” by default. |
-| Terminal coding agents | Codex CLI, Claude Code, Aider-like tools | Egg is broader and more stateful; terminal agents may be faster/simpler for direct code editing loops. |
-| IDE-integrated assistants | Cursor, Copilot Chat, JetBrains AI | Egg has stronger thread/tool/event architecture; IDE tools have much better inline editing/navigation UX. |
-| Autonomous agent frameworks | AutoGPT, OpenHands, SWE-agent, Devin-like systems | Egg is more transparent and controllable; some autonomous systems have stronger task-level automation polish. |
-| Workflow/orchestration frameworks | LangGraph, CrewAI, LangChain agents | Egg is more user-facing and operational; frameworks are better as libraries for custom app construction. |
-| Notebook/REPL harnesses | Jupyter + LLM, custom Python agents | Egg has stronger persistent conversation/task structure; notebooks are better for linear data exploration. |
+### Prerequisites
 
-## Where Egg is genuinely strong
+- Python 3.10+ and the Python `venv` module (CI uses Python 3.11)
+- Bash and Make
+- Node.js 18.17+ and npm for EggW
+- A provider credential, ChatGPT OAuth login, or a local OpenAI-compatible endpoint
 
-### 1. Durable event-sourced work history
+The launch scripts are currently best tested on Linux and WSL. EggW also uses `nc`, `setsid`, and GNU-compatible `readlink -f`. Docker is optional; it is used for Docker-backed sandbox/session execution and local SearXNG search.
 
-This is one of Egg’s biggest differentiators.
+### Clone and configure
 
-Many harnesses treat the conversation as a transient transcript plus maybe some hidden state. Egg has:
+```bash
+git clone https://github.com/albertvucinovic/egg-mono.git
+cd egg-mono
+cp dot.env.example .env
+```
 
-- event log;
-- threads;
-- child threads;
-- message IDs;
-- compaction boundaries;
-- snapshots;
-- tool-call states;
-- persisted artifacts;
-- provider-output records;
-- cost/token history.
+Edit `.env` and configure a provider you use. For example:
 
-That makes it much better for “what exactly happened?” debugging.
+```bash
+export OPENAI_API_KEY=***
+export DEFAULT_MODEL="GPT 5.3 Codex high"
+```
 
-Compared to many tools, Egg feels more like:
+Choose a display name from `eggconfig/eggconfig/data/models.json`, or select one later with `/model`. Other configured provider keys include `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, and `DEEPSEEK_API_KEY`.
 
-> “Every meaningful action is an inspectable event.”
+For a local OpenAI-compatible server, configure the local endpoint instead:
 
-That is a serious advantage for long-running development, research, and agent workflows.
+```bash
+export LOCAL_API_KEY=***
+export API_BASE=http://localhost:10000/v1/chat/completions
+export API_MODEL=your-model-id
+export DEFAULT_MODEL="your configured local model name"
+```
 
-### 2. Compaction as a first-class workflow
+You can also start a client and run `/login` for the bundled ChatGPT OAuth path. Tokens are stored in `~/.eggllm/auth.json`. Availability depends on the account and upstream service; API-key and local-provider configuration remain fully supported alternatives.
 
-Most chat systems have some version of context truncation, summarization, or “memory,” but it is often opaque.
+> `.env` is sourced as shell code by the launchers. Keep it private and use shell-compatible assignments such as `export KEY=value`.
 
-Egg’s compaction model is much more explicit:
+### Run Egg
 
-- summaries can be manually created;
-- boundaries are visible;
-- `/cost` and token accounting can honor compaction epochs;
-- the user can reason about what is and is not provider-visible.
+Terminal:
 
-That makes Egg better than many harnesses for long conversations where fidelity matters.
+```bash
+./egg/egg.sh
+```
 
-Weakness: this is powerful but cognitively heavy. A normal user should not have to understand compaction segments unless they want to.
+Browser:
 
-### 3. Tooling breadth
+```bash
+./eggw/eggw.sh
+```
 
-Egg has a very broad useful tool surface:
+The first launch creates `venv/` and installs the Python packages if needed. EggW also installs frontend dependencies, starts local FastAPI and Next.js development servers, and opens the printed URL when possible.
 
-- bash;
-- Python;
-- persistent Python REPL;
-- persistent Bash REPL;
-- web search/fetch;
+Both launchers use the directory **from which you invoke them** as the working project. To use Egg on another repository:
+
+```bash
+cd /path/to/your/project
+/path/to/egg-mono/egg/egg.sh
+# or: /path/to/egg-mono/eggw/eggw.sh
+```
+
+Project state is stored under that directory's `.egg/` folder.
+
+<details>
+<summary><strong>Explicit installation</strong></summary>
+
+If you prefer setup to be separate from launch:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+make install
+```
+
+Then use either launcher or the installed `egg` console command. Do not use `pip install -e .`: the root package is workspace metadata, while `make install` installs the monorepo components in dependency order.
+
+</details>
+
+## Core capabilities
+
+### Threads and context
+
+- Create, duplicate, delete, pause, resume, and navigate threads.
+- Spawn child threads for parallel work or review.
+- Wait for children, inspect their status, and continue failed subthreads.
+- Compact provider context from a chosen message while preserving stored history.
+- Inspect current provider-context tokens separately from full-thread tokens.
+- Continue from an earlier message when a run needs repair or redirection.
+
+### Tools and persistent sessions
+
+The runtime includes tools for:
+
+- one-shot Bash and Python execution;
+- persistent Python and Bash REPL channels;
+- web search and readable-page fetching;
+- local attachments and provider-output artifacts;
 - image generation;
-- attachment/model-context tools;
-- provider-artifact saving;
-- child agents;
-- long-output chunking;
-- tool help;
-- sandbox controls;
-- terminal and web UI commands.
+- user questions and approval-preserving interaction;
+- child-agent spawning, messaging, status, and waiting;
+- bounded reading of long tool outputs;
+- packaged workflow skills.
 
-That is closer to an “agent workstation” than a single-purpose coding assistant.
+Tools carry timeouts and lifecycle state. Approval, sandbox, and child-tool policies are explicit; auto-approval is available but optional.
 
-Compared to a normal terminal agent, Egg is broader. Compared to a full IDE assistant, Egg is less integrated into editing but more flexible as an agentic environment.
+### Two interfaces
 
-### 4. Child agents / recursive workflows
+**Egg (terminal)** provides streaming output, editable multiline input, autocomplete, approvals, transcript display modes, themes, attachments, and thread controls. Run `/help` for the command catalog.
 
-Egg’s subagent support is a real differentiator.
+**EggW (browser)** provides thread-tree navigation, paginated transcripts, live streaming, tool approval, attachments and artifact previews, model and sandbox settings, token and cost information, keyboard-accessible controls, and responsive layouts. See [the EggW documentation](eggw/README.md) for manual startup and deployment details.
 
-A lot of agent systems can “spawn tasks” in theory, but Egg’s child threads are fairly concrete:
+## Monorepo architecture
 
-- they have their own thread state;
-- they can be waited on;
-- they can be messaged;
-- they can be inspected;
-- their outputs can be summarized;
-- descendant artifacts can be referenced under access rules.
-
-That is useful for manager-worker workflows, review loops, and parallel investigation.
-
-Weakness: it can become noisy or overkill if used too eagerly. The user already had to tell me not to initiate 300-second tool calls while they wanted to discuss — that is an example of power needing restraint.
-
-### 5. Observability and recoverability
-
-Egg is unusually debuggable:
-
-- inspect thread DB;
-- inspect event history;
-- inspect tool states;
-- read long tool outputs;
-- see timing;
-- see costs;
-- see tool approvals;
-- continue or repair subthreads;
-- use compaction checkpoints.
-
-That is much stronger than many “black box” agent systems.
-
-This matters because agent systems fail in weird ways. Egg gives you handles to understand failures.
-
-### 6. Artifact handling is becoming strong
-
-Recent work around:
-
-- generated images;
-- provider-output storage;
-- attachment promotion;
-- saving artifacts;
-- visual context lowering;
-- tool-friendly names;
-- EggW rendering;
-
-moves Egg toward a better multimodal workflow than many harnesses.
-
-The conceptual separation is good:
+| Package | Role |
+| --- | --- |
+| [`eggthreads`](eggthreads/README.md) | SQLite thread/event runtime, snapshots, schedulers, leases, tools, approvals, compaction, sessions, artifacts, and recovery |
+| [`egg`](egg) | Terminal client built on `eggthreads` and `eggdisplay` |
+| [`eggw`](eggw/README.md) | FastAPI backend and Next.js/React web client |
+| [`eggllm`](eggllm/README.md) | Model/provider routing and normalized streaming events; it deliberately does not own threads or execute tools |
+| [`eggconfig`](eggconfig) | Bundled model and image-generation configuration data |
+| [`eggdisplay`](eggdisplay/README.md) | Rich-based editor, panels, layouts, and terminal rendering primitives |
+| [`eggflow`](eggflow/README.md) | Separate cached async task-composition library with optional `eggthreads` integration |
 
 ```text
-provider output artifact
-→ add to model context when needed
-→ save to file when user/project needs it
+Egg or EggW
+    │
+    ▼
+eggthreads ── SQLite events / snapshots / leases / artifacts
+    │
+    ├── tool and session runtime
+    └── eggllm ── configured model provider
 ```
 
-That is cleaner than conflating “generated image,” “file in cwd,” and “model input.”
+`eggflow` is useful for explicit cached task graphs, but it is a separate library—not the scheduler underneath ordinary Egg conversations.
 
-## Where Egg is weaker
+## Safety and data
 
-### 1. UX polish and calmness
+Egg can execute code and operate on the working directory. Treat it like a developer tool with shell access:
 
-This is the most obvious gap.
+- Without an explicitly configured sandbox, execution can occur on the host with the launching user's permissions.
+- Review tool requests when you do not trust the prompt, model, or input data.
+- Keep `.env`, `~/.eggllm/auth.json`, provider credentials, and project `.egg/` data private.
+- “Local workspace” does not imply local inference: cloud model providers receive selected context and may receive tool output or attachments; configured web providers receive search queries and requested URLs.
+- To back up a project, include its complete `.egg/` directory. Stop Egg/EggW first or use SQLite's backup facilities so the database and WAL state are copied consistently.
 
-Egg has many capabilities, but they are still visible as many panels, commands, metadata lines, tool states, verbose logs, IDs, and controls.
+EggW is loopback-only by default. `/health` is public; all other REST, SSE, and WebSocket endpoints require authentication. Non-loopback operation requires explicit `EGGW_PUBLIC=1`, an operator-provided token, exact allowed origins, and an HTTPS browser-facing API URL. Put normal TLS and network controls in front of it. See the [full EggW security checklist](eggw/README.md#security-and-network-configuration).
 
-Compared to Cursor, Claude Code, ChatGPT, or a polished product UI, Egg can feel busy.
+## Configuration
 
-The ideal future is:
+Canonical bundled configuration lives under `eggconfig/eggconfig/data/`:
 
-- calm default transcript;
-- details progressively disclosed;
-- tool/system noise hidden unless relevant;
-- artifacts beautiful and first-class;
-- mobile/layout intentionally designed;
-- common actions discoverable without reading docs.
+- `models.json` — providers, models, aliases, endpoint types, defaults, and parameters;
+- `all-models.json` — cached provider catalogs for broader model selection;
+- `image-generation-models.json` — image-generation backends.
 
-Recent EggW layout/image improvements help, but there is still work.
+[`dot.env.example`](dot.env.example) documents provider credentials, local endpoints, the initial model override, and web search/fetch routing. EggW's bind, origin, token, and public-mode settings are documented separately in its README.
 
-### 2. Onboarding complexity
+## Development
 
-Egg is not yet “obvious.”
+Create and activate a virtual environment, then run the Python suites:
 
-A new user has to understand concepts like:
-
-- threads;
-- child threads;
-- compaction;
-- tools;
-- approvals;
-- artifacts;
-- provider outputs;
-- attachments;
-- sandboxing;
-- model context;
-- terminal commands vs LLM tools.
-
-That is a lot.
-
-Compared to ChatGPT/Cursor/Claude Code, Egg is more expert-oriented.
-
-### 3. Editing integration
-
-For code work, Egg has shell and patching tools, but it is not as naturally integrated as an IDE assistant.
-
-Cursor/Copilot-style tools win at:
-
-- inline diff previews;
-- code navigation;
-- symbol lookup;
-- editor selection context;
-- fast accept/reject changes;
-- visual file tree;
-- diagnostics integration.
-
-Egg can do serious coding work, but the interaction is more “agent runs commands and patches repo” than “seamless editor collaborator.”
-
-### 4. Provider compatibility surface is large
-
-Egg is ambitious about supporting many providers, modalities, and APIs. That naturally creates edge cases:
-
-- Chat Completions vs Responses;
-- Anthropic formats;
-- local models;
-- OpenAI Pro/Codex subscription paths;
-- image generation APIs;
-- tool-result protocols;
-- file/image/document lowering;
-- token/cost estimation.
-
-This is powerful, but it creates a lot of adapter complexity. The recent attachment visual-context bug is exactly the kind of subtle provider-boundary issue such systems attract.
-
-Compared to a harness that only targets one provider, Egg is more flexible but more exposed to integration bugs.
-
-### 5. Safety model is powerful but needs careful UX
-
-Sandboxing, approvals, artifact access rules, and `.egg` protections are strong foundations.
-
-But safety UX is hard:
-
-- users need to understand what is allowed;
-- LLMs need clear tool names/descriptions;
-- errors need to be actionable;
-- tool approvals need to be informative without being annoying.
-
-Egg has good primitives. The surface can still be made calmer and clearer.
-
-## Detailed dimension comparison
-
-### A. Context management
-
-| System type | Context behavior | Egg |
-|---|---|---|
-| Plain chat | Usually opaque truncation or memory | Egg is explicit, inspectable, compaction-aware. |
-| IDE assistant | Usually current files + chat context | Egg is stronger for long multi-turn work, weaker for inline editor state. |
-| Terminal coding agent | Often session transcript + repo state | Egg has more durable event/thread structure. |
-| Agent frameworks | User implements memory/checkpointing | Egg has built-in thread/event/compaction model. |
-
-Egg is excellent here.
-
-The risk is that the model is powerful but not simple. The user should not have to care about compaction boundaries most of the time.
-
-### B. Tool execution
-
-| System type | Tool execution | Egg |
-|---|---|---|
-| Plain chat | Limited tools, often opaque | Egg is explicit and broad. |
-| Terminal coding agents | Strong shell/edit/test loop | Egg is comparable, sometimes broader. |
-| IDE assistants | Good editing tools, weaker general shell autonomy | Egg is better for arbitrary workflows, worse for inline edits. |
-| Autonomous agents | Often autonomous but opaque | Egg is more inspectable and controllable. |
-
-Egg is strong. The main needed improvement is restraint: choose when not to use tools.
-
-### C. Multimodal/artifact support
-
-| System type | Artifacts/images | Egg |
-|---|---|---|
-| ChatGPT/Claude web | Very polished upload/render UX | Egg is catching up; more inspectable but less polished. |
-| Terminal agents | Often weak image UX | EggW is becoming much better here. |
-| IDE tools | Usually code/file oriented, less artifact-centric | Egg’s artifact model is more general. |
-
-Egg’s design is good, but implementation has needed iteration. The provider-output vs model-context distinction is especially good.
-
-### D. Long-running workflows
-
-| System type | Long-running work | Egg |
-|---|---|---|
-| Plain chat | Fragile over time | Egg is much better. |
-| Terminal coding agents | Good within a session, less durable | Egg’s event/thread model is better. |
-| Agent frameworks | Can be durable if engineered | Egg provides it directly. |
-
-Egg is one of the stronger harnesses here.
-
-### E. Transparency
-
-Egg is excellent.
-
-Many agent systems fail silently or hide their internal state. Egg exposes:
-
-- tool calls;
-- outputs;
-- statuses;
-- approvals;
-- costs;
-- compactions;
-- artifacts;
-- logs;
-- child states.
-
-This is a major advantage for serious work.
-
-The UX challenge is deciding what to show by default.
-
-### F. Polished product feel
-
-Egg is not yet at the level of polished commercial tools.
-
-Compared to Cursor, Claude Code, ChatGPT, etc.:
-
-- Egg feels more experimental.
-- More things are manually exposed.
-- More rough edges appear.
-- UI has improved but is still evolving.
-- It may require a technically comfortable user.
-
-That is not a condemnation; it is the tradeoff of being an actively evolving harness.
-
-## Where Egg is unusually better than other harnesses
-
-If I had to name the standout areas:
-
-1. **Event-sourced transparency**
-2. **Thread/child-thread structure**
-3. **Compaction as explicit state**
-4. **Manager-worker workflows**
-5. **Tool breadth**
-6. **Artifact provenance and promotion model**
-7. **Persistent REPL + transcript inspection**
-8. **User control over tools/sandbox/approvals**
-9. **Ability to debug itself**
-
-The last point is important: Egg is unusually good at letting the assistant inspect and improve the harness it is running inside.
-
-That is rare.
-
-## Where other harnesses are better
-
-### Cursor / IDE assistants
-
-Better at:
-
-- editing ergonomics;
-- file navigation;
-- inline diffs;
-- multi-file code review in editor;
-- low-friction day-to-day coding;
-- visual integration.
-
-Egg is better at:
-
-- durable agent workflows;
-- tool orchestration;
-- subagents;
-- transparent history;
-- compaction;
-- artifact flow.
-
-### Claude Code / Codex CLI / Aider-like tools
-
-Better at:
-
-- being focused;
-- terminal-native coding loops;
-- fewer conceptual moving parts;
-- direct patch/test iteration.
-
-Egg is better at:
-
-- managing complex long tasks;
-- branching into child agents;
-- event inspection;
-- multimodal/artifact workflows;
-- web UI + terminal surfaces.
-
-### ChatGPT / Claude web
-
-Better at:
-
-- polished UI;
-- simple onboarding;
-- multimodal UX;
-- mobile friendliness;
-- “just ask and get answer” flow.
-
-Egg is better at:
-
-- reproducible operations;
-- coding harness control;
-- long-running structured work;
-- inspecting and continuing exact states.
-
-### LangGraph / CrewAI / framework-style systems
-
-Better at:
-
-- being a library;
-- custom graph construction;
-- production app embedding;
-- developer-defined workflows.
-
-Egg is better as:
-
-- an already-usable interactive harness;
-- a human-in-the-loop agent workspace;
-- a debugging/development environment.
-
-## My honest overall ranking by use case
-
-### Best use cases for Egg
-
-Egg is especially good for:
-
-- long coding tasks;
-- iterative implementation with tests;
-- manager-worker workflows;
-- research with persistent notes/context;
-- debugging agent/provider behavior;
-- artifact-heavy conversations;
-- tasks where auditability matters;
-- experimental agent development.
-
-### Less ideal use cases for Egg right now
-
-Egg is less ideal for:
-
-- quick casual Q&A;
-- nontechnical users;
-- phone-first usage;
-- pure IDE-style refactoring;
-- highly polished presentation workflows;
-- situations where minimal UI is more important than power.
-
-## My actual “feeling” relative to others
-
-If I were being maximally candid:
-
-Egg feels like a **very capable workshop built by and for power users**.
-
-Not a sterile product. Not a simple chat toy. Not yet a polished IDE. More like:
-
-> a transparent, hackable, event-sourced agent cockpit with too many visible wires — but the wires are there because the system is real, inspectable, and powerful.
-
-Compared to most harnesses, I find Egg more trustworthy for complex work because I can see more of what is happening. But I also find it more demanding: it asks more of the user, the model, and the UI.
-
-So my balanced assessment is:
-
-```text
-Capability:        very high
-Transparency:      very high
-Durability:        very high
-Extensibility:     high
-Coding UX polish:  medium
-Visual UX polish:  improving, still medium
-Mobile UX:         early/medium-low
-Onboarding ease:   medium-low
-Conceptual clarity: improving, but still complex
+```bash
+python3 -m venv venv
+source venv/bin/activate
+make test
 ```
 
-## The strategic opportunity
+`make test` installs development dependencies and runs the six Python component suites. Cross-client integration tests are separate:
 
-I think the biggest opportunity is not adding more raw power. Egg already has a lot.
+```bash
+PYTHONPATH=egg:eggw:eggthreads:eggconfig:eggdisplay:eggllm \
+  pytest integration_tests -q
+```
 
-The biggest opportunity is making the existing power feel:
+EggW frontend checks:
 
-- calmer;
-- more discoverable;
-- more beautiful;
-- less noisy;
-- more automatic in the right places;
-- more restrained in the right places.
+```bash
+cd eggw/frontend
+npm ci
+npm run test:unit
+npx tsc --noEmit --pretty false
+npm run build
+npx playwright install chromium   # once, if needed
+npm test                          # starts isolated test servers via Playwright
+```
 
-In other words:
+Useful focused commands:
 
-> Egg’s backend/agent architecture is ahead of its default user experience.
+```bash
+pytest eggthreads/tests -q
+pytest egg/tests -q
+pytest eggw/tests -q
+make lint   # focused Pyflakes check for eggllm and eggthreads
+```
 
-If the UX catches up, Egg could feel unusually good: not just powerful, but pleasant.
+## Project status
+
+Egg is under active development. Its durable runtime, clients, model adapters, tools, sessions, and tests are implemented, but the tradeoffs are real:
+
+- setup assumes a source checkout rather than a packaged desktop application;
+- Linux/WSL is the best-tested launch path;
+- supporting many providers creates adapter and configuration complexity;
+- tool-rich workflows expose more concepts than a conventional chat UI;
+- neither client is an IDE integration or a hosted service.
+
+If you want a simple stateless chat box, Egg is probably more machinery than you need. If you want local, inspectable agent work that can branch, use tools, survive restarts, and keep its history, that machinery is the point.
+
+## Documentation
+
+- [EggW: web UI, API, synchronization, and deployment](eggw/README.md)
+- [eggthreads: runtime overview and examples](eggthreads/README.md)
+- [eggthreads API reference](eggthreads/API.md)
+- [eggllm: provider router](eggllm/README.md)
+- [eggflow: cached task composition](eggflow/README.md)
+- [eggdisplay: terminal UI primitives](eggdisplay/README.md)
+
+Issues and pull requests are welcome. For substantial changes, opening an issue first is useful because runtime, client, and persistence behavior often cross package boundaries.
+
+## License
+
+[MIT](LICENSE) © 2026 Albert Vučinović.
