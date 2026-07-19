@@ -118,3 +118,14 @@ Producers that return Eggflow Tasks. Explicit identities own behavior/config
 cache identity; process-local Producer objects and live resources do not.
 Objectives, archives, feasibility policy, and Pareto selection remain optional
 and outside this composition.
+
+## Generic hierarchical runtime
+
+The optional `eggopt.eggthreads_runtime.HierarchicalRuntime` is the single
+Eggopt-provided `Producer[StrategyRunInput, Task]` runtime. It materializes the
+replay-safe `StudyRoot/StrategyRunRoot/RunSetup/Step S000/Proposal P000` seed
+and subsequent serial steps/proposals, with bounded ordered case execution.
+Every domain Producer operation returns a cached value paired with its
+authoritative physical thread ID; no registry, validation stage, raw-name
+scan, model call, or general descendant-context REPL capability is included.
+Domains may implement the same structural Producer contract instead.

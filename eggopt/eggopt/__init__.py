@@ -18,6 +18,13 @@ from .core import (
 from .evaluation import CaseRequest, EvaluationRequest
 from .gepa import GEPAState, GEPAStrategy
 from .physics import PhysicsState, PhysicsStrategy
+from .runtime import (
+    OperationResult,
+    ProposalResult,
+    StepResult,
+    StrategyRunInput,
+    StrategyRunResult,
+)
 from .repair import (
     Accepted,
     Inspection,
@@ -44,13 +51,18 @@ __all__ = [
     "Metric",
     "NeedsRepair",
     "Observation",
+    "OperationResult",
     "PhysicsState",
     "PhysicsStrategy",
     "Producer",
     "Proposal",
+    "ProposalResult",
     "RepairFeedback",
     "RepairInput",
     "Stop",
+    "StepResult",
     "StrategyDecision",
     "StrategyInput",
+    "StrategyRunInput",
+    "StrategyRunResult",
 ]

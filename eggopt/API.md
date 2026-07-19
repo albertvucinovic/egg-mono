@@ -16,11 +16,15 @@ inspection, or judging—is a typed `Producer[Input, Output]`.
 - `RepairInput`, `RepairFeedback`, `Accepted | NeedsRepair`, `ItemFailure` —
   repair values.
 - `CaseRequest`, `EvaluationRequest` — ordered case-evaluation inputs.
+- `StrategyRunInput`, `OperationResult`, `ProposalResult`, `StepResult`,
+  `StrategyRunResult` — dependency-free runtime request and authoritative
+  thread/value results.
 
 ## Optional runtime modules
 
 - `eggopt.eggflow` — generic cacheable `ProduceTask` / `EggflowProducer`.
 - `eggopt.eggthreads` — cached run roots and an inspectable fake leaf Producer.
+- `eggopt.eggthreads_runtime` — the one shipped hierarchical strategy runtime.
 - `eggopt.eggflow_repair` — independently cached cumulative repair attempts.
 - `eggopt.eggflow_evaluation` — independently cached case map and aggregation.
 
@@ -72,3 +76,20 @@ assert len(decision.proposals[0].evidence) == 2
   and are reconstructed.
 - Irreversible effects require an Eggflow task boundary; cached typed results
   are authoritative.
+
+## Hierarchical runtime
+
+`HierarchicalRuntime` is an injectable `Producer[StrategyRunInput, Task]`; a
+domain may instead supply its own Producer with that structural contract. The
+shipped implementation creates the exact physical hierarchy
+`StudyRoot/StrategyRunRoot/RunSetup`, seeds `Step S000/Proposal P000`, then
+runs later steps and proposals serially. Candidate production, strategy
+transition, each case, and aggregation each receive a physical thread. It does
+not add a validation stage or bookkeeping operation threads.
+
+Cases run up to `StrategyRunInput.max_concurrent_cases` concurrently, but case
+results and aggregation preserve request order. Returned `OperationResult`
+values pair each deterministic operation value with its authoritative thread
+ID. Eggflow replay reuses those cached values and references without Producer
+invocation, thread creation, or raw-name recovery scans. The adapter uses
+process-local Producers/fakes in this slice and makes no model calls.
