@@ -62,6 +62,15 @@ by the library.
   skeleton; a domain composes validation/repair into its Producers when required.
 - Steps and proposals execute serially. Case operations may execute concurrently up to a positive,
   configurable `max_concurrent_cases`, while their results and aggregation remain in request order.
+- Each configured domain role receives an explicit dependency-free operation context containing its
+  authoritative physical thread ID, so domain-owned Producers may create restricted children under
+  that operation without ambient context or name scans. Operation threads retain compact local-only
+  audit entries (semantic name, Producer identity, input/output digests, and outcome/failure type);
+  full inputs and outputs are not copied into transcripts.
+- A typed `ItemFailure` from candidate production or case execution terminates only that
+  proposal/evaluation. The ordered failure remains in the run result, unavailable downstream work is
+  skipped, and sibling proposals plus later steps continue from successful observations. Infrastructure
+  exceptions still fail the Eggflow task.
 
 ### Hard and soft composition
 
@@ -155,6 +164,10 @@ result values paired with cached thread IDs are the only authoritative reference
   `Producer[StrategyRunInput, Task]` runtime with the exact seed/step/proposal hierarchy, physical
   fake domain operations, bounded case concurrency, ordered aggregation, and replay-safe typed
   thread/value results. Do not add validation, a registry, model calls, or domain behavior.
+- [x] **P5.2.1 — contextual operations, audit, and item isolation.** Pass explicit operation context to
+  every configured role, record compact model-hidden operation audit entries, and retain candidate/case
+  `ItemFailure` outcomes without aborting siblings or later successful observations. Preserve the exact
+  skeleton, bounded ordered case behavior, and top-level runtime contract.
 - [ ] **P6 — first domain vertical slice: trading.** Use existing development-only trading evidence
   for one cached deterministic GEPA transition, then one explicitly approved tiny live mutation.
   Keep the base prompt frozen and July unopened.
@@ -185,6 +198,21 @@ result values paired with cached thread IDs are the only authoritative reference
   duplicating the library.
 
 ## Durable status
+
+- 2026-07-20 — P5.2.1 completed. Every configured role now receives explicit
+  `OperationInput(value, OperationContext)` with its authoritative operation thread; a focused fake
+  creates a restricted child under that ID. Physical operations record compact `no_api` digest/outcome
+  audit messages, including infrastructure exception type, while cached replay writes nothing. Candidate
+  and ordered case `ItemFailure` results remain typed proposal outcomes, skip unavailable downstream
+  work, and allow siblings/later steps to continue from successful observations only. Exact topology,
+  serial steps/proposals, bounded ordered cases, and the top-level runtime contract remain unchanged.
+  No selector subthreads or domain work were added.
+
+- 2026-07-20 — Manager review opened focused correction P5.2.1 before any domain adapter: configured
+  roles need explicit authoritative operation context for domain-owned restricted children; physical
+  operations need compact local-only digest/outcome audit entries; and candidate/case `ItemFailure`
+  values must remain typed item outcomes rather than aborting the study. No selector subthreads, live
+  scheduling, domain behavior, ambient context, or descendant tooling are in this correction.
 
 - 2026-07-19 — P5.2 completed with dependency-free run inputs/results and Eggopt's one optional
   `HierarchicalRuntime`. The runtime is itself a `Producer` returning an Eggflow `Task`, creates the

@@ -101,6 +101,18 @@ phase boundaries, and compliance review. A worker implements only the currently 
   fresh executor replays without producer calls or thread creation and without raw name scans.
 - [x] Use fakes only, run focused tests/checks, update status, and commit one coherent library change.
 
+## P5.2.1 — Contextual operation correction
+
+- [x] Add dependency-free `OperationContext` / `OperationInput[T]`; invoke every configured role with
+  its semantic value and authoritative operation thread ID, preserving the top-level runtime contract.
+- [x] Use public Eggthreads APIs to write compact model-hidden operation start/outcome audit entries;
+  include identities and digests, record infrastructure failure type, and write nothing on replay.
+- [x] Retain candidate and ordered case `ItemFailure` outcomes, skip unavailable evaluation or
+  aggregation, and continue sibling proposals/later steps from successful observations only.
+- [x] Prove contextual restricted-child ancestry, exact skeleton/concurrency preservation, audit replay,
+  infrastructure failure audit, and candidate/case failure isolation with fakes only.
+- [x] Amend docs, run focused/full Eggopt tests and package checks, then commit one correction.
+
 ## P6 — Trading adapter (domain repository)
 
 - [ ] Follow the trading integration plan; no domain code in `eggopt`.
@@ -119,6 +131,17 @@ phase boundaries, and compliance review. A worker implements only the currently 
 - [ ] Add Pareto/evolution/islands only when a concrete adapter exercises them.
 
 ## Status log
+
+- 2026-07-20: P5.2.1 completed with explicit operation context, public-API model-hidden
+  digest/outcome audit messages, cached audit replay, and isolated typed candidate/case `ItemFailure`
+  results. Tests prove domain child ancestry, failure audit, sibling/later-step continuation, ordered
+  case retention, and preserved exact topology/concurrency. Full Eggopt tests and package checks pass;
+  selector subthreads and trading remain unstarted.
+
+- 2026-07-20: Manager review opened P5.2.1 to correct three runtime foundations before trading:
+  explicit operation context for domain-owned children, model-hidden digest/outcome audit records, and
+  isolated typed candidate/case `ItemFailure` outcomes. The exact skeleton, concurrency contract, and
+  top-level runtime Producer contract stay unchanged; selector subthreads remain a later slice.
 
 - 2026-07-19: P5.2 completed. Added pure `StrategyRunInput`/authoritative result values and one
   optional hierarchical runtime Producer returning an Eggflow Task. Focused fake tests prove exact

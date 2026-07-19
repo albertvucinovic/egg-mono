@@ -19,6 +19,8 @@ from .evaluation import CaseRequest, EvaluationRequest
 from .gepa import GEPAState, GEPAStrategy
 from .physics import PhysicsState, PhysicsStrategy
 from .runtime import (
+    OperationContext,
+    OperationInput,
     OperationResult,
     ProposalResult,
     StepResult,
@@ -51,6 +53,8 @@ __all__ = [
     "Metric",
     "NeedsRepair",
     "Observation",
+    "OperationContext",
+    "OperationInput",
     "OperationResult",
     "PhysicsState",
     "PhysicsStrategy",

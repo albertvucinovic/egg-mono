@@ -12,6 +12,7 @@ from typing import Generic, TypeVar
 from eggflow import Task, keyed
 from eggthreads import (
     ThreadsDB,
+    append_message,
     create_child_thread,
     create_root_thread,
     set_thread_tools_enabled,
@@ -25,11 +26,13 @@ from .core import (
     Producer,
     Proposal,
     Stop,
-    StrategyDecision,
     StrategyInput,
 )
 from .evaluation import CaseRequest
+from .repair import ItemFailure
 from .runtime import (
+    OperationContext,
+    OperationInput,
     OperationResult,
     ProposalResult,
     StepResult,
@@ -41,10 +44,10 @@ StateT = TypeVar("StateT")
 CaseT = TypeVar("CaseT")
 
 _CREATE_THREAD_SCHEMA = b"eggopt.CreateRuntimeThread:v1\0"
-_OPERATION_SCHEMA = b"eggopt.RuntimeOperationTask:v1\0"
-_CASE_GROUP_SCHEMA = b"eggopt.RuntimeCaseGroupTask:v1\0"
-_PROPOSAL_SCHEMA = b"eggopt.RuntimeProposalTask:v1\0"
-_RUN_SCHEMA = b"eggopt.HierarchicalRuntimeTask:v1\0"
+_OPERATION_SCHEMA = b"eggopt.RuntimeOperationTask:v2\0"
+_CASE_GROUP_SCHEMA = b"eggopt.RuntimeCaseGroupTask:v2\0"
+_PROPOSAL_SCHEMA = b"eggopt.RuntimeProposalTask:v2\0"
+_RUN_SCHEMA = b"eggopt.HierarchicalRuntimeTask:v2\0"
 
 __all__ = ["HierarchicalRuntime", "HierarchicalRuntimeTask"]
 
@@ -123,45 +126,45 @@ class _OperationTask(Task):
             thread_id = yield _CreateThread(
                 self.threads_db_path, self.name, self.parent_thread_id
             )
-        result = self.producer.produce(self.value)
-        if isinstance(result, Task) or inspect.iscoroutine(result):
-            result = yield result
-        return OperationResult(thread_id, result)
-
-
-@dataclass
-class _RunCaseOperation(Task, Generic[CaseT]):
-    threads_db_path: str
-    evaluation_thread_id: str
-    thread_id: str
-    index: int
-    candidate: Candidate
-    case: CaseT
-    case_producer: Producer
-    case_identity: str
-
-    def get_cache_key(self) -> str:
-        return _cache_key(
-            _CASE_GROUP_SCHEMA,
-            (
+        input_digest = _digest_hex(self.value, "operation value")
+        _append_operation_audit(
+            self.threads_db_path,
+            thread_id,
+            self.name,
+            self.producer_identity,
+            input_digest,
+            outcome="started",
+        )
+        role_input = OperationInput(
+            OperationContext(thread_id, self.name), self.value
+        )
+        try:
+            result = self.producer.produce(role_input)
+            if isinstance(result, Task) or inspect.iscoroutine(result):
+                result = yield result
+        except Exception as exc:
+            _append_operation_audit(
                 self.threads_db_path,
-                self.evaluation_thread_id,
-                self.thread_id,
-                self.index,
-                self.case_identity,
-                _pickle_digest((self.candidate, self.case), "case operation"),
-            ),
+                thread_id,
+                self.name,
+                self.producer_identity,
+                input_digest,
+                outcome="failed",
+                failure_type=type(exc).__name__,
+            )
+            raise
+        _append_operation_audit(
+            self.threads_db_path,
+            thread_id,
+            self.name,
+            self.producer_identity,
+            input_digest,
+            outcome="item_failure"
+            if isinstance(result, ItemFailure)
+            else "succeeded",
+            output_digest=_digest_hex(result, "operation result"),
         )
-
-    def run(self):
-        result = self.case_producer.produce(
-            CaseRequest(self.candidate, self.case)
-        )
-        if isinstance(result, Task) or inspect.iscoroutine(result):
-            result = yield result
-        if not isinstance(result, CaseEvidence):
-            raise TypeError("case_producer must produce CaseEvidence values")
-        return OperationResult(self.thread_id, result)
+        return OperationResult(thread_id, result)
 
 
 @dataclass
@@ -200,7 +203,9 @@ class _CaseGroupTask(Task, Generic[CaseT]):
             ),
         )
 
-    async def run(self) -> tuple[OperationResult[CaseEvidence], ...]:
+    async def run(
+        self,
+    ) -> tuple[OperationResult[CaseEvidence | ItemFailure], ...]:
         semaphore = asyncio.Semaphore(self.max_concurrent_cases)
         thread_ids = []
         for index in range(len(self.cases)):
@@ -218,15 +223,14 @@ class _CaseGroupTask(Task, Generic[CaseT]):
         async def run_case(index: int, case: CaseT):
             async with semaphore:
                 return await keyed(
-                    _RunCaseOperation(
+                    _OperationTask(
                         self.threads_db_path,
                         self.evaluation_thread_id,
-                        thread_ids[index],
-                        index,
-                        self.candidate,
-                        case,
+                        f"Case K{index:03d}",
                         self.case_producer,
                         self.case_identity,
+                        CaseRequest(self.candidate, case),
+                        thread_ids[index],
                     ),
                     "case",
                     index,
@@ -235,6 +239,13 @@ class _CaseGroupTask(Task, Generic[CaseT]):
         results = await asyncio.gather(
             *(run_case(index, case) for index, case in enumerate(self.cases))
         )
+        if not all(
+            isinstance(result.value, (CaseEvidence, ItemFailure))
+            for result in results
+        ):
+            raise TypeError(
+                "case_producer must produce CaseEvidence or ItemFailure"
+            )
         return tuple(results)
 
 
@@ -306,8 +317,20 @@ class _ProposalTask(Task, Generic[CaseT]):
             self.proposal_id,
             "production",
         )
+        if isinstance(production.value, ItemFailure):
+            return ProposalResult(
+                self.proposal_id,
+                proposal_thread_id,
+                None,
+                self.proposal,
+                production,
+                (),
+                None,
+            )
         if not isinstance(production.value, Candidate):
-            raise TypeError("candidate_producer must produce a Candidate")
+            raise TypeError(
+                "candidate_producer must produce Candidate or ItemFailure"
+            )
 
         evaluation_thread_id = yield _CreateThread(
             self.threads_db_path, "Evaluation", proposal_thread_id
@@ -321,6 +344,18 @@ class _ProposalTask(Task, Generic[CaseT]):
             self.case_identity,
             self.max_concurrent_cases,
         )
+        if any(
+            isinstance(result.value, ItemFailure) for result in case_results
+        ):
+            return ProposalResult(
+                self.proposal_id,
+                proposal_thread_id,
+                evaluation_thread_id,
+                self.proposal,
+                production,
+                case_results,
+                None,
+            )
         evidence = tuple(result.value for result in case_results)
         base = Observation(production.value, cases=evidence)
         aggregation = yield keyed(
@@ -433,7 +468,7 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
         step_results.append(
             StepResult("S000", seed_step_thread_id, None, state, (seed_result,))
         )
-        observations = (seed_result.aggregation.value,)
+        observations = _successful_observations((seed_result,))
         proposal_number = 1
 
         for step_number in range(1, self.value.max_steps + 1):
@@ -489,9 +524,7 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
                 )
                 proposal_results.append(proposal_result)
                 proposal_number += 1
-            observations = tuple(
-                result.aggregation.value for result in proposal_results
-            )
+            observations = _successful_observations(proposal_results)
             step_results.append(
                 StepResult(
                     step_id,
@@ -555,6 +588,65 @@ class HierarchicalRuntime(Generic[StateT, CaseT]):
             self.aggregate_identity,
             value,
         )
+
+
+def _successful_observations(
+    proposals: tuple[ProposalResult, ...] | list[ProposalResult],
+) -> tuple[Observation, ...]:
+    return tuple(
+        proposal.aggregation.value
+        for proposal in proposals
+        if proposal.aggregation is not None
+    )
+
+
+def _append_operation_audit(
+    threads_db_path: str,
+    thread_id: str,
+    semantic_name: str,
+    producer_identity: str,
+    input_digest: str,
+    *,
+    outcome: str,
+    output_digest: str | None = None,
+    failure_type: str | None = None,
+) -> None:
+    fields = [
+        "eggopt.operation",
+        f"name={semantic_name}",
+        f"producer={producer_identity}",
+        f"input_sha256={input_digest}",
+        f"outcome={outcome}",
+    ]
+    if output_digest is not None:
+        fields.append(f"output_sha256={output_digest}")
+    if failure_type is not None:
+        fields.append(f"failure_type={failure_type}")
+    db = ThreadsDB(threads_db_path)
+    try:
+        db.init_schema()
+        append_message(
+            db,
+            thread_id,
+            role="system",
+            content=" ".join(fields),
+            extra={
+                "no_api": True,
+                "keep_user_turn": True,
+                "origin": "eggopt.operation.audit",
+                "eggopt_operation_audit": True,
+            },
+        )
+    finally:
+        db.conn.close()
+
+
+def _digest_hex(value: object, name: str) -> str:
+    try:
+        encoded = pickle.dumps(value, protocol=5)
+    except Exception as exc:
+        raise TypeError(f"{name} must be pickleable for audit identity") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _cache_key(schema: bytes, values: object) -> str:

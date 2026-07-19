@@ -125,7 +125,12 @@ The optional `eggopt.eggthreads_runtime.HierarchicalRuntime` is the single
 Eggopt-provided `Producer[StrategyRunInput, Task]` runtime. It materializes the
 replay-safe `StudyRoot/StrategyRunRoot/RunSetup/Step S000/Proposal P000` seed
 and subsequent serial steps/proposals, with bounded ordered case execution.
-Every domain Producer operation returns a cached value paired with its
-authoritative physical thread ID; no registry, validation stage, raw-name
-scan, model call, or general descendant-context REPL capability is included.
-Domains may implement the same structural Producer contract instead.
+Every configured role receives a dependency-free `OperationInput` containing
+its semantic value and authoritative physical thread context, then returns a
+cached value paired with that thread ID. Operation threads retain digest-only,
+model-hidden start/outcome audit messages. Candidate/case `ItemFailure` values
+remain ordered item outcomes and do not abort sibling proposals or later
+steps; infrastructure exceptions still fail. No registry, validation stage,
+selector subthreads, raw-name scan, model call, or general descendant-context
+REPL capability is included. Domains may implement the same top-level
+structural Producer contract instead.

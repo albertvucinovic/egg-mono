@@ -5,13 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from .core import Candidate, Observation, Proposal
+from .core import Candidate, CaseEvidence, Observation, Proposal
+from .repair import ItemFailure
 
 StateT = TypeVar("StateT")
 CaseT = TypeVar("CaseT")
 ValueT = TypeVar("ValueT")
 
 __all__ = [
+    "OperationContext",
+    "OperationInput",
     "OperationResult",
     "ProposalResult",
     "StepResult",
@@ -45,6 +48,30 @@ class StrategyRunInput(Generic[StateT, CaseT]):
 
 
 @dataclass(frozen=True)
+class OperationContext:
+    """Explicit physical context for one authoritative domain operation."""
+
+    thread_id: str
+    semantic_name: str
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.thread_id, "thread_id")
+        _require_nonempty_string(self.semantic_name, "semantic_name")
+
+
+@dataclass(frozen=True)
+class OperationInput(Generic[ValueT]):
+    """A semantic role input paired with its authoritative operation context."""
+
+    context: OperationContext
+    value: ValueT
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.context, OperationContext):
+            raise TypeError("context must be an OperationContext")
+
+
+@dataclass(frozen=True)
 class OperationResult(Generic[ValueT]):
     """One authoritative domain operation value and its physical thread."""
 
@@ -61,33 +88,53 @@ class ProposalResult:
 
     proposal_id: str
     proposal_thread_id: str
-    evaluation_thread_id: str
+    evaluation_thread_id: str | None
     proposal: Proposal
-    production: OperationResult[Candidate]
-    cases: tuple[OperationResult[object], ...]
-    aggregation: OperationResult[Observation]
+    production: OperationResult[Candidate | ItemFailure]
+    cases: tuple[OperationResult[CaseEvidence | ItemFailure], ...]
+    aggregation: OperationResult[Observation] | None
 
     def __post_init__(self) -> None:
         _require_nonempty_string(self.proposal_id, "proposal_id")
         _require_nonempty_string(self.proposal_thread_id, "proposal_thread_id")
-        _require_nonempty_string(
-            self.evaluation_thread_id, "evaluation_thread_id"
-        )
+        if self.evaluation_thread_id is not None:
+            _require_nonempty_string(
+                self.evaluation_thread_id, "evaluation_thread_id"
+            )
         if not isinstance(self.proposal, Proposal):
             raise TypeError("proposal must be a Proposal")
         if not isinstance(self.production, OperationResult):
             raise TypeError("production must be an OperationResult")
-        if not isinstance(self.production.value, Candidate):
-            raise TypeError("production value must be a Candidate")
+        if not isinstance(self.production.value, (Candidate, ItemFailure)):
+            raise TypeError(
+                "production value must be a Candidate or ItemFailure"
+            )
         object.__setattr__(
             self,
             "cases",
             _typed_tuple(self.cases, OperationResult, "cases"),
         )
-        if not isinstance(self.aggregation, OperationResult):
-            raise TypeError("aggregation must be an OperationResult")
-        if not isinstance(self.aggregation.value, Observation):
-            raise TypeError("aggregation value must be an Observation")
+        for case in self.cases:
+            if not isinstance(case.value, (CaseEvidence, ItemFailure)):
+                raise TypeError(
+                    "case value must be CaseEvidence or ItemFailure"
+                )
+        if isinstance(self.production.value, ItemFailure):
+            if self.evaluation_thread_id is not None or self.cases:
+                raise ValueError(
+                    "failed production cannot have evaluation results"
+                )
+        elif self.evaluation_thread_id is None:
+            raise ValueError(
+                "successful production requires an evaluation thread"
+            )
+        if self.aggregation is not None:
+            if not isinstance(self.aggregation, OperationResult):
+                raise TypeError(
+                    "aggregation must be an OperationResult or None"
+                )
+            if not isinstance(self.aggregation.value, Observation):
+                raise TypeError("aggregation value must be an Observation")
 
 
 @dataclass(frozen=True)

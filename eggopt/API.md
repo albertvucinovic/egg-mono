@@ -16,9 +16,9 @@ inspection, or judging—is a typed `Producer[Input, Output]`.
 - `RepairInput`, `RepairFeedback`, `Accepted | NeedsRepair`, `ItemFailure` —
   repair values.
 - `CaseRequest`, `EvaluationRequest` — ordered case-evaluation inputs.
-- `StrategyRunInput`, `OperationResult`, `ProposalResult`, `StepResult`,
-  `StrategyRunResult` — dependency-free runtime request and authoritative
-  thread/value results.
+- `StrategyRunInput`, `OperationContext`, `OperationInput`, `OperationResult`,
+  `ProposalResult`, `StepResult`, `StrategyRunResult` — dependency-free runtime
+  request, explicit operation context, and authoritative thread/value results.
 
 ## Optional runtime modules
 
@@ -88,8 +88,20 @@ transition, each case, and aggregation each receive a physical thread. It does
 not add a validation stage or bookkeeping operation threads.
 
 Cases run up to `StrategyRunInput.max_concurrent_cases` concurrently, but case
-results and aggregation preserve request order. Returned `OperationResult`
-values pair each deterministic operation value with its authoritative thread
-ID. Eggflow replay reuses those cached values and references without Producer
-invocation, thread creation, or raw-name recovery scans. The adapter uses
-process-local Producers/fakes in this slice and makes no model calls.
+results and aggregation preserve request order. Each configured role receives
+`OperationInput(value, OperationContext)`, whose context provides the physical
+operation thread ID and semantic name; a domain Producer may create restricted
+children directly under that ID without ambient state or scans. Returned
+`OperationResult` values pair each deterministic operation value with the same
+authoritative thread ID.
+
+Operation threads contain only local/model-hidden audit messages with semantic
+name, Producer identity, input/output SHA-256 digests, and outcome (or exception
+type for infrastructure failure). They never copy full role inputs/outputs. A
+cached replay adds no audit messages. Candidate or case `ItemFailure` values are
+retained in ordered `ProposalResult` operations; unavailable evaluation or
+aggregation is `None`, siblings continue, and later strategies receive only
+successful observations. Infrastructure exceptions still fail the Eggflow
+task. Eggflow replay reuses cached values/references without Producer
+invocation, thread creation, or raw-name recovery scans. No selector subthreads
+or model calls are included.
