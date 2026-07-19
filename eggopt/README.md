@@ -74,3 +74,30 @@ The injected drive is deterministic and process-local. Its explicit
 clients, schedulers, or database connections in specs, inputs, or cached
 results; reconstruct runtime resources outside these values. This P3 substrate
 does not call a model or scheduler.
+
+## Same-conversation repair
+
+Pure repair values are available directly from `eggopt`; durable composition is
+optional:
+
+```python
+from eggopt.eggflow_repair import RepairingProducer
+
+repairing = RepairingProducer(
+    inner=inner_producer,
+    inner_identity="candidate-writer:v1",
+    inspect=inspection_producer,
+    inspect_identity="compile-and-test:v1",
+    max_repairs=2,
+)
+task = repairing.produce(original_input)
+```
+
+Each expected invalid output becomes concrete cumulative `RepairFeedback` for
+the same process-local inner Producer instance. Inner attempts and inspections
+are independently cached. `Accepted` may carry a normalized value; exhaustion
+or terminal context failure becomes an `ItemFailure` so a containing batch can
+continue. Nonterminal infrastructure errors remain Eggflow failures. There is
+no Check/Constraint hierarchy. Identities are caller-owned and must change with
+behavior or configuration; live Producers are excluded from cache identity and
+cached results.
