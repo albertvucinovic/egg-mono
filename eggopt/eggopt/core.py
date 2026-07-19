@@ -5,8 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from math import isfinite
-from types import MappingProxyType
-from typing import Generic, Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import Generic, Iterator, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 InputT = TypeVar("InputT", contravariant=True)
 OutputT = TypeVar("OutputT", covariant=True)
@@ -84,6 +83,25 @@ JSONValue: TypeAlias = (
     | tuple["JSONValue", ...]
     | Mapping[str, "JSONValue"]
 )
+
+
+@dataclass(frozen=True, eq=False)
+class _FrozenMapping(Mapping[str, JSONValue]):
+    """A value-based immutable mapping suitable for pickle-backed caches."""
+
+    _items: tuple[tuple[str, JSONValue], ...] = ()
+
+    def __getitem__(self, key: str) -> JSONValue:
+        for item_key, value in self._items:
+            if item_key == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
 
 
 @dataclass(frozen=True)
@@ -220,15 +238,15 @@ def _typed_tuple(values: object, item_type: type, name: str) -> tuple:
     return normalized
 
 
-def _freeze_mapping(value: object, path: str) -> Mapping[str, JSONValue]:
+def _freeze_mapping(value: object, path: str) -> _FrozenMapping:
     if not isinstance(value, Mapping):
         raise TypeError(f"{path} must be a mapping")
-    frozen: dict[str, JSONValue] = {}
+    frozen: list[tuple[str, JSONValue]] = []
     for key, item in value.items():
         if not isinstance(key, str):
             raise TypeError(f"{path} keys must be strings")
-        frozen[key] = _freeze_json(item, f"{path}[{key!r}]")
-    return MappingProxyType(frozen)
+        frozen.append((key, _freeze_json(item, f"{path}[{key!r}]")))
+    return _FrozenMapping(tuple(frozen))
 
 
 def _freeze_json(value: object, path: str) -> JSONValue:

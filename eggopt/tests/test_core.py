@@ -1,5 +1,7 @@
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 from math import inf, nan
+from pickle import dumps, loads
 from typing import get_args, get_origin, get_type_hints
 
 import pytest
@@ -64,6 +66,47 @@ def test_feedback_defensively_freezes_nested_json_like_data() -> None:
         feedback.data["later"] = 2  # type: ignore[index]
     with pytest.raises(TypeError):
         feedback.data["details"]["accepted"] = False  # type: ignore[index]
+
+
+def test_core_transition_values_round_trip_through_pickle() -> None:
+    feedback = Feedback(
+        "structured",
+        {"nested": {"examples": ["one", "two"]}, "score": 1.5},
+    )
+    evidence = CaseEvidence(
+        "case-1", metrics=(Metric("accuracy", 0.75),), feedback=(feedback,)
+    )
+    observation = Observation(
+        Candidate("policy"),
+        cases=(evidence,),
+        metrics=(Metric("mean_accuracy", 0.75),),
+        feedback=(feedback,),
+    )
+    strategy_input = StrategyInput(state=("round", 1), observations=(observation,))
+    proposal = Proposal(
+        parents=(observation.candidate,), instruction="revise", evidence=(evidence,)
+    )
+    values = (
+        feedback,
+        evidence,
+        observation,
+        strategy_input,
+        proposal,
+        Advance(state=("round", 2), proposals=(proposal,)),
+        Stop(state=("round", 2), reason="done"),
+    )
+
+    restored = loads(dumps(values))
+
+    assert restored == values
+    restored_feedback = restored[0]
+    assert isinstance(restored_feedback.data, Mapping)
+    assert isinstance(restored_feedback.data["nested"], Mapping)
+    assert restored_feedback.data["nested"]["examples"] == ("one", "two")
+    with pytest.raises(TypeError):
+        restored_feedback.data["later"] = True  # type: ignore[index]
+    with pytest.raises(TypeError):
+        restored_feedback.data["nested"]["later"] = True  # type: ignore[index]
 
 
 @pytest.mark.parametrize("value", [nan, inf, -inf])
