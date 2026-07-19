@@ -9,7 +9,7 @@ The pure core does not execute evaluations or effects. Domain adapters express
 strategy, mutation, solving, evaluation, aggregation, and judging as
 `Producer` roles. Eggflow and Eggthreads integrations live outside this core.
 
-See [`API.md`](API.md) for the stable concepts and optional module boundaries.
+See [`API.md`](API.md) for stable concepts and [`RUNNING.md`](RUNNING.md) for durable execution and resume operations.
 
 ## Install
 

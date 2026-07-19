@@ -1,5 +1,7 @@
 # eggopt API
 
+For an operational hierarchy example, resume rules, and inspection guidance, see [`RUNNING.md`](RUNNING.md).
+
 `eggopt` is a domain-neutral optimization substrate. Candidate meaning, cases,
 metrics, safety policy, effects, objectives, and budgets belong to adapters.
 Every semantic role—strategy, mutation, case evaluation, aggregation,
