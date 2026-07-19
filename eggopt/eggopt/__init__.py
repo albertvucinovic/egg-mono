@@ -16,6 +16,7 @@ from .core import (
     StrategyInput,
 )
 from .gepa import GEPAState, GEPAStrategy
+from .physics import PhysicsState, PhysicsStrategy
 
 __all__ = [
     "Advance",
@@ -28,6 +29,8 @@ __all__ = [
     "JSONValue",
     "Metric",
     "Observation",
+    "PhysicsState",
+    "PhysicsStrategy",
     "Producer",
     "Proposal",
     "Stop",
