@@ -101,3 +101,18 @@ continue. Nonterminal infrastructure errors remain Eggflow failures. There is
 no Check/Constraint hierarchy. Identities are caller-owned and must change with
 behavior or configuration; live Producers are excluded from cache identity and
 cached results.
+
+## Evaluation composition
+
+`EvaluationRequest` and `CaseRequest` are dependency-free ordered request
+values. Optional `EvaluationProducer` from `eggopt.eggflow_evaluation` maps
+candidate/case requests through one Producer and aggregates the resulting
+`Observation` through another Producer. Per-case `CaseEvidence` is preserved
+in full and in order; aggregation may only add aggregate metrics/feedback.
+
+A domain case can represent one case or an indivisible batch. Deterministic,
+sandboxed, soft, or composite evaluators remain ordinary Producers, including
+Producers that return Eggflow Tasks. Explicit identities own behavior/config
+cache identity; process-local Producer objects and live resources do not.
+Objectives, archives, feasibility policy, and Pareto selection remain optional
+and outside this composition.

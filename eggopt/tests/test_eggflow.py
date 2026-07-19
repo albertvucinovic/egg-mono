@@ -44,12 +44,18 @@ def _strategy_input(text: str = "policy") -> StrategyInput[GEPAState]:
     return StrategyInput(GEPAState(max_generations=2), (observation,))
 
 
-def test_eggflow_wrapper_is_runtime_producer_and_runs_gepa_transition() -> None:
+def test_eggflow_wrapper_is_runtime_producer_and_runs_gepa_transition(
+    tmp_path,
+) -> None:
     inner = CountingProducer()
     wrapper = EggflowProducer(inner, "gepa:first-parent:v1")
 
     task = wrapper.produce(_strategy_input())
-    decision = task.run()
+    store = TaskStore(str(tmp_path / "flow.db"))
+    try:
+        decision = asyncio.run(FlowExecutor(store).run(task))
+    finally:
+        store.conn.close()
 
     assert isinstance(wrapper, Producer)
     assert isinstance(task, Task)
@@ -58,6 +64,35 @@ def test_eggflow_wrapper_is_runtime_producer_and_runs_gepa_transition() -> None:
     assert decision.proposals[0].evidence[0].case_id == "case"
     assert decision.proposals[0].feedback[0].text == "aggregate feedback"
     assert inner.calls == 1
+
+
+def test_produce_task_flattens_task_result_and_replays_cache(tmp_path) -> None:
+    first = TaskReturningProducer()
+    flow_path = tmp_path / "flow.db"
+    first_store = TaskStore(str(flow_path))
+    try:
+        first_result = asyncio.run(
+            FlowExecutor(first_store).run(
+                ProduceTask(first, "task-returning:v1", "value")
+            )
+        )
+    finally:
+        first_store.conn.close()
+
+    second = TaskReturningProducer()
+    second_store = TaskStore(str(flow_path))
+    try:
+        second_result = asyncio.run(
+            FlowExecutor(second_store).run(
+                ProduceTask(second, "task-returning:v1", "value")
+            )
+        )
+    finally:
+        second_store.conn.close()
+
+    assert first_result == second_result == "task:value"
+    assert first.calls == 1
+    assert second.calls == 0
 
 
 def test_produce_task_key_changes_with_identity_or_input() -> None:
@@ -130,3 +165,20 @@ def test_invalid_configuration_and_unpickleable_input_fail_clearly() -> None:
     task = ProduceTask(producer, "identity", CustomPickleFailure())
     with pytest.raises(TypeError, match="value must be pickleable"):
         task.get_cache_key()
+
+
+@dataclass
+class ValueTask(Task):
+    value: str
+
+    def run(self) -> str:
+        return f"task:{self.value}"
+
+
+@dataclass
+class TaskReturningProducer:
+    calls: int = 0
+
+    def produce(self, value: str) -> Task:
+        self.calls += 1
+        return ValueTask(value)

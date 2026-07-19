@@ -15,7 +15,7 @@ from .core import Producer
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 
-_CACHE_SCHEMA = b"eggopt.ProduceTask:v1\0"
+_CACHE_SCHEMA = b"eggopt.ProduceTask:v2\0"
 
 
 @dataclass
@@ -30,10 +30,13 @@ class ProduceTask(Task, Generic[InputT, OutputT]):
         _validate_producer(self.producer)
         _validate_identity(self.producer_identity)
 
-    def run(self) -> OutputT:
-        """Invoke the synchronous Producer exactly once on a cache miss."""
+    def run(self):
+        """Invoke once and flatten one produced Eggflow Task."""
 
-        return self.producer.produce(self.value)
+        result = self.producer.produce(self.value)
+        if isinstance(result, Task):
+            return (yield result)
+        return result
 
     def get_cache_key(self) -> str:
         """Key by adapter schema, caller-owned identity, and pickled input."""

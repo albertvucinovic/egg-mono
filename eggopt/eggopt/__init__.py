@@ -15,6 +15,7 @@ from .core import (
     StrategyDecision,
     StrategyInput,
 )
+from .evaluation import CaseRequest, EvaluationRequest
 from .gepa import GEPAState, GEPAStrategy
 from .physics import PhysicsState, PhysicsStrategy
 from .repair import (
@@ -31,6 +32,8 @@ __all__ = [
     "Accepted",
     "Candidate",
     "CaseEvidence",
+    "CaseRequest",
+    "EvaluationRequest",
     "Feedback",
     "FunctionProducer",
     "GEPAState",
