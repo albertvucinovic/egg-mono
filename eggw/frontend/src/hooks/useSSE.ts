@@ -225,11 +225,30 @@ export function useSSE(threadId: string | null) {
     if (!threadId) return;
     clearLiveToolsForThread(threadId).forEach(removeStreamingTool);
   }, [removeStreamingTool, threadId]);
+  const removeRetainedToolsOutsideInvocation = useCallback(
+    (activeInvokeId: string) => {
+      if (!threadId) return;
+      liveToolsForThread(threadId)
+        .removeOutsideInvocation(activeInvokeId)
+        .forEach(removeStreamingTool);
+    },
+    [liveToolsForThread, removeStreamingTool, threadId],
+  );
   const reconcileDurableToolMessage = useCallback(
     (message: import("@/lib/store").Message) => {
       if (!threadId) return;
       const reconciliation =
         liveToolsForThread(threadId).reconcileMessage(message);
+      reconciliation.hideCalls.forEach(hideStreamingToolCall);
+      reconciliation.removeTools.forEach(removeStreamingTool);
+    },
+    [hideStreamingToolCall, liveToolsForThread, removeStreamingTool, threadId],
+  );
+  const reconcileDurableToolMessages = useCallback(
+    (messages: readonly import("@/lib/store").Message[]) => {
+      if (!threadId) return;
+      const reconciliation =
+        liveToolsForThread(threadId).reconcileMessages(messages);
       reconciliation.hideCalls.forEach(hideStreamingToolCall);
       reconciliation.removeTools.forEach(removeStreamingTool);
     },
@@ -279,10 +298,14 @@ export function useSSE(threadId: string | null) {
 
   const refreshMessagesNow = useCallback(() => {
     if (!threadId) return;
-    void refreshTranscriptTail(queryClient, threadId).catch((error) => {
-      console.error("Failed to refresh transcript tail:", error);
-    });
-  }, [queryClient, threadId]);
+    void refreshTranscriptTail(queryClient, threadId)
+      .then((snapshot) => {
+        reconcileDurableToolMessages(snapshot.pages[0]?.items || []);
+      })
+      .catch((error) => {
+        console.error("Failed to refresh transcript tail:", error);
+      });
+  }, [queryClient, reconcileDurableToolMessages, threadId]);
 
   const rewindMessagesNow = useCallback(() => {
     if (!threadId) return;
@@ -380,12 +403,14 @@ export function useSSE(threadId: string | null) {
           retainedSync?.activeInvokeId === activeInvokeId &&
           retainedSync.lastEventSeq >= replayCursor,
       );
+      reconcileDurableToolMessages(snapshot.pages[0]?.items || []);
       if (!activeInvokeId) {
         streamingBufferForThread(threadId).clear();
         clearRetainedTools();
         resetThreadStreaming(threadId);
         evictThreadEventSyncState(threadId);
       } else if (resumesRetainedInvocation && retainedSync) {
+        removeRetainedToolsOutsideInvocation(activeInvokeId);
         // The mutable live buffer already represents every event through this
         // cursor. Resume only the gap accumulated while this route was away;
         // replaying from stream.open would duplicate tool output and can make a
@@ -395,15 +420,13 @@ export function useSSE(threadId: string | null) {
         // A bounded authoritative tail may have made retained tool cards durable
         // while the thread was not selected. Reconcile that handoff now because
         // those msg.create events intentionally need not be replayed again.
-        for (const message of snapshot.pages[0]?.items || []) {
-          reconcileDurableToolMessage(message);
-        }
       } else if (
         hasRetainedLiveToolsForThread(threadId) ||
         ((retainedSync?.activeInvokeId || previousStreaming?.invokeId) &&
           (retainedSync?.activeInvokeId || previousStreaming?.invokeId) !==
             activeInvokeId)
       ) {
+        removeRetainedToolsOutsideInvocation(activeInvokeId);
         // Invocation replacement owns a fresh assistant generation, while a
         // phase-2/recovery invocation can still finish a tool introduced by the
         // previous invocation. Preserve those tool cards until durable messages
@@ -563,7 +586,11 @@ export function useSSE(threadId: string | null) {
         if (notifications.toolOutput) {
           const { id, name, suppressed } = notifications.toolOutput;
           liveToolsForThread(threadId)
-            .observe(id, true)
+            .observe(
+              id,
+              true,
+              syncStateRef.current?.activeInvokeId || null,
+            )
             .forEach(removeStreamingTool);
           setIsStreaming(true);
           setStreamingKind("tool");
@@ -571,7 +598,11 @@ export function useSSE(threadId: string | null) {
         }
         if (notifications.toolCall) {
           liveToolsForThread(threadId)
-            .observe(notifications.toolCall.id)
+            .observe(
+              notifications.toolCall.id,
+              false,
+              syncStateRef.current?.activeInvokeId || null,
+            )
             .forEach(removeStreamingTool);
           upsertStreamingToolCall(
             notifications.toolCall.id,
@@ -716,8 +747,20 @@ export function useSSE(threadId: string | null) {
           const toolIdText = toolId;
           const toolNameText = toolName;
           liveToolsForThread(threadId)
-            .observe(toolIdText)
+            .observe(
+              toolIdText,
+              false,
+              syncStateRef.current?.activeInvokeId || null,
+            )
             .forEach(removeStreamingTool);
+          if (syncStateRef.current?.activeInvokeId) {
+            // The execution-start event repeats the full declaration under the
+            // owning tool lease. After moving this call to that invocation,
+            // every retained entry from an older invocation is stale UI state.
+            removeRetainedToolsOutsideInvocation(
+              syncStateRef.current.activeInvokeId,
+            );
+          }
           const args = toolCallArgumentsFromPayload(payload);
           markStreamingToolStarted(
             toolIdText,
@@ -759,6 +802,14 @@ export function useSSE(threadId: string | null) {
         }
         setStreamingKind("llm");
         setIsStreaming(true);
+        if (syncStateRef.current?.activeInvokeId) {
+          // A provider request starts only after preceding tool results have
+          // crossed their durable handoff. Old tool cards must not follow the
+          // thread into this new LLM invocation.
+          removeRetainedToolsOutsideInvocation(
+            syncStateRef.current.activeInvokeId,
+          );
+        }
       } catch (err) {
         console.error("Failed to parse provider_request.started:", err);
       }
@@ -1015,8 +1066,10 @@ export function useSSE(threadId: string | null) {
     removeStreamingTool,
     liveToolsForThread,
     clearRetainedTools,
+    removeRetainedToolsOutsideInvocation,
     hideStreamingToolCall,
     reconcileDurableToolMessage,
+    reconcileDurableToolMessages,
     upsertStreamingToolCall,
     setIsStreaming,
     setStreamingModelKey,

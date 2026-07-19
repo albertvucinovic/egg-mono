@@ -39,12 +39,44 @@ describe("live tool continuity", () => {
     expect(registry.has("call-output")).toBe(true);
   });
 
+  it("reconciles a durable snapshot even when its result precedes its call in the page", () => {
+    const registry = new LiveToolRegistry();
+    registry.observe("call-snapshot", true, "invoke-old");
+
+    expect(registry.reconcileMessages([
+      result("call-snapshot"),
+      assistant("call-snapshot"),
+    ])).toEqual({ hideCalls: [], removeTools: ["call-snapshot"] });
+    expect(registry.has("call-snapshot")).toBe(false);
+  });
+
   it("keeps a settled tool across invocation close until a later invocation publishes its result", () => {
     const registry = new LiveToolRegistry();
     registry.observe("call-later");
     // stream.close intentionally has no registry operation.
     expect(registry.has("call-later")).toBe(true);
     expect(registry.reconcileMessage(result("call-later"))).toEqual({ hideCalls: [], removeTools: ["call-later"] });
+  });
+
+  it("drops only tools owned by older invocations at an authoritative active-lease boundary", () => {
+    const registry = new LiveToolRegistry();
+    registry.observe("call-old", true, "invoke-old");
+    registry.observe("call-current", true, "invoke-current");
+    registry.observe("call-unowned");
+
+    expect(registry.removeOutsideInvocation("invoke-current")).toEqual(["call-old", "call-unowned"]);
+    expect(registry.has("call-old")).toBe(false);
+    expect(registry.has("call-current")).toBe(true);
+    expect(registry.has("call-unowned")).toBe(false);
+  });
+
+  it("moves a declared tool to the execution invocation when execution starts", () => {
+    const registry = new LiveToolRegistry();
+    registry.observe("call-handoff", false, "invoke-llm");
+    registry.observe("call-handoff", true, "invoke-tool");
+
+    expect(registry.removeOutsideInvocation("invoke-tool")).toEqual([]);
+    expect(registry.has("call-handoff")).toBe(true);
   });
 
   it("supports explicit terminal cleanup only when no durable card is required", () => {

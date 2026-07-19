@@ -3085,6 +3085,169 @@ test.describe('SSE reconnect integration', () => {
     await expect(page.getByTestId('streaming-tool-output')).toHaveCount(0);
     expect(liveCursors).toEqual([300, 305, 306, 400]);
   });
+
+  test('removes stale waits from older invocations when a newer tool lease is active', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const rootThread = 'stale-waits-root-thread';
+    const oldWaitA = 'call-old-wait-74crwXZI';
+    const oldWaitB = 'call-old-wait-MTTUdpph';
+    const activeTool = 'call-current-tool-DkkTBO7z';
+    const oldWaitAInvoke = 'invoke-old-wait-a';
+    const oldWaitBInvoke = 'invoke-old-wait-b';
+    const activeInvoke = 'invoke-current-tool';
+    const oldWaitArgs = (child: string) => JSON.stringify({ thread_ids: [child], timeout: 300 });
+    const baseMessage = { id: 'stale-waits-base', role: 'user', content: 'Run historical waits.', event_seq: 1 };
+    const durableTail = [
+      baseMessage,
+      {
+        id: 'durable-old-wait-a-call',
+        role: 'assistant',
+        tool_calls: [{ id: oldWaitA, name: 'wait', arguments: oldWaitArgs('child-a') }],
+        event_seq: 10,
+      },
+      {
+        id: 'durable-old-wait-a-result',
+        role: 'tool',
+        name: 'wait',
+        tool_call_id: oldWaitA,
+        content: 'Tool execution timed out after 300 seconds.',
+        event_seq: 20,
+      },
+      {
+        id: 'durable-old-wait-b-call',
+        role: 'assistant',
+        tool_calls: [{ id: oldWaitB, name: 'wait', arguments: oldWaitArgs('child-b') }],
+        event_seq: 30,
+      },
+      {
+        id: 'durable-old-wait-b-result',
+        role: 'tool',
+        name: 'wait',
+        tool_call_id: oldWaitB,
+        content: 'Thread child-b finished.',
+        event_seq: 40,
+      },
+    ];
+
+    await mockThreadShell(page, rootThread, { messages: durableTail });
+    await page.unroute(new RegExp(`/api/threads/${rootThread}/state(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${rootThread}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: {
+        state: 'running',
+        streaming_kind: 'tool',
+        streaming_invoke_id: activeInvoke,
+        live_replay_cursor: 99,
+        active_get_user_wait: false,
+      },
+    }));
+    await page.unroute(new RegExp(`/api/threads/${rootThread}/messages(?:\\?.*)?$`));
+    let messageRequests = 0;
+    let releaseDurableSnapshot!: () => void;
+    const durableSnapshotReady = new Promise<void>((resolve) => { releaseDurableSnapshot = resolve; });
+    await page.route(new RegExp(`/api/threads/${rootThread}/messages(?:\\?.*)?$`), (route) => {
+      messageRequests += 1;
+      if (messageRequests > 1) {
+        return durableSnapshotReady.then(() => route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: { items: [...durableTail].reverse(), snapshot_cursor: 108, next_before: null },
+        }));
+      }
+      return route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        // The initial snapshot deliberately predates the result handoff.
+        json: { items: [baseMessage], snapshot_cursor: 99, next_before: null },
+      });
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${rootThread}/events`);
+    let eventConnection = 0;
+    const envelope = (
+      eventSeq: number,
+      type: string,
+      invokeId: string,
+      payload: Record<string, unknown>,
+    ) => JSON.stringify({
+      event_id: `stale-waits-${eventSeq}`,
+      event_seq: eventSeq,
+      type,
+      ts: new Date().toISOString(),
+      msg_id: null,
+      invoke_id: invokeId,
+      chunk_seq: type === 'stream.delta' ? eventSeq : null,
+      payload,
+    });
+    const block = (
+      eventSeq: number,
+      type: string,
+      invokeId: string,
+      payload: Record<string, unknown>,
+    ) => [
+      `id: ${eventSeq}`,
+      `event: ${type}`,
+      `data: ${envelope(eventSeq, type, invokeId, payload)}`,
+      '',
+    ];
+    await page.route(new RegExp(`/api/threads/${rootThread}/events(?:\\?.*)?$`), async (route) => {
+      eventConnection += 1;
+      const frames = eventConnection === 1
+        ? [
+            ...block(100, 'stream.open', oldWaitAInvoke, { stream_kind: 'tool' }),
+            ...block(101, 'tool_call.execution_started', oldWaitAInvoke, {
+              tool_call_id: oldWaitA,
+              name: 'wait',
+              arguments: oldWaitArgs('child-a'),
+              timeout: 300,
+            }),
+            ...block(102, 'stream.delta', oldWaitAInvoke, { tool: { id: oldWaitA, name: 'wait', text: '' } }),
+            ...block(103, 'stream.open', oldWaitBInvoke, { stream_kind: 'tool' }),
+            ...block(104, 'tool_call.execution_started', oldWaitBInvoke, {
+              tool_call_id: oldWaitB,
+              name: 'wait',
+              arguments: oldWaitArgs('child-b'),
+              timeout: 300,
+            }),
+            ...block(105, 'stream.delta', oldWaitBInvoke, { tool: { id: oldWaitB, name: 'wait', text: '' } }),
+          ]
+        : [
+            ...block(106, 'stream.open', activeInvoke, { stream_kind: 'tool' }),
+            ...block(107, 'tool_call.execution_started', activeInvoke, {
+              tool_call_id: activeTool,
+              name: 'bash',
+              arguments: '{"script":"sleep 30"}',
+              timeout: 30,
+            }),
+          ];
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [...frames, ''].join('\n'),
+      });
+    });
+
+    await page.goto(`/${rootThread}`);
+    await expect.poll(() => eventConnection).toBe(1);
+    await expect(page.getByTestId('chat-panel')).toContainText(oldWaitB.slice(-8));
+
+    // The authenticated SSE transport reconnects in place. No route remount or
+    // fresh `/state` setup occurs, matching the real screenshot's trigger.
+    await expect.poll(() => eventConnection).toBeGreaterThanOrEqual(2);
+    releaseDurableSnapshot();
+    await expect.poll(() => messageRequests).toBeGreaterThan(1);
+    await expect(page.getByTestId('get-user-wait-call')).toHaveCount(0);
+    await expect(page.getByTestId('get-user-wait-output')).toHaveCount(0);
+    await expect(page.getByTestId('chat-panel')).not.toContainText(oldWaitA.slice(-8));
+    await expect(page.getByTestId('chat-panel')).not.toContainText(oldWaitB.slice(-8));
+    await expect(page.getByTestId('streaming-tool-output').locator('..').locator('..').filter({ hasText: activeTool.slice(-8) }))
+      .toContainText('streaming output...');
+    const durableActivity = page.getByTestId('hidden-details');
+    await expect(durableActivity).toHaveCount(1);
+    await expect(durableActivity).toContainText('Executed 2 tools, got 2 tool results');
+  });
 });
 
 test.describe('Authoritative same-version transcript refresh', () => {
@@ -3316,6 +3479,7 @@ test.describe('Live Tool Streaming', () => {
     const waitId = 'call-wait-timeout-60';
     const siblingId = 'call-sibling-live-bash';
     let transcriptRequests = 0;
+    let terminal = false;
 
     await mockThreadShell(page, threadId, {
       messages: [{ id: 'before-timeout-wait', role: 'user', content: 'wait for child' }],
@@ -3330,7 +3494,6 @@ test.describe('Live Tool Streaming', () => {
     }));
     await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
       transcriptRequests += 1;
-      const terminal = transcriptRequests > 1;
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
@@ -3365,6 +3528,7 @@ test.describe('Live Tool Streaming', () => {
         ...block(4, 'tool_call.finished', { tool_call_id: waitId, reason: 'timeout', output: '--- TIMEOUT ---\nWait timed out after 60 seconds.' }, now),
         '',
       ];
+      if (eventConnection > 1) terminal = true;
       await route.fulfill({
         status: 200,
         headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
@@ -3381,10 +3545,7 @@ test.describe('Live Tool Streaming', () => {
     await expect(waitCard).toContainText('timeout in 0s (limit 60s)');
     await expect(siblingCard).toContainText('streaming output...');
 
-    await expect(waitCard).toContainText('finished');
-    await expect(waitCard).not.toContainText('streaming output...');
-    await expect(waitCard).not.toContainText('running ');
-    await expect(waitCard).not.toContainText('timeout in ');
+    await expect(waitCard).toHaveCount(0);
     await expect(siblingCard).toContainText('streaming output...');
     await expect.poll(() => transcriptRequests).toBeGreaterThan(1);
     const compactTimeout = page.getByTestId('chat-panel').getByTestId('hidden-details');

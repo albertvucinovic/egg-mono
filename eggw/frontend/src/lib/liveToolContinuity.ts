@@ -11,6 +11,7 @@ export interface LiveToolReconciliation {
 export interface LiveToolRegistryEntry {
   toolCallId: string;
   ordinal: number;
+  invokeId: string | null;
   callDurable: boolean;
   resultDurable: boolean;
   terminalWithoutDurable: boolean;
@@ -27,16 +28,22 @@ export class LiveToolRegistry {
 
   constructor(private readonly limit = MAX_RETAINED_LIVE_TOOLS) {}
 
-  observe(toolCallId: string, hasOutput = false): string[] {
+  observe(
+    toolCallId: string,
+    hasOutput = false,
+    invokeId: string | null = null,
+  ): string[] {
     if (!toolCallId) return [];
     const existing = this.entries.get(toolCallId);
     if (existing) {
       existing.hasOutput = existing.hasOutput || hasOutput;
+      if (invokeId) existing.invokeId = invokeId;
       return [];
     }
     this.entries.set(toolCallId, {
       toolCallId,
       ordinal: this.nextOrdinal++,
+      invokeId,
       callDurable: false,
       resultDurable: false,
       terminalWithoutDurable: false,
@@ -47,18 +54,57 @@ export class LiveToolRegistry {
 
   reconcileMessage(message: Message): LiveToolReconciliation {
     const matched = durableToolCallIds(message);
+    return this.reconcileIds(matched.callIds, matched.resultIds);
+  }
+
+  /** Remove entries whose full durable lifecycle is already in one snapshot. */
+  reconcileMessages(messages: readonly Message[]): LiveToolReconciliation {
+    const durableCalls = new Set<string>();
+    const durableResults = new Set<string>();
+    for (const message of messages) {
+      const matched = durableToolCallIds(message);
+      matched.callIds.forEach((toolCallId) => durableCalls.add(toolCallId));
+      matched.resultIds.forEach((toolCallId) => durableResults.add(toolCallId));
+    }
+    return this.reconcileIds(durableCalls, durableResults);
+  }
+
+  private reconcileIds(
+    callIds: readonly string[] | Set<string>,
+    resultIds: readonly string[] | Set<string>,
+  ): LiveToolReconciliation {
     const hideCalls: string[] = [];
-    for (const toolCallId of matched.callIds) {
+    callIds.forEach((toolCallId) => {
       const entry = this.entries.get(toolCallId);
-      if (!entry) continue;
+      if (!entry) return;
       entry.callDurable = true;
       if (!entry.hasOutput) hideCalls.push(toolCallId);
-    }
-    for (const toolCallId of matched.resultIds) {
+    });
+    resultIds.forEach((toolCallId) => {
       const entry = this.entries.get(toolCallId);
       if (entry) entry.resultDurable = true;
-    }
+    });
     return { hideCalls, removeTools: this.collectRemovable() };
+  }
+
+  /**
+   * Drop entries that cannot belong to the currently active lease.
+   *
+   * A tool can legitimately outlive the LLM invocation that declared it, but
+   * its execution start is emitted under the tool lease and calls observe again
+   * with that lease's invoke ID. Once `/state` identifies a newer active
+   * invocation, every entry not owned by that invocation (including legacy
+   * unowned entries) is historical UI residue; its canonical transcript
+   * remains the durable authority.
+   */
+  removeOutsideInvocation(activeInvokeId: string): string[] {
+    const removable: string[] = [];
+    this.entries.forEach((entry, toolCallId) => {
+      if (entry.invokeId === activeInvokeId) return;
+      this.entries.delete(toolCallId);
+      removable.push(toolCallId);
+    });
+    return removable;
   }
 
   markTerminalWithoutDurable(toolCallId: string): string[] {
