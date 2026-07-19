@@ -181,6 +181,7 @@ class Proposal:
     parents: tuple[Candidate, ...] = ()
     instruction: str = ""
     evidence: tuple[CaseEvidence, ...] = ()
+    feedback: tuple[Feedback, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -190,6 +191,9 @@ class Proposal:
             raise TypeError("instruction must be a string")
         object.__setattr__(
             self, "evidence", _typed_tuple(self.evidence, CaseEvidence, "evidence")
+        )
+        object.__setattr__(
+            self, "feedback", _typed_tuple(self.feedback, Feedback, "feedback")
         )
 
 

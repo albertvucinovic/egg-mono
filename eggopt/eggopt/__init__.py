@@ -15,6 +15,7 @@ from .core import (
     StrategyDecision,
     StrategyInput,
 )
+from .gepa import GEPAState, GEPAStrategy
 
 __all__ = [
     "Advance",
@@ -22,6 +23,8 @@ __all__ = [
     "CaseEvidence",
     "Feedback",
     "FunctionProducer",
+    "GEPAState",
+    "GEPAStrategy",
     "JSONValue",
     "Metric",
     "Observation",

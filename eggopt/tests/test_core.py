@@ -84,7 +84,10 @@ def test_core_transition_values_round_trip_through_pickle() -> None:
     )
     strategy_input = StrategyInput(state=("round", 1), observations=(observation,))
     proposal = Proposal(
-        parents=(observation.candidate,), instruction="revise", evidence=(evidence,)
+        parents=(observation.candidate,),
+        instruction="revise",
+        evidence=(evidence,),
+        feedback=(feedback,),
     )
     values = (
         feedback,
@@ -100,6 +103,7 @@ def test_core_transition_values_round_trip_through_pickle() -> None:
 
     assert restored == values
     restored_feedback = restored[0]
+    assert restored[4].feedback == (feedback,)
     assert isinstance(restored_feedback.data, Mapping)
     assert isinstance(restored_feedback.data["nested"], Mapping)
     assert restored_feedback.data["nested"]["examples"] == ("one", "two")
@@ -159,6 +163,7 @@ def test_identifiers_and_collection_members_are_validated() -> None:
 def test_proposal_supports_initialization_mutation_and_crossover() -> None:
     first = Candidate("first")
     second = Candidate("second")
+    feedback = Feedback("aggregate")
     evidence = CaseEvidence("selected", feedback=(Feedback("informative"),))
 
     initialization = Proposal()
@@ -167,6 +172,7 @@ def test_proposal_supports_initialization_mutation_and_crossover() -> None:
         parents=(first, second),
         instruction="combine",
         evidence=[evidence],  # type: ignore[arg-type]
+        feedback=[feedback],  # type: ignore[arg-type]
     )
 
     assert initialization.parents == ()
@@ -174,6 +180,7 @@ def test_proposal_supports_initialization_mutation_and_crossover() -> None:
     assert mutation.parents == (first,)
     assert crossover.parents == (first, second)
     assert crossover.evidence == (evidence,)
+    assert crossover.feedback == (feedback,)
 
 
 def test_strategy_transition_contracts_normalize_and_enforce_tag_invariants() -> None:
