@@ -636,3 +636,116 @@ def test_infrastructure_failure_is_audited_and_raised(tmp_path) -> None:
         )
     assert replay_broken.calls == 1
     assert len(_audit_messages(threads_path, broken.context.thread_id)) == 4
+
+@dataclass
+class EffectiveSetup:
+    calls: int = 0
+
+    def produce(self, operation: OperationInput[StrategyRunInput]):
+        self.calls += 1
+        original = operation.value
+        return StrategyRunInput(
+            state=7,
+            seed=Candidate("setup seed"),
+            cases=("setup-a", "setup-b"),
+            max_steps=original.max_steps,
+            max_concurrent_cases=original.max_concurrent_cases,
+        )
+
+
+def test_optional_setup_child_drives_effective_seed_state_and_cases(
+    tmp_path,
+) -> None:
+    threads_path = tmp_path / "threads.sqlite"
+    setup = EffectiveSetup()
+    strategy = FakeStrategy()
+    candidates = FakeCandidateProducer()
+    cases = ConcurrentCases()
+    runtime = HierarchicalRuntime(
+        str(threads_path),
+        strategy,
+        "strategy:v1",
+        candidates,
+        "candidate:v1",
+        cases,
+        "case:v1",
+        OrderedAggregate(),
+        "aggregate:v1",
+        setup=setup,
+        setup_identity="load-development-cases:v1",
+        setup_name="LoadDevelopmentCases",
+    )
+    request = StrategyRunInput(
+        0,
+        Candidate("original seed"),
+        cases=("original",),
+        max_steps=1,
+        max_concurrent_cases=2,
+    )
+    task = runtime.produce(request)
+    changed_key = HierarchicalRuntime(
+        str(threads_path),
+        strategy,
+        "strategy:v1",
+        candidates,
+        "candidate:v1",
+        cases,
+        "case:v1",
+        OrderedAggregate(),
+        "aggregate:v1",
+        setup=setup,
+        setup_identity="load-development-cases:v2",
+        setup_name="LoadDevelopmentCases",
+    ).produce(request)
+    assert task.get_cache_key() != changed_key.get_cache_key()
+
+    result = _run(task, tmp_path / "flow.db")
+    assert setup.calls == 1
+    assert result.steps[0].state == 7
+    assert result.steps[0].proposals[0].production.value == Candidate(
+        "setup seed"
+    )
+    assert cases.calls == [
+        ("setup seed", "setup-a"),
+        ("setup seed", "setup-b"),
+        ("first", "setup-a"),
+        ("first", "setup-b"),
+    ]
+    rows = _threads(threads_path)
+    setup_id = next(
+        thread_id
+        for thread_id, name in rows
+        if name == "LoadDevelopmentCases"
+    )
+    db = ThreadsDB(threads_path)
+    try:
+        db.init_schema()
+        assert get_parent(db, setup_id) == result.run_setup_thread_id
+    finally:
+        db.conn.close()
+
+    replay_setup = EffectiveSetup()
+    replay_candidates = FakeCandidateProducer()
+    replay_cases = ConcurrentCases()
+    replay = _run(
+        HierarchicalRuntime(
+            str(threads_path),
+            FakeStrategy(),
+            "strategy:v1",
+            replay_candidates,
+            "candidate:v1",
+            replay_cases,
+            "case:v1",
+            OrderedAggregate(),
+            "aggregate:v1",
+            setup=replay_setup,
+            setup_identity="load-development-cases:v1",
+            setup_name="LoadDevelopmentCases",
+        ).produce(request),
+        tmp_path / "flow.db",
+    )
+    assert replay == result
+    assert replay_setup.calls == 0
+    assert replay_candidates.calls == []
+    assert replay_cases.calls == []
+    assert _threads(threads_path) == rows

@@ -113,6 +113,17 @@ phase boundaries, and compliance review. A worker implements only the currently 
   infrastructure failure audit, and candidate/case failure isolation with fakes only.
 - [x] Amend docs, run focused/full Eggopt tests and package checks, then commit one correction.
 
+## P5.2.2 — Reusable contextual setup and GEPA selectors
+
+- [x] Expose the existing minimal `OperationTask`; do not add a registry or parallel operation layer.
+- [x] Add an optional configured setup Producer/identity/name beneath `RunSetup`; its effective
+  `StrategyRunInput` drives seed/state/cases and its identity/config enters runtime cache identity.
+- [x] Refactor pure GEPA decisions through one shared builder and add a contextual GEPA adapter with
+  `ParentSelection` and per-parent `EvidenceSelection` child `OperationTask`s.
+- [x] Cover setup-driven cases, exact selector ancestry/parity, selector/setup cache identity, and replay
+  with zero Producer calls, threads, or audits.
+- [x] Update concise docs/status, run full Eggopt checks, and commit only this generic slice.
+
 ## P6 — Trading adapter (domain repository)
 
 - [ ] Follow the trading integration plan; no domain code in `eggopt`.
@@ -131,6 +142,15 @@ phase boundaries, and compliance review. A worker implements only the currently 
 - [ ] Add Pareto/evolution/islands only when a concrete adapter exercises them.
 
 ## Status log
+
+- 2026-07-20: P5.2.2 completed with public `OperationTask`, optional effective-input setup beneath
+  `RunSetup`, and `ContextualGEPAStrategy` selector children sharing pure GEPA decision logic. Setup
+  and selector cache identity plus zero-work replay are covered; full Eggopt tests/package checks pass.
+  Trading, LLMs, validation, and descendant tooling remain unstarted.
+
+- 2026-07-20: P5.2.2 approved: public reusable `OperationTask`, optional contextual setup beneath
+  `RunSetup`, and contextual GEPA selector operation children sharing pure decision logic. Existing
+  callers/topology defaults remain valid; no trading or speculative runtime features are included.
 
 - 2026-07-20: P5.2.1 completed with explicit operation context, public-API model-hidden
   digest/outcome audit messages, cached audit replay, and isolated typed candidate/case `ItemFailure`

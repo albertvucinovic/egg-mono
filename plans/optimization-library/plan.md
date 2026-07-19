@@ -168,6 +168,10 @@ result values paired with cached thread IDs are the only authoritative reference
   every configured role, record compact model-hidden operation audit entries, and retain candidate/case
   `ItemFailure` outcomes without aborting siblings or later successful observations. Preserve the exact
   skeleton, bounded ordered case behavior, and top-level runtime contract.
+- [x] **P5.2.2 — reusable contextual composition and GEPA selectors.** Expose the existing operation
+  task, add an optional physical setup operation under `RunSetup`, and provide a contextual GEPA adapter
+  whose parent/evidence selectors are audited operation children and share the pure GEPA decision
+  builder. Preserve default runtime behavior and cache/replay guarantees; add no domain semantics.
 - [ ] **P6 — first domain vertical slice: trading.** Use existing development-only trading evidence
   for one cached deterministic GEPA transition, then one explicitly approved tiny live mutation.
   Keep the base prompt frozen and July unopened.
@@ -198,6 +202,20 @@ result values paired with cached thread IDs are the only authoritative reference
   duplicating the library.
 
 ## Durable status
+
+- 2026-07-20 — P5.2.2 completed. The audited contextual `OperationTask` is public for domain-owned
+  runtimes. `HierarchicalRuntime` has a backward-compatible optional setup operation below `RunSetup`;
+  its effective input drives S000 and its identity/name enter run cache identity.
+  `ContextualGEPAStrategy` creates parent and per-parent evidence selector operation children beneath
+  `StrategyTransition`, keys selector identities/configuration, and shares `build_gepa_decision` with
+  pure `GEPAStrategy`. Focused tests prove setup values, exact selector ancestry/parity, and replay with
+  no role calls, threads, or audits. No trading or model behavior was added.
+
+- 2026-07-20 — P5.2.2 approved as the next generic pre-domain slice: make `OperationTask` reusable,
+  allow one optional contextual setup child below `RunSetup`, and add contextual GEPA selector children
+  through a shared pure decision builder. Setup/selector identities and configuration must participate in
+  cache identity, and replay must create no work. Trading, models, validation, and descendant tooling
+  remain outside this slice.
 
 - 2026-07-20 — P5.2.1 completed. Every configured role now receives explicit
   `OperationInput(value, OperationContext)` with its authoritative operation thread; a focused fake

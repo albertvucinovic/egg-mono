@@ -24,7 +24,8 @@ inspection, or judging—is a typed `Producer[Input, Output]`.
 
 - `eggopt.eggflow` — generic cacheable `ProduceTask` / `EggflowProducer`.
 - `eggopt.eggthreads` — cached run roots and an inspectable fake leaf Producer.
-- `eggopt.eggthreads_runtime` — the one shipped hierarchical strategy runtime.
+- `eggopt.eggthreads_runtime` — reusable contextual `OperationTask`, the one
+  shipped hierarchy, and `ContextualGEPAStrategy`.
 - `eggopt.eggflow_repair` — independently cached cumulative repair attempts.
 - `eggopt.eggflow_evaluation` — independently cached case map and aggregation.
 
@@ -105,3 +106,19 @@ successful observations. Infrastructure exceptions still fail the Eggflow
 task. Eggflow replay reuses cached values/references without Producer
 invocation, thread creation, or raw-name recovery scans. No selector subthreads
 or model calls are included.
+
+`OperationTask` is the same minimal audited contextual composition used by the
+hierarchy and is public for domain-owned runtimes: it creates (or accepts) an
+operation thread, invokes a `Producer[OperationInput[T], U | Task]`, and returns
+`OperationResult[U]`. `HierarchicalRuntime` optionally accepts `setup`,
+`setup_identity`, and `setup_name`; that operation is a child of `RunSetup`,
+receives the original `StrategyRunInput`, and its returned effective input
+drives state, seed, cases, and limits from S000 onward. With no setup, topology
+and behavior are unchanged.
+
+`ContextualGEPAStrategy` is an optional strategy Producer for the hierarchy. It
+creates `ParentSelection` and ordered per-parent `EvidenceSelection NNN`
+operation children beneath the authoritative `StrategyTransition` thread, then
+uses the same pure decision builder as `GEPAStrategy`. Setup and selector
+identities/configuration participate in cache keys; replay invokes no roles and
+creates no threads or audit messages.

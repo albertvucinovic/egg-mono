@@ -29,6 +29,12 @@ from .core import (
     StrategyInput,
 )
 from .evaluation import CaseRequest
+from .gepa import (
+    GEPAState,
+    _validate_gepa_input,
+    _validate_gepa_options,
+    build_gepa_decision,
+)
 from .repair import ItemFailure
 from .runtime import (
     OperationContext,
@@ -49,7 +55,12 @@ _CASE_GROUP_SCHEMA = b"eggopt.RuntimeCaseGroupTask:v2\0"
 _PROPOSAL_SCHEMA = b"eggopt.RuntimeProposalTask:v2\0"
 _RUN_SCHEMA = b"eggopt.HierarchicalRuntimeTask:v2\0"
 
-__all__ = ["HierarchicalRuntime", "HierarchicalRuntimeTask"]
+__all__ = [
+    "ContextualGEPAStrategy",
+    "HierarchicalRuntime",
+    "HierarchicalRuntimeTask",
+    "OperationTask",
+]
 
 
 @dataclass
@@ -89,7 +100,9 @@ class _CreateThread(Task):
 
 
 @dataclass
-class _OperationTask(Task):
+class OperationTask(Task):
+    """Run one audited contextual Producer in an authoritative thread."""
+
     threads_db_path: str
     parent_thread_id: str
     name: str
@@ -97,6 +110,7 @@ class _OperationTask(Task):
     producer_identity: str
     value: object
     thread_id: str | None = None
+    operation_key: object | None = None
 
     def __post_init__(self) -> None:
         _validate_nonempty_string(self.threads_db_path, "threads_db_path")
@@ -115,7 +129,9 @@ class _OperationTask(Task):
                 self.parent_thread_id,
                 self.name,
                 self.producer_identity,
+                _producer_cache_identity(self.producer),
                 self.thread_id,
+                self.operation_key,
                 _pickle_digest(self.value, "operation value"),
             ),
         )
@@ -223,7 +239,7 @@ class _CaseGroupTask(Task, Generic[CaseT]):
         async def run_case(index: int, case: CaseT):
             async with semaphore:
                 return await keyed(
-                    _OperationTask(
+                    OperationTask(
                         self.threads_db_path,
                         self.evaluation_thread_id,
                         f"Case K{index:03d}",
@@ -306,7 +322,7 @@ class _ProposalTask(Task, Generic[CaseT]):
             self.step_thread_id,
         )
         production = yield keyed(
-            _OperationTask(
+            OperationTask(
                 self.threads_db_path,
                 proposal_thread_id,
                 "Production",
@@ -359,7 +375,7 @@ class _ProposalTask(Task, Generic[CaseT]):
         evidence = tuple(result.value for result in case_results)
         base = Observation(production.value, cases=evidence)
         aggregation = yield keyed(
-            _OperationTask(
+            OperationTask(
                 self.threads_db_path,
                 evaluation_thread_id,
                 "Aggregation",
@@ -403,6 +419,9 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
     aggregate: Producer
     aggregate_identity: str
     value: StrategyRunInput[StateT, CaseT]
+    setup: Producer | None = None
+    setup_identity: str | None = None
+    setup_name: str = "Setup"
 
     def __post_init__(self) -> None:
         _validate_nonempty_string(self.threads_db_path, "threads_db_path")
@@ -418,6 +437,7 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
             )
         if not isinstance(self.value, StrategyRunInput):
             raise TypeError("value must be a StrategyRunInput")
+        _validate_setup(self.setup, self.setup_identity, self.setup_name)
 
     def get_cache_key(self) -> str:
         return _cache_key(
@@ -428,6 +448,8 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
                 self.candidate_identity,
                 self.case_identity,
                 self.aggregate_identity,
+                self.setup_identity,
+                self.setup_name if self.setup is not None else None,
                 _pickle_digest(self.value, "StrategyRunInput"),
             ),
         )
@@ -442,8 +464,22 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
         run_setup_thread_id = yield _CreateThread(
             self.threads_db_path, "RunSetup", strategy_thread_id
         )
+        effective_value = self.value
+        if self.setup is not None:
+            setup_result = yield OperationTask(
+                self.threads_db_path,
+                run_setup_thread_id,
+                self.setup_name,
+                self.setup,
+                self.setup_identity,
+                self.value,
+                operation_key=(self.setup_identity, self.setup_name),
+            )
+            if not isinstance(setup_result.value, StrategyRunInput):
+                raise TypeError("setup must produce a StrategyRunInput")
+            effective_value = setup_result.value
 
-        state = self.value.state
+        state = effective_value.state
         observations: tuple[Observation, ...] = ()
         step_results: list[StepResult[StateT]] = []
         proposal_number = 0
@@ -455,15 +491,15 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
             self.threads_db_path,
             seed_step_thread_id,
             "P000",
-            Proposal(parents=(self.value.seed,), instruction="seed"),
-            self.value.cases,
+            Proposal(parents=(effective_value.seed,), instruction="seed"),
+            effective_value.cases,
             self.candidate_producer,
             self.candidate_identity,
             self.case_producer,
             self.case_identity,
             self.aggregate,
             self.aggregate_identity,
-            self.value.max_concurrent_cases,
+            effective_value.max_concurrent_cases,
         )
         step_results.append(
             StepResult("S000", seed_step_thread_id, None, state, (seed_result,))
@@ -471,13 +507,13 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
         observations = _successful_observations((seed_result,))
         proposal_number = 1
 
-        for step_number in range(1, self.value.max_steps + 1):
+        for step_number in range(1, effective_value.max_steps + 1):
             step_id = f"S{step_number:03d}"
             step_thread_id = yield _CreateThread(
                 self.threads_db_path, f"Step {step_id}", strategy_thread_id
             )
             transition = yield keyed(
-                _OperationTask(
+                OperationTask(
                     self.threads_db_path,
                     step_thread_id,
                     "StrategyTransition",
@@ -513,14 +549,14 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
                     step_thread_id,
                     proposal_id,
                     proposal,
-                    self.value.cases,
+                    effective_value.cases,
                     self.candidate_producer,
                     self.candidate_identity,
                     self.case_producer,
                     self.case_identity,
                     self.aggregate,
                     self.aggregate_identity,
-                    self.value.max_concurrent_cases,
+                    effective_value.max_concurrent_cases,
                 )
                 proposal_results.append(proposal_result)
                 proposal_number += 1
@@ -545,6 +581,157 @@ class HierarchicalRuntimeTask(Task, Generic[StateT, CaseT]):
 
 
 @dataclass(frozen=True)
+class ContextualGEPAStrategy:
+    """Run GEPA selectors as operation children of StrategyTransition."""
+
+    threads_db_path: str
+    select_parents: Producer[
+        OperationInput[tuple[Observation, ...]], tuple[Observation, ...] | Task
+    ]
+    parent_identity: str
+    select_evidence: Producer[
+        OperationInput[Observation], tuple[CaseEvidence, ...] | Task
+    ]
+    evidence_identity: str
+    instruction: str = "Revise the candidate using the selected evidence."
+    proposals_per_parent: int = 1
+
+    def __post_init__(self) -> None:
+        _validate_nonempty_string(self.threads_db_path, "threads_db_path")
+        _validate_producer(self.select_parents, "select_parents")
+        _validate_nonempty_string(self.parent_identity, "parent_identity")
+        _validate_producer(self.select_evidence, "select_evidence")
+        _validate_nonempty_string(self.evidence_identity, "evidence_identity")
+        _validate_gepa_options(self.instruction, self.proposals_per_parent)
+
+    def cache_identity(self) -> tuple[object, ...]:
+        """Return selector/config identity for an enclosing OperationTask."""
+
+        return (
+            self.parent_identity,
+            self.evidence_identity,
+            self.instruction,
+            self.proposals_per_parent,
+        )
+
+    def produce(
+        self, operation: OperationInput[StrategyInput[GEPAState]]
+    ) -> Task | Stop[GEPAState]:
+        if not isinstance(operation, OperationInput):
+            raise TypeError("operation must be an OperationInput")
+        value = operation.value
+        if not isinstance(operation.context, OperationContext):
+            raise TypeError("operation context must be an OperationContext")
+        stop = _validate_gepa_input(value)
+        if stop is not None:
+            return stop
+        return _ContextualGEPATask(
+            self.threads_db_path,
+            operation.context.thread_id,
+            value,
+            self.select_parents,
+            self.parent_identity,
+            self.select_evidence,
+            self.evidence_identity,
+            self.instruction,
+            self.proposals_per_parent,
+        )
+
+
+@dataclass
+class _ContextualGEPATask(Task):
+    threads_db_path: str
+    transition_thread_id: str
+    value: StrategyInput[GEPAState]
+    select_parents: Producer
+    parent_identity: str
+    select_evidence: Producer
+    evidence_identity: str
+    instruction: str
+    proposals_per_parent: int
+
+    def __post_init__(self) -> None:
+        _validate_nonempty_string(self.threads_db_path, "threads_db_path")
+        _validate_nonempty_string(
+            self.transition_thread_id, "transition_thread_id"
+        )
+        _validate_gepa_input(self.value)
+        _validate_producer(self.select_parents, "select_parents")
+        _validate_nonempty_string(self.parent_identity, "parent_identity")
+        _validate_producer(self.select_evidence, "select_evidence")
+        _validate_nonempty_string(
+            self.evidence_identity, "evidence_identity"
+        )
+        _validate_gepa_options(self.instruction, self.proposals_per_parent)
+
+    def get_cache_key(self) -> str:
+        return _cache_key(
+            b"eggopt.ContextualGEPATask:v1\0",
+            (
+                self.threads_db_path,
+                self.transition_thread_id,
+                self.parent_identity,
+                self.evidence_identity,
+                self.instruction,
+                self.proposals_per_parent,
+                _pickle_digest(self.value, "GEPA StrategyInput"),
+            ),
+        )
+
+    def run(self):
+        parents_result = yield OperationTask(
+            self.threads_db_path,
+            self.transition_thread_id,
+            "ParentSelection",
+            self.select_parents,
+            self.parent_identity,
+            self.value.observations,
+        )
+        try:
+            parents = tuple(parents_result.value)
+        except TypeError as exc:
+            raise TypeError("selected parents must be an iterable") from exc
+        if not all(isinstance(parent, Observation) for parent in parents):
+            raise TypeError(
+                "selected parents must contain only Observation"
+            )
+        if not parents:
+            return build_gepa_decision(
+                self.value,
+                (),
+                (),
+                instruction=self.instruction,
+                proposals_per_parent=self.proposals_per_parent,
+            )
+
+        evidence_by_parent = []
+        for index, parent in enumerate(parents):
+            result = yield keyed(
+                OperationTask(
+                    self.threads_db_path,
+                    self.transition_thread_id,
+                    f"EvidenceSelection {index:03d}",
+                    self.select_evidence,
+                    self.evidence_identity,
+                    parent,
+                ),
+                "evidence",
+                index,
+            )
+            try:
+                evidence_by_parent.append(tuple(result.value))
+            except TypeError as exc:
+                raise TypeError("selected evidence must be an iterable") from exc
+        return build_gepa_decision(
+            self.value,
+            parents,
+            tuple(evidence_by_parent),
+            instruction=self.instruction,
+            proposals_per_parent=self.proposals_per_parent,
+        )
+
+
+@dataclass(frozen=True)
 class HierarchicalRuntime(Generic[StateT, CaseT]):
     """Injectable ``Producer[StrategyRunInput, Task]`` hierarchy runtime."""
 
@@ -557,6 +744,9 @@ class HierarchicalRuntime(Generic[StateT, CaseT]):
     case_identity: str
     aggregate: Producer
     aggregate_identity: str
+    setup: Producer | None = None
+    setup_identity: str | None = None
+    setup_name: str = "Setup"
 
     def __post_init__(self) -> None:
         _validate_nonempty_string(self.threads_db_path, "threads_db_path")
@@ -570,6 +760,7 @@ class HierarchicalRuntime(Generic[StateT, CaseT]):
             _validate_nonempty_string(
                 getattr(self, identity_name), identity_name
             )
+        _validate_setup(self.setup, self.setup_identity, self.setup_name)
 
     def produce(
         self, value: StrategyRunInput[StateT, CaseT]
@@ -587,6 +778,9 @@ class HierarchicalRuntime(Generic[StateT, CaseT]):
             self.aggregate,
             self.aggregate_identity,
             value,
+            self.setup,
+            self.setup_identity,
+            self.setup_name,
         )
 
 
@@ -649,6 +843,15 @@ def _digest_hex(value: object, name: str) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _producer_cache_identity(producer: object) -> object:
+    identity = getattr(producer, "cache_identity", None)
+    if identity is None:
+        return None
+    if not callable(identity):
+        raise TypeError("producer cache_identity must be callable")
+    return identity()
+
+
 def _cache_key(schema: bytes, values: object) -> str:
     try:
         encoded = pickle.dumps(values, protocol=5)
@@ -663,6 +866,18 @@ def _pickle_digest(value: object, name: str) -> bytes:
     except Exception as exc:
         raise TypeError(f"{name} must be pickleable for cache identity") from exc
     return hashlib.sha256(encoded).digest()
+
+
+def _validate_setup(
+    setup: object, setup_identity: object, setup_name: object
+) -> None:
+    if setup is None:
+        if setup_identity is not None:
+            raise ValueError("setup_identity requires setup")
+        return
+    _validate_producer(setup, "setup")
+    _validate_nonempty_string(setup_identity, "setup_identity")
+    _validate_nonempty_string(setup_name, "setup_name")
 
 
 def _validate_producer(value: object, name: str) -> None:

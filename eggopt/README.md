@@ -133,4 +133,9 @@ remain ordered item outcomes and do not abort sibling proposals or later
 steps; infrastructure exceptions still fail. No registry, validation stage,
 selector subthreads, raw-name scan, model call, or general descendant-context
 REPL capability is included. Domains may implement the same top-level
-structural Producer contract instead.
+structural Producer contract instead. The public `OperationTask` is the same
+minimal audited contextual composition for domain-owned runtimes. An optional
+setup Producer runs beneath `RunSetup` and returns the effective run input. The
+optional `ContextualGEPAStrategy` runs parent and per-parent evidence selectors
+as operation children beneath `StrategyTransition`, sharing decision logic with
+the pure `GEPAStrategy`. Their identities and configuration are cache identity.
