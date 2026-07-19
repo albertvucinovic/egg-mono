@@ -59,3 +59,18 @@ not store live clients or schedulers in the wrapper, and do not expect them in
 cached results. Runtime resources must be reconstructed outside cached values.
 Import this optional adapter from `eggopt.eggflow`; importing `eggopt` itself
 never imports Eggflow.
+
+## Inspectable fake Eggthreads leaf
+
+Install `eggopt[eggflow,eggthreads]` and import the optional substrate from
+`eggopt.eggthreads`. `CreateRunRoots` durably creates a study root and strategy
+child, while `ThreadProducer` creates a configured leaf and records a typed
+fake drive's user/assistant transcript. Eggflow's committed `RunRoots` and
+`ThreadOutput` values are authoritative; adapters never scan for threads by
+name.
+
+The injected drive is deterministic and process-local. Its explicit
+`drive_identity` must change with behavior or configuration. Do not put live
+clients, schedulers, or database connections in specs, inputs, or cached
+results; reconstruct runtime resources outside these values. This P3 substrate
+does not call a model or scheduler.
