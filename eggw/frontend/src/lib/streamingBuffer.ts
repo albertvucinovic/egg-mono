@@ -74,6 +74,7 @@ export class IntervalCoalescer<TimeoutId = ReturnType<typeof setTimeout>> {
 }
 
 export class StreamingBuffer {
+  assistantGeneration = 0;
   contentChunks: string[] = [];
   reasoningChunks: string[] = [];
   reasoningSummaryChunks: string[] = [];
@@ -167,9 +168,14 @@ export class StreamingBuffer {
   }
 
   clearAssistantText() {
+    this.assistantGeneration += 1;
     this.contentChunks = [];
     this.reasoningChunks = [];
     this.reasoningSummaryChunks = [];
+    // Imperative transcript leaves keep their own consumed-chunk indices. A
+    // generation boundary must wake them even though clearing adds no chunk.
+    this.contentListeners.forEach((listener) => listener());
+    this.reasoningListeners.forEach((listener) => listener());
   }
 
   removeToolCall(toolCallId: string) {
@@ -184,9 +190,7 @@ export class StreamingBuffer {
   }
 
   clear() {
-    this.contentChunks = [];
-    this.reasoningChunks = [];
-    this.reasoningSummaryChunks = [];
+    this.clearAssistantText();
     this.toolOutputChunks = new Map();
     this.toolCalls = new Map();
     this.seenToolOutputs = new Set();

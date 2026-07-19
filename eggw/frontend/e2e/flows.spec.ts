@@ -2942,6 +2942,149 @@ test.describe('SSE reconnect integration', () => {
     await expect(page.getByTestId('chat-panel')).toContainText('resumed exactly once');
     await expect(page.getByTestId('chat-panel')).not.toContainText('resumed exactly onceresumed exactly once');
   });
+
+  test('keeps a running long-thread stream complete across repeated route switches', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const liveThread = 'route-replay-live-long-thread';
+    const otherThread = 'route-replay-other-thread';
+    const invokeId = 'route-replay-invoke';
+    const waitId = 'route-replay-wait-call';
+    const liveMessages = Array.from({ length: 300 }, (_, index) => ({
+      id: `route-replay-history-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `history ${index}`,
+    }));
+    let completed = false;
+
+    await mockThreadShell(page, liveThread, { messages: liveMessages });
+    await mockThreadShell(page, otherThread, {
+      messages: [{ id: 'route-replay-other-only', role: 'assistant', content: 'OTHER THREAD ONLY' }],
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${liveThread}/children`);
+    await page.route(`${TEST_API_BASE}/api/threads/${liveThread}/children`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [{ id: otherThread, name: 'Replay other thread', parent_id: liveThread, has_children: false }],
+    }));
+    await page.unroute(`${TEST_API_BASE}/api/threads/${otherThread}`);
+    await page.route(`${TEST_API_BASE}/api/threads/${otherThread}`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { id: otherThread, name: 'Replay other thread', parent_id: liveThread, has_children: false },
+    }));
+    await page.unroute(`${TEST_API_BASE}/api/threads/${liveThread}/state`);
+    await page.route(new RegExp(`/api/threads/${liveThread}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: completed
+        ? { state: 'waiting_user', streaming_invoke_id: null, live_replay_cursor: 400, active_get_user_wait: false }
+        : {
+            state: 'running',
+            streaming_kind: 'tool',
+            streaming_invoke_id: invokeId,
+            live_replay_cursor: 300,
+            active_get_user_wait: false,
+          },
+    }));
+    await page.unroute(new RegExp(`/api/threads/${liveThread}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${liveThread}/messages(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: completed
+        ? {
+            items: [
+              ...liveMessages.slice(1),
+              { id: 'route-replay-final', role: 'assistant', content: 'FINAL DURABLE ANSWER' },
+            ],
+            snapshot_cursor: 400,
+            next_before: null,
+          }
+        : { items: liveMessages, snapshot_cursor: 300, next_before: null },
+    }));
+    await page.unroute(`${TEST_API_BASE}/api/threads/${liveThread}/events`);
+    let liveMountConnections = 0;
+    const liveCursors: number[] = [];
+    await page.route(new RegExp(`/api/threads/${liveThread}/events(?:\\?.*)?$`), async (route, request) => {
+      const requestedCursor = new URL(request.url()).searchParams.get('after_seq');
+      const cursor = Number(requestedCursor || request.headers()['last-event-id'] || -1);
+      if (requestedCursor !== null) {
+        liveMountConnections += 1;
+        liveCursors.push(cursor);
+      }
+      const ts = new Date().toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `route-replay-${eventSeq}`,
+        event_seq: eventSeq,
+        type,
+        ts,
+        msg_id: null,
+        invoke_id: invokeId,
+        chunk_seq: type === 'stream.delta' ? eventSeq : null,
+        payload,
+      });
+      const block = (eventSeq: number, type: string, payload: Record<string, unknown>) => [
+        `id: ${eventSeq}`,
+        `event: ${type}`,
+        `data: ${envelope(eventSeq, type, payload)}`,
+        '',
+      ];
+      const frames = requestedCursor === null || completed
+        ? []
+        : cursor <= 300
+        ? [
+            ...block(301, 'stream.open', { stream_kind: 'tool' }),
+            ...block(302, 'stream.delta', { text: 'STREAM-BEGIN|' }),
+            ...block(303, 'tool_call.execution_started', {
+              tool_call_id: waitId,
+              name: 'wait',
+              arguments: '{"thread_ids":["child"],"timeout":60}',
+              timeout: 60,
+            }),
+            ...block(304, 'stream.delta', { tool: { id: waitId, name: 'wait', text: 'WAIT-OUTPUT' } }),
+            ...block(305, 'stream.delta', { text: '|STREAM-END' }),
+          ]
+        : block(cursor + 1, 'stream.delta', { text: `|RETURN-${liveMountConnections - 1}` });
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [...frames, ''].join('\n'),
+      });
+    });
+
+    await page.goto(`/${liveThread}`);
+    await expect(page.getByTestId('streaming-content')).toHaveText('STREAM-BEGIN||STREAM-END');
+    await expect(page.getByTestId('streaming-tool-output')).toHaveText('WAIT-OUTPUT');
+    await expect(page.locator('.eggw-message-card')).toHaveCount(61);
+
+    for (let switchIndex = 0; switchIndex < 2; switchIndex += 1) {
+      await page.getByRole('button', { name: /Replay other thread/ }).click();
+      await expect(page.getByTestId('chat-panel')).toContainText('OTHER THREAD ONLY');
+      await page.getByRole('button', { name: /Parent/ }).click();
+      await expect.poll(() => liveMountConnections).toBeGreaterThanOrEqual(switchIndex + 2);
+      await expect(page.getByTestId('streaming-content')).toHaveText(
+        `STREAM-BEGIN||STREAM-END${Array.from({ length: switchIndex + 1 }, (_, index) => `|RETURN-${index + 1}`).join('')}`,
+      );
+      await expect(page.getByTestId('streaming-tool-output')).toHaveText('WAIT-OUTPUT');
+      await expect(page.locator('.eggw-message-card')).toHaveCount(61);
+      await expect(page.locator('[data-message-id="route-replay-history-299"]')).toBeVisible();
+    }
+
+    // If the stream finishes while another route owns the UI, returning must
+    // publish the durable tail and remove stale live/wait cards rather than
+    // leaving the old ephemeral representation in front of the newest message.
+    await page.getByRole('button', { name: /Replay other thread/ }).click();
+    await expect(page.getByTestId('chat-panel')).toContainText('OTHER THREAD ONLY');
+    completed = true;
+    await page.getByRole('button', { name: /Parent/ }).click();
+    await expect(page.locator('[data-message-id="route-replay-final"]')).toContainText('FINAL DURABLE ANSWER');
+    await expect(page.locator('[data-message-id="route-replay-history-299"]')).toBeVisible();
+    await expect(page.getByText(/Chat Messages · 301 loaded/)).toBeVisible();
+    await expect(page.getByTestId('streaming-content')).toHaveCount(0);
+    await expect(page.getByTestId('streaming-tool-output')).toHaveCount(0);
+    expect(liveCursors).toEqual([300, 305, 306, 400]);
+  });
 });
 
 test.describe('Authoritative same-version transcript refresh', () => {

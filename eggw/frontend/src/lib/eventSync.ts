@@ -16,6 +16,28 @@ export interface ThreadEventSyncState {
   activeInvokeId: string | null;
 }
 
+// A route owns the transport, but the thread owns its last semantically applied
+// accepted cursor. Keeping this tiny state beside the thread-keyed streaming buffers lets
+// navigation resume an in-flight invocation instead of replaying (and appending)
+// its complete live output every time the user returns to the thread.
+const retainedThreadEventSyncStates = new Map<string, ThreadEventSyncState>();
+
+export function retainedThreadEventSyncState(
+  threadId: string,
+): ThreadEventSyncState | null {
+  return retainedThreadEventSyncStates.get(threadId) || null;
+}
+
+export function retainThreadEventSyncState(
+  state: ThreadEventSyncState,
+): void {
+  retainedThreadEventSyncStates.set(state.threadId, state);
+}
+
+export function evictThreadEventSyncState(threadId: string): void {
+  retainedThreadEventSyncStates.delete(threadId);
+}
+
 export interface AcceptedThreadEvent {
   accepted: true;
   event: ThreadEventEnvelope;

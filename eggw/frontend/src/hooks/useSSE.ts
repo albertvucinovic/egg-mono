@@ -27,7 +27,10 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import {
   createThreadEventSyncState,
+  evictThreadEventSyncState,
   reduceThreadEvent,
+  retainedThreadEventSyncState,
+  retainThreadEventSyncState,
   type ThreadEventSyncState,
 } from "@/lib/eventSync";
 import {
@@ -314,6 +317,7 @@ export function useSSE(threadId: string | null) {
         )
           return;
         evictStreamingBufferForThread(candidateThreadId);
+        evictThreadEventSyncState(candidateThreadId);
         evictThreadEphemeralState(candidateThreadId);
       });
     },
@@ -370,18 +374,48 @@ export function useSSE(threadId: string | null) {
           : null;
       const previousStreaming =
         useAppStore.getState().streamingByThread[threadId];
+      const retainedSync = retainedThreadEventSyncState(threadId);
+      const resumesRetainedInvocation = Boolean(
+        activeInvokeId &&
+          retainedSync?.activeInvokeId === activeInvokeId &&
+          retainedSync.lastEventSeq >= replayCursor,
+      );
       if (!activeInvokeId) {
         streamingBufferForThread(threadId).clear();
         clearRetainedTools();
         resetThreadStreaming(threadId);
+        evictThreadEventSyncState(threadId);
+      } else if (resumesRetainedInvocation && retainedSync) {
+        // The mutable live buffer already represents every event through this
+        // cursor. Resume only the gap accumulated while this route was away;
+        // replaying from stream.open would duplicate tool output and can make a
+        // large active stream appear to vanish while its full history replays.
+        replayCursor = retainedSync.lastEventSeq;
+        syncStateRef.current = retainedSync;
+        // A bounded authoritative tail may have made retained tool cards durable
+        // while the thread was not selected. Reconcile that handoff now because
+        // those msg.create events intentionally need not be replayed again.
+        for (const message of snapshot.pages[0]?.items || []) {
+          reconcileDurableToolMessage(message);
+        }
       } else if (
-        previousStreaming?.invokeId &&
-        previousStreaming.invokeId !== activeInvokeId
+        hasRetainedLiveToolsForThread(threadId) ||
+        ((retainedSync?.activeInvokeId || previousStreaming?.invokeId) &&
+          (retainedSync?.activeInvokeId || previousStreaming?.invokeId) !==
+            activeInvokeId)
       ) {
-        // Invocation changes clear assistant text only. Phase 2 tool state may
-        // legitimately publish its result from this later runner invocation.
+        // Invocation replacement owns a fresh assistant generation, while a
+        // phase-2/recovery invocation can still finish a tool introduced by the
+        // previous invocation. Preserve those tool cards until durable messages
+        // reconcile them, but rebuild assistant text from the new stream.open.
         streamingBufferForThread(threadId).clearAssistantText();
         clearThreadStreamingAssistant(threadId);
+      } else {
+        // No retained cursor can prove ownership of this active invocation.
+        // Rebuild all ephemeral live state from its lease-fenced stream.open.
+        streamingBufferForThread(threadId).clear();
+        clearRetainedTools();
+        resetThreadStreaming(threadId);
       }
       if (activeInvokeId) {
         patchThreadStreaming(threadId, {
@@ -393,11 +427,14 @@ export function useSSE(threadId: string | null) {
               : null,
         });
       }
-      syncStateRef.current = createThreadEventSyncState(
-        threadId,
-        replayCursor,
-        activeInvokeId,
-      );
+      if (!syncStateRef.current) {
+        syncStateRef.current = createThreadEventSyncState(
+          threadId,
+          replayCursor,
+          activeInvokeId,
+        );
+      }
+      retainThreadEventSyncState(syncStateRef.current);
       setThreadConnection(threadId, "connecting");
     } catch (error) {
       if (ownsSetup()) {
@@ -460,6 +497,7 @@ export function useSSE(threadId: string | null) {
         const reduced = reduceThreadEvent(current, event.data, type);
         if (!reduced.accepted) return;
         syncStateRef.current = reduced.state;
+        retainThreadEventSyncState(reduced.state);
         if (reduced.state.activeInvokeId !== current.activeInvokeId) {
           patchThreadStreaming(threadId, {
             invokeId: reduced.state.activeInvokeId,
@@ -1046,6 +1084,7 @@ export function useSSE(threadId: string | null) {
           )
             return;
           evictStreamingBufferForThread(threadId);
+          evictThreadEventSyncState(threadId);
           evictThreadEphemeralState(threadId);
         });
       }

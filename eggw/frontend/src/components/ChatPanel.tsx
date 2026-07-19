@@ -1458,6 +1458,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
   const lastContentIndexRef = useRef(0);
   const lastReasoningIndexRef = useRef(0);
   const lastReasoningSummaryIndexRef = useRef(0);
+  const lastAssistantGenerationRef = useRef(-1);
   const lastToolOutputIndexRef = useRef<Record<string, number>>({});
   const lastToolCallArgIndexRef = useRef<Record<string, number>>({});
   const lastToolCallChunksRef = useRef<Record<string, string[]>>({});
@@ -1536,6 +1537,16 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     loadingOlderRef.current = false;
     revealingLoadedRef.current = false;
     pendingHistoryAnchorRef.current = null;
+    // Imperative streaming leaves are component-local while their buffers are
+    // thread-local. Force the next attached thread to hydrate its own complete
+    // buffer even when React reuses this ChatPanel across dynamic routes.
+    lastAssistantGenerationRef.current = -1;
+    lastContentIndexRef.current = 0;
+    lastReasoningIndexRef.current = 0;
+    lastReasoningSummaryIndexRef.current = 0;
+    lastToolOutputIndexRef.current = {};
+    lastToolCallArgIndexRef.current = {};
+    lastToolCallChunksRef.current = {};
     if (renderStartIndex !== null) setRenderStartIndex(null);
     if (renderEndIndex !== null) setRenderEndIndex(null);
   }
@@ -1922,6 +1933,22 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     const streamingBuffer = streamingBufferForThread(threadId);
     let appended = false;
 
+    if (
+      lastAssistantGenerationRef.current !==
+      streamingBuffer.assistantGeneration
+    ) {
+      lastAssistantGenerationRef.current = streamingBuffer.assistantGeneration;
+      lastContentIndexRef.current = 0;
+      lastReasoningIndexRef.current = 0;
+      lastReasoningSummaryIndexRef.current = 0;
+      if (streamingContentRef.current)
+        streamingContentRef.current.textContent = "";
+      if (streamingReasoningRef.current)
+        streamingReasoningRef.current.textContent = "";
+      if (streamingReasoningSummaryRef.current)
+        streamingReasoningSummaryRef.current.textContent = "";
+    }
+
     if (streamingContentRef.current) {
       const chunks = streamingBuffer.contentChunks;
       appended = appendBufferedTextChunks(streamingContentRef.current, chunks, lastContentIndexRef.current) || appended;
@@ -2157,6 +2184,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
   // Reset DOM state only after assistant and retained tool state are both gone.
   useEffect(() => {
     if (!showLiveCard) {
+      lastAssistantGenerationRef.current = -1;
       lastContentIndexRef.current = 0;
       lastReasoningIndexRef.current = 0;
       lastReasoningSummaryIndexRef.current = 0;

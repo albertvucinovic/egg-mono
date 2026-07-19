@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   createThreadEventSyncState,
+  evictThreadEventSyncState,
   reduceThreadEvent,
+  retainedThreadEventSyncState,
+  retainThreadEventSyncState,
 } from "./eventSync";
 
 function event(eventSeq: number, type: string, invokeId: string | null = "invoke-a"): string {
@@ -18,6 +21,16 @@ function event(eventSeq: number, type: string, invokeId: string | null = "invoke
 }
 
 describe("thread event reconciliation", () => {
+  it("retains and explicitly evicts the last applied cursor by thread", () => {
+    const state = createThreadEventSyncState("retained-thread", 42, "invoke-a");
+    retainThreadEventSyncState(state);
+    expect(retainedThreadEventSyncState("retained-thread")).toEqual(state);
+    expect(retainedThreadEventSyncState("another-thread")).toBeNull();
+
+    evictThreadEventSyncState("retained-thread");
+    expect(retainedThreadEventSyncState("retained-thread")).toBeNull();
+  });
+
   it("rejects duplicate and out-of-order reconnect frames", () => {
     const initial = createThreadEventSyncState("thread-a", 10, "invoke-a");
     const first = reduceThreadEvent(initial, event(11, "stream.delta"), "stream.delta");

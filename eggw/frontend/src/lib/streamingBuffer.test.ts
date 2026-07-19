@@ -3,6 +3,25 @@ import { AnimationFrameCoalescer, IntervalCoalescer, StreamingBuffer } from "./s
 import { useAppStore } from "./store";
 
 describe("StreamingBuffer tool arguments", () => {
+  it("notifies live leaves when an assistant generation is cleared", () => {
+    const buffer = new StreamingBuffer();
+    let contentNotifications = 0;
+    let reasoningNotifications = 0;
+    buffer.subscribeContent(() => { contentNotifications += 1; });
+    buffer.subscribeReasoning(() => { reasoningNotifications += 1; });
+    buffer.appendContent("old answer");
+    buffer.appendReasoning("old reasoning");
+    const generation = buffer.assistantGeneration;
+
+    buffer.clearAssistantText();
+
+    expect(buffer.assistantGeneration).toBe(generation + 1);
+    expect(buffer.getContent()).toBe("");
+    expect(buffer.getReasoning()).toBe("");
+    expect(contentNotifications).toBe(2);
+    expect(reasoningNotifications).toBe(2);
+  });
+
   it("retains argument chunks without growing-string concatenation", () => {
     const buffer = new StreamingBuffer();
     const chunks = Array.from({ length: 1_100 }, (_, index) => `${index},`);
