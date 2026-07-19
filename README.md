@@ -165,7 +165,6 @@ Tools carry timeouts and lifecycle state. Approval, sandbox, and child-tool poli
 | [`eggconfig`](eggconfig) | Bundled model and image-generation configuration data |
 | [`eggdisplay`](eggdisplay/README.md) | Rich-based editor, panels, layouts, and terminal rendering primitives |
 | [`eggflow`](eggflow/README.md) | Separate cached async task-composition library with optional `eggthreads` integration |
-| [`eggopt`](eggopt/README.md) | Standalone, domain-neutral optimization contracts and deterministic strategies |
 
 ```text
 Egg or EggW
@@ -211,7 +210,7 @@ source venv/bin/activate
 make test
 ```
 
-`make test` installs development dependencies and runs the seven Python component suites. Cross-client integration tests are separate:
+`make test` installs development dependencies and runs the six Python component suites. Cross-client integration tests are separate:
 
 ```bash
 PYTHONPATH=egg:eggw:eggthreads:eggconfig:eggdisplay:eggllm \
@@ -233,7 +232,6 @@ npm test                          # starts isolated test servers via Playwright
 Useful focused commands:
 
 ```bash
-pytest eggopt/tests -q
 pytest eggthreads/tests -q
 pytest egg/tests -q
 pytest eggw/tests -q
