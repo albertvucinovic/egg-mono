@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -153,10 +157,13 @@ def test_upstream_gepa_keeps_candidates_lineage_and_specialists(tmp_path):
         ).messages
         assistant = [message for message in messages if message.payload.get("role") == "assistant"]
         assert any(message.payload.get("eggopt_kind") for message in assistant)
-        assert any(message.payload.get("content") == "I would choose instruction=999" for message in assistant)
+        assert any(
+            message.payload.get("content") == "I would choose instruction=999"
+            for message in assistant
+        )
 
 
-def test_evaluations_replay_after_reopen_at_a_different_path(tmp_path):
+def test_evaluations_replay_in_a_new_process_at_a_different_path(tmp_path):
     source = tmp_path / "source"
     replay = tmp_path / "different-layout" / "replay"
     source.mkdir()
@@ -172,41 +179,97 @@ def test_evaluations_replay_after_reopen_at_a_different_path(tmp_path):
     assert first.num_metric_calls == 2
     assert len(evaluator.calls) == 2
     store.conn.close()
-    shutil.copy2(flow_path, replay / "renamed-cache.sqlite")
+    replay_db = replay / "renamed-cache.sqlite"
+    shutil.copy2(flow_path, replay_db)
 
-    fresh_store = TaskStore(str(replay / "renamed-cache.sqlite"))
-    fresh_executor = FlowExecutor(fresh_store)
-    fresh_evaluator = CountingEvaluator()
-    fresh_adapter = make_adapter(fresh_executor, fresh_evaluator)
-    fresh_drive = DeterministicDrive()  # fresh live resources do not affect keys
-    fresh_threads = ThreadsDB(replay / "fresh-threads.sqlite")
-    fresh_threads.init_schema()
-    fresh_proposer = EggthreadsCandidateProposer(
-        fresh_executor,
-        fresh_threads,
-        drive=fresh_drive,
-        reflector_id="tests.level-reflector",
-        reflector_version="1",
-        reflector_config={"policy": "increment"},
-        study_name="A physically different replay study",
+    sentinel = replay / "evaluator-called"
+    script = replay / "replay.py"
+    script.write_text(
+        """
+import json
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from eggflow import FlowExecutor, TaskStore
+from eggopt.gepa import EggflowGEPAAdapter
+
+@dataclass(frozen=True)
+class Example:
+    example_id: str
+    target_level: int
+
+class MustNotRun:
+    def __init__(self, sentinel):
+        self.calls = 0
+        self.sentinel = sentinel
+
+    def __call__(self, candidate, example):
+        self.calls += 1
+        self.sentinel.write_text(f"{candidate!r} {example!r}")
+        raise AssertionError("cached evaluator executed after process restart")
+
+evaluator = MustNotRun(Path(sys.argv[2]))
+adapter = EggflowGEPAAdapter(
+    FlowExecutor(TaskStore(sys.argv[1])),
+    evaluator=evaluator,
+    evaluator_id="tests.level-evaluator",
+    evaluator_version="1",
+    evaluator_config={"metric": "threshold"},
+    example_id=lambda example: example.example_id,
+)
+candidate = {"instruction": "1"}
+examples = [Example("easy", 1), Example("hard", 2)]
+result = adapter.evaluate(examples, candidate, capture_traces=True)
+print(json.dumps({
+    "calls": evaluator.calls,
+    "keys": [adapter.semantic_key(candidate, item).digest() for item in examples],
+    "metric_calls": result.num_metric_calls,
+    "outputs": result.outputs,
+    "scores": result.scores,
+    "evidence_inputs": [dict(item.inputs) for item in result.trajectories],
+    "objective_scores": result.objective_scores,
+}, sort_keys=True))
+"""
     )
+    env = os.environ.copy()
+    package_root = str(Path(__file__).resolve().parents[1])
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join(
+        path for path in (package_root, existing_pythonpath) if path
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script), str(replay_db), str(sentinel)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=replay,
+        env=env,
+    )
+    replayed = json.loads(completed.stdout)
+    assert not sentinel.exists()
+    assert replayed == {
+        "calls": 0,
+        "evidence_inputs": [
+            {"example_id": "easy", "target_level": "1"},
+            {"example_id": "hard", "target_level": "2"},
+        ],
+        "keys": keys,
+        "metric_calls": 0,
+        "objective_scores": [{"accuracy": 1.0}, {"accuracy": 0.0}],
+        "outputs": first.outputs,
+        "scores": first.scores,
+    }
 
-    assert [fresh_adapter.semantic_key(candidate, example).digest() for example in examples] == keys
-    second = fresh_adapter.evaluate(examples, candidate, capture_traces=True)
-    assert second.outputs == first.outputs
-    assert second.scores == first.scores
-    assert second.trajectories == first.trajectories
-    assert second.objective_scores == first.objective_scores
-    assert second.num_metric_calls == 0
-    assert fresh_evaluator.calls == []
-    assert fresh_drive.calls == 0
-    assert fresh_proposer.study_thread_id
-
-    # Paths, labels, and live resources differ, while equal semantic inputs do not.
-    _, _, other_executor, _ = make_runtime(replay, flow_name="empty.sqlite", threads_name="other.sqlite")
+    # Paths and live resources differ, while equal semantic inputs do not.
+    _, _, other_executor, _ = make_runtime(
+        replay, flow_name="empty.sqlite", threads_name="other.sqlite"
+    )
     other_adapter = make_adapter(other_executor, CountingEvaluator())
     assert other_adapter.semantic_key(candidate, examples[0]).digest() == keys[0]
-    changed = make_adapter(other_executor, CountingEvaluator(), config={"metric": "changed"})
+    changed = make_adapter(
+        other_executor, CountingEvaluator(), config={"metric": "changed"}
+    )
     assert changed.semantic_key(candidate, examples[0]).digest() != keys[0]
 
 

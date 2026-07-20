@@ -112,7 +112,9 @@ class _ReflectionTask(Task):
         occurrence = _resolve_or_create_occurrence(
             self.threads_db, self.study_thread_id, self.semantic_key, self.request
         )
-        persisted = _load_response(self.threads_db, occurrence.mutation_thread_id, self.semantic_key)
+        persisted = _load_response(
+            self.threads_db, occurrence.mutation_thread_id, self.semantic_key
+        )
         if persisted is not None:
             return persisted[0]
 
@@ -384,9 +386,8 @@ def _validate_components(
 
 
 def _request_content(request: Mapping[str, Any]) -> str:
-    return "Reflect on the structured GEPA evidence and return typed component updates.\n" + json.dumps(
-        request, sort_keys=True, ensure_ascii=False
-    )
+    prompt = "Reflect on the structured GEPA evidence and return typed component updates.\n"
+    return prompt + json.dumps(request, sort_keys=True, ensure_ascii=False)
 
 
 def _run_sync(awaitable: Any) -> Any:
@@ -396,4 +397,6 @@ def _run_sync(awaitable: Any) -> Any:
         return asyncio.run(awaitable)
     if inspect.iscoroutine(awaitable):
         awaitable.close()
-    raise RuntimeError("Eggopt's synchronous GEPA proposer cannot run inside an active asyncio loop")
+    raise RuntimeError(
+        "Eggopt's synchronous GEPA proposer cannot run inside an active asyncio loop"
+    )

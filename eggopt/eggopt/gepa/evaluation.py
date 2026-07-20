@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 from eggflow import FlowExecutor, Task
-from gepa.core.adapter import EvaluationBatch
+from gepa import EvaluationBatch
 
 from ._identity import canonical_candidate, canonical_json, digest_payload
 
@@ -213,7 +213,10 @@ class EggflowGEPAAdapter(Generic[ExampleT, OutputT]):
             evidence.as_reflective_record(score)
             for evidence, score in zip(trajectories, eval_batch.scores, strict=True)
         ]
-        return {component: [dict(record) for record in records] for component in components_to_update}
+        return {
+            component: [dict(record) for record in records]
+            for component in components_to_update
+        }
 
     async def _evaluate_each(
         self, batch: list[ExampleT], candidate: Mapping[str, str]
@@ -253,7 +256,9 @@ def _run_sync(awaitable: Any) -> Any:
         return asyncio.run(awaitable)
     if inspect.iscoroutine(awaitable):
         awaitable.close()
-    raise RuntimeError("Eggopt's synchronous GEPA adapter cannot run inside an active asyncio loop")
+    raise RuntimeError(
+        "Eggopt's synchronous GEPA adapter cannot run inside an active asyncio loop"
+    )
 
 
 def _finite_score(value: Any, what: str) -> float:
