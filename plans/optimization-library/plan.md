@@ -172,6 +172,9 @@ result values paired with cached thread IDs are the only authoritative reference
   task, add an optional physical setup operation under `RunSetup`, and provide a contextual GEPA adapter
   whose parent/evidence selectors are audited operation children and share the pure GEPA decision
   builder. Preserve default runtime behavior and cache/replay guarantees; add no domain semantics.
+- [x] **P5.3 — persistent Solver/Execution composition.** Replace the fake leaf and detached repair
+  surfaces with one concise composition that caches exactly one Solver/Execution pair per item,
+  records real sandboxed Python/bash operations, and repairs in the same Solver conversation.
 - [ ] **P6 — first domain vertical slice: trading.** Use existing development-only trading evidence
   for one cached deterministic GEPA transition, then one explicitly approved tiny live mutation.
   Keep the base prompt frozen and July unopened.
@@ -202,6 +205,26 @@ result values paired with cached thread IDs are the only authoritative reference
   duplicating the library.
 
 ## Durable status
+
+- 2026-07-20 — P5.3 completed: `SolverExecution(...).produce(request)` now owns one cached
+  Solver child and one cached Execution child per item. Explicit attempt/check identities and input
+  digests independently cache solver and real sandboxed Python/bash work while retaining those IDs;
+  sanitized rejection returns to the same Solver, accepted typed values return directly, terminal or
+  exhausted items become `ItemFailure`, and infrastructure failures propagate. Focused tests prove
+  exact topology, durable tool history, replay/invalidation, same-solver repair, fresh-executor
+  resume, and Solver/Execution capability isolation. Obsolete `ThreadProducer` and
+  `eggflow_repair` surfaces were removed; no trading code changed.
+
+- 2026-07-20 — P5.3 approved: replace the fragmented thread-leaf/repair APIs with one concise,
+  domain-neutral `SolverExecution` composition. One item owns a stable Solver thread and a stable
+  Execution thread. Solver attempts and execution/check operations remain independently Eggflow-
+  cached by explicit semantic identity/input/attempt while reusing those thread IDs. Expected
+  rejection feeds sanitized feedback back into the same Solver; acceptance returns the typed value;
+  exhaustion is an `ItemFailure`; infrastructure errors remain failures. Execution owns the
+  configured workspace/sandbox and records real tool executions, not empty per-attempt audit child
+  threads. The API should let clients express the pair in one short construction and should replace,
+  not wrap, overlapping `ThreadProducer`/detached repair machinery. Trading will consume it only
+  after the generic API is accepted.
 
 - 2026-07-20 — P5.2.2 completed. The audited contextual `OperationTask` is public for domain-owned
   runtimes. `HierarchicalRuntime` has a backward-compatible optional setup operation below `RunSetup`;

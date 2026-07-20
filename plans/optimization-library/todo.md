@@ -22,6 +22,30 @@ phase boundaries, and compliance review. A worker implements only the currently 
   recover hierarchy work.
 - [x] Keep domain validation out of the generic runtime and do not add descendant-context REPL support.
 
+## P5.3 — Persistent Solver/Execution composition
+
+- [x] Replace overlapping leaf-thread and detached repair APIs with one domain-neutral
+      `SolverExecution` Producer composition; prefer the term Execution because it covers parsing,
+      compilation, tests, scoring, simulation, and judging.
+- [x] Create/cache exactly one Solver thread and one Execution thread per item under an authoritative
+      parent; reuse both IDs across all attempts and checks without scanning thread names.
+- [x] Keep each solver attempt and execution/check independently cacheable by explicit identities,
+      item/input digest, and attempt/check identity; changed output/check inputs must invalidate the
+      relevant work without creating another pair.
+- [x] Configure Solver and Execution through small pickle-safe specs. Execution owns an explicit
+      working directory and sandbox policy and records actual Python/bash tool calls and outputs in
+      its existing thread; do not create empty per-attempt validation threads.
+- [x] Feed `NeedsRepair(RepairFeedback)` back into the same Solver thread, return `Accepted` typed
+      values directly, return `ItemFailure` on exhaustion/recognized item terminal, and propagate
+      unrelated infrastructure failures.
+- [x] Make the common client program short and readable (one `SolverExecution(...)` construction and
+      `.produce(request)`); remove or clearly replace obsolete `ThreadProducer`/repair surfaces rather
+      than stacking adapters.
+- [x] Focused tests must prove exact two-thread topology, real sandboxed execution history, attempt-
+      scoped replay/invalidation, same-solver repair, fresh-executor resume, and capability isolation.
+- [x] Update README/API/RUNNING docs with one minimal generic example; run Eggopt-focused checks and
+      commit one coherent slice. Do not edit trading in this phase.
+
 ## P1 — Pure core
 
 - [x] **P1.1 Package scaffold**
@@ -142,6 +166,13 @@ phase boundaries, and compliance review. A worker implements only the currently 
 - [ ] Add Pareto/evolution/islands only when a concrete adapter exercises them.
 
 ## Status log
+
+- 2026-07-20: P5.3 completed with one public `SolverExecution` composition, exactly one cached
+  Solver/Execution sibling pair per item, attempt/check scoped caching, real sandboxed Python/bash
+  history in Execution, cumulative same-Solver repair, typed terminal outcomes, and infrastructure
+  error propagation. Focused tests cover exact topology, replay/invalidation, fresh executors, and
+  capability isolation. The obsolete fake `ThreadProducer` and detached `eggflow_repair` APIs/tests
+  were removed and concise README/API/RUNNING guidance added. No trading repository was edited.
 
 - 2026-07-20: P5.2.2 completed with public `OperationTask`, optional effective-input setup beneath
   `RunSetup`, and `ContextualGEPAStrategy` selector children sharing pure GEPA decision logic. Setup

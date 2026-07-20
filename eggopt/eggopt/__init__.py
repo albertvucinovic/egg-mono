@@ -33,7 +33,6 @@ from .repair import (
     ItemFailure,
     NeedsRepair,
     RepairFeedback,
-    RepairInput,
 )
 
 __all__ = [
@@ -62,7 +61,6 @@ __all__ = [
     "Proposal",
     "ProposalResult",
     "RepairFeedback",
-    "RepairInput",
     "Stop",
     "StepResult",
     "StrategyDecision",

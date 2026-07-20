@@ -14,7 +14,6 @@ __all__ = [
     "ItemFailure",
     "NeedsRepair",
     "RepairFeedback",
-    "RepairInput",
 ]
 
 
@@ -47,20 +46,6 @@ class NeedsRepair:
 
 
 Inspection: TypeAlias = Accepted[OutputT] | NeedsRepair
-
-
-@dataclass(frozen=True)
-class RepairInput(Generic[InputT]):
-    """Original input plus cumulative feedback for the next repair attempt."""
-
-    original: InputT
-    feedback: tuple[RepairFeedback, ...] = ()
-
-    def __post_init__(self) -> None:
-        feedback = tuple(self.feedback)
-        if not all(isinstance(item, RepairFeedback) for item in feedback):
-            raise TypeError("feedback must contain only RepairFeedback values")
-        object.__setattr__(self, "feedback", feedback)
 
 
 @dataclass(frozen=True)
