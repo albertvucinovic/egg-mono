@@ -6,6 +6,7 @@ install:
 	pip install -e ./eggthreads
 	pip install -e ./eggdisplay
 	pip install -e ./eggflow
+	pip install -e ./eggopt
 	pip install -e ./egg
 	pip install -e ./eggw
 
@@ -15,6 +16,7 @@ install-dev:
 	pip install -e "./eggthreads[dev]"
 	pip install -e ./eggdisplay
 	pip install -e "./eggflow[dev]"
+	pip install -e "./eggopt[dev]"
 	pip install -e "./egg[dev]"
 	pip install -e ./eggw
 
@@ -23,6 +25,7 @@ test: install-dev
 	pytest eggthreads/tests -q
 	pytest eggdisplay/tests -q
 	pytest eggflow/tests -q
+	pytest eggopt/tests -q
 	pytest egg/tests -q
 	pytest eggw/tests -q
 
