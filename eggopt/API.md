@@ -20,24 +20,25 @@ role is a typed `Producer[Input, Output]`.
 `SolverExecution(...).produce(SolverExecutionRequest(item_id, value))` returns one
 durable Eggflow task; import it from `eggopt.solver_execution`. It composes:
 
-- `SolverSpec`: pickle-safe Solver name, system prompt, and optional model key.
+- `SolverSpec`: Solver workspace, sandbox, tool allowlist, name, system
+  prompt, and optional model key.
 - `ExecutionSpec`: explicit working directory, sandbox settings, and the
   Python/bash capability allowlist.
 - `SolverInput`: authoritative Solver thread ID, original input, cumulative
   sanitized feedback, and attempt number.
-- `ExecutionInput`: authoritative Execution thread ID, candidate, attempt, and
-  `execute`, a Producer accepting `ToolCall(tool, script, identity)`.
+- `ExecutionInput`: candidate, attempt, and attempt-bound `execution`, with concise
+  `.python(...)` and `.bash(...)` methods and its authoritative thread ID.
 - `ExecutionResult`: thread/tool-call IDs and actual published tool output.
 
 One cached pair of sibling Solver and Execution children is created per
 `item_id` under the supplied authoritative parent. Attempts and checks share
 those IDs. Solver attempts key on explicit identity, item digest, feedback, and
-attempt. Tool work additionally keys on explicit check identity, tool, script
-digest, and attempt. Execution records real Eggthreads tool-call and output
-events in its existing thread; no per-attempt validation child exists.
+attempt. Tool work additionally keys on explicit semantic key, caller-owned
+`cache_by` dependency, tool, script digest, and attempt. Execution records real
+Eggthreads tool-call and output events in its existing thread; no per-attempt validation child exists.
 
-Inspection returns `Accepted(value)` or `NeedsRepair(RepairFeedback)`. Repair
-continues in the same Solver conversation. Exhaustion or recognized terminal
+The configured execution role returns `Accepted(value)` or
+`NeedsRepair(RepairFeedback)`. Repair continues in the same Solver conversation. Exhaustion or recognized terminal
 context returns `ItemFailure`; nonterminal infrastructure failures propagate.
 
 ## Optional modules

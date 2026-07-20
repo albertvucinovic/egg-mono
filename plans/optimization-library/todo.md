@@ -167,6 +167,11 @@ phase boundaries, and compliance review. A worker implements only the currently 
 
 ## Status log
 
+- 2026-07-20: P5.3 review correction completed: cached pre-attempt feedback append/trigger IDs,
+  Solver workspace/sandbox/tool policy, `cache_by` execution dependencies with duplicate-free crash
+  recovery, keyword role construction, Python/bash conveniences, effective capability tests, and
+  restored CreateRunRoots/end-to-end coverage.
+
 - 2026-07-20: P5.3 completed with one public `SolverExecution` composition, exactly one cached
   Solver/Execution sibling pair per item, attempt/check scoped caching, real sandboxed Python/bash
   history in Execution, cumulative same-Solver repair, typed terminal outcomes, and infrastructure

@@ -206,6 +206,13 @@ result values paired with cached thread IDs are the only authoritative reference
 
 ## Durable status
 
+- 2026-07-20 — P5.3 review correction completed: repair feedback is now a separately cached
+  same-Solver user append before the next attempt (with trigger ID and no fabricated assistant copy);
+  Solver and Execution each own workspace/sandbox/tool policy; tool keys include caller-owned
+  `cache_by` and resume existing deterministic calls without duplicate enqueue; keyword roles and
+  Python/bash conveniences shorten clients. Focused CreateRunRoots and end-to-end integration coverage
+  are restored.
+
 - 2026-07-20 — P5.3 completed: `SolverExecution(...).produce(request)` now owns one cached
   Solver child and one cached Execution child per item. Explicit attempt/check identities and input
   digests independently cache solver and real sandboxed Python/bash work while retaining those IDs;

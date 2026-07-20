@@ -158,15 +158,16 @@ Create the authoritative item parent once, import `SolverExecution` from
 `SolverExecution(...).produce(SolverExecutionRequest(item_id, value))`. Run the
 returned task through `FlowExecutor(TaskStore("flow.db"))`. Resume with the
 same `flow.db`, `threads.sqlite`, parent ID, item ID, specs, identities, and
-request value. A fresh executor then returns cached work without model/inspector
-calls, child creation, or repeated tool execution.
+request value. A fresh executor then returns cached work without
+solver/execution-role calls, child creation, or repeated tool execution.
 
 The configured Execution working directory must be under the process working
-directory (Eggthreads' filesystem boundary). Execution is sandbox-enabled and
-restricted to its explicit Python/bash allowlist; Solver has no tool capability
-and sees only original input plus sanitized repair feedback supplied by the
-client drive. Inspect the two persistent children and Execution's durable
+directory (Eggthreads' filesystem boundary). Execution is sandbox-enabled and restricted to its explicit Python/bash
+allowlist. Solver uses its independently configured workspace, sandbox, and
+(default-empty) tool allowlist and sees sanitized repair feedback before each
+repair attempt. Inspect the two persistent children and Execution's durable
 `tool_call.*` plus tool `msg.create` events through EggW or Eggthreads APIs.
-Change a semantic identity when solver, inspection, command, sandbox, or tool
-behavior changes; changed work is cached separately while the item keeps its
-same two thread IDs.
+Bind fixed scripts that read mutable workspace files with `cache_by` (normally a
+content hash). Change a semantic identity when solver, execution-role, command,
+sandbox, or tool behavior changes; changed work is cached separately while the
+item keeps its same two thread IDs.

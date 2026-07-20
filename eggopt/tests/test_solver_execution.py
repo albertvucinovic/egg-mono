@@ -9,6 +9,7 @@ from eggflow import FlowExecutor, Result, Task, TaskError, TaskStore
 from eggflow.eggthreads_tasks import ContextLimitExceededError
 from eggthreads import (
     ThreadsDB,
+    build_tool_call_states,
     create_root_thread,
     get_parent,
     get_thread_sandbox_config,
@@ -30,15 +31,27 @@ from eggopt.solver_execution import (
     SolverExecutionRequest,
     SolverInput,
     SolverSpec,
-    ToolCall,
 )
 
 
 @dataclass
 class SolverDrive:
+    threads_path: str = ""
     calls: list[SolverInput[str]] = field(default_factory=list)
 
     def produce(self, value: SolverInput[str]) -> str:
+        if value.feedback:
+            db = ThreadsDB(self.threads_path)
+            db.init_schema()
+            try:
+                messages = _events(db, value.thread_id, "msg.create")
+                assert messages[-1]["content"] == value.feedback[-1].text
+                assert messages[-1]["role"] == "user"
+                assert messages[-1].get("eggopt_repair_feedback") is True
+                assert messages[-1].get("no_api") is not True
+            finally:
+                db.conn.close()
+            assert value.trigger_message_id
         self.calls.append(value)
         return "print(40)" if not value.feedback else "print(42)"
 
@@ -49,8 +62,8 @@ class PythonInspection:
 
     def produce(self, value: ExecutionInput[str]):
         self.calls.append(value)
-        execution = value.execute.produce(
-            ToolCall("python", value.candidate, "candidate-python")
+        execution = value.execution.python(
+            value.candidate, key="candidate-python", cache_by=value.candidate
         )
         return InspectTask(execution, value.candidate)
 
@@ -74,7 +87,9 @@ class BashInspection:
     def produce(self, value: ExecutionInput[str]):
         self.calls += 1
         return BashInspectTask(
-            value.execute.produce(ToolCall("bash", value.candidate, "candidate-bash")),
+            value.execution.bash(
+                value.candidate, key="candidate-bash", cache_by=value.candidate
+            ),
             value.candidate,
         )
 
@@ -89,7 +104,7 @@ class BashInspectTask(Task):
         return Accepted(result.output)
 
 
-def _setup(tmp_path, monkeypatch, solver=None, inspect=None, max_repairs=1):
+def _setup(tmp_path, monkeypatch, solver=None, execution=None, max_repairs=1):
     monkeypatch.chdir(tmp_path)
     threads_path = tmp_path / "threads.sqlite"
     db = ThreadsDB(threads_path)
@@ -99,15 +114,18 @@ def _setup(tmp_path, monkeypatch, solver=None, inspect=None, max_repairs=1):
     db.conn.close()
     workspace = Path(".eggopt-test-workspaces") / uuid4().hex / "outerContext"
     execution = SolverExecution(
-        str(threads_path),
-        parent,
-        SolverSpec(system_prompt="Solve from feedback only."),
-        ExecutionSpec(str(workspace)),
-        solver or SolverDrive(),
-        "solver:v1",
-        inspect or PythonInspection(),
-        "inspect:v1",
-        max_repairs,
+        threads_db_path=str(threads_path),
+        parent_thread_id=parent,
+        solver=solver or SolverDrive(str(threads_path)),
+        execution=execution or PythonInspection(),
+        solver_identity="solver:v1",
+        execution_identity="execution:v1",
+        solver_spec=SolverSpec(
+            str(workspace / "innerContext"),
+            system_prompt="Solve from feedback only.",
+        ),
+        execution_spec=ExecutionSpec(str(workspace)),
+        max_repairs=max_repairs,
     )
     return threads_path, parent, execution
 
@@ -135,9 +153,9 @@ def _events(db, thread_id, event_type):
 
 
 def test_exact_pair_real_sandbox_history_and_same_solver_repair(tmp_path, monkeypatch) -> None:
-    solver = SolverDrive()
-    inspect = PythonInspection()
-    threads_path, parent, composition = _setup(tmp_path, monkeypatch, solver, inspect)
+    solver = SolverDrive(str(tmp_path / "threads.sqlite"))
+    execution_role = PythonInspection()
+    threads_path, parent, composition = _setup(tmp_path, monkeypatch, solver, execution_role)
 
     result = _run(
         composition.produce(SolverExecutionRequest("item-1", "source")),
@@ -149,8 +167,8 @@ def test_exact_pair_real_sandbox_history_and_same_solver_repair(tmp_path, monkey
     assert len(solver.calls) == 2
     assert len({call.thread_id for call in solver.calls}) == 1
     assert solver.calls[1].feedback == (RepairFeedback("print 42"),)
-    assert len({call.thread_id for call in inspect.calls}) == 1
-    assert {call.attempt for call in inspect.calls} == {0, 1}
+    assert len({call.thread_id for call in execution_role.calls}) == 1
+    assert {call.attempt for call in execution_role.calls} == {0, 1}
 
     db = ThreadsDB(threads_path)
     db.init_schema()
@@ -176,56 +194,52 @@ def test_exact_pair_real_sandbox_history_and_same_solver_repair(tmp_path, monkey
         assert "40" in tool_results[0]["content"]
         assert "42" in tool_results[1]["content"]
         assert len(_events(db, execution_id, "tool_call.finished")) == 2
-        sandbox = get_thread_sandbox_config(db, execution_id)
-        assert sandbox.enabled and sandbox.provider == "docker"
-        assert sandbox.settings["network"] == "none"
+        solver_sandbox = get_thread_sandbox_config(db, solver_id)
+        execution_sandbox = get_thread_sandbox_config(db, execution_id)
+        assert solver_sandbox.enabled and solver_sandbox.provider == "docker"
+        assert execution_sandbox.enabled and execution_sandbox.provider == "docker"
+        assert execution_sandbox.settings["network"] == "none"
+        solver_messages = _events(db, solver_id, "msg.create")
+        assert [message["role"] for message in solver_messages] == ["system", "user"]
     finally:
         db.conn.close()
 
 
 def test_fresh_executor_replay_and_changed_input_reuses_pair(tmp_path, monkeypatch) -> None:
-    first_solver = SolverDrive()
-    first_inspect = PythonInspection()
-    threads_path, parent, first = _setup(tmp_path, monkeypatch, first_solver, first_inspect)
+    first_solver = SolverDrive(str(tmp_path / "threads.sqlite"))
+    first_execution = PythonInspection()
+    threads_path, parent, first = _setup(tmp_path, monkeypatch, first_solver, first_execution)
     flow_path = tmp_path / "flow.db"
     request = SolverExecutionRequest("item-1", "source")
     expected = _run(first.produce(request), flow_path)
 
-    replay_solver = SolverDrive()
-    replay_inspect = PythonInspection()
+    replay_solver = SolverDrive(str(threads_path))
+    replay_execution = PythonInspection()
     replay = SolverExecution(
-        str(threads_path),
-        parent,
-        first.solver_spec,
-        first.execution_spec,
-        replay_solver,
-        "solver:v1",
-        replay_inspect,
-        "inspect:v1",
-        1,
+        threads_db_path=str(threads_path), parent_thread_id=parent,
+        solver=replay_solver, execution=replay_execution,
+        solver_identity="solver:v1", execution_identity="execution:v1",
+        solver_spec=first.solver_spec, execution_spec=first.execution_spec,
+        max_repairs=1,
     )
     assert _run(replay.produce(request), flow_path) == expected
     assert replay_solver.calls == []
-    assert replay_inspect.calls == []
+    assert replay_execution.calls == []
 
-    changed_solver = SolverDrive()
-    changed_inspect = PythonInspection()
+    changed_solver = SolverDrive(str(threads_path))
+    changed_execution = PythonInspection()
     changed = SolverExecution(
-        str(threads_path),
-        parent,
-        first.solver_spec,
-        first.execution_spec,
-        changed_solver,
-        "solver:v1",
-        changed_inspect,
-        "inspect:v1",
-        1,
+        threads_db_path=str(threads_path), parent_thread_id=parent,
+        solver=changed_solver, execution=changed_execution,
+        solver_identity="solver:v1", execution_identity="execution:v1",
+        solver_spec=first.solver_spec, execution_spec=first.execution_spec,
+        max_repairs=1,
     )
     assert _run(
         changed.produce(SolverExecutionRequest("item-1", "changed source")),
         flow_path,
     ) == expected
-    assert len(changed_solver.calls) == len(changed_inspect.calls) == 2
+    assert len(changed_solver.calls) == len(changed_execution.calls) == 2
 
     db = ThreadsDB(threads_path)
     db.init_schema()
@@ -240,9 +254,9 @@ def test_fresh_executor_replay_and_changed_input_reuses_pair(tmp_path, monkeypat
 
 def test_check_identity_or_script_change_invalidates_only_execution(tmp_path, monkeypatch) -> None:
     solver = SolverDrive()
-    inspect = BashInspection()
+    execution_role = BashInspection()
     threads_path, parent, composition = _setup(
-        tmp_path, monkeypatch, solver=ConstantProducer("printf old"), inspect=inspect, max_repairs=0
+        tmp_path, monkeypatch, solver=ConstantProducer("printf old"), execution=execution_role, max_repairs=0
     )
     flow_path = tmp_path / "flow.db"
     request = SolverExecutionRequest("item-1", "printf old")
@@ -251,20 +265,18 @@ def test_check_identity_or_script_change_invalidates_only_execution(tmp_path, mo
     class ChangedInspection:
         def produce(self, value):
             return BashInspectTask(
-                value.execute.produce(ToolCall("bash", "printf new", "changed-check")),
+                value.execution.bash(
+                    "printf new", key="changed-check", cache_by="new"
+                ),
                 value.candidate,
             )
 
     changed = SolverExecution(
-        str(threads_path),
-        parent,
-        composition.solver_spec,
-        composition.execution_spec,
-        SolverDrive(),
-        "solver:v1",
-        ChangedInspection(),
-        "inspect:v2",
-        0,
+        threads_db_path=str(threads_path), parent_thread_id=parent,
+        solver=SolverDrive(), execution=ChangedInspection(),
+        solver_identity="solver:v1", execution_identity="execution:v2",
+        solver_spec=composition.solver_spec,
+        execution_spec=composition.execution_spec, max_repairs=0,
     )
     assert "new" in _run(changed.produce(request), flow_path)
 
@@ -281,15 +293,15 @@ def test_capability_isolation_and_item_failures(tmp_path, monkeypatch) -> None:
     threads_path, parent, exhausted = _setup(tmp_path, monkeypatch)
     result = _run(
         SolverExecution(
-            exhausted.threads_db_path,
-            exhausted.parent_thread_id,
-            exhausted.solver_spec,
-            exhausted.execution_spec,
-            ConstantProducer("print(0)"),
-            "solver:invalid",
-            ConstantProducer(NeedsRepair(RepairFeedback("invalid"))),
-            "inspect:invalid",
-            0,
+            threads_db_path=exhausted.threads_db_path,
+            parent_thread_id=exhausted.parent_thread_id,
+            solver=ConstantProducer("print(0)"),
+            execution=ConstantProducer(NeedsRepair(RepairFeedback("invalid"))),
+            solver_identity="solver:invalid",
+            execution_identity="execution:invalid",
+            solver_spec=exhausted.solver_spec,
+            execution_spec=exhausted.execution_spec,
+            max_repairs=0,
         ).produce(SolverExecutionRequest("bad", "source")),
         tmp_path / "flow.db",
     )
@@ -303,8 +315,12 @@ def test_capability_isolation_and_item_failures(tmp_path, monkeypatch) -> None:
         execution_tools = get_thread_tools_config(db, execution_id)
         assert not solver_tools.llm_tools_enabled
         assert solver_tools.allowed_tools == set()
-        assert not execution_tools.llm_tools_enabled
+        assert execution_tools.llm_tools_enabled
         assert execution_tools.allowed_tools == {"python", "bash"}
+        assert not solver_tools.is_tool_allowed("python")
+        assert execution_tools.is_tool_allowed("python")
+        assert get_thread_sandbox_config(db, solver_id).enabled
+        assert get_thread_sandbox_config(db, execution_id).enabled
     finally:
         db.conn.close()
 
@@ -322,7 +338,7 @@ def test_nonterminal_infrastructure_failure_propagates(tmp_path, monkeypatch) ->
         def produce(self, value):
             raise TaskError("execution unavailable", Result(error="execution unavailable"))
 
-    _, _, composition = _setup(tmp_path, monkeypatch, inspect=FailingInspection())
+    _, _, composition = _setup(tmp_path, monkeypatch, execution=FailingInspection())
     with pytest.raises(TaskError, match="execution unavailable"):
         _run(
             composition.produce(SolverExecutionRequest("item-1", "source")),
@@ -342,3 +358,81 @@ def test_context_terminal_becomes_item_failure(tmp_path, monkeypatch) -> None:
         tmp_path / "flow.db",
     )
     assert result == ItemFailure("terminal", "context exhausted", 1)
+
+
+def test_execution_resumes_existing_call_without_duplicate(tmp_path, monkeypatch) -> None:
+    import eggopt.solver_execution as module
+
+    threads_path, parent, composition = _setup(
+        tmp_path, monkeypatch, solver=ConstantProducer("printf ok"),
+        execution=BashInspection(), max_repairs=0,
+    )
+    original = module.ThreadRunner.run_once
+    crashed = False
+
+    async def crash_after_execution(self):
+        nonlocal crashed
+        result = await original(self)
+        states = build_tool_call_states(self.db, self.thread_id)
+        if not crashed and any(state.finished_reason for state in states.values()):
+            crashed = True
+            raise RuntimeError("crash after tool execution")
+        return result
+
+    monkeypatch.setattr(module.ThreadRunner, "run_once", crash_after_execution)
+    flow_path = tmp_path / "flow.db"
+    request = SolverExecutionRequest("item-1", "source")
+    with pytest.raises(TaskError, match="crash after tool execution"):
+        _run(composition.produce(request), flow_path)
+
+    monkeypatch.setattr(module.ThreadRunner, "run_once", original)
+    assert "ok" in _run(composition.produce(request), flow_path)
+    db = ThreadsDB(threads_path)
+    db.init_schema()
+    try:
+        execution_id = _children(db, parent)[1]
+        requests = [
+            event for event in _events(db, execution_id, "msg.create")
+            if event.get("tool_calls")
+        ]
+        assert len(requests) == 1
+        assert len(_events(db, execution_id, "tool_call.finished")) == 1
+    finally:
+        db.conn.close()
+
+
+def test_cache_by_invalidates_fixed_workspace_check(tmp_path, monkeypatch) -> None:
+    threads_path, parent, composition = _setup(
+        tmp_path, monkeypatch, solver=ConstantProducer("candidate"),
+        execution=CacheBoundInspection("v1"), max_repairs=0,
+    )
+    flow_path = tmp_path / "flow.db"
+    request = SolverExecutionRequest("item-1", "source")
+    assert "fixed" in _run(composition.produce(request), flow_path)
+    changed = SolverExecution(
+        threads_db_path=str(threads_path), parent_thread_id=parent,
+        solver=ConstantProducer("candidate"), execution=CacheBoundInspection("v2"),
+        solver_identity="solver:v1", execution_identity="execution:v2",
+        solver_spec=composition.solver_spec, execution_spec=composition.execution_spec,
+        max_repairs=0,
+    )
+    assert "fixed" in _run(changed.produce(request), flow_path)
+    db = ThreadsDB(threads_path)
+    db.init_schema()
+    try:
+        assert len(_events(db, _children(db, parent)[1], "tool_call.finished")) == 2
+    finally:
+        db.conn.close()
+
+
+@dataclass
+class CacheBoundInspection:
+    dependency: str
+
+    def produce(self, value):
+        return BashInspectTask(
+            value.execution.bash(
+                "printf fixed", key="workspace-check", cache_by=self.dependency
+            ),
+            value.candidate,
+        )
