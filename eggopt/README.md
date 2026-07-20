@@ -141,3 +141,64 @@ identity. Store paths, thread IDs, labels, and live resource objects are
 excluded. To replay evaluation results after a process restart, open a new
 `TaskStore`/`FlowExecutor` on a copy or restored instance of the prior Eggflow
 SQLite database; its filesystem path may differ.
+
+## Production Eggthreads drive and `solver_safe`
+
+A production mutator uses normal `ThreadRunner` turns and a caller-supplied
+`ToolRegistry`. Configure the authoritative study root before constructing the
+reflector:
+
+```python
+from eggthreads import ToolRegistry
+from eggopt.gepa import (
+    EggthreadsReflectionDrive, EggthreadsReflectionLM,
+    create_solver_safe_study,
+)
+
+study_id, solver_profile = create_solver_safe_study(
+    threads,
+    workspace="./mutator-workspace",
+    model_key="configured-chat-model",
+)
+registry = ToolRegistry()  # Register the implementations the application owns.
+# registry.register(...)
+
+drive = EggthreadsReflectionDrive(
+    llm=llm_client,
+    tools=registry,
+    drive_identity={
+        "model": "configured-chat-model@2026-07",
+        "tool_behavior": "application-tools-v3",
+        "profile": solver_profile,
+        "workspace_policy": "mutator-workspace-v1",
+    },
+    # Choose this only when the application accepts automatic execution of the
+    # already allowlisted tools. Otherwise use Eggthreads' normal approval UI.
+    auto_approve_tools=True,
+)
+proposer = EggthreadsReflectionLM(
+    flow,
+    threads,
+    drive=drive,
+    reflector_id="production-reflector",
+    reflector_version="1",
+    reflector_config={"response_schema": "strict-mutations-v1"},
+    study_thread_id=study_id,
+)
+```
+
+`solver_safe` allowlists exactly `python`, `python_repl`, `bash`, `bash_repl`,
+`add_local_file_to_model_context`, `read_long_tool_output`, `skill`, and
+`tool_help`. Descendants inherit/intersect that policy; a larger registry does
+not expose extra tools. The helper enables Eggthreads' Docker sandbox with an
+empty `network.allowedDomains`, `/workspace`, workspace-only `allowWrite`, and
+`.egg` write/read denial, and disables user sandbox reconfiguration. Eggthreads
+translates the empty domain allowlist to Docker `--network none`; callers remain
+responsible for Docker availability and for versioning the model, registry
+behavior, image/runtime, and workspace policy in `drive_identity`.
+
+The model may use any allowed tool chain. Its causally new final assistant
+message must be strict JSON of the form
+`{"mutations":[{"component":"new text"}]}` with the requested count and
+component names. Eggopt validates it and annotates that exact message with typed
+mutation metadata; arbitrary earlier transcript text is not result authority.

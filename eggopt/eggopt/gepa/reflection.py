@@ -230,12 +230,24 @@ class EggthreadsReflectionLM:
         self.drive = drive
         self.reflector_id = reflector_id
         self.reflector_version = reflector_version
+        drive_identity = getattr(drive, "semantic_identity", {})
         self._reflector_config_json = canonical_json(
-            reflector_config, what="reflector_config"
+            {
+                "reflector": reflector_config,
+                "drive": drive_identity,
+            },
+            what="reflector_config",
         )
+        if getattr(drive, "requires_study_thread", False) and study_thread_id is None:
+            raise ValueError(
+                "production reflection drive requires an explicit study_thread_id"
+            )
         self.study_thread_id = study_thread_id or create_root_thread(
             threads_db, name=study_name
         )
+        validate_study = getattr(drive, "validate_study", None)
+        if callable(validate_study):
+            validate_study(threads_db, self.study_thread_id)
         self.fail_after_response = fail_after_response
 
     def __call__(

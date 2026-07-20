@@ -17,6 +17,14 @@ from .reflection import (
     ReflectionDrive,
     ReflectionOccurrence,
 )
+from .production_drive import (
+    EggthreadsReflectionDrive,
+    SOLVER_SAFE_PROFILE_NAME,
+    SOLVER_SAFE_PROFILE_VERSION,
+    SOLVER_SAFE_TOOLS,
+    configure_solver_safe_tools,
+    create_solver_safe_study,
+)
 from .runner import optimize_with_egg
 
 __all__ = [
@@ -24,7 +32,11 @@ __all__ = [
     "CandidateMutations",
     "EggflowGEPAAdapter",
     "EggthreadsCandidateProposer",
+    "EggthreadsReflectionDrive",
     "EggthreadsReflectionLM",
+    "SOLVER_SAFE_PROFILE_NAME",
+    "SOLVER_SAFE_PROFILE_VERSION",
+    "SOLVER_SAFE_TOOLS",
     "EvaluationSemanticKey",
     "ExampleEvaluation",
     "GEPAResult",
@@ -32,5 +44,7 @@ __all__ = [
     "ReflectionDrive",
     "ReflectionEvidence",
     "ReflectionOccurrence",
+    "configure_solver_safe_tools",
+    "create_solver_safe_study",
     "optimize_with_egg",
 ]
