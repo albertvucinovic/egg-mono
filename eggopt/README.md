@@ -7,6 +7,9 @@ each candidate/example evaluation, and Eggthreads stores each reflective
 mutation as an inspectable `GEPA Study -> Iteration -> Mutation` conversation.
 
 The package deliberately does **not** define a generic optimization runtime.
+Its injected reflection drive has two local entry points: `start` begins the
+first turn in a new Mutation conversation, while `resume` drives a request that
+was appended to an existing candidate-lineage conversation.
 
 ## Minimal wiring
 
@@ -35,11 +38,20 @@ def evaluate(candidate, example):
     )
 
 # A real application injects its own drive. Tests use deterministic fakes only.
-def drive(conversation, request):
-    del request
-    mutation = CandidateMutation({"instruction": "better instruction"})
-    conversation.append_assistant("Inspectable reflection", mutation)
-    return mutation
+class Drive:
+    def start(self, conversation, request):
+        del request
+        mutation = CandidateMutation({"instruction": "better instruction"})
+        conversation.append_assistant("Inspectable reflection", mutation)
+        return mutation
+
+    def resume(self, conversation, request):
+        # The request is already appended to the producing conversation.
+        mutation = CandidateMutation({"instruction": "better instruction"})
+        conversation.append_assistant("Inspectable follow-up", mutation)
+        return mutation
+
+drive = Drive()
 
 adapter = EggflowGEPAAdapter(
     flow,
@@ -69,6 +81,15 @@ result = optimize_with_egg(
 )
 print(result.best_candidate, result.parents, result.per_val_instance_best_candidates)
 ```
+
+Reflection turns have two identities: the Eggflow task key is semantic, while
+the Eggthread is physical conversation context. Repeating an identical request
+reuses the typed Eggflow result even from another study. For a new request about
+a candidate produced by an earlier mutation, the proposer finds that structured
+candidate result and appends the follow-up to the same Mutation thread. On
+restart, pass the persisted `study_thread_id` to recover that affinity; thread
+display names are never authority. An interrupted request already present in
+that study is driven in place without appending a duplicate trigger.
 
 Semantic evaluation keys include a versioned operation, stable evaluator
 identity/configuration, the candidate, and application-supplied example

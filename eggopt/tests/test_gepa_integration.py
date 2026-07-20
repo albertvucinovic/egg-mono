@@ -60,10 +60,33 @@ class CountingEvaluator:
 
 class DeterministicDrive:
     def __init__(self) -> None:
-        self.calls = 0
+        self.start_calls = 0
+        self.resume_calls = 0
+        self.thread_ids: list[str] = []
+        self.context_roles: list[list[str]] = []
 
-    def __call__(self, conversation, request) -> CandidateMutation:
-        self.calls += 1
+    @property
+    def calls(self) -> int:
+        return self.start_calls + self.resume_calls
+
+    def start(self, conversation, request) -> CandidateMutation:
+        self.start_calls += 1
+        return self._respond(conversation, request)
+
+    def resume(self, conversation, request) -> CandidateMutation:
+        self.resume_calls += 1
+        return self._respond(conversation, request)
+
+    def _respond(self, conversation, request) -> CandidateMutation:
+        self.thread_ids.append(conversation.thread_id)
+        projection = load_thread_projection(
+            conversation.db,
+            conversation.thread_id,
+            conversation.db.max_event_seq(conversation.thread_id),
+        )
+        self.context_roles.append(
+            [message.payload.get("role") for message in projection.messages]
+        )
         next_level = int(request["candidate"]["instruction"]) + 1
         mutation = CandidateMutation({"instruction": str(next_level)})
         # This text intentionally advertises the wrong candidate. The structured
@@ -147,20 +170,25 @@ def test_upstream_gepa_keeps_candidates_lineage_and_specialists(tmp_path):
     assert drive.calls == 2
 
     iterations = list_children_with_meta(threads, proposer.study_thread_id)
-    assert [name for _, name, _, _ in iterations] == ["Iteration 001", "Iteration 002"]
-    for iteration_id, _, _, _ in iterations:
-        mutations = list_children_with_meta(threads, iteration_id)
-        assert [name for _, name, _, _ in mutations] == ["Mutation"]
-        mutation_id = mutations[0][0]
-        messages = load_thread_projection(
-            threads, mutation_id, threads.max_event_seq(mutation_id)
-        ).messages
-        assistant = [message for message in messages if message.payload.get("role") == "assistant"]
-        assert any(message.payload.get("eggopt_kind") for message in assistant)
-        assert any(
-            message.payload.get("content") == "I would choose instruction=999"
-            for message in assistant
-        )
+    assert [name for _, name, _, _ in iterations] == ["Iteration 001"]
+    mutations = list_children_with_meta(threads, iterations[0][0])
+    assert [name for _, name, _, _ in mutations] == ["Mutation"]
+    mutation_id = mutations[0][0]
+    messages = load_thread_projection(
+        threads, mutation_id, threads.max_event_seq(mutation_id)
+    ).messages
+    assistant = [
+        message for message in messages if message.payload.get("role") == "assistant"
+    ]
+    assert len(assistant) == 2
+    assert all(message.payload.get("eggopt_kind") for message in assistant)
+    assert all(
+        message.payload.get("content") == "I would choose instruction=999"
+        for message in assistant
+    )
+    assert drive.thread_ids == [mutation_id, mutation_id]
+    assert drive.start_calls == 1
+    assert drive.resume_calls == 1
 
 
 def test_evaluations_replay_in_a_new_process_at_a_different_path(tmp_path):
@@ -273,6 +301,145 @@ print(json.dumps({
     assert changed.semantic_key(candidate, examples[0]).digest() != keys[0]
 
 
+def test_identical_reflection_reuses_committed_result_with_fresh_proposer(tmp_path):
+    flow_path, store, executor, threads = make_runtime(tmp_path)
+    first_drive = DeterministicDrive()
+    first = make_proposer(executor, threads, first_drive)
+    candidate = {"instruction": "0"}
+    dataset = {"instruction": [{"Feedback": "reach level 1"}]}
+
+    assert first(candidate, dataset, ["instruction"]) == {"instruction": "1"}
+    first_occurrence = first.occurrence(candidate, dataset, ["instruction"])
+    assert first_occurrence is not None
+    store.conn.close()
+
+    fresh_store = TaskStore(str(flow_path))
+    fresh_drive = DeterministicDrive()
+    # This different physical study is deliberately empty. The semantic
+    # Eggflow result remains reusable without consulting or driving a thread.
+    fresh = make_proposer(FlowExecutor(fresh_store), threads, fresh_drive)
+    assert fresh.study_thread_id != first.study_thread_id
+
+    assert fresh(candidate, dataset, ["instruction"]) == {"instruction": "1"}
+    assert fresh_drive.calls == 0
+    assert list_children_with_meta(threads, fresh.study_thread_id) == []
+
+
+def test_new_turn_for_mutated_candidate_reuses_lineage_conversation(tmp_path):
+    _, _, executor, threads = make_runtime(tmp_path)
+    drive = DeterministicDrive()
+    first = make_proposer(executor, threads, drive)
+    first_dataset = {"instruction": [{"Feedback": "reach level 1"}]}
+
+    assert first(
+        {"instruction": "0"}, first_dataset, ["instruction"]
+    ) == {"instruction": "1"}
+    first_occurrence = first.occurrence(
+        {"instruction": "0"}, first_dataset, ["instruction"]
+    )
+    assert first_occurrence is not None
+
+    # A fresh runtime object binds by the authoritative study id. New evidence
+    # for candidate B is a new semantic turn in B's producing conversation.
+    restarted_drive = DeterministicDrive()
+    restarted = make_proposer(
+        executor,
+        threads,
+        restarted_drive,
+        study_thread_id=first.study_thread_id,
+    )
+    second_dataset = {"instruction": [{"Feedback": "now reach level 2"}]}
+    assert restarted(
+        {"instruction": "1"}, second_dataset, ["instruction"]
+    ) == {"instruction": "2"}
+    second_occurrence = restarted.occurrence(
+        {"instruction": "1"}, second_dataset, ["instruction"]
+    )
+
+    assert second_occurrence is not None
+    assert second_occurrence.mutation_thread_id == first_occurrence.mutation_thread_id
+    assert restarted_drive.thread_ids == [first_occurrence.mutation_thread_id]
+    assert restarted_drive.start_calls == 0
+    assert restarted_drive.resume_calls == 1
+    assert restarted_drive.context_roles == [["user", "assistant", "user"]]
+    iterations = list_children_with_meta(threads, first.study_thread_id)
+    assert len(iterations) == 1
+    assert len(list_children_with_meta(threads, iterations[0][0])) == 1
+    messages = load_thread_projection(
+        threads,
+        first_occurrence.mutation_thread_id,
+        threads.max_event_seq(first_occurrence.mutation_thread_id),
+    ).messages
+    assert [message.payload.get("role") for message in messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert messages[0].payload["request"]["candidate"] == {"instruction": "0"}
+    assert messages[2].payload["request"]["candidate"] == {"instruction": "1"}
+
+
+def test_interrupted_request_reuses_exact_thread_without_duplicate_trigger(tmp_path):
+    _, store, executor, threads = make_runtime(tmp_path)
+
+    class InterruptedDrive(DeterministicDrive):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_once = True
+
+        def start(self, conversation, request):
+            self.start_calls += 1
+            self.thread_ids.append(conversation.thread_id)
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("interrupted before typed response")
+            return self._respond(conversation, request)
+
+    first_drive = InterruptedDrive()
+    first = make_proposer(executor, threads, first_drive)
+    candidate = {"instruction": "0"}
+    dataset = {"instruction": [{"Feedback": "reach level 1"}]}
+
+    with pytest.raises(TaskError, match="interrupted before typed response"):
+        first(candidate, dataset, ["instruction"])
+    occurrence = first.occurrence(candidate, dataset, ["instruction"])
+    assert occurrence is not None and occurrence.response_message_id is None
+    key = first.semantic_key(candidate, dataset, ["instruction"])
+    assert store.get(key)["status"] == "FAILED"
+
+    restarted_drive = DeterministicDrive()
+    restarted = make_proposer(
+        executor,
+        threads,
+        restarted_drive,
+        study_thread_id=first.study_thread_id,
+    )
+    assert restarted(candidate, dataset, ["instruction"]) == {"instruction": "1"}
+    recovered = restarted.occurrence(candidate, dataset, ["instruction"])
+    assert recovered is not None
+    assert recovered.mutation_thread_id == occurrence.mutation_thread_id
+    assert restarted_drive.thread_ids == [occurrence.mutation_thread_id]
+    assert restarted_drive.start_calls == 1
+    assert restarted_drive.resume_calls == 0
+
+    iterations = list_children_with_meta(threads, first.study_thread_id)
+    assert len(iterations) == 1
+    assert len(list_children_with_meta(threads, iterations[0][0])) == 1
+    messages = load_thread_projection(
+        threads,
+        occurrence.mutation_thread_id,
+        threads.max_event_seq(occurrence.mutation_thread_id),
+    ).messages
+    requests = [
+        message
+        for message in messages
+        if message.payload.get("eggopt_kind")
+        == "eggopt.gepa.reflection-request.v1"
+    ]
+    assert [message.msg_id for message in requests] == [occurrence.request_message_id]
+
+
 def test_drive_transcript_is_not_result_authority(tmp_path):
     _, _, executor, threads = make_runtime(tmp_path)
 
@@ -280,14 +447,22 @@ def test_drive_transcript_is_not_result_authority(tmp_path):
         def __init__(self) -> None:
             self.calls = 0
 
-        def __call__(self, conversation, request):
+        def start(self, conversation, request):
             del request
             self.calls += 1
             # Neither this transcript nor its thread label can authorize a result.
             from eggthreads import append_message
 
-            append_message(conversation.db, conversation.thread_id, "assistant", "instruction=42")
+            append_message(
+                conversation.db,
+                conversation.thread_id,
+                "assistant",
+                "instruction=42",
+            )
             return CandidateMutation({"instruction": "1"})
+
+        def resume(self, conversation, request):
+            return self.start(conversation, request)
 
     drive = TextOnlyDrive()
     proposer = make_proposer(executor, threads, drive, study_name="instruction=42")
@@ -335,10 +510,18 @@ def test_recovery_reuses_persisted_assistant_mutation(tmp_path):
     row = store.get(proposer.semantic_key(candidate, dataset, ["instruction"]))
     assert row is not None and row["status"] == "FAILED"
 
-    # Retry crosses Eggflow's real FAILED -> recover -> run boundary. run() finds
-    # the structured assistant result and neither continues nor drives again.
-    assert proposer(candidate, dataset, ["instruction"]) == {"instruction": "1"}
+    # A fresh proposer crosses Eggflow's real FAILED -> recover -> run boundary.
+    # run() finds the structured assistant result and does not drive again.
+    restarted_drive = DeterministicDrive()
+    restarted = make_proposer(
+        executor,
+        threads,
+        restarted_drive,
+        study_thread_id=proposer.study_thread_id,
+    )
+    assert restarted(candidate, dataset, ["instruction"]) == {"instruction": "1"}
     assert drive.calls == 1
-    assert proposer.occurrence(candidate, dataset, ["instruction"]) == occurrence
-    completed = store.get(proposer.semantic_key(candidate, dataset, ["instruction"]))
+    assert restarted_drive.calls == 0
+    assert restarted.occurrence(candidate, dataset, ["instruction"]) == occurrence
+    completed = store.get(restarted.semantic_key(candidate, dataset, ["instruction"]))
     assert completed is not None and completed["status"] == "COMPLETED"

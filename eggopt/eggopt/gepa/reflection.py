@@ -44,9 +44,15 @@ class CandidateMutation:
 
 
 class ReflectionDrive(Protocol):
-    """Injected drive for one persistent Eggthreads mutation conversation."""
+    """Injected driver for one persistent Eggthreads conversation."""
 
-    def __call__(
+    def start(
+        self,
+        conversation: "ReflectionConversation",
+        request: Mapping[str, Any],
+    ) -> CandidateMutation: ...
+
+    def resume(
         self,
         conversation: "ReflectionConversation",
         request: Mapping[str, Any],
@@ -95,33 +101,44 @@ class ReflectionOccurrence:
 
 
 @dataclass
-class _ReflectionTask(Task):
+class _CachedReflectionTask(Task):
     semantic_key: str
-    threads_db: ThreadsDB
-    study_thread_id: str
-    request: dict[str, Any]
-    drive: ReflectionDrive
-    fail_after_response: Callable[[], None] | None = None
 
     def get_cache_key(self) -> str:
-        # Physical thread IDs, database paths, names, and the live drive are
-        # occurrence resources and intentionally do not participate.
         return self.semantic_key
 
     async def run(self) -> CandidateMutation:
-        occurrence = _resolve_or_create_occurrence(
-            self.threads_db, self.study_thread_id, self.semantic_key, self.request
-        )
+        raise RuntimeError("completed reflection cache entry was not reused")
+
+
+@dataclass
+class _ReflectionTask(Task):
+    semantic_key: str
+    threads_db: ThreadsDB
+    occurrence: ReflectionOccurrence
+    request: dict[str, Any]
+    drive: ReflectionDrive
+    resume: bool
+    fail_after_response: Callable[[], None] | None = None
+
+    def get_cache_key(self) -> str:
+        # Physical thread IDs, paths, and the live drive remain occurrence-only.
+        return self.semantic_key
+
+    async def run(self) -> CandidateMutation:
         persisted = _load_response(
-            self.threads_db, occurrence.mutation_thread_id, self.semantic_key
+            self.threads_db, self.occurrence.mutation_thread_id, self.semantic_key
         )
         if persisted is not None:
             return persisted[0]
 
         conversation = ReflectionConversation(
-            self.threads_db, occurrence.mutation_thread_id, self.semantic_key
+            self.threads_db,
+            self.occurrence.mutation_thread_id,
+            self.semantic_key,
         )
-        value = self.drive(conversation, dict(self.request))
+        method = self.drive.resume if self.resume else self.drive.start
+        value = method(conversation, dict(self.request))
         if inspect.isawaitable(value):
             value = await value
         mutation = _validate_mutation(value, self.request)
@@ -130,31 +147,20 @@ class _ReflectionTask(Task):
                 "reflection drive must persist its assistant response with "
                 "conversation.append_assistant()"
             )
-        persisted = _load_response_message(
+        persisted_mutation = _load_response_message(
             self.threads_db,
-            occurrence.mutation_thread_id,
+            self.occurrence.mutation_thread_id,
             conversation.response_message_id,
             self.semantic_key,
         )
-        if persisted != mutation:
+        if persisted_mutation != mutation:
             raise ValueError("persisted assistant mutation differs from drive result")
         if self.fail_after_response is not None:
             self.fail_after_response()
         return mutation
 
     async def recover(self) -> bool:
-        # A completed response is already a durable typed semantic boundary.
-        # run() will reuse it. No continuation is appropriate for that case.
-        occurrence = _find_occurrence(self.threads_db, self.study_thread_id, self.semantic_key)
-        if occurrence is not None:
-            persisted = _load_response(
-                self.threads_db, occurrence.mutation_thread_id, self.semantic_key
-            )
-            if persisted is not None:
-                return True
-        # The only real boundary exposed by this slice drives atomically in the
-        # injected callable. A request-only thread is healthy pending work, so
-        # it must not be continued speculatively.
+        # run() reconciles a persisted typed response before invoking the drive.
         return True
 
 
@@ -174,10 +180,14 @@ class EggthreadsCandidateProposer:
         study_name: str = "GEPA Study",
         fail_after_response: Callable[[], None] | None = None,
     ) -> None:
+        """Bind a drive to a study; persist ``study_thread_id`` for restart."""
+
         if not isinstance(reflector_id, str) or not reflector_id:
             raise ValueError("reflector_id must be a non-empty string")
         if not isinstance(reflector_version, str) or not reflector_version:
             raise ValueError("reflector_version must be a non-empty string")
+        if study_thread_id is not None and threads_db.get_thread(study_thread_id) is None:
+            raise ValueError(f"study thread not found: {study_thread_id}")
         self.executor = executor
         self.threads_db = threads_db
         self.drive = drive
@@ -186,7 +196,9 @@ class EggthreadsCandidateProposer:
         self._reflector_config_json = canonical_json(
             reflector_config, what="reflector_config"
         )
-        self.study_thread_id = study_thread_id or create_root_thread(threads_db, name=study_name)
+        self.study_thread_id = study_thread_id or create_root_thread(
+            threads_db, name=study_name
+        )
         self.fail_after_response = fail_after_response
 
     def __call__(
@@ -197,14 +209,44 @@ class EggthreadsCandidateProposer:
     ) -> dict[str, str]:
         request = self._request(candidate, reflective_dataset, components_to_update)
         key = self.semantic_key(candidate, reflective_dataset, components_to_update)
+        occurrence = _find_occurrence(self.threads_db, self.study_thread_id, key)
+        cached = self.executor.store.get(key)
+        if occurrence is None and cached is not None and cached["status"] == "COMPLETED":
+            cached_mutation = _run_sync(
+                self.executor.run(_CachedReflectionTask(key))
+            )
+            if not isinstance(cached_mutation, CandidateMutation):
+                raise TypeError("reflection task must return CandidateMutation")
+            return dict(cached_mutation.updates)
+        if occurrence is None:
+            affinity_thread_id = _find_candidate_affinity(
+                self.threads_db, self.study_thread_id, candidate
+            )
+            if affinity_thread_id is None and _has_uncommitted_request(
+                self.threads_db, self.study_thread_id
+            ):
+                raise RuntimeError(
+                    "study has an uncommitted reflection request; resume it before "
+                    "starting independent work"
+                )
+            occurrence = _append_request(
+                self.threads_db,
+                self.study_thread_id,
+                key,
+                request,
+                affinity_thread_id=affinity_thread_id,
+            )
         mutation = _run_sync(
             self.executor.run(
                 _ReflectionTask(
                     semantic_key=key,
                     threads_db=self.threads_db,
-                    study_thread_id=self.study_thread_id,
+                    occurrence=occurrence,
                     request=request,
                     drive=self.drive,
+                    resume=_thread_has_prior_response(
+                        self.threads_db, occurrence.mutation_thread_id
+                    ),
                     fail_after_response=self.fail_after_response,
                 )
             )
@@ -255,7 +297,6 @@ class EggthreadsCandidateProposer:
         components_to_update: Sequence[str],
     ) -> dict[str, Any]:
         components = _validate_components(candidate, components_to_update)
-        # JSON round-trip makes the persisted request detached and concrete.
         dataset = json.loads(canonical_json(reflective_dataset, what="reflective_dataset"))
         return {
             "candidate": dict(canonical_candidate(candidate)),
@@ -264,20 +305,25 @@ class EggthreadsCandidateProposer:
         }
 
 
-def _resolve_or_create_occurrence(
+def _append_request(
     db: ThreadsDB,
     study_thread_id: str,
     semantic_key: str,
     request: Mapping[str, Any],
+    *,
+    affinity_thread_id: str | None,
 ) -> ReflectionOccurrence:
-    found = _find_occurrence(db, study_thread_id, semantic_key)
-    if found is not None:
-        return found
-    iteration_number = len(list_children_with_meta(db, study_thread_id)) + 1
-    iteration_id = create_child_thread(
-        db, study_thread_id, name=f"Iteration {iteration_number:03d}"
-    )
-    mutation_id = create_child_thread(db, iteration_id, name="Mutation")
+    if affinity_thread_id is None:
+        iteration_number = len(list_children_with_meta(db, study_thread_id)) + 1
+        iteration_id = create_child_thread(
+            db, study_thread_id, name=f"Iteration {iteration_number:03d}"
+        )
+        mutation_id = create_child_thread(db, iteration_id, name="Mutation")
+    else:
+        mutation_id = affinity_thread_id
+        iteration_id = _parent_thread_id(db, mutation_id)
+        if iteration_id is None:
+            raise ValueError(f"mutation thread has no iteration parent: {mutation_id}")
     request_id = append_message(
         db,
         mutation_id,
@@ -300,28 +346,100 @@ def _resolve_or_create_occurrence(
 def _find_occurrence(
     db: ThreadsDB, study_thread_id: str, semantic_key: str
 ) -> ReflectionOccurrence | None:
-    for iteration_id, _name, _recap, _created in list_children_with_meta(db, study_thread_id):
-        for mutation_id, _mname, _mrecap, _mcreated in list_children_with_meta(db, iteration_id):
-            projection = _projection(db, mutation_id)
-            request_id: str | None = None
-            response_id: str | None = None
-            for message in projection.messages:
-                payload = message.payload
-                if payload.get("semantic_key") != semantic_key:
-                    continue
-                if payload.get("eggopt_kind") == _REFLECTION_REQUEST_KIND:
-                    request_id = message.msg_id
-                elif payload.get("eggopt_kind") == _REFLECTION_RESPONSE_KIND:
-                    response_id = message.msg_id
-            if request_id is not None:
-                return ReflectionOccurrence(
-                    study_thread_id=study_thread_id,
-                    iteration_thread_id=iteration_id,
-                    mutation_thread_id=mutation_id,
-                    request_message_id=request_id,
-                    response_message_id=response_id,
-                )
+    for iteration_id, mutation_id in _mutation_threads(db, study_thread_id):
+        request_id: str | None = None
+        response_id: str | None = None
+        for message in _projection(db, mutation_id).messages:
+            payload = message.payload
+            if payload.get("semantic_key") != semantic_key:
+                continue
+            if payload.get("eggopt_kind") == _REFLECTION_REQUEST_KIND:
+                request_id = message.msg_id
+            elif payload.get("eggopt_kind") == _REFLECTION_RESPONSE_KIND:
+                response_id = message.msg_id
+        if request_id is not None:
+            return ReflectionOccurrence(
+                study_thread_id=study_thread_id,
+                iteration_thread_id=iteration_id,
+                mutation_thread_id=mutation_id,
+                request_message_id=request_id,
+                response_message_id=response_id,
+            )
     return None
+
+
+def _has_uncommitted_request(db: ThreadsDB, study_thread_id: str) -> bool:
+    for _iteration_id, mutation_id in _mutation_threads(db, study_thread_id):
+        pending: set[str] = set()
+        for message in _projection(db, mutation_id).messages:
+            payload = message.payload
+            semantic_key = payload.get("semantic_key")
+            if not isinstance(semantic_key, str):
+                continue
+            if payload.get("eggopt_kind") == _REFLECTION_REQUEST_KIND:
+                pending.add(semantic_key)
+            elif payload.get("eggopt_kind") == _REFLECTION_RESPONSE_KIND:
+                pending.discard(semantic_key)
+        if pending:
+            return True
+    return False
+
+
+def _find_candidate_affinity(
+    db: ThreadsDB,
+    study_thread_id: str,
+    candidate: Mapping[str, str],
+) -> str | None:
+    target = dict(canonical_candidate(candidate))
+    for _iteration_id, mutation_id in _mutation_threads(db, study_thread_id):
+        for message in reversed(_projection(db, mutation_id).messages):
+            for mutation in _response_mutations(message.payload):
+                if mutation.updates == target:
+                    return mutation_id
+    return None
+
+
+def _response_mutations(payload: Mapping[str, Any]) -> tuple[CandidateMutation, ...]:
+    if payload.get("eggopt_kind") != _REFLECTION_RESPONSE_KIND:
+        return ()
+    # Current drives persist one mutation. A future plural result can store a
+    # ``mutations`` list here without changing lineage-affinity discovery.
+    raw_mutations = payload.get("mutations")
+    if raw_mutations is None:
+        raw_mutations = [payload.get("mutation")]
+    if not isinstance(raw_mutations, list):
+        return ()
+    mutations: list[CandidateMutation] = []
+    for raw in raw_mutations:
+        try:
+            mutations.append(CandidateMutation(raw))
+        except (TypeError, ValueError):
+            continue
+    return tuple(mutations)
+
+
+def _mutation_threads(db: ThreadsDB, study_thread_id: str):
+    for iteration_id, _name, _recap, _created in list_children_with_meta(
+        db, study_thread_id
+    ):
+        for mutation_id, _mname, _mrecap, _mcreated in list_children_with_meta(
+            db, iteration_id
+        ):
+            yield iteration_id, mutation_id
+
+
+def _parent_thread_id(db: ThreadsDB, thread_id: str) -> str | None:
+    row = db.conn.execute(
+        "SELECT parent_id FROM children WHERE child_id=?", (thread_id,)
+    ).fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def _thread_has_prior_response(db: ThreadsDB, mutation_thread_id: str) -> bool:
+    return any(
+        message.payload.get("eggopt_kind") == _REFLECTION_RESPONSE_KIND
+        for message in _projection(db, mutation_thread_id).messages
+    )
 
 
 def _load_response(
@@ -333,7 +451,6 @@ def _load_response(
             payload.get("eggopt_kind") == _REFLECTION_RESPONSE_KIND
             and payload.get("semantic_key") == semantic_key
         ):
-            # Structured payload is authority; content/name scanning is not.
             return CandidateMutation(payload.get("mutation")), message.msg_id
     return None
 
