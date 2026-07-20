@@ -5,7 +5,7 @@ from typing import Any
 from gepa import GEPAResult, optimize
 
 from .evaluation import EggflowGEPAAdapter
-from .reflection import EggthreadsCandidateProposer
+from .reflection import EggthreadsReflectionLM
 
 
 def optimize_with_egg(
@@ -13,7 +13,7 @@ def optimize_with_egg(
     seed_candidate: dict[str, str],
     trainset: list[Any],
     adapter: EggflowGEPAAdapter[Any, Any],
-    proposer: EggthreadsCandidateProposer,
+    proposer: EggthreadsReflectionLM,
     valset: list[Any] | None = None,
     **gepa_options: Any,
 ) -> GEPAResult:
@@ -24,7 +24,13 @@ def optimize_with_egg(
     directly to :func:`gepa.optimize`.
     """
 
-    forbidden = {"custom_candidate_proposer", "reflection_lm", "task_lm", "evaluator"}
+    forbidden = {
+        "custom_candidate_proposer",
+        "reflection_lm",
+        "reflection_strategy",
+        "task_lm",
+        "evaluator",
+    }
     overlap = forbidden.intersection(gepa_options)
     if overlap:
         raise TypeError(f"Egg integration owns GEPA option(s): {sorted(overlap)}")
@@ -33,6 +39,6 @@ def optimize_with_egg(
         trainset=trainset,
         valset=valset,
         adapter=adapter,
-        custom_candidate_proposer=proposer,
+        reflection_strategy=proposer,
         **gepa_options,
     )

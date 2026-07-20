@@ -16,10 +16,15 @@ from eggthreads import (
     load_thread_projection,
 )
 from gepa import GEPAResult
-from gepa.utils.stop_condition import MaxTrackedCandidatesStopper
+from gepa.strategies.proposal_sampling import SameParentSampling
+from gepa.utils.stop_condition import (
+    MaxCandidateProposalsStopper,
+    MaxTrackedCandidatesStopper,
+)
 
 from eggopt.gepa import (
     CandidateMutation,
+    CandidateMutations,
     EggflowGEPAAdapter,
     EggthreadsCandidateProposer,
     ExampleEvaluation,
@@ -189,6 +194,257 @@ def test_upstream_gepa_keeps_candidates_lineage_and_specialists(tmp_path):
     assert drive.thread_ids == [mutation_id, mutation_id]
     assert drive.start_calls == 1
     assert drive.resume_calls == 1
+
+
+def test_singular_reflector_uses_upstream_reflection_strategy(monkeypatch, tmp_path):
+    from eggopt.gepa import runner
+
+    captured = {}
+
+    def fake_optimize(**kwargs):
+        captured.update(kwargs)
+        return "result"
+
+    monkeypatch.setattr(runner, "optimize", fake_optimize)
+    _, _, executor, threads = make_runtime(tmp_path)
+    reflector = make_proposer(executor, threads, DeterministicDrive())
+    adapter = make_adapter(executor, CountingEvaluator())
+
+    assert optimize_with_egg(
+        seed_candidate={"instruction": "0"},
+        trainset=[Example("one", 1)],
+        adapter=adapter,
+        proposer=reflector,
+        max_metric_calls=1,
+    ) == "result"
+    assert captured["reflection_strategy"] is reflector
+    assert "custom_candidate_proposer" not in captured
+
+
+def test_candidate_mutations_are_non_empty_ordered_and_pickle_safe():
+    import pickle
+
+    mutations = CandidateMutations(
+        (
+            CandidateMutation({"instruction": "first"}),
+            CandidateMutation({"instruction": "second"}),
+        )
+    )
+    assert [item.updates["instruction"] for item in mutations] == [
+        "first",
+        "second",
+    ]
+    assert pickle.loads(pickle.dumps(mutations)) == mutations
+    assert CandidateMutations.one(
+        CandidateMutation({"instruction": "only"})
+    ).items[0].updates == {"instruction": "only"}
+    with pytest.raises(ValueError, match="must not be empty"):
+        CandidateMutations(())
+
+
+def test_same_parent_sampling_uses_one_plural_turn_and_upstream_selection(
+    tmp_path,
+):
+    @dataclass(frozen=True)
+    class SpecialistExample:
+        example_id: str
+
+    class SpecialistEvaluator:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, str]] = []
+
+        def __call__(self, candidate, example):
+            level = int(candidate["instruction"])
+            self.calls.append((level, example.example_id))
+            scores = {
+                "left": {0: 0.0, 1: 0.5, 2: 1.0},
+                "right": {0: 0.0, 1: 1.0, 2: 0.5},
+            }
+            score = scores[example.example_id][level]
+            return ExampleEvaluation(
+                output=str(level),
+                score=score,
+                evidence=ReflectionEvidence(
+                    inputs={"example_id": example.example_id},
+                    generated_outputs=str(level),
+                    feedback="become the matching specialist",
+                ),
+            )
+
+    class PluralDrive:
+        def __init__(self) -> None:
+            self.start_calls = 0
+            self.resume_calls = 0
+            self.thread_ids: list[str] = []
+
+        def start(self, conversation, request):
+            self.start_calls += 1
+            self.thread_ids.append(conversation.thread_id)
+            assert request["mutation_count"] == 2
+            mutations = CandidateMutations(
+                (
+                    CandidateMutation({"instruction": "1"}),
+                    CandidateMutation({"instruction": "2"}),
+                )
+            )
+            conversation.append_assistant("Two specialists", mutations)
+            return mutations
+
+        def resume(self, conversation, request):
+            self.resume_calls += 1
+            return self.start(conversation, request)
+
+    _, _, executor, threads = make_runtime(tmp_path)
+    evaluator = SpecialistEvaluator()
+    drive = PluralDrive()
+    adapter = make_adapter(executor, evaluator, config={"metric": "specialist"})
+    reflector = make_proposer(executor, threads, drive)
+    examples = [SpecialistExample("left"), SpecialistExample("right")]
+
+    result = optimize_with_egg(
+        seed_candidate={"instruction": "0"},
+        trainset=examples,
+        valset=examples,
+        adapter=adapter,
+        proposer=reflector,
+        sampling_strategy=SameParentSampling(2),
+        stop_callbacks=MaxCandidateProposalsStopper(1),
+        reflection_minibatch_size=1,
+        skip_perfect_score=False,
+        seed=1,
+        logger=QuietLogger(),
+    )
+
+    assert result.candidates == [
+        {"instruction": "0"},
+        {"instruction": "1"},
+        {"instruction": "2"},
+    ]
+    assert result.parents == [[None], [0], [0]]
+    assert result.val_aggregate_scores == [0.0, 0.75, 0.75]
+    assert result.per_val_instance_best_candidates == {0: {2}, 1: {1}}
+    assert drive.start_calls == 1
+    assert drive.resume_calls == 0
+    assert {level for level, _example_id in evaluator.calls} == {0, 1, 2}
+
+    iterations = list_children_with_meta(threads, reflector.study_thread_id)
+    assert len(iterations) == 1
+    mutations = list_children_with_meta(threads, iterations[0][0])
+    assert len(mutations) == 1
+    assert drive.thread_ids == [mutations[0][0]]
+    messages = load_thread_projection(
+        threads, mutations[0][0], threads.max_event_seq(mutations[0][0])
+    ).messages
+    response = next(
+        message
+        for message in messages
+        if message.payload.get("eggopt_kind")
+        == "eggopt.gepa.reflection-response.v1"
+    )
+    assert response.payload["mutations"] == [
+        {"instruction": "1"},
+        {"instruction": "2"},
+    ]
+    assert "mutation" not in response.payload
+
+
+def test_plural_turn_cache_replay_and_each_child_keeps_affinity(tmp_path):
+    class PluralDrive(DeterministicDrive):
+        def start(self, conversation, request):
+            self.start_calls += 1
+            self.thread_ids.append(conversation.thread_id)
+            self.context_roles.append(_roles(conversation))
+            count = request["mutation_count"]
+            mutations = CandidateMutations(
+                tuple(
+                    CandidateMutation({"instruction": str(index + 1)})
+                    for index in range(count)
+                )
+            )
+            conversation.append_assistant("Plural mutation", mutations)
+            return mutations
+
+        def resume(self, conversation, request):
+            self.resume_calls += 1
+            self.thread_ids.append(conversation.thread_id)
+            self.context_roles.append(_roles(conversation))
+            level = int(request["candidate"]["instruction"]) + 10
+            mutation = CandidateMutation({"instruction": str(level)})
+            conversation.append_assistant("Follow-up", mutation)
+            return mutation
+
+    def _roles(conversation):
+        projection = load_thread_projection(
+            conversation.db,
+            conversation.thread_id,
+            conversation.db.max_event_seq(conversation.thread_id),
+        )
+        return [message.payload.get("role") for message in projection.messages]
+
+    flow_path, store, executor, threads = make_runtime(tmp_path)
+    first_drive = PluralDrive()
+    first = make_proposer(executor, threads, first_drive)
+    candidate = {"instruction": "0"}
+    jobs = [
+        (candidate, {"instruction": [{"Feedback": "left"}]}, ["instruction"]),
+        (candidate, {"instruction": [{"Feedback": "right"}]}, ["instruction"]),
+    ]
+
+    proposals = first.reflect_many(jobs)
+    assert [proposal.new_texts for proposal, _next in proposals] == [
+        {"instruction": "1"},
+        {"instruction": "2"},
+    ]
+    occurrence = first.occurrence_many(candidate, jobs)
+    assert occurrence is not None
+    assert first_drive.start_calls == 1
+    store.conn.close()
+
+    fresh_store = TaskStore(str(flow_path))
+    replay_drive = PluralDrive()
+    replay = make_proposer(FlowExecutor(fresh_store), threads, replay_drive)
+    replayed = replay.reflect_many(jobs)
+    assert [proposal.new_texts for proposal, _next in replayed] == [
+        {"instruction": "1"},
+        {"instruction": "2"},
+    ]
+    assert replay_drive.calls == 0
+
+    # Each child persisted in the plural response resolves to its producing
+    # conversation when later evidence arrives.
+    lineage_drive = PluralDrive()
+    lineage = make_proposer(
+        FlowExecutor(fresh_store),
+        threads,
+        lineage_drive,
+        study_thread_id=first.study_thread_id,
+    )
+    for child in ({"instruction": "1"}, {"instruction": "2"}):
+        proposal, _next = lineage.reflect(
+            child,
+            {"instruction": [{"Feedback": f"critique {child['instruction']}"}]},
+            ["instruction"],
+        )
+        assert proposal.new_texts == {
+            "instruction": str(int(child["instruction"]) + 10)
+        }
+
+    assert lineage_drive.resume_calls == 2
+    assert lineage_drive.thread_ids == [
+        occurrence.mutation_thread_id,
+        occurrence.mutation_thread_id,
+    ]
+    assert lineage_drive.context_roles[0] == ["user", "assistant", "user"]
+    assert lineage_drive.context_roles[1] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
+    iterations = list_children_with_meta(threads, first.study_thread_id)
+    assert len(iterations) == 1
+    assert len(list_children_with_meta(threads, iterations[0][0])) == 1
 
 
 def test_evaluations_replay_in_a_new_process_at_a_different_path(tmp_path):

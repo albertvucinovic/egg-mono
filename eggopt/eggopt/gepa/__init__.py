@@ -10,7 +10,9 @@ from .evaluation import (
 )
 from .reflection import (
     CandidateMutation,
+    CandidateMutations,
     EggthreadsCandidateProposer,
+    EggthreadsReflectionLM,
     ReflectionConversation,
     ReflectionDrive,
     ReflectionOccurrence,
@@ -19,8 +21,10 @@ from .runner import optimize_with_egg
 
 __all__ = [
     "CandidateMutation",
+    "CandidateMutations",
     "EggflowGEPAAdapter",
     "EggthreadsCandidateProposer",
+    "EggthreadsReflectionLM",
     "EvaluationSemanticKey",
     "ExampleEvaluation",
     "GEPAResult",

@@ -2,8 +2,10 @@
 
 from .gepa import (
     CandidateMutation,
+    CandidateMutations,
     EggflowGEPAAdapter,
     EggthreadsCandidateProposer,
+    EggthreadsReflectionLM,
     EvaluationSemanticKey,
     ExampleEvaluation,
     GEPAResult,
@@ -16,8 +18,10 @@ from .gepa import (
 
 __all__ = [
     "CandidateMutation",
+    "CandidateMutations",
     "EggflowGEPAAdapter",
     "EggthreadsCandidateProposer",
+    "EggthreadsReflectionLM",
     "EvaluationSemanticKey",
     "ExampleEvaluation",
     "GEPAResult",

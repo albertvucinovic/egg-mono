@@ -17,8 +17,9 @@ was appended to an existing candidate-lineage conversation.
 from eggflow import FlowExecutor, TaskStore
 from eggthreads import ThreadsDB
 from eggopt.gepa import (
-    CandidateMutation, EggflowGEPAAdapter, EggthreadsCandidateProposer,
-    ExampleEvaluation, ReflectionEvidence, optimize_with_egg,
+    CandidateMutation, CandidateMutations, EggflowGEPAAdapter,
+    EggthreadsReflectionLM, ExampleEvaluation, ReflectionEvidence,
+    optimize_with_egg,
 )
 
 flow = FlowExecutor(TaskStore("flow.db"))
@@ -61,7 +62,7 @@ adapter = EggflowGEPAAdapter(
     evaluator_config={"metric": "exact-match"},
     example_id=lambda example: example["id"],
 )
-proposer = EggthreadsCandidateProposer(
+proposer = EggthreadsReflectionLM(
     flow,
     threads,
     drive=drive,
@@ -81,6 +82,49 @@ result = optimize_with_egg(
 )
 print(result.best_candidate, result.parents, result.per_val_instance_best_candidates)
 ```
+
+## One turn, multiple proposals
+
+Upstream GEPA can request several proposals from one parent with its public
+`SameParentSampling` strategy. `EggthreadsReflectionLM.reflect_many()` groups
+those ordered jobs by parent and calls the persistent mutator once per parent.
+The drive returns a typed ordered batch and persists it with the assistant turn:
+
+```python
+from gepa.strategies.proposal_sampling import SameParentSampling
+
+class BestOfTwoDrive(Drive):
+    def start(self, conversation, request):
+        assert request["mutation_count"] == 2
+        mutations = CandidateMutations((
+            CandidateMutation({"instruction": "concise"}),
+            CandidateMutation({"instruction": "show your reasoning"}),
+        ))
+        conversation.append_assistant("Two informed alternatives", mutations)
+        return mutations
+
+proposer = EggthreadsReflectionLM(
+    flow,
+    threads,
+    drive=BestOfTwoDrive(),
+    reflector_id="my-reflector",
+    reflector_version="1",
+    reflector_config={"policy": "best-of-two"},
+)
+result = optimize_with_egg(
+    seed_candidate={"instruction": "baseline"},
+    trainset=trainset,
+    adapter=adapter,
+    proposer=proposer,
+    sampling_strategy=SameParentSampling(2),
+    max_metric_calls=100,
+)
+```
+
+GEPA independently evaluates each returned `ReflectionProposal`, then applies
+its configured acceptance and selection strategies. Eggopt does not duplicate
+that optimizer logic. A later critique of any emitted candidate is appended to
+the same producing Mutation conversation.
 
 Reflection turns have two identities: the Eggflow task key is semantic, while
 the Eggthread is physical conversation context. Repeating an identical request

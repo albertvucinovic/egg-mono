@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import pickle
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -16,17 +17,18 @@ from eggthreads import (
     list_children_with_meta,
     load_thread_projection,
 )
+from gepa.proposer.reflective_mutation.reflection_lm import ReflectionProposal
 
 from ._identity import canonical_candidate, canonical_json, digest_payload
 
-_REFLECTION_OPERATION = "eggopt.gepa.reflect.v1"
+_REFLECTION_OPERATION = "eggopt.gepa.reflect.v2"
 _REFLECTION_REQUEST_KIND = "eggopt.gepa.reflection-request.v1"
 _REFLECTION_RESPONSE_KIND = "eggopt.gepa.reflection-response.v1"
 
 
 @dataclass(frozen=True)
 class CandidateMutation:
-    """Validated component updates returned as the reflection task result."""
+    """Validated component updates for one proposed candidate."""
 
     updates: Mapping[str, str]
 
@@ -43,6 +45,38 @@ class CandidateMutation:
         object.__setattr__(self, "updates", normalized)
 
 
+@dataclass(frozen=True)
+class CandidateMutations:
+    """Ordered, non-empty, pickle-safe mutations from one informed turn."""
+
+    items: tuple[CandidateMutation, ...]
+
+    def __post_init__(self) -> None:
+        try:
+            normalized = tuple(self.items)
+        except TypeError as exc:
+            raise TypeError("mutations must be an iterable of CandidateMutation") from exc
+        if not normalized:
+            raise ValueError("mutations must not be empty")
+        if not all(isinstance(item, CandidateMutation) for item in normalized):
+            raise TypeError("mutations must contain only CandidateMutation values")
+        object.__setattr__(self, "items", normalized)
+        try:
+            pickle.dumps(self)
+        except Exception as exc:
+            raise TypeError("mutations must be pickle-safe") from exc
+
+    @classmethod
+    def one(cls, mutation: CandidateMutation) -> CandidateMutations:
+        return cls((mutation,))
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __iter__(self):
+        return iter(self.items)
+
+
 class ReflectionDrive(Protocol):
     """Injected driver for one persistent Eggthreads conversation."""
 
@@ -50,13 +84,13 @@ class ReflectionDrive(Protocol):
         self,
         conversation: "ReflectionConversation",
         request: Mapping[str, Any],
-    ) -> CandidateMutation: ...
+    ) -> CandidateMutation | CandidateMutations: ...
 
     def resume(
         self,
         conversation: "ReflectionConversation",
         request: Mapping[str, Any],
-    ) -> CandidateMutation: ...
+    ) -> CandidateMutation | CandidateMutations: ...
 
 
 class ReflectionConversation:
@@ -68,15 +102,18 @@ class ReflectionConversation:
         self.semantic_key = semantic_key
         self.response_message_id: str | None = None
 
-    def append_assistant(self, content: str, mutation: CandidateMutation) -> str:
-        """Persist an inspectable assistant answer plus its typed mutation."""
+    def append_assistant(
+        self,
+        content: str,
+        mutations: CandidateMutation | CandidateMutations,
+    ) -> str:
+        """Persist an inspectable assistant answer plus typed mutations."""
 
         if self.response_message_id is not None:
             raise RuntimeError("reflection drive already appended an assistant response")
         if not isinstance(content, str):
             raise TypeError("assistant response content must be a string")
-        if not isinstance(mutation, CandidateMutation):
-            raise TypeError("assistant response mutation must be CandidateMutation")
+        normalized = _normalize_mutations(mutations)
         self.response_message_id = append_message(
             self.db,
             self.thread_id,
@@ -85,7 +122,7 @@ class ReflectionConversation:
             extra={
                 "eggopt_kind": _REFLECTION_RESPONSE_KIND,
                 "semantic_key": self.semantic_key,
-                "mutation": dict(mutation.updates),
+                "mutations": [dict(item.updates) for item in normalized],
             },
         )
         return self.response_message_id
@@ -107,7 +144,7 @@ class _CachedReflectionTask(Task):
     def get_cache_key(self) -> str:
         return self.semantic_key
 
-    async def run(self) -> CandidateMutation:
+    async def run(self) -> CandidateMutations:
         raise RuntimeError("completed reflection cache entry was not reused")
 
 
@@ -125,7 +162,7 @@ class _ReflectionTask(Task):
         # Physical thread IDs, paths, and the live drive remain occurrence-only.
         return self.semantic_key
 
-    async def run(self) -> CandidateMutation:
+    async def run(self) -> CandidateMutations:
         persisted = _load_response(
             self.threads_db, self.occurrence.mutation_thread_id, self.semantic_key
         )
@@ -141,31 +178,31 @@ class _ReflectionTask(Task):
         value = method(conversation, dict(self.request))
         if inspect.isawaitable(value):
             value = await value
-        mutation = _validate_mutation(value, self.request)
+        mutations = _validate_mutations(value, self.request)
         if conversation.response_message_id is None:
             raise RuntimeError(
                 "reflection drive must persist its assistant response with "
                 "conversation.append_assistant()"
             )
-        persisted_mutation = _load_response_message(
+        persisted_mutations = _load_response_message(
             self.threads_db,
             self.occurrence.mutation_thread_id,
             conversation.response_message_id,
             self.semantic_key,
         )
-        if persisted_mutation != mutation:
-            raise ValueError("persisted assistant mutation differs from drive result")
+        if persisted_mutations != mutations:
+            raise ValueError("persisted assistant mutations differ from drive result")
         if self.fail_after_response is not None:
             self.fail_after_response()
-        return mutation
+        return mutations
 
     async def recover(self) -> bool:
         # run() reconciles a persisted typed response before invoking the drive.
         return True
 
 
-class EggthreadsCandidateProposer:
-    """Upstream ``custom_candidate_proposer`` backed by Eggthreads + Eggflow."""
+class EggthreadsReflectionLM:
+    """Stateful upstream ``ReflectionLM`` backed by Eggthreads and Eggflow."""
 
     def __init__(
         self,
@@ -207,17 +244,167 @@ class EggthreadsCandidateProposer:
         reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
         components_to_update: list[str],
     ) -> dict[str, str]:
-        request = self._request(candidate, reflective_dataset, components_to_update)
-        key = self.semantic_key(candidate, reflective_dataset, components_to_update)
+        """Compatibility convenience for one mutation outside GEPA."""
+
+        proposal, _next = self.reflect(
+            candidate, reflective_dataset, components_to_update
+        )
+        return dict(proposal.new_texts)
+
+    def semantic_key(
+        self,
+        candidate: Mapping[str, str],
+        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+        components_to_update: Sequence[str],
+    ) -> str:
+        job = (candidate, reflective_dataset, components_to_update)
+        return self.semantic_key_many(candidate, [job])
+
+    def occurrence(
+        self,
+        candidate: Mapping[str, str],
+        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+        components_to_update: Sequence[str],
+    ) -> ReflectionOccurrence | None:
+        job = (candidate, reflective_dataset, components_to_update)
+        return self.occurrence_many(candidate, [job])
+
+    def reflect(
+        self,
+        candidate: dict[str, str],
+        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+        components_to_update: list[str],
+    ) -> tuple[ReflectionProposal, EggthreadsReflectionLM]:
+        results = self.reflect_many(
+            [(candidate, reflective_dataset, components_to_update)]
+        )
+        return results[0]
+
+    def reflect_many(
+        self,
+        jobs: list[
+            tuple[
+                dict[str, str],
+                Mapping[str, Sequence[Mapping[str, Any]]],
+                list[str],
+            ]
+        ],
+    ) -> list[tuple[ReflectionProposal, EggthreadsReflectionLM]]:
+        if not jobs:
+            return []
+        outputs: list[tuple[ReflectionProposal, EggthreadsReflectionLM] | None] = [
+            None for _ in jobs
+        ]
+        groups: dict[str, list[int]] = {}
+        candidates: dict[str, dict[str, str]] = {}
+        for index, (candidate, _dataset, _components) in enumerate(jobs):
+            candidate_json = canonical_json(
+                canonical_candidate(candidate), what="candidate"
+            )
+            groups.setdefault(candidate_json, []).append(index)
+            candidates[candidate_json] = candidate
+
+        for candidate_json, indices in groups.items():
+            grouped_jobs = [jobs[index] for index in indices]
+            mutations = self._mutate_many(
+                candidates[candidate_json], grouped_jobs
+            )
+            if len(mutations) != len(indices):
+                raise ValueError(
+                    "reflection drive returned "
+                    f"{len(mutations)} mutations for {len(indices)} jobs"
+                )
+            for index, mutation in zip(indices, mutations, strict=True):
+                outputs[index] = (
+                    ReflectionProposal(new_texts=dict(mutation.updates)),
+                    self,
+                )
+        if any(output is None for output in outputs):
+            raise RuntimeError("reflection result mapping is incomplete")
+        return [output for output in outputs if output is not None]
+
+    def semantic_key_many(
+        self,
+        candidate: Mapping[str, str],
+        jobs: Sequence[
+            tuple[
+                Mapping[str, str],
+                Mapping[str, Sequence[Mapping[str, Any]]],
+                Sequence[str],
+            ]
+        ],
+    ) -> str:
+        if not jobs:
+            raise ValueError("reflection jobs must not be empty")
+        ordered_jobs = []
+        for job_candidate, dataset, components in jobs:
+            if canonical_candidate(job_candidate) != canonical_candidate(candidate):
+                raise ValueError("grouped reflection jobs must share one parent candidate")
+            ordered_jobs.append(
+                {
+                    "candidate": canonical_candidate(job_candidate),
+                    "reflective_dataset": json.loads(
+                        canonical_json(dataset, what="reflective_dataset")
+                    ),
+                    "components_to_update": _validate_components(
+                        job_candidate, components
+                    ),
+                }
+            )
+        return digest_payload(
+            _REFLECTION_OPERATION,
+            {
+                "operation": _REFLECTION_OPERATION,
+                "reflector": {
+                    "id": self.reflector_id,
+                    "version": self.reflector_version,
+                    "config": self._reflector_config_json,
+                },
+                "candidate": canonical_candidate(candidate),
+                "jobs": ordered_jobs,
+                "count": len(ordered_jobs),
+            },
+        )
+
+    def occurrence_many(
+        self,
+        candidate: Mapping[str, str],
+        jobs: Sequence[
+            tuple[
+                Mapping[str, str],
+                Mapping[str, Sequence[Mapping[str, Any]]],
+                Sequence[str],
+            ]
+        ],
+    ) -> ReflectionOccurrence | None:
+        return _find_occurrence(
+            self.threads_db,
+            self.study_thread_id,
+            self.semantic_key_many(candidate, jobs),
+        )
+
+    def _mutate_many(
+        self,
+        candidate: Mapping[str, str],
+        jobs: Sequence[
+            tuple[
+                Mapping[str, str],
+                Mapping[str, Sequence[Mapping[str, Any]]],
+                Sequence[str],
+            ]
+        ],
+    ) -> CandidateMutations:
+        request = self._request_many(candidate, jobs)
+        key = self.semantic_key_many(candidate, jobs)
         occurrence = _find_occurrence(self.threads_db, self.study_thread_id, key)
         cached = self.executor.store.get(key)
         if occurrence is None and cached is not None and cached["status"] == "COMPLETED":
-            cached_mutation = _run_sync(
+            cached_mutations = _run_sync(
                 self.executor.run(_CachedReflectionTask(key))
             )
-            if not isinstance(cached_mutation, CandidateMutation):
-                raise TypeError("reflection task must return CandidateMutation")
-            return dict(cached_mutation.updates)
+            if not isinstance(cached_mutations, CandidateMutations):
+                raise TypeError("reflection task must return CandidateMutations")
+            return cached_mutations
         if occurrence is None:
             affinity_thread_id = _find_candidate_affinity(
                 self.threads_db, self.study_thread_id, candidate
@@ -236,7 +423,7 @@ class EggthreadsCandidateProposer:
                 request,
                 affinity_thread_id=affinity_thread_id,
             )
-        mutation = _run_sync(
+        mutations = _run_sync(
             self.executor.run(
                 _ReflectionTask(
                     semantic_key=key,
@@ -251,58 +438,46 @@ class EggthreadsCandidateProposer:
                 )
             )
         )
-        if not isinstance(mutation, CandidateMutation):
-            raise TypeError("reflection task must return CandidateMutation")
-        return dict(mutation.updates)
+        if not isinstance(mutations, CandidateMutations):
+            raise TypeError("reflection task must return CandidateMutations")
+        return mutations
 
-    def semantic_key(
+    def _request_many(
         self,
         candidate: Mapping[str, str],
-        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
-        components_to_update: Sequence[str],
-    ) -> str:
-        components = _validate_components(candidate, components_to_update)
-        dataset_json = canonical_json(reflective_dataset, what="reflective_dataset")
-        return digest_payload(
-            _REFLECTION_OPERATION,
-            {
-                "operation": _REFLECTION_OPERATION,
-                "reflector": {
-                    "id": self.reflector_id,
-                    "version": self.reflector_version,
-                    "config": self._reflector_config_json,
-                },
-                "candidate": canonical_candidate(candidate),
-                "reflective_dataset": dataset_json,
-                "components_to_update": components,
-            },
-        )
-
-    def occurrence(
-        self,
-        candidate: Mapping[str, str],
-        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
-        components_to_update: Sequence[str],
-    ) -> ReflectionOccurrence | None:
-        return _find_occurrence(
-            self.threads_db,
-            self.study_thread_id,
-            self.semantic_key(candidate, reflective_dataset, components_to_update),
-        )
-
-    def _request(
-        self,
-        candidate: Mapping[str, str],
-        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
-        components_to_update: Sequence[str],
+        jobs: Sequence[
+            tuple[
+                Mapping[str, str],
+                Mapping[str, Sequence[Mapping[str, Any]]],
+                Sequence[str],
+            ]
+        ],
     ) -> dict[str, Any]:
-        components = _validate_components(candidate, components_to_update)
-        dataset = json.loads(canonical_json(reflective_dataset, what="reflective_dataset"))
+        if not jobs:
+            raise ValueError("reflection jobs must not be empty")
+        job_records = []
+        all_components: set[str] = set()
+        for job_candidate, dataset, components in jobs:
+            validated = _validate_components(job_candidate, components)
+            all_components.update(validated)
+            job_records.append(
+                {
+                    "reflective_dataset": json.loads(
+                        canonical_json(dataset, what="reflective_dataset")
+                    ),
+                    "components_to_update": list(validated),
+                }
+            )
         return {
             "candidate": dict(canonical_candidate(candidate)),
-            "reflective_dataset": dataset,
-            "components_to_update": list(components),
+            "jobs": job_records,
+            "components_to_update": sorted(all_components),
+            "mutation_count": len(job_records),
         }
+
+
+# Compatibility name for the first slice's public constructor.
+EggthreadsCandidateProposer = EggthreadsReflectionLM
 
 
 def _append_request(
@@ -402,10 +577,9 @@ def _find_candidate_affinity(
 def _response_mutations(payload: Mapping[str, Any]) -> tuple[CandidateMutation, ...]:
     if payload.get("eggopt_kind") != _REFLECTION_RESPONSE_KIND:
         return ()
-    # Current drives persist one mutation. A future plural result can store a
-    # ``mutations`` list here without changing lineage-affinity discovery.
     raw_mutations = payload.get("mutations")
     if raw_mutations is None:
+        # Read compatibility with response metadata written by Eggopt v0.1.0.
         raw_mutations = [payload.get("mutation")]
     if not isinstance(raw_mutations, list):
         return ()
@@ -444,14 +618,17 @@ def _thread_has_prior_response(db: ThreadsDB, mutation_thread_id: str) -> bool:
 
 def _load_response(
     db: ThreadsDB, mutation_thread_id: str, semantic_key: str
-) -> tuple[CandidateMutation, str] | None:
+) -> tuple[CandidateMutations, str] | None:
     for message in reversed(_projection(db, mutation_thread_id).messages):
         payload = message.payload
         if (
             payload.get("eggopt_kind") == _REFLECTION_RESPONSE_KIND
             and payload.get("semantic_key") == semantic_key
         ):
-            return CandidateMutation(payload.get("mutation")), message.msg_id
+            mutations = _response_mutations(payload)
+            if not mutations:
+                raise ValueError("assistant response has no valid mutations")
+            return CandidateMutations(mutations), message.msg_id
     return None
 
 
@@ -460,7 +637,7 @@ def _load_response_message(
     mutation_thread_id: str,
     response_message_id: str,
     semantic_key: str,
-) -> CandidateMutation:
+) -> CandidateMutations:
     for message in _projection(db, mutation_thread_id).messages:
         if message.msg_id != response_message_id:
             continue
@@ -470,7 +647,10 @@ def _load_response_message(
             or payload.get("semantic_key") != semantic_key
         ):
             raise ValueError("assistant response lacks reflection authority metadata")
-        return CandidateMutation(payload.get("mutation"))
+        mutations = _response_mutations(payload)
+        if not mutations:
+            raise ValueError("assistant response has no valid mutations")
+        return CandidateMutations(mutations)
     raise ValueError("reflection drive response message was not persisted")
 
 
@@ -478,14 +658,34 @@ def _projection(db: ThreadsDB, thread_id: str):
     return load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
 
 
-def _validate_mutation(value: Any, request: Mapping[str, Any]) -> CandidateMutation:
-    if not isinstance(value, CandidateMutation):
-        raise TypeError("reflection drive must return CandidateMutation")
+def _normalize_mutations(
+    value: CandidateMutation | CandidateMutations,
+) -> CandidateMutations:
+    if isinstance(value, CandidateMutations):
+        return value
+    if isinstance(value, CandidateMutation):
+        return CandidateMutations.one(value)
+    raise TypeError("reflection drive must return CandidateMutation(s)")
+
+
+def _validate_mutations(
+    value: Any, request: Mapping[str, Any]
+) -> CandidateMutations:
+    mutations = _normalize_mutations(value)
+    expected_count = int(request["mutation_count"])
+    if len(mutations) != expected_count:
+        raise ValueError(
+            f"reflection drive must return {expected_count} mutation(s), "
+            f"got {len(mutations)}"
+        )
     allowed = set(request["components_to_update"])
-    unexpected = set(value.updates) - allowed
-    if unexpected:
-        raise ValueError(f"mutation updated unrequested components: {sorted(unexpected)}")
-    return value
+    for mutation in mutations:
+        unexpected = set(mutation.updates) - allowed
+        if unexpected:
+            raise ValueError(
+                f"mutation updated unrequested components: {sorted(unexpected)}"
+            )
+    return mutations
 
 
 def _validate_components(
@@ -503,7 +703,7 @@ def _validate_components(
 
 
 def _request_content(request: Mapping[str, Any]) -> str:
-    prompt = "Reflect on the structured GEPA evidence and return typed component updates.\n"
+    prompt = "Reflect on the structured GEPA evidence and return typed mutations.\n"
     return prompt + json.dumps(request, sort_keys=True, ensure_ascii=False)
 
 
@@ -515,5 +715,5 @@ def _run_sync(awaitable: Any) -> Any:
     if inspect.iscoroutine(awaitable):
         awaitable.close()
     raise RuntimeError(
-        "Eggopt's synchronous GEPA proposer cannot run inside an active asyncio loop"
+        "Eggopt's synchronous GEPA reflector cannot run inside an active asyncio loop"
     )
