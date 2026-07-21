@@ -222,10 +222,11 @@ def test_docker_sandbox_masks_egg_without_output_mounts(tmp_path, monkeypatch):
         argv = provider.wrap_argv(["bash", "-lc", "true"], settings, working_dir=tmp_path)
 
     mounts = _docker_mount_specs(argv)
-    egg_mounts = [spec for spec in mounts if spec.endswith(":/workspace/.egg:ro")]
-    assert len(egg_mounts) == 1
-    assert not egg_mounts[0].startswith(str(tmp_path / ".egg") + ":")
-    assert ".egg/sandbox/masks/egg" in egg_mounts[0]
+    tmpfs_mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--mount"]
+    assert "type=tmpfs,dst=/workspace/.egg,readonly" in tmpfs_mounts
+    # The project root already has the real Egg database. The sandbox must not
+    # bind it into the container or add another host path for the mask.
+    assert not any(str(tmp_path / ".egg") in spec for spec in mounts)
     assert not any(".egg_outputs" in spec for spec in mounts)
     assert not any(".egg/egg_outputs" in spec for spec in mounts)
 def test_tool_context_passes_output_subtree_to_docker_sandbox(tmp_path, monkeypatch):
