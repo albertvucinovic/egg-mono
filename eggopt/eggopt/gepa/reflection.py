@@ -177,7 +177,14 @@ class _ReflectionTask(Task):
             self.occurrence.mutation_thread_id,
             self.semantic_key,
         )
-        method = self.drive.resume if self.resume else self.drive.start
+        recovery = getattr(self.drive, "continue_for_recovery", None)
+        method = (
+            recovery
+            if self.resume and callable(recovery)
+            else self.drive.resume
+            if self.resume
+            else self.drive.start
+        )
         value = method(conversation, dict(self.request))
         if inspect.isawaitable(value):
             value = await value

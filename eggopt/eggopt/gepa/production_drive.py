@@ -346,6 +346,20 @@ class EggthreadsReflectionDrive:
                 raise RuntimeError(f"reflection runner stalled in state {state!r}")
         raise RuntimeError("reflection runner did not settle within max_runner_steps")
 
+    async def continue_for_recovery(
+        self,
+        conversation: ReflectionConversation,
+        request: Mapping[str, Any],
+    ) -> CandidateMutation | CandidateMutations:
+        """Continue an interrupted turn beyond the normal per-drive step slice."""
+
+        original = self.max_runner_steps
+        self.max_runner_steps = max(original, 256)
+        try:
+            return await self.resume(conversation, request)
+        finally:
+            self.max_runner_steps = original
+
     async def _run_step(
         self,
         runner: ThreadRunner,
