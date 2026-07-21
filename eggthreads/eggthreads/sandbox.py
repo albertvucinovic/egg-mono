@@ -300,16 +300,21 @@ def _docker_mount_args_from_filesystem_policy(
     wd = working_dir.resolve()
     workspace = str(workspace or "/workspace")
     allow_roots = _sandbox_allow_write_roots(settings, wd)
-    args: List[str] = ["-v", f"{wd}:{workspace}:ro"]
+    host_workspace = f"{workspace.rstrip('/')}/host"
+    # Mount a private parent filesystem, then expose the host workspace at a
+    # child path. This keeps `/workspace/.egg` outside the host bind entirely;
+    # mounting anything directly over `<bind>/.egg` makes Docker create that
+    # destination in the host source before container start.
+    args: List[str] = ["--tmpfs", f"{workspace}:rw", "-v", f"{wd}:{host_workspace}:ro"]
     if any(p == wd for p in allow_roots):
-        args = ["-v", f"{wd}:{workspace}"]
+        args = ["--tmpfs", f"{workspace}:rw", "-v", f"{wd}:{host_workspace}"]
     else:
         for p in allow_roots:
             try:
                 p.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
-            container_path = _container_path_for_host_path(p, wd, workspace)
+            container_path = _container_path_for_host_path(p, wd, host_workspace)
             if container_path:
                 args.extend(["-v", f"{p}:{container_path}"])
 
@@ -320,7 +325,7 @@ def _docker_mount_args_from_filesystem_policy(
             continue
         denied.append(p)
     for p in _keep_broad_roots(denied):
-        container_path = _container_path_for_host_path(p, wd, workspace)
+        container_path = _container_path_for_host_path(p, wd, host_workspace)
         if not container_path:
             continue
         mask = _sandbox_mask_dir("docker", hashlib.sha256(str(p).encode("utf-8")).hexdigest()[:16])
@@ -921,12 +926,10 @@ class DockerProvider:
         for arg in extra_args:
             if isinstance(arg, str):
                 cmd.append(arg)
-        # An anonymous read-only tmpfs hides any host .egg tree without a bind
-        # destination. Docker otherwise creates a root-owned `.egg` mountpoint
-        # in every writable host workspace before starting the container.
+        # `.egg` lives on the private parent tmpfs, never under the host bind.
         cmd.extend(["--mount", f"type=tmpfs,dst={Path(workspace) / '.egg'},readonly"])
         # Set working directory inside container
-        cmd.extend(["-w", workspace])
+        cmd.extend(["-w", f"{str(workspace).rstrip('/')}/host"])
         # Image
         cmd.append(image)
         # The command to run inside container (argv)

@@ -193,13 +193,13 @@ def test_docker_provider_wrap_argv(eggthreads):
         assert "-v" in wrapped
         # Find the volume mount for working dir
         vol_idx = wrapped.index("-v")
-        assert wrapped[vol_idx + 1] == "/home/user/project:/app"
+        assert wrapped[vol_idx + 1] == "/home/user/project:/app/host"
         # Check for extra mount
         assert "-v" in wrapped[vol_idx + 2:]  # Another -v after the first
         assert "--cap-drop" in wrapped
         assert "ALL" in wrapped
         assert "-w" in wrapped
-        assert "/app" in wrapped
+        assert wrapped[wrapped.index("-w") + 1] == "/app/host"
         assert "alpine:latest" in wrapped
         assert wrapped[-3:] == ["python", "-c", "print(\'test\')"]
     
@@ -390,12 +390,12 @@ def test_working_dir_handling(eggthreads):
         # Check that /custom/dir is mounted
         assert "-v" in wrapped
         vol_index = wrapped.index("-v")
-        assert wrapped[vol_index + 1] == "/custom/dir:/workspace"
+        assert wrapped[vol_index + 1] == "/custom/dir:/workspace/host"
         
         # Check working directory is set
         assert "-w" in wrapped
         w_index = wrapped.index("-w")
-        assert wrapped[w_index + 1] == "/workspace"
+        assert wrapped[w_index + 1] == "/workspace/host"
     
     # Test Bwrap provider working_dir
     provider = sandbox._PROVIDERS["bwrap"]
@@ -905,20 +905,20 @@ def test_docker_provider_mounts_correct_directory(eggthreads, tmp_path):
         # Check mount
         assert "-v" in wrapped
         vol_idx = wrapped.index("-v")
-        assert wrapped[vol_idx + 1] == f"{tmp_path}:/workspace"
+        assert wrapped[vol_idx + 1] == f"{tmp_path}:/workspace/host"
         
         # Test with subdirectory
         subdir = tmp_path / "sub" / "deep"
         subdir.mkdir(parents=True)
         wrapped2 = provider.wrap_argv(argv, settings, working_dir=subdir)
         vol_idx2 = wrapped2.index("-v")
-        assert wrapped2[vol_idx2 + 1] == f"{subdir}:/workspace"
+        assert wrapped2[vol_idx2 + 1] == f"{subdir}:/workspace/host"
         
         # Test with custom workspace in settings
         settings_custom = {"workspace": "/app"}
         wrapped3 = provider.wrap_argv(argv, settings_custom, working_dir=tmp_path)
         vol_idx3 = wrapped3.index("-v")
-        assert wrapped3[vol_idx3 + 1] == f"{tmp_path}:/app"
+        assert wrapped3[vol_idx3 + 1] == f"{tmp_path}:/app/host"
         # Check -w uses custom workspace
         w_idx = wrapped3.index("-w")
-        assert wrapped3[w_idx + 1] == "/app"
+        assert wrapped3[w_idx + 1] == "/app/host"
