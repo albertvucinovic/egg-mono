@@ -406,6 +406,39 @@ class EggthreadsReflectionLM:
             self.semantic_key_many(candidate, jobs),
         )
 
+    def resume_uncommitted(self) -> CandidateMutations | None:
+        """Resume the sole persisted request that lacks a typed response.
+
+        Applications call this once before asking upstream GEPA to generate
+        new work after a process interruption. It never appends a duplicate
+        trigger and returns ``None`` when the study is clean.
+        """
+
+        pending = _uncommitted_occurrences(self.threads_db, self.study_thread_id)
+        if not pending:
+            return None
+        if len(pending) != 1:
+            raise RuntimeError("study has multiple uncommitted reflection requests")
+        occurrence, request, key = pending[0]
+        mutations = _run_sync(
+            self.executor.run(
+                _ReflectionTask(
+                    semantic_key=key,
+                    threads_db=self.threads_db,
+                    occurrence=occurrence,
+                    request=request,
+                    drive=self.drive,
+                    resume=_thread_has_prior_response(
+                        self.threads_db, occurrence.mutation_thread_id
+                    ),
+                    fail_after_response=self.fail_after_response,
+                )
+            )
+        )
+        if not isinstance(mutations, CandidateMutations):
+            raise TypeError("reflection task must return CandidateMutations")
+        return mutations
+
     def _mutate_many(
         self,
         candidate: Mapping[str, str],
@@ -582,6 +615,42 @@ def _has_uncommitted_request(db: ThreadsDB, study_thread_id: str) -> bool:
         if pending:
             return True
     return False
+
+
+def _uncommitted_occurrences(
+    db: ThreadsDB, study_thread_id: str
+) -> list[tuple[ReflectionOccurrence, dict[str, Any], str]]:
+    pending = []
+    for iteration_id, mutation_id in _mutation_threads(db, study_thread_id):
+        requests: dict[str, Any] = {}
+        completed: set[str] = set()
+        request_ids: dict[str, str] = {}
+        for message in _projection(db, mutation_id).messages:
+            payload = message.payload
+            key = payload.get("semantic_key")
+            if not isinstance(key, str):
+                continue
+            if payload.get("eggopt_kind") == _REFLECTION_REQUEST_KIND:
+                request = payload.get("request")
+                if isinstance(request, dict):
+                    requests[key] = dict(request)
+                    request_ids[key] = message.msg_id
+            elif payload.get("eggopt_kind") == _REFLECTION_RESPONSE_KIND:
+                completed.add(key)
+        for key in requests.keys() - completed:
+            pending.append(
+                (
+                    ReflectionOccurrence(
+                        study_thread_id,
+                        iteration_id,
+                        mutation_id,
+                        request_ids[key],
+                    ),
+                    requests[key],
+                    key,
+                )
+            )
+    return pending
 
 
 def _find_candidate_affinity(

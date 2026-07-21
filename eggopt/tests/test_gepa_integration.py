@@ -926,6 +926,34 @@ def test_interrupted_request_reuses_exact_thread_without_duplicate_trigger(tmp_p
     assert [message.msg_id for message in requests] == [occurrence.request_message_id]
 
 
+def test_resume_uncommitted_request_before_upstream_reentry(tmp_path):
+    _, _, executor, threads = make_runtime(tmp_path)
+
+    class InterruptedDrive(DeterministicDrive):
+        def start(self, conversation, request):
+            self.start_calls += 1
+            raise RuntimeError("interrupted")
+
+    first = make_proposer(executor, threads, InterruptedDrive())
+    candidate = {"instruction": "0"}
+    dataset = {"instruction": [{"Feedback": "reach level 1"}]}
+    with pytest.raises(TaskError, match="interrupted"):
+        first(candidate, dataset, ["instruction"])
+
+    restarted_drive = DeterministicDrive()
+    restarted = make_proposer(
+        executor,
+        threads,
+        restarted_drive,
+        study_thread_id=first.study_thread_id,
+    )
+    resumed = restarted.resume_uncommitted()
+
+    assert resumed is not None
+    assert [dict(item.updates) for item in resumed] == [{"instruction": "1"}]
+    assert restarted.resume_uncommitted() is None
+
+
 def test_drive_transcript_is_not_result_authority(tmp_path):
     _, _, executor, threads = make_runtime(tmp_path)
 
