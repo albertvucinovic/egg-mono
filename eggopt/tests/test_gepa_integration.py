@@ -1071,3 +1071,14 @@ def test_pareto_breadth_sampling_repeats_only_available_parent() -> None:
     tasks = ParetoBreadthSampling(2).sample_tasks(State(), None, Batches(), Loader())
 
     assert [task.parent_idx for task in tasks] == [0, 0]
+
+
+def test_max_mutation_stages_stopper_counts_iterations() -> None:
+    from types import SimpleNamespace
+
+    from eggopt.gepa import MaxMutationStagesStopper
+
+    stopper = MaxMutationStagesStopper(5)
+    assert stopper(SimpleNamespace(i=-1)) is False
+    assert stopper(SimpleNamespace(i=3)) is False
+    assert stopper(SimpleNamespace(i=4)) is True

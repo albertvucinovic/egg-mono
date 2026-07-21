@@ -4,10 +4,27 @@ from __future__ import annotations
 
 import random
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
 from gepa.gepa_utils import remove_dominated_programs
 from gepa.strategies.proposal_sampling import ProposalTask
+
+
+@dataclass
+class MaxMutationStagesStopper:
+    """Stop after a fixed number of GEPA loop iterations (mutation stages)."""
+
+    max_stages: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_stages, bool) or not isinstance(self.max_stages, int):
+            raise TypeError("max_stages must be an integer")
+        if self.max_stages < 1:
+            raise ValueError("max_stages must be positive")
+
+    def __call__(self, state: Any) -> bool:
+        return state.i >= self.max_stages - 1
 
 
 class ParetoBreadthSampling:
