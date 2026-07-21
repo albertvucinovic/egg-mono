@@ -64,6 +64,21 @@ class CountingEvaluator:
         )
 
 
+def test_reflection_evidence_preserves_structured_json() -> None:
+    evidence = ReflectionEvidence(
+        inputs={"case": {"feature": 1.25}, "labels": ["SHORT", "FLAT", "LONG"]},
+        generated_outputs={"action": "FLAT", "valid": True},
+        feedback="compare every action",
+    )
+
+    assert evidence.as_reflective_record(2.5) == {
+        "Inputs": {"case": {"feature": 1.25}, "labels": ["SHORT", "FLAT", "LONG"]},
+        "Generated Outputs": {"action": "FLAT", "valid": True},
+        "Feedback": "compare every action",
+        "Score": 2.5,
+    }
+
+
 class DeterministicDrive:
     def __init__(self) -> None:
         self.start_calls = 0

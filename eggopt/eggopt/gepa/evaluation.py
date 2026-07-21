@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import math
 import pickle
 from collections.abc import Callable, Mapping, Sequence
@@ -23,27 +24,22 @@ _EVALUATION_OPERATION = "eggopt.gepa.evaluate-example.v1"
 class ReflectionEvidence:
     """Typed evidence that is converted to GEPA's reflective dataset."""
 
-    inputs: Mapping[str, str]
-    generated_outputs: str | Mapping[str, str]
+    inputs: Mapping[str, Any]
+    generated_outputs: Any
     feedback: str
 
     def __post_init__(self) -> None:
-        inputs = _string_mapping(self.inputs, "evidence inputs")
-        generated: str | dict[str, str]
-        if isinstance(self.generated_outputs, str):
-            generated = self.generated_outputs
-        else:
-            generated = _string_mapping(self.generated_outputs, "generated outputs")
         if not isinstance(self.feedback, str):
             raise TypeError("evidence feedback must be a string")
+        inputs = _json_mapping(self.inputs, "evidence inputs")
+        generated = _json_value(self.generated_outputs, "generated outputs")
         object.__setattr__(self, "inputs", inputs)
         object.__setattr__(self, "generated_outputs", generated)
 
     def as_reflective_record(self, score: float) -> dict[str, Any]:
-        generated = self.generated_outputs
         return {
             "Inputs": dict(self.inputs),
-            "Generated Outputs": dict(generated) if isinstance(generated, Mapping) else generated,
+            "Generated Outputs": self.generated_outputs,
             "Feedback": self.feedback,
             "Score": score,
         }
@@ -291,12 +287,17 @@ def _finite_score(value: Any, what: str) -> float:
     return result
 
 
-def _string_mapping(value: Mapping[str, str], what: str) -> dict[str, str]:
+def _json_value(value: Any, what: str) -> Any:
+    try:
+        return json.loads(canonical_json(value, what=what))
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{what} must be canonical JSON data") from exc
+
+
+def _json_mapping(value: Mapping[str, Any], what: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
-        raise TypeError(f"{what} must be a mapping of strings to strings")
-    result: dict[str, str] = {}
-    for key, item in value.items():
-        if not isinstance(key, str) or not isinstance(item, str):
-            raise TypeError(f"{what} must be a mapping of strings to strings")
-        result[key] = item
+        raise TypeError(f"{what} must be a JSON object")
+    result = _json_value(value, what)
+    if not isinstance(result, dict) or not all(isinstance(key, str) for key in result):
+        raise TypeError(f"{what} must be a JSON object with string keys")
     return result
