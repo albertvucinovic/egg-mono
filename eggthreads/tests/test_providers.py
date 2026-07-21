@@ -447,7 +447,7 @@ def test_augment_with_protections_adds_egg_protection(eggthreads):
 
 
 def test_docker_provider_masks_egg_dir(eggthreads, tmp_path, monkeypatch):
-    """Test that Docker provider masks .egg with an empty read-only dir."""
+    """Docker hides .egg without creating a host-workspace mountpoint."""
     sandbox = eggthreads.sandbox
     provider = sandbox._PROVIDERS["docker"]
     monkeypatch.chdir(tmp_path)
@@ -457,20 +457,10 @@ def test_docker_provider_masks_egg_dir(eggthreads, tmp_path, monkeypatch):
         settings = {}
         # When working dir is same as CWD, .egg is inside
         wrapped = provider.wrap_argv(argv, settings, working_dir=tmp_path)
-        egg_dir = tmp_path / ".egg"
-        egg_dir.mkdir(exist_ok=True)
-        # Should have a -v mask for .egg as read-only, not a bind of real .egg.
-        # Find all -v occurrences
+        mounts = [wrapped[i + 1] for i, arg in enumerate(wrapped[:-1]) if arg == "--mount"]
+        assert "type=tmpfs,dst=/workspace/.egg,readonly" in mounts
+        assert not (tmp_path / ".egg").exists()
         vol_indices = [i for i, arg in enumerate(wrapped) if arg == "-v"]
-        found = ""
-        for idx in vol_indices:
-            mount_spec = wrapped[idx + 1]
-            if mount_spec.endswith(":/workspace/.egg:ro"):
-                found = mount_spec
-                break
-        assert found, f"Expected empty read-only mask for .egg in {wrapped}"
-        assert not found.startswith(str(egg_dir) + ":")
-        assert ".egg/sandbox/masks/egg" in found
         assert not any(".egg_outputs" in wrapped[idx + 1] for idx in vol_indices)
 
 

@@ -921,8 +921,10 @@ class DockerProvider:
         for arg in extra_args:
             if isinstance(arg, str):
                 cmd.append(arg)
-        egg_mask = _sandbox_mask_dir("egg")
-        cmd.extend(["-v", f"{egg_mask}:{Path(workspace) / '.egg'}:ro"])
+        # An anonymous read-only tmpfs hides any host .egg tree without a bind
+        # destination. Docker otherwise creates a root-owned `.egg` mountpoint
+        # in every writable host workspace before starting the container.
+        cmd.extend(["--mount", f"type=tmpfs,dst={Path(workspace) / '.egg'},readonly"])
         # Set working directory inside container
         cmd.extend(["-w", workspace])
         # Image
