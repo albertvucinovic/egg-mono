@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,13 +11,17 @@ from eggthreads import (
     ThreadRunner,
     ThreadsDB,
     ToolRegistry,
+    append_message,
     approve_tool_calls_for_thread,
+    count_text_tokens,
     create_root_thread,
     edit_message,
     get_thread_sandbox_config,
     get_thread_tools_config,
     get_thread_working_directory,
+    interrupt_thread,
     load_thread_projection,
+    provider_context_token_stats,
     set_thread_model,
     set_thread_sandbox_config,
     set_thread_tool_allowlist,
@@ -34,6 +39,8 @@ from .reflection import (
 
 SOLVER_SAFE_PROFILE_NAME = "solver_safe"
 SOLVER_SAFE_PROFILE_VERSION = "1"
+_MUTATION_REPAIR_POLICY = "eggopt.gepa.strict-mutation-repair"
+_MUTATION_REPAIR_VERSION = "1"
 SOLVER_SAFE_TOOLS = frozenset(
     {
         "python",
@@ -148,6 +155,8 @@ class EggthreadsReflectionDrive:
         all_models_path: str = "all-models.json",
         auto_approve_tools: bool = False,
         max_runner_steps: int = 32,
+        max_correction_turns: int = 0,
+        context_ceiling_tokens: int | None = None,
     ) -> None:
         if not isinstance(tools, ToolRegistry):
             raise TypeError("tools must be an Eggthreads ToolRegistry")
@@ -160,9 +169,41 @@ class EggthreadsReflectionDrive:
         self.max_runner_steps = int(max_runner_steps)
         if self.max_runner_steps < 1:
             raise ValueError("max_runner_steps must be positive")
-        self.semantic_identity = json.loads(
-            canonical_json(drive_identity, what="drive_identity")
-        )
+        if (
+            isinstance(max_correction_turns, bool)
+            or not isinstance(max_correction_turns, int)
+            or max_correction_turns < 0
+        ):
+            raise ValueError("max_correction_turns must be a non-negative integer")
+        if context_ceiling_tokens is not None and (
+            isinstance(context_ceiling_tokens, bool)
+            or not isinstance(context_ceiling_tokens, int)
+            or context_ceiling_tokens < 1
+        ):
+            raise ValueError(
+                "context_ceiling_tokens must be a positive integer or None"
+            )
+        self.max_correction_turns = max_correction_turns
+        self.context_ceiling_tokens = context_ceiling_tokens
+        identity = json.loads(canonical_json(drive_identity, what="drive_identity"))
+        reserved = {"mutation_repair", "context_ceiling"}.intersection(identity)
+        if reserved:
+            raise ValueError(
+                f"drive_identity uses reserved Eggopt key(s): {sorted(reserved)}"
+            )
+        self.semantic_identity = {
+            **identity,
+            "mutation_repair": {
+                "policy": _MUTATION_REPAIR_POLICY,
+                "version": _MUTATION_REPAIR_VERSION,
+                "max_correction_turns": max_correction_turns,
+            },
+            "context_ceiling": {
+                "policy": "eggopt.gepa.streaming-context-ceiling",
+                "version": "1",
+                "max_tokens": context_ceiling_tokens,
+            },
+        }
 
     def validate_study(self, db: ThreadsDB, study_thread_id: str) -> None:
         """Require an explicit, sandboxed, workspace-bounded study root."""
@@ -221,7 +262,7 @@ class EggthreadsReflectionDrive:
     ) -> CandidateMutation | CandidateMutations:
         db = conversation.db
         thread_id = conversation.thread_id
-        before_seq = db.max_event_seq(thread_id)
+        after_seq = db.max_event_seq(thread_id)
         if self.auto_approve_tools:
             approve_tool_calls_for_thread(
                 db,
@@ -238,34 +279,119 @@ class EggthreadsReflectionDrive:
             all_models_path=self.all_models_path,
             tools=self.tools,
         )
-        for _ in range(self.max_runner_steps):
-            progressed = await runner.run_once()
-            if not progressed:
-                state = thread_state(db, thread_id)
-                if state == "waiting_tool_approval":
-                    raise RuntimeError(
-                        "reflection tool call requires approval; configure an existing "
-                        "approval path or set auto_approve_tools=True"
-                    )
-                break
-        else:
-            raise RuntimeError("reflection runner did not settle within max_runner_steps")
+        for correction in range(self.max_correction_turns + 1):
+            await self._run_until_settled(runner, db, thread_id)
+            message = _causal_final_assistant(db, thread_id, after_seq)
+            try:
+                mutations = _strict_mutations(message.payload.get("content"), request)
+            except (TypeError, ValueError) as exc:
+                if correction >= self.max_correction_turns:
+                    raise ValueError(
+                        "reflection mutation envelope remained invalid after "
+                        f"{self.max_correction_turns} corrective turn(s): {_repair_reason(exc)}"
+                    ) from exc
+                repair_feedback = _repair_feedback(exc, request)
+                append_message(
+                    db,
+                    thread_id,
+                    "user",
+                    repair_feedback,
+                    extra={
+                        "eggopt_kind": "eggopt.gepa.reflection-repair.v1",
+                        "semantic_key": conversation.semantic_key,
+                        "repair_policy": _MUTATION_REPAIR_POLICY,
+                        "repair_version": _MUTATION_REPAIR_VERSION,
+                        "correction_turn": correction + 1,
+                        "validation_feedback": repair_feedback,
+                    },
+                )
+                after_seq = db.max_event_seq(thread_id)
+                continue
+            edit_message(
+                db,
+                thread_id,
+                message.msg_id,
+                message.payload.get("content", ""),
+                extra={
+                    "eggopt_kind": "eggopt.gepa.reflection-response.v1",
+                    "semantic_key": conversation.semantic_key,
+                    "mutations": [dict(item.updates) for item in mutations],
+                },
+            )
+            conversation.response_message_id = message.msg_id
+            return mutations if len(mutations) > 1 else mutations.items[0]
+        raise AssertionError("unreachable correction loop")
 
-        message = _causal_final_assistant(db, thread_id, before_seq)
-        mutations = _strict_mutations(message.payload.get("content"), request)
-        edit_message(
-            db,
-            thread_id,
-            message.msg_id,
-            message.payload.get("content", ""),
-            extra={
-                "eggopt_kind": "eggopt.gepa.reflection-response.v1",
-                "semantic_key": conversation.semantic_key,
-                "mutations": [dict(item.updates) for item in mutations],
-            },
+    async def _run_until_settled(
+        self,
+        runner: ThreadRunner,
+        db: ThreadsDB,
+        thread_id: str,
+    ) -> None:
+        for _ in range(self.max_runner_steps):
+            before_seq = db.max_event_seq(thread_id)
+            progressed = await self._run_step(runner, db, thread_id)
+            state = thread_state(db, thread_id)
+            if state == "waiting_tool_approval":
+                raise RuntimeError(
+                    "reflection tool call requires approval; configure an existing "
+                    "approval path or set auto_approve_tools=True"
+                )
+            if state == "waiting_user":
+                terminal_error = _runner_error_after(db, thread_id, before_seq)
+                if terminal_error is not None:
+                    raise RuntimeError(terminal_error)
+                return
+            if not progressed:
+                raise RuntimeError(f"reflection runner stalled in state {state!r}")
+        raise RuntimeError("reflection runner did not settle within max_runner_steps")
+
+    async def _run_step(
+        self,
+        runner: ThreadRunner,
+        db: ThreadsDB,
+        thread_id: str,
+    ) -> bool:
+        if self.context_ceiling_tokens is None:
+            return await runner.run_once()
+        current = int(
+            provider_context_token_stats(db, thread_id).get("context_tokens") or 0
         )
-        conversation.response_message_id = message.msg_id
-        return mutations if len(mutations) > 1 else mutations.items[0]
+        if current >= self.context_ceiling_tokens:
+            raise RuntimeError(
+                "reflection context ceiling reached before provider call; "
+                f"operation terminated ({current} >= {self.context_ceiling_tokens})"
+            )
+        task = asyncio.create_task(runner.run_once())
+        try:
+            while not task.done():
+                await asyncio.sleep(0)
+                current = int(
+                    provider_context_token_stats(db, thread_id).get("context_tokens")
+                    or 0
+                )
+                live = _open_llm_stream_tokens(db, thread_id)
+                if current + live >= self.context_ceiling_tokens:
+                    interrupt_thread(
+                        db,
+                        thread_id,
+                        reason=(
+                            "eggopt reflection context ceiling reached: "
+                            f"{current + live} >= {self.context_ceiling_tokens}"
+                        ),
+                    )
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    raise RuntimeError(
+                        "reflection context ceiling reached; operation terminated"
+                    )
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
 
 def _root_thread_id(db: ThreadsDB, thread_id: str) -> str:
@@ -316,6 +442,57 @@ def _causal_final_assistant(db: ThreadsDB, thread_id: str, after_seq: int):
     if not candidates:
         raise RuntimeError("reflection runner produced no final assistant response")
     return candidates[-1]
+
+
+def _runner_error_after(db: ThreadsDB, thread_id: str, after_seq: int) -> str | None:
+    projection = load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
+    for message in reversed(projection.messages):
+        if message.created_event_seq <= after_seq:
+            break
+        if message.payload.get("runner_error"):
+            return str(message.payload.get("content") or "reflection runner failed")
+    return None
+
+
+def _open_llm_stream_tokens(db: ThreadsDB, thread_id: str) -> int:
+    row = db.current_open(thread_id)
+    if row is None or row["purpose"] != "llm":
+        return 0
+    invoke_id = str(row["invoke_id"])
+    parts: list[str] = []
+    for event in db.events_since(thread_id, 0):
+        if event["invoke_id"] != invoke_id or event["type"] != "stream.delta":
+            continue
+        try:
+            payload = json.loads(event["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        for key in ("text", "reason", "reasoning_summary"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        tool_call = payload.get("tool_call")
+        if isinstance(tool_call, Mapping):
+            parts.append(str(tool_call.get("arguments_delta") or ""))
+    return count_text_tokens("".join(parts))
+
+
+def _repair_reason(exc: BaseException) -> str:
+    reason = " ".join(str(exc).split())
+    return reason[:300] or "invalid mutation envelope"
+
+
+def _repair_feedback(exc: BaseException, request: Mapping[str, Any]) -> str:
+    components = ", ".join(
+        sorted(str(item) for item in request["components_to_update"])
+    )
+    count = int(request["mutation_count"])
+    return (
+        "Your previous response could not be accepted: "
+        f"{_repair_reason(exc)}. Return only strict JSON with exactly the key "
+        f"'mutations', containing {count} object(s) that update only: {components}. "
+        "Do not include Markdown or commentary."
+    )
 
 
 def _strict_mutations(content: Any, request: Mapping[str, Any]) -> CandidateMutations:

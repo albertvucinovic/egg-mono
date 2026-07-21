@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from eggthreads import (
     enqueue_user_tool_call,
     get_thread_sandbox_config,
     get_thread_tools_config,
+    list_children_with_meta,
     load_thread_projection,
     set_thread_tool_allowlist,
 )
@@ -133,6 +135,7 @@ def _reflector(
     llm,
     registry: ToolRegistry,
     identity: dict,
+    **drive_options,
 ) -> EggthreadsReflectionLM:
     drive = EggthreadsReflectionDrive(
         llm=llm,
@@ -140,6 +143,7 @@ def _reflector(
         drive_identity=identity,
         runner_config=RunnerConfig(tool_timeout_sec=30),
         auto_approve_tools=True,
+        **drive_options,
     )
     return EggthreadsReflectionLM(
         FlowExecutor(TaskStore(str(tmp_path / "flow.sqlite"))),
@@ -150,6 +154,235 @@ def _reflector(
         reflector_config={"schema": "strict-mutations-v1"},
         study_thread_id=study_id,
     )
+
+
+class RepairingLLM:
+    current_model_key = "scripted-model"
+
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = iter(responses)
+        self.messages: list[list[dict]] = []
+
+    async def astream_chat(self, messages, **kwargs):
+        del kwargs
+        self.messages.append(messages)
+        yield {
+            "type": "message",
+            "role": "assistant",
+            "content": next(self.responses),
+            "stop_reason": "end_turn",
+        }
+
+
+class StreamingCeilingLLM:
+    current_model_key = "scripted-model"
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def astream_chat(self, messages, **kwargs):
+        del messages, kwargs
+        try:
+            while True:
+                yield {"type": "content_delta", "text": "token " * 8}
+                await asyncio.sleep(0)
+        finally:
+            self.cancelled = True
+
+
+def test_malformed_envelope_repairs_in_same_mutation_thread(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _db(tmp_path)
+    study_id, profile = create_solver_safe_study(db, workspace=tmp_path / "workspace")
+    llm = RepairingLLM(
+        [
+            "not json and secret transcript details",
+            json.dumps({"mutations": [{"instruction": "fixed"}]}),
+        ]
+    )
+    reflector = _reflector(
+        tmp_path,
+        db,
+        study_id,
+        llm,
+        _registry([], []),
+        {"model": "repair-test", "profile": profile},
+        max_correction_turns=2,
+    )
+    dataset = {"instruction": [{"Feedback": "repair"}]}
+
+    proposal, _next = reflector.reflect(
+        {"instruction": "seed"}, dataset, ["instruction"]
+    )
+    assert proposal.new_texts == {"instruction": "fixed"}
+    occurrence = reflector.occurrence({"instruction": "seed"}, dataset, ["instruction"])
+    assert occurrence is not None
+    assert len(llm.messages) == 2
+    transcript = load_thread_projection(
+        db,
+        occurrence.mutation_thread_id,
+        db.max_event_seq(occurrence.mutation_thread_id),
+    ).messages
+    repairs = [
+        message
+        for message in transcript
+        if message.payload.get("eggopt_kind") == "eggopt.gepa.reflection-repair.v1"
+    ]
+    malformed = [
+        message
+        for message in transcript
+        if message.payload.get("role") == "assistant"
+        and message.payload.get("content") == "not json and secret transcript details"
+    ]
+    final = [
+        message
+        for message in transcript
+        if message.payload.get("eggopt_kind") == "eggopt.gepa.reflection-response.v1"
+    ]
+    assert len(malformed) == 1
+    assert len(repairs) == 1
+    assert len(final) == 1
+    assert malformed[0].created_event_seq < repairs[0].created_event_seq < final[0].created_event_seq
+    assert repairs[0].payload["correction_turn"] == 1
+    assert "strict JSON" in repairs[0].payload["content"]
+    assert repairs[0].payload["validation_feedback"] == repairs[0].payload["content"]
+    assert "secret transcript details" not in repairs[0].payload["content"]
+    assert len(list_children_with_meta(db, occurrence.iteration_thread_id)) == 1
+
+    changed = _reflector(
+        tmp_path,
+        db,
+        study_id,
+        RepairingLLM([json.dumps({"mutations": [{"instruction": "other"}]})]),
+        _registry([], []),
+        {"model": "repair-test", "profile": profile},
+        max_correction_turns=1,
+    )
+    assert changed.semantic_key(
+        {"instruction": "seed"}, dataset, ["instruction"]
+    ) != reflector.semantic_key({"instruction": "seed"}, dataset, ["instruction"])
+    identity = reflector.drive.semantic_identity["mutation_repair"]
+    assert identity == {
+        "policy": "eggopt.gepa.strict-mutation-repair",
+        "version": "1",
+        "max_correction_turns": 2,
+    }
+
+
+def test_malformed_envelope_stops_after_configured_repairs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _db(tmp_path)
+    study_id, profile = create_solver_safe_study(db, workspace=tmp_path / "workspace")
+    llm = RepairingLLM(["bad", "still bad", "must not run"])
+    reflector = _reflector(
+        tmp_path,
+        db,
+        study_id,
+        llm,
+        _registry([], []),
+        {"model": "repair-limit", "profile": profile},
+        max_correction_turns=1,
+    )
+
+    with pytest.raises(Exception, match="remained invalid after 1 corrective turn"):
+        reflector(
+            {"instruction": "seed"},
+            {"instruction": [{"Feedback": "repair"}]},
+            ["instruction"],
+        )
+    assert len(llm.messages) == 2
+
+
+def test_context_ceiling_rejects_before_provider_call(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _db(tmp_path)
+    study_id, profile = create_solver_safe_study(db, workspace=tmp_path / "workspace")
+    reflector = _reflector(
+        tmp_path,
+        db,
+        study_id,
+        MustNotRunLLM(),
+        _registry([], []),
+        {"model": "preflight-ceiling", "profile": profile},
+        context_ceiling_tokens=1,
+    )
+
+    with pytest.raises(Exception, match="context ceiling reached before provider call"):
+        reflector(
+            {"instruction": "seed"},
+            {"instruction": [{"Feedback": "stream"}]},
+            ["instruction"],
+        )
+    assert reflector.drive.llm.calls == 0
+
+
+def test_streaming_context_ceiling_interrupts_only_reflection_operation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    db = _db(tmp_path)
+    study_id, profile = create_solver_safe_study(db, workspace=tmp_path / "workspace")
+    llm = StreamingCeilingLLM()
+    reflector = _reflector(
+        tmp_path,
+        db,
+        study_id,
+        llm,
+        _registry([], []),
+        {"model": "ceiling-test", "profile": profile},
+        context_ceiling_tokens=180,
+    )
+    from eggthreads import provider_context_token_stats
+
+    # The inherited Mutation context is the operation whose live stream is bounded.
+    assert provider_context_token_stats(db, study_id)["context_tokens"] < 180
+
+    with pytest.raises(Exception, match="context ceiling reached"):
+        reflector(
+            {"instruction": "seed"},
+            {"instruction": [{"Feedback": "stream"}]},
+            ["instruction"],
+        )
+    occurrence = reflector.occurrence(
+        {"instruction": "seed"},
+        {"instruction": [{"Feedback": "stream"}]},
+        ["instruction"],
+    )
+    assert occurrence is not None
+    assert llm.cancelled is True
+    assert db.current_open(occurrence.mutation_thread_id) is None
+    assert db.get_thread(study_id).status == "active"
+    assert db.get_thread(occurrence.mutation_thread_id).status == "active"
+    events = list(db.events_since(occurrence.mutation_thread_id, 0))
+    assert any(event["type"] == "control.interrupt" for event in events)
+    assert reflector.drive.semantic_identity["context_ceiling"] == {
+        "policy": "eggopt.gepa.streaming-context-ceiling",
+        "version": "1",
+        "max_tokens": 180,
+    }
+
+
+def test_production_drive_validates_repair_and_ceiling_options():
+    registry = _registry([], [])
+    for options, message in [
+        ({"max_correction_turns": -1}, "max_correction_turns"),
+        ({"max_correction_turns": True}, "max_correction_turns"),
+        ({"context_ceiling_tokens": 0}, "context_ceiling_tokens"),
+        ({"context_ceiling_tokens": True}, "context_ceiling_tokens"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            EggthreadsReflectionDrive(
+                llm=MustNotRunLLM(),
+                tools=registry,
+                drive_identity={"model": "validation-test"},
+                **options,
+            )
+    with pytest.raises(ValueError, match="reserved"):
+        EggthreadsReflectionDrive(
+            llm=MustNotRunLLM(),
+            tools=registry,
+            drive_identity={"mutation_repair": "caller override"},
+        )
 
 
 def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypatch):

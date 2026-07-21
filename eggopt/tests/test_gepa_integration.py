@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -136,6 +137,207 @@ def make_proposer(executor, threads, drive, **kwargs):
         reflector_config={"policy": "increment"},
         **kwargs,
     )
+
+
+def test_adapter_bounds_async_evaluations_preserves_order_and_replays(tmp_path):
+    _, _, executor, _threads = make_runtime(tmp_path)
+
+    class AsyncEvaluator:
+        def __init__(self) -> None:
+            self.active = 0
+            self.peak = 0
+            self.started: list[str] = []
+            self.release: asyncio.Event | None = None
+
+        async def __call__(self, candidate, example):
+            del candidate
+            if self.release is None:
+                self.release = asyncio.Event()
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            self.started.append(example.example_id)
+            if len(self.started) == 2:
+                self.release.set()
+            await self.release.wait()
+            await asyncio.sleep((3 - example.target_level) * 0.001)
+            self.active -= 1
+            return ExampleEvaluation(
+                output=example.example_id,
+                score=float(example.target_level),
+                evidence=ReflectionEvidence(
+                    inputs={"id": example.example_id},
+                    generated_outputs=example.example_id,
+                    feedback="ordered",
+                ),
+            )
+
+    evaluator = AsyncEvaluator()
+    adapter = EggflowGEPAAdapter(
+        executor,
+        evaluator=evaluator,
+        evaluator_id="tests.async-bounded",
+        evaluator_version="1",
+        evaluator_config={},
+        example_id=lambda example: example.example_id,
+        max_concurrent_evaluations=2,
+    )
+    examples = [Example("first", 1), Example("second", 2), Example("third", 3)]
+    batch = adapter.evaluate(examples, {"instruction": "x"})
+
+    assert evaluator.peak == 2
+    assert batch.outputs == ["first", "second", "third"]
+    assert batch.scores == [1.0, 2.0, 3.0]
+    assert batch.num_metric_calls == 3
+
+    replay = AsyncEvaluator()
+    reopened = EggflowGEPAAdapter(
+        executor,
+        evaluator=replay,
+        evaluator_id="tests.async-bounded",
+        evaluator_version="1",
+        evaluator_config={},
+        example_id=lambda example: example.example_id,
+        max_concurrent_evaluations=2,
+    )
+    replayed = reopened.evaluate(examples, {"instruction": "x"})
+    assert replay.started == []
+    assert replayed.outputs == batch.outputs
+    assert replayed.num_metric_calls == 0
+
+
+def test_adapter_default_keeps_unbounded_parallel_behavior(tmp_path):
+    _, _, executor, _threads = make_runtime(tmp_path)
+
+    class DefaultEvaluator:
+        def __init__(self) -> None:
+            self.active = 0
+            self.peak = 0
+
+        async def __call__(self, candidate, example):
+            del candidate
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            await asyncio.sleep(0)
+            self.active -= 1
+            return ExampleEvaluation(
+                output=example.example_id,
+                score=0.0,
+                evidence=ReflectionEvidence(
+                    inputs={"id": example.example_id},
+                    generated_outputs=example.example_id,
+                    feedback="default",
+                ),
+            )
+
+    evaluator = DefaultEvaluator()
+    adapter = EggflowGEPAAdapter(
+        executor,
+        evaluator=evaluator,
+        evaluator_id="tests.async-default",
+        evaluator_version="1",
+        evaluator_config={},
+        example_id=lambda example: example.example_id,
+    )
+    examples = [Example("one", 1), Example("two", 2), Example("three", 3)]
+
+    adapter.evaluate(examples, {"instruction": "x"})
+    assert evaluator.peak == 3
+
+
+def test_adapter_serial_limit_runs_one_evaluation_at_a_time(tmp_path):
+    _, _, executor, _threads = make_runtime(tmp_path)
+
+    class SerialEvaluator:
+        def __init__(self) -> None:
+            self.active = 0
+            self.peak = 0
+
+        async def __call__(self, candidate, example):
+            del candidate
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            await asyncio.sleep(0)
+            self.active -= 1
+            return ExampleEvaluation(
+                output=example.example_id,
+                score=0.0,
+                evidence=ReflectionEvidence(
+                    inputs={"id": example.example_id},
+                    generated_outputs=example.example_id,
+                    feedback="serial",
+                ),
+            )
+
+    evaluator = SerialEvaluator()
+    adapter = EggflowGEPAAdapter(
+        executor,
+        evaluator=evaluator,
+        evaluator_id="tests.async-serial",
+        evaluator_version="1",
+        evaluator_config={},
+        example_id=lambda example: example.example_id,
+        max_concurrent_evaluations=1,
+    )
+    examples = [Example("one", 1), Example("two", 2), Example("three", 3)]
+
+    assert adapter.evaluate(examples, {"instruction": "x"}).outputs == [
+        "one",
+        "two",
+        "three",
+    ]
+    assert evaluator.peak == 1
+
+    with pytest.raises(ValueError, match="positive integer"):
+        EggflowGEPAAdapter(
+            executor,
+            evaluator=evaluator,
+            evaluator_id="tests.invalid-limit",
+            evaluator_version="1",
+            evaluator_config={},
+            example_id=lambda example: example.example_id,
+            max_concurrent_evaluations=0,
+        )
+
+
+def test_domain_reflection_instruction_changes_identity_and_persisted_request(tmp_path):
+    _, _, executor, threads = make_runtime(tmp_path)
+    drive = DeterministicDrive()
+    dataset = {"instruction": [{"Feedback": "improve"}]}
+    candidate = {"instruction": "0"}
+    custom = "Use domain evidence only; preserve the complete candidate contract."
+    proposer = make_proposer(
+        executor,
+        threads,
+        drive,
+        reflection_instruction=custom,
+    )
+
+    default_key = make_proposer(
+        executor,
+        threads,
+        DeterministicDrive(),
+        study_thread_id=proposer.study_thread_id,
+    ).semantic_key(candidate, dataset, ["instruction"])
+    custom_key = proposer.semantic_key(candidate, dataset, ["instruction"])
+    assert custom_key != default_key
+    with pytest.raises(ValueError, match="non-empty"):
+        make_proposer(
+            executor,
+            threads,
+            DeterministicDrive(),
+            study_thread_id=proposer.study_thread_id,
+            reflection_instruction="   ",
+        )
+    assert proposer(candidate, dataset, ["instruction"]) == {"instruction": "1"}
+    occurrence = proposer.occurrence(candidate, dataset, ["instruction"])
+    assert occurrence is not None
+    message = load_thread_projection(
+        threads,
+        occurrence.mutation_thread_id,
+        threads.max_event_seq(occurrence.mutation_thread_id),
+    ).messages[0]
+    assert message.payload["request"]["instruction"] == custom
+    assert message.payload["content"].startswith(custom + "\n")
 
 
 def test_upstream_gepa_keeps_candidates_lineage_and_specialists(tmp_path):

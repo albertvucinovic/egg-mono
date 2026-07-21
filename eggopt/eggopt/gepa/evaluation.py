@@ -146,11 +146,21 @@ class EggflowGEPAAdapter(Generic[ExampleT, OutputT]):
         evaluator_version: str,
         evaluator_config: Mapping[str, Any],
         example_id: Callable[[ExampleT], Any],
+        max_concurrent_evaluations: int | None = None,
     ) -> None:
         if not isinstance(evaluator_id, str) or not evaluator_id:
             raise ValueError("evaluator_id must be a non-empty string")
         if not isinstance(evaluator_version, str) or not evaluator_version:
             raise ValueError("evaluator_version must be a non-empty string")
+        if max_concurrent_evaluations is not None:
+            if (
+                isinstance(max_concurrent_evaluations, bool)
+                or not isinstance(max_concurrent_evaluations, int)
+                or max_concurrent_evaluations < 1
+            ):
+                raise ValueError(
+                    "max_concurrent_evaluations must be a positive integer or None"
+                )
         self.executor = executor
         self.evaluator = evaluator
         self.evaluator_id = evaluator_id
@@ -159,6 +169,7 @@ class EggflowGEPAAdapter(Generic[ExampleT, OutputT]):
             evaluator_config, what="evaluator_config"
         )
         self.example_id = example_id
+        self.max_concurrent_evaluations = max_concurrent_evaluations
 
     def semantic_key(
         self, candidate: Mapping[str, str], example: ExampleT
@@ -241,7 +252,17 @@ class EggflowGEPAAdapter(Generic[ExampleT, OutputT]):
         )
         if not tasks:
             return [], metric_calls
-        values = await self.executor.run(tasks)
+        if self.max_concurrent_evaluations is None:
+            values = await self.executor.run(tasks)
+        else:
+            values = []
+            limit = self.max_concurrent_evaluations
+            for start in range(0, len(tasks), limit):
+                # Each bounded Eggflow batch is parallel internally and returns
+                # values in declared order. Chunk concatenation preserves that
+                # order without sharing one executor context across coroutines.
+                batch_values = await self.executor.run(tasks[start : start + limit])
+                values.extend(batch_values)
         for value in values:
             if not isinstance(value, ExampleEvaluation):
                 raise TypeError("evaluation task must return ExampleEvaluation")

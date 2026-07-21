@@ -61,6 +61,8 @@ adapter = EggflowGEPAAdapter(
     evaluator_version="1",
     evaluator_config={"metric": "exact-match"},
     example_id=lambda example: example["id"],
+    # Omit for the historical fully parallel behavior; use 1 for serial.
+    max_concurrent_evaluations=4,
 )
 proposer = EggthreadsReflectionLM(
     flow,
@@ -175,6 +177,8 @@ drive = EggthreadsReflectionDrive(
     # Choose this only when the application accepts automatic execution of the
     # already allowlisted tools. Otherwise use Eggthreads' normal approval UI.
     auto_approve_tools=True,
+    max_correction_turns=2,
+    context_ceiling_tokens=240_000,
 )
 proposer = EggthreadsReflectionLM(
     flow,
@@ -184,6 +188,10 @@ proposer = EggthreadsReflectionLM(
     reflector_version="1",
     reflector_config={"response_schema": "strict-mutations-v1"},
     study_thread_id=study_id,
+    reflection_instruction=(
+        "Use only the supplied evidence. Return complete replacements for the "
+        "requested candidate components."
+    ),
 )
 ```
 
@@ -202,3 +210,8 @@ message must be strict JSON of the form
 `{"mutations":[{"component":"new text"}]}` with the requested count and
 component names. Eggopt validates it and annotates that exact message with typed
 mutation metadata; arbitrary earlier transcript text is not result authority.
+
+Malformed final envelopes can be repaired with bounded corrective turns. Each
+sanitized validation request is appended to the same Mutation conversation; the
+repair policy/version/count and streaming context ceiling are semantic identity.
+The ceiling interrupts only that in-progress reflection operation.

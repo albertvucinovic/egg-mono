@@ -24,6 +24,9 @@ from ._identity import canonical_candidate, canonical_json, digest_payload
 _REFLECTION_OPERATION = "eggopt.gepa.reflect.v2"
 _REFLECTION_REQUEST_KIND = "eggopt.gepa.reflection-request.v1"
 _REFLECTION_RESPONSE_KIND = "eggopt.gepa.reflection-response.v1"
+_DEFAULT_REFLECTION_INSTRUCTION = (
+    "Reflect on the structured GEPA evidence and return the requested typed mutations."
+)
 
 
 @dataclass(frozen=True)
@@ -215,6 +218,7 @@ class EggthreadsReflectionLM:
         reflector_config: Mapping[str, Any],
         study_thread_id: str | None = None,
         study_name: str = "GEPA Study",
+        reflection_instruction: str = _DEFAULT_REFLECTION_INSTRUCTION,
         fail_after_response: Callable[[], None] | None = None,
     ) -> None:
         """Bind a drive to a study; persist ``study_thread_id`` for restart."""
@@ -225,11 +229,17 @@ class EggthreadsReflectionLM:
             raise ValueError("reflector_version must be a non-empty string")
         if study_thread_id is not None and threads_db.get_thread(study_thread_id) is None:
             raise ValueError(f"study thread not found: {study_thread_id}")
+        if (
+            not isinstance(reflection_instruction, str)
+            or not reflection_instruction.strip()
+        ):
+            raise ValueError("reflection_instruction must be a non-empty string")
         self.executor = executor
         self.threads_db = threads_db
         self.drive = drive
         self.reflector_id = reflector_id
         self.reflector_version = reflector_version
+        self.reflection_instruction = reflection_instruction.strip()
         drive_identity = getattr(drive, "semantic_identity", {})
         self._reflector_config_json = canonical_json(
             {
@@ -372,6 +382,7 @@ class EggthreadsReflectionLM:
                     "version": self.reflector_version,
                     "config": self._reflector_config_json,
                 },
+                "instruction": self.reflection_instruction,
                 "candidate": canonical_candidate(candidate),
                 "jobs": ordered_jobs,
                 "count": len(ordered_jobs),
@@ -481,6 +492,7 @@ class EggthreadsReflectionLM:
                 }
             )
         return {
+            "instruction": self.reflection_instruction,
             "candidate": dict(canonical_candidate(candidate)),
             "jobs": job_records,
             "components_to_update": sorted(all_components),
@@ -715,8 +727,10 @@ def _validate_components(
 
 
 def _request_content(request: Mapping[str, Any]) -> str:
-    prompt = "Reflect on the structured GEPA evidence and return typed mutations.\n"
-    return prompt + json.dumps(request, sort_keys=True, ensure_ascii=False)
+    instruction = request.get("instruction")
+    if not isinstance(instruction, str) or not instruction:
+        raise ValueError("reflection request requires an instruction")
+    return instruction + "\n" + json.dumps(request, sort_keys=True, ensure_ascii=False)
 
 
 def _run_sync(awaitable: Any) -> Any:
