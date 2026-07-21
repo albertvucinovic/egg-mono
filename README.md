@@ -165,7 +165,7 @@ Tools carry timeouts and lifecycle state. Approval, sandbox, and child-tool poli
 | [`eggconfig`](eggconfig) | Bundled model and image-generation configuration data |
 | [`eggdisplay`](eggdisplay/README.md) | Rich-based editor, panels, layouts, and terminal rendering primitives |
 | [`eggflow`](eggflow/README.md) | Separate cached async task-composition library with optional `eggthreads` integration |
-| [`eggopt`](eggopt/README.md) | Egg-integrated upstream GEPA optimization with durable evaluation and reflection |
+| [`eggopt`](eggopt/README.md) | Native and upstream GEPA with durable evaluation and reflection |
 
 ```text
 Egg or EggW
@@ -259,7 +259,7 @@ If you want a simple stateless chat box, Egg is probably more machinery than you
 - [eggthreads API reference](eggthreads/API.md)
 - [eggllm: provider router](eggllm/README.md)
 - [eggflow: cached task composition](eggflow/README.md)
-- [eggopt: Egg-integrated GEPA](eggopt/README.md)
+- [eggopt: Native and upstream GEPA](eggopt/README.md)
 - [eggdisplay: terminal UI primitives](eggdisplay/README.md)
 
 Issues and pull requests are welcome. For substantial changes, opening an issue first is useful because runtime, client, and persistence behavior often cross package boundaries.

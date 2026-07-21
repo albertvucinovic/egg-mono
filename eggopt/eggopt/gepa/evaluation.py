@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from eggflow import FlowExecutor, Task
-from gepa import EvaluationBatch
+
+try:
+    from gepa import EvaluationBatch
+except ImportError:  # NativeGEPA remains usable without the optional upstream package.
+    EvaluationBatch = Any
 
 from ._identity import canonical_candidate, canonical_json, digest_payload
 

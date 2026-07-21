@@ -5,7 +5,7 @@ import inspect
 import json
 import pickle
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from eggflow import FlowExecutor, Task
@@ -17,7 +17,6 @@ from eggthreads import (
     list_children_with_meta,
     load_thread_projection,
 )
-from gepa.proposer.reflective_mutation.reflection_lm import ReflectionProposal
 
 from ._identity import canonical_candidate, canonical_json, digest_payload
 
@@ -27,6 +26,16 @@ _REFLECTION_RESPONSE_KIND = "eggopt.gepa.reflection-response.v1"
 _DEFAULT_REFLECTION_INSTRUCTION = (
     "Reflect on the structured GEPA evidence and return the requested typed mutations."
 )
+
+
+@dataclass(frozen=True)
+class ReflectionProposal:
+    """One proposed component replacement, understood structurally by upstream GEPA."""
+
+    new_texts: dict[str, str]
+    prompts: dict[str, Any] = field(default_factory=dict)
+    raw_lm_outputs: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -319,6 +328,18 @@ class EggthreadsReflectionLM:
             ]
         ],
     ) -> list[tuple[ReflectionProposal, EggthreadsReflectionLM]]:
+        return _run_sync(self.reflect_many_async(jobs))
+
+    async def reflect_many_async(
+        self,
+        jobs: list[
+            tuple[
+                dict[str, str],
+                Mapping[str, Sequence[Mapping[str, Any]]],
+                list[str],
+            ]
+        ],
+    ) -> list[tuple[ReflectionProposal, EggthreadsReflectionLM]]:
         if not jobs:
             return []
         outputs: list[tuple[ReflectionProposal, EggthreadsReflectionLM] | None] = [
@@ -335,7 +356,7 @@ class EggthreadsReflectionLM:
 
         for candidate_json, indices in groups.items():
             grouped_jobs = [jobs[index] for index in indices]
-            mutations = self._mutate_many(
+            mutations = await self._mutate_many_async(
                 candidates[candidate_json], grouped_jobs
             )
             if len(mutations) != len(indices):
@@ -446,7 +467,7 @@ class EggthreadsReflectionLM:
             raise TypeError("reflection task must return CandidateMutations")
         return mutations
 
-    def _mutate_many(
+    async def _mutate_many_async(
         self,
         candidate: Mapping[str, str],
         jobs: Sequence[
@@ -462,32 +483,27 @@ class EggthreadsReflectionLM:
         occurrence = _find_occurrence(self.threads_db, self.study_thread_id, key)
         cached = self.executor.store.get(key)
         if occurrence is None and cached is not None and cached["status"] == "COMPLETED":
-            cached_mutations = _run_sync(
-                self.executor.run(_CachedReflectionTask(key))
-            )
-            if not isinstance(cached_mutations, CandidateMutations):
-                raise TypeError("reflection task must return CandidateMutations")
-            return cached_mutations
-        if occurrence is None:
-            affinity_thread_id = _find_candidate_affinity(
-                self.threads_db, self.study_thread_id, candidate
-            )
-            if affinity_thread_id is None and _has_uncommitted_request(
-                self.threads_db, self.study_thread_id
-            ):
-                raise RuntimeError(
-                    "study has an uncommitted reflection request; resume it before "
-                    "starting independent work"
+            mutations = await self.executor.run(_CachedReflectionTask(key))
+        else:
+            if occurrence is None:
+                affinity_thread_id = _find_candidate_affinity(
+                    self.threads_db, self.study_thread_id, candidate
                 )
-            occurrence = _append_request(
-                self.threads_db,
-                self.study_thread_id,
-                key,
-                request,
-                affinity_thread_id=affinity_thread_id,
-            )
-        mutations = _run_sync(
-            self.executor.run(
+                if affinity_thread_id is None and _has_uncommitted_request(
+                    self.threads_db, self.study_thread_id
+                ):
+                    raise RuntimeError(
+                        "study has an uncommitted reflection request; resume it before "
+                        "starting independent work"
+                    )
+                occurrence = _append_request(
+                    self.threads_db,
+                    self.study_thread_id,
+                    key,
+                    request,
+                    affinity_thread_id=affinity_thread_id,
+                )
+            mutations = await self.executor.run(
                 _ReflectionTask(
                     semantic_key=key,
                     threads_db=self.threads_db,
@@ -500,10 +516,22 @@ class EggthreadsReflectionLM:
                     fail_after_response=self.fail_after_response,
                 )
             )
-        )
         if not isinstance(mutations, CandidateMutations):
             raise TypeError("reflection task must return CandidateMutations")
         return mutations
+
+    def _mutate_many(
+        self,
+        candidate: Mapping[str, str],
+        jobs: Sequence[
+            tuple[
+                Mapping[str, str],
+                Mapping[str, Sequence[Mapping[str, Any]]],
+                Sequence[str],
+            ]
+        ],
+    ) -> CandidateMutations:
+        return _run_sync(self._mutate_many_async(candidate, jobs))
 
     def _request_many(
         self,
