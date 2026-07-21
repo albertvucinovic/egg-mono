@@ -57,6 +57,23 @@ def test_tools_config_allowlist_parses_and_disables_override(tmp_path):
     assert not cfg.is_tool_allowed("blocked_tool")
 
 
+def test_historical_python_policy_name_maps_to_python_exec(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="legacy-python-policy")
+
+    ts.set_thread_tool_allowlist(db, tid, ["python"])
+    cfg = ts.get_thread_tools_config(db, tid)
+    assert cfg.allowed_tools == {"python_exec"}
+    assert cfg.is_tool_allowed("python_exec")
+
+    ts.disable_tool_for_thread(db, tid, "python")
+    cfg = ts.get_thread_tools_config(db, tid)
+    assert cfg.disabled_tools == {"python_exec"}
+    assert not cfg.is_tool_allowed("python_exec")
+
+    ts.enable_tool_for_thread(db, tid, "python")
+    assert ts.get_thread_tools_config(db, tid).is_tool_allowed("python_exec")
+
 def test_tool_statuses_reflect_allowlist_and_disabled_tools(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
@@ -113,7 +130,7 @@ def test_create_child_thread_inherits_allowlist_and_disabled_distinctly(tmp_path
     assert cfg.disabled_tools == {"bash"}
     assert not cfg.is_tool_allowed("bash")
     assert cfg.is_tool_allowed("web_search")
-    assert not cfg.is_tool_allowed("python")
+    assert not cfg.is_tool_allowed("python_exec")
 
 
 def test_create_child_thread_inherits_tools_enabled_and_secret_mode(tmp_path):

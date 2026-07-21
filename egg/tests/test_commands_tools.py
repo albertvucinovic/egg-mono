@@ -128,7 +128,7 @@ class TestToolsAdminCommands:
 
         class MockConfig:
             llm_tools_enabled = True
-            disabled_tools = ["python"]
+            disabled_tools = ["python_exec"]
             allow_raw_tool_output = False
             allowed_tools = None
 
@@ -137,7 +137,7 @@ class TestToolsAdminCommands:
         egg_app.handle_command("/toolsStatus")
 
         captured = capsys.readouterr()
-        assert "python" in captured.out.lower() or "DISABLED" in captured.out
+        assert "python_exec" in captured.out.lower() or "DISABLED" in captured.out
         assert any("tools status" in msg.lower() for msg in egg_app._system_log)
 
     def test_tools_status_displays_allowlist_restricted_tools(self, egg_app, monkeypatch):
@@ -155,7 +155,7 @@ class TestToolsAdminCommands:
             "eggthreads.builtin_plugins.tools_admin.available_tools",
             lambda: {
                 "bash": {"spec": {}, "local_only": False},
-                "python": {"spec": {}, "local_only": False},
+                "python_exec": {"spec": {}, "local_only": False},
             },
         )
         monkeypatch.setattr(
@@ -170,7 +170,7 @@ class TestToolsAdminCommands:
         text = printed[0][1]
         assert "Tool allowlist: bash" in text
         assert "bash: enabled" in text
-        assert "python: not allowed" in text
+        assert "python_exec: not allowed" in text
 
     def test_tools_secrets_enables_raw_mode(self, egg_app, monkeypatch):
         """Should enable raw mode on 'on'."""

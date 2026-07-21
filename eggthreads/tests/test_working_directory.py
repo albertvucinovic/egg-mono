@@ -68,6 +68,26 @@ def test_isolation_behavior(db):
     finally:
         shutil.rmtree(parent_dir, ignore_errors=True)
 
+
+def test_python_exec_runs_in_thread_working_directory(db):
+    root_tid = create_root_thread(db, "python-cwd")
+    cwd = Path.cwd().resolve()
+    task_dir = cwd / "python_exec_cwd"
+    task_dir.mkdir(exist_ok=True)
+    try:
+        set_thread_working_directory(db, root_tid, "python_exec_cwd")
+        tools = create_default_tools()
+
+        result = tools.execute(
+            "python_exec",
+            {"script": "from pathlib import Path; print(Path.cwd())"},
+            thread_id=root_tid,
+        )
+
+        assert str(task_dir) in result
+    finally:
+        shutil.rmtree(task_dir, ignore_errors=True)
+
 def test_safety_constraints(db):
     root_tid = create_root_thread(db, "root")
     # Use a path guaranteed to be outside CWD (sibling of CWD under its parent)

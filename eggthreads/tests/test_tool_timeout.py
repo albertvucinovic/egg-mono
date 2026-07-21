@@ -133,7 +133,7 @@ class TestToolTimeout:
 
         # Run an infinite loop with a 1-second timeout
         result = tools.execute(
-            "python",
+            "python_exec",
             {"script": "import time; time.sleep(10)", "timeout": 1},
         )
 
@@ -146,7 +146,7 @@ class TestToolTimeout:
         tools = eggthreads.create_default_tools()
 
         result = tools.execute(
-            "python",
+            "python_exec",
             {"script": "print('hello')", "timeout": 10},
         )
 
@@ -159,7 +159,7 @@ class TestToolTimeout:
         tools = eggthreads.create_default_tools()
 
         result = tools.execute(
-            "python",
+            "python_exec",
             {"script": "import sys; sys.stdout.write('x' * 100_000)", "timeout": 3},
         )
 
@@ -186,7 +186,7 @@ class TestToolTimeout:
         tools = eggthreads.create_default_tools()
 
         result = tools.execute(
-            "python",
+            "python_exec",
             {"script": "import time; time.sleep(10)"},
             tool_timeout_sec=1,
         )
@@ -701,7 +701,7 @@ class TestToolCancelCheck:
         threading.Thread(target=set_cancel, daemon=True).start()
 
         result = tools.execute(
-            "python",
+            "python_exec",
             {"script": "import time; time.sleep(10)"},
             cancel_check=cancel_check,
         )

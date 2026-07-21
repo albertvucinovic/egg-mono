@@ -1920,7 +1920,7 @@ def test_reducer_cache_incrementally_applies_all_in_turn_approval_tail(tmp_path,
             "role": "assistant",
             "tool_calls": [
                 {"id": "tc_turn_a", "type": "function", "function": {"name": "bash", "arguments": "a"}},
-                {"id": "tc_turn_b", "type": "function", "function": {"name": "python", "arguments": "b"}},
+                {"id": "tc_turn_b", "type": "function", "function": {"name": "python_exec", "arguments": "b"}},
             ],
         },
         msg_id="m-asst-tool-turn",

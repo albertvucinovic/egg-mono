@@ -46,6 +46,16 @@ from typing import Any, Mapping, Optional, Set, List
 from .db import ThreadsDB
 
 
+_TOOL_NAME_ALIASES = {"python": "python_exec"}
+
+
+def canonical_tool_name(name: str) -> str:
+    """Return the current policy/registry name for a historical tool name."""
+
+    key = name.strip().lower() if isinstance(name, str) else ""
+    return _TOOL_NAME_ALIASES.get(key, key)
+
+
 class ToolPolicyReadError(RuntimeError):
     """Raised when a tool policy cannot be read or validated safely."""
 
@@ -92,7 +102,7 @@ class ToolsConfig:
 
         if self.policy_error or not isinstance(name, str) or not name.strip():
             return False
-        key = name.strip().lower()
+        key = canonical_tool_name(name)
         if key in self.disabled_tools:
             return False
         return self.allowed_tools is None or key in self.allowed_tools
@@ -113,7 +123,7 @@ def _clean_tool_names(value: Any, *, field_name: str, thread_id: str) -> Set[str
                 thread_id,
                 f"{field_name} contains an invalid tool name",
             )
-        names.add(name.strip().lower())
+        names.add(canonical_tool_name(name))
     return names
 
 
@@ -341,7 +351,7 @@ def disable_tool_for_thread(db: ThreadsDB, thread_id: str, name: str) -> None:
 
     if not isinstance(name, str) or not name.strip():
         return
-    _append_tools_config_event(db, thread_id, {"disable": [name.strip()]})
+    _append_tools_config_event(db, thread_id, {"disable": [canonical_tool_name(name)]})
 
 
 def enable_tool_for_thread(db: ThreadsDB, thread_id: str, name: str) -> None:
@@ -349,7 +359,7 @@ def enable_tool_for_thread(db: ThreadsDB, thread_id: str, name: str) -> None:
 
     if not isinstance(name, str) or not name.strip():
         return
-    _append_tools_config_event(db, thread_id, {"enable": [name.strip()]})
+    _append_tools_config_event(db, thread_id, {"enable": [canonical_tool_name(name)]})
 
 
 def set_thread_tool_allowlist(db: ThreadsDB, thread_id: str, names: List[str] | Set[str]) -> None:
@@ -357,7 +367,7 @@ def set_thread_tool_allowlist(db: ThreadsDB, thread_id: str, names: List[str] | 
 
     if not isinstance(names, (list, tuple, set)):
         names = []
-    clean = sorted({n.strip() for n in names if isinstance(n, str) and n.strip()})
+    clean = sorted({canonical_tool_name(n) for n in names if isinstance(n, str) and n.strip()})
     _append_tools_config_event(db, thread_id, {"allow_only": clean})
 
 
@@ -431,7 +441,7 @@ def get_tool_statuses_for_config(
     """
 
     disabled_set = {
-        n.strip().lower()
+        canonical_tool_name(n)
         for n in (getattr(cfg, "disabled_tools", None) or set())
         if isinstance(n, str) and n.strip()
     }
@@ -442,14 +452,14 @@ def get_tool_statuses_for_config(
         allowed_set = None
     else:
         allowed_set = {
-            n.strip().lower()
+            canonical_tool_name(n)
             for n in allowed_raw
             if isinstance(n, str) and n.strip()
         }
 
     statuses: List[dict[str, Any]] = []
     for name, info in sorted(available_tools.items()):
-        key = name.strip().lower() if isinstance(name, str) else ""
+        key = canonical_tool_name(name) if isinstance(name, str) else ""
         is_disabled = key in disabled_set
         allowed_by_allowlist = allowed_set is None or key in allowed_set
         policy_error = bool(getattr(cfg, "policy_error", None))

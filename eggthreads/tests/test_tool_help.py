@@ -38,6 +38,21 @@ def test_every_default_registered_tool_has_curated_detailed_help() -> None:
     assert "bash" in BUILTIN_TOOL_HELP_DETAILS
 
 
+def test_python_exec_is_the_llm_facing_python_tool_and_documents_cwd() -> None:
+    registry = create_default_tools()
+    specs = _specs_by_name(registry)
+
+    assert "python_exec" in specs
+    assert "python" not in specs
+    description = specs["python_exec"]["function"]["description"]
+    assert "Python code" in description
+    assert "current working directory" in description
+
+    output = registry.execute("tool_help", {"tool_name": "python_exec"})
+    assert "Tool: python_exec" in output
+    assert "current working directory" in output
+
+
 def test_tool_help_for_generate_image_includes_dynamic_config(tmp_path) -> None:
     models_path = tmp_path / "models.json"
     image_models_path = tmp_path / "image-generation-models.json"

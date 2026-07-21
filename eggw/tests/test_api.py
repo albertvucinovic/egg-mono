@@ -3825,9 +3825,9 @@ class TestCommands:
         statuses = {item["name"]: item for item in data["data"]["tools"]}
         assert statuses["bash"]["enabled"] is True
         assert statuses["bash"]["status"] == "enabled"
-        assert statuses["python"]["enabled"] is False
-        assert statuses["python"]["status"] == "not_allowed"
-        assert "python: not allowed" in data["message"]
+        assert statuses["python_exec"]["enabled"] is False
+        assert statuses["python_exec"]["status"] == "not_allowed"
+        assert "python_exec: not allowed" in data["message"]
 
 
 # Run tests

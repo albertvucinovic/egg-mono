@@ -344,11 +344,11 @@ def test_enable_disable_tool_commands_are_registered_handlers(monkeypatch) -> No
     ctx = CommandContext(db=object(), current_thread="thread-1", log_system=logs.append)
 
     registry.execute("disableTool", ctx, "bash")
-    registry.execute("enableTool", ctx, "python")
+    registry.execute("enableTool", ctx, "python_exec")
     result = registry.execute("disableTool", ctx, "")
 
     assert disabled == [("thread-1", "bash")]
-    assert enabled == [("thread-1", "python")]
+    assert enabled == [("thread-1", "python_exec")]
     assert result.clear_input is False
     assert any("Usage: /disabletool" in message for message in logs)
 
@@ -374,7 +374,7 @@ def test_tools_secrets_status_and_info_commands_are_registered_handlers(monkeypa
         "eggthreads.builtin_plugins.tools_admin.available_tools",
         lambda: {
             "bash": {"spec": {"name": "bash"}, "local_only": False},
-            "python": {"spec": {"name": "python"}, "local_only": False},
+            "python_exec": {"spec": {"name": "python_exec"}, "local_only": False},
         },
     )
 
@@ -393,7 +393,7 @@ def test_tools_secrets_status_and_info_commands_are_registered_handlers(monkeypa
     assert raw_values == [("thread-1", True)]
     assert invalid.clear_input is False
     assert any("Usage: /toolsSecrets" in message for message in logs)
-    assert any(title == "Tools Status" and "python: not allowed" in text for title, text in printed)
+    assert any(title == "Tools Status" and "python_exec: not allowed" in text for title, text in printed)
     assert any(title == "Tool: bash" and '"name": "bash"' in text for title, text in printed)
 
 

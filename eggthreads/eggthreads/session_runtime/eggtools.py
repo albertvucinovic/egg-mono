@@ -181,10 +181,10 @@ def bash(script: str, **kwargs: Any) -> str:
     return tool("bash", timeout_sec=timeout_sec, **kwargs)
 
 
-def python(script: str, **kwargs: Any) -> str:
+def python_exec(script: str, **kwargs: Any) -> str:
     timeout_sec = _pop_timeout_arg(kwargs)
     kwargs["script"] = script
-    return tool("python", timeout_sec=timeout_sec, **kwargs)
+    return tool("python_exec", timeout_sec=timeout_sec, **kwargs)
 
 
 _load_generated_wrappers()

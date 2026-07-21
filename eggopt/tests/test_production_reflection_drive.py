@@ -66,7 +66,7 @@ class ScriptedToolLLM:
             tool_call = {
                 "id": call_id,
                 "type": "function",
-                "function": {"name": "python", "arguments": arguments},
+                "function": {"name": "python_exec", "arguments": arguments},
             }
             yield {"type": "tool_calls_delta", "delta": [tool_call]}
             yield {
@@ -110,7 +110,7 @@ def _db(tmp_path: Path) -> ThreadsDB:
 def _registry(executions: list[str], blocked: list[str]) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(
-        "python",
+        "python_exec",
         "Deterministic test calculation",
         {
             "type": "object",
@@ -400,9 +400,9 @@ def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypa
 
     child = create_child_thread(db, study_id, name="Mutation")
     assert get_thread_tools_config(db, child).allowed_tools == SOLVER_SAFE_TOOLS
-    set_thread_tool_allowlist(db, study_id, {"python", "bash"})
+    set_thread_tool_allowlist(db, study_id, {"python_exec", "bash"})
     set_thread_tool_allowlist(db, child, set(SOLVER_SAFE_TOOLS))
-    assert get_thread_tools_config(db, child).allowed_tools == {"python", "bash"}
+    assert get_thread_tools_config(db, child).allowed_tools == {"python_exec", "bash"}
 
     sandbox = get_thread_sandbox_config(db, child)
     assert sandbox.enabled is True
@@ -446,7 +446,7 @@ def test_production_drive_tool_round_trip_policy_affinity_and_cache(
     assert occurrence is not None
     assert executions == ["turn-1"]
     assert blocked == []
-    assert all(names == {"python"} for names in llm.tool_names)
+    assert all(names == {"python_exec"} for names in llm.tool_names)
     child_tools = get_thread_tools_config(db, occurrence.mutation_thread_id)
     assert child_tools.allowed_tools == SOLVER_SAFE_TOOLS
     assert not child_tools.is_tool_allowed("web_search")

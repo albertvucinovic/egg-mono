@@ -671,13 +671,17 @@ def register_execution_tools(registry: ToolRegistry) -> None:
     )
 
     registry.register(
-        name="python",
-        description="Execute a Python script and return combined stdout/stderr. Use timeout to limit execution time.",
+        name="python_exec",
+        description=(
+            "Execute Python code in the current working directory and return combined "
+            "stdout/stderr. Use timeout to limit execution time."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "script": {"type": "string", "description": "The Python script to execute."},
             },
+            "required": ["script"],
         },
         impl=execute_python_tool_context,
         accepts_context=True,

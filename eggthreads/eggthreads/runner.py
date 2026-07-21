@@ -3702,7 +3702,7 @@ class ThreadRunner:
                 self.thread_id,
                 current.tool_call_id,
                 full_output,
-                tool_name=current.name,
+                tool_name=self.tools.resolve_name(current.name),
                 tool_args=current.arguments,
                 finished_reason=str(current.finished_reason or ""),
                 origin=ra.kind,
@@ -3882,10 +3882,11 @@ class ThreadRunner:
                 # executing the tool, immediately mark it finished with
                 # a synthetic "not allowed" output. This applies equally
                 # to assistant- and user-originated calls.
-                if not tools_cfg.is_tool_allowed(tc.name):
+                tool_name = self.tools.resolve_name(tc.name)
+                if not tools_cfg.is_tool_allowed(tool_name):
                     import os as _os
                     disabled_msg = policy_error_message or (
-                        f"Tool '{tc.name}' is not allowed for this thread and "
+                        f"Tool '{tool_name}' is not allowed for this thread and "
                         "was not executed."
                     )
                     finished_seq = self._owned_append(
@@ -3938,10 +3939,10 @@ class ThreadRunner:
                         # closed. Repeat the declaration metadata on execution
                         # start so a running tool remains inspectable without
                         # waiting for a final transcript redraw.
-                        'name': tc.name,
+                        'name': tool_name,
                         'arguments': tc.arguments,
                         'resumes_after_lease_loss': self.tools.capabilities(
-                            tc.name
+                            tool_name
                         ).resumes_after_lease_loss,
                     }
                     if tool_timeout_sec is not None:
@@ -3993,11 +3994,16 @@ class ThreadRunner:
                     return check
 
                 cancel_check = make_cancel_check(self.db.path, self.thread_id, invoke_id)
-                stream_ctx = self._tool_stream_context(tc=tc, invoke_id=invoke_id, current_model=current_model)
+                execution_tc = replace(tc, name=tool_name)
+                stream_ctx = self._tool_stream_context(
+                    tc=execution_tc,
+                    invoke_id=invoke_id,
+                    current_model=current_model,
+                )
 
                 try:
                     tool_result = await self.tools.execute_async(
-                        tc.name,
+                        tool_name,
                         tc.arguments,
                         thread_id=self.thread_id,
                         invoke_id=invoke_id,
@@ -4112,7 +4118,7 @@ class ThreadRunner:
                             thread_id=self.thread_id,
                             invoke_id=invoke_id,
                             tool_call_id=tc.tool_call_id,
-                            tool_name=tc.name or '',
+                            tool_name=tool_name or '',
                             current_model=current_model,
                             heartbeat=_heartbeat,
                             suppressed_counter=suppressed_counter,
@@ -4148,7 +4154,7 @@ class ThreadRunner:
                     self.thread_id,
                     tc.tool_call_id,
                     full_result,
-                    tool_name=tc.name,
+                    tool_name=tool_name,
                     tool_args=tc.arguments,
                     finished_reason=finish_reason,
                     origin=ra.kind,
@@ -4170,6 +4176,7 @@ class ThreadRunner:
             # Output approval done (TC5) -> publish final tool message based on
             # the last tool_call.output_approval payload.
             if tc.state == 'TC5':
+                tool_name = self.tools.resolve_name(tc.name)
                 payload = tc.last_output_approval_payload or {}
                 decision = payload.get('decision')
                 preview = payload.get('preview') or ''
@@ -4178,7 +4185,7 @@ class ThreadRunner:
                 from .tool_output_contract import requires_legacy_long_output_routing
 
                 long_finished_output = bool(
-                    requires_legacy_long_output_routing(tc.name)
+                    requires_legacy_long_output_routing(tool_name)
                     and (
                         len(finished_output) > LONG_OUTPUT_CHAR_THRESHOLD
                         or _line_count(finished_output) > LONG_OUTPUT_LINE_THRESHOLD
@@ -4257,7 +4264,7 @@ class ThreadRunner:
                         # Structured artifact content is safe only for a whole
                         # decision. A partial long-output decision must retain
                         # its bounded preview/read-tool recovery note.
-                        structured_content = _tool_output_content_parts_for_transcript(tc.name, finished_output)
+                        structured_content = _tool_output_content_parts_for_transcript(tool_name, finished_output)
                         content = structured_content if structured_content is not None else str(preview)
                     else:
                         content = str(preview)
@@ -4289,7 +4296,7 @@ class ThreadRunner:
                     'role': 'tool',
                     'content': content,
                     'tool_call_id': tc.tool_call_id,
-                    'name': tc.name,
+                    'name': tool_name,
                     'user_tool_call': bool(ra.kind == 'RA3_tools_user'),
                 }
                 try:
@@ -4407,11 +4414,11 @@ class ThreadRunner:
                 args_obj = args
             else:
                 args_obj = {"_arg": args}
-            if tc.name in ("bash", "python") and isinstance(args_obj.get("script"), str):
+            if tc.name in ("bash", "python_exec") and isinstance(args_obj.get("script"), str):
                 script = args_obj.get("script")
                 if tc.name == "bash":
                     return f"$ {script}"
-                return f"python {script}"
+                return f"python_exec {script}"
             # Generic fallback
             return f"{tc.name}({json.dumps(args_obj, ensure_ascii=False)})"
         except Exception:

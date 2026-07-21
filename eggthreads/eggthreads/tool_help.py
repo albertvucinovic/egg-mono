@@ -135,8 +135,8 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
         ],
         "examples": ['{"script": "git status --short && pytest -q eggthreads/tests/test_tool_help.py", "timeout": 120}'],
     },
-    "python": {
-        "details": "Execute a standalone Python script and return combined stdout/stderr.",
+    "python_exec": {
+        "details": "Execute standalone Python code in the current working directory and return combined stdout/stderr.",
         "use_when": [
             "You need structured parsing, repository analysis, or a short deterministic script.",
             "A one-shot Python process is preferable to maintaining REPL state.",

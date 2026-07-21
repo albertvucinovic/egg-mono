@@ -51,7 +51,7 @@ def test_python_tool_is_sandboxed_and_children_inherit_latest_config(tmp_path, m
 
     # Attempt to write outside CWD should fail under the restrictive config.
     out = tools.execute(
-        "python",
+        "python_exec",
         {"script": "from pathlib import Path; Path('../blocked.txt').write_text('nope')"},
         thread_id=child,
     )
@@ -72,7 +72,7 @@ def test_python_tool_is_sandboxed_and_children_inherit_latest_config(tmp_path, m
     child2 = eggthreads.create_child_thread(db, root, name="child2")
 
     out2 = tools.execute(
-        "python",
+        "python_exec",
         {"script": "from pathlib import Path; Path('../ok.txt').write_text('ok')"},
         thread_id=child2,
     )

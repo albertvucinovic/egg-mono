@@ -4381,11 +4381,11 @@ def _make_eggtools_module(eval_token: str):
         args["script"] = script
         return repl_bridge.call_tool(eval_token, "bash", args, timeout_sec=timeout_sec)
 
-    def python(script: str, **kwargs: Any) -> str:
+    def python_exec(script: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         timeout_sec = _pop_timeout_arg(args)
         args["script"] = script
-        return repl_bridge.call_tool(eval_token, "python", args, timeout_sec=timeout_sec)
+        return repl_bridge.call_tool(eval_token, "python_exec", args, timeout_sec=timeout_sec)
 
     _install_generated_wrappers()
 
@@ -4399,7 +4399,7 @@ def _make_eggtools_module(eval_token: str):
     mod.fetch_url = fetch_url
     mod.skill = skill
     mod.bash = bash
-    mod.python = python
+    mod.python_exec = python_exec
     return mod
 
 

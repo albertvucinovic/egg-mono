@@ -313,7 +313,7 @@ def test_default_selection_skips_latest_denied_or_omitted_publication(tmp_path, 
         db,
         thread_id,
         "omitted-latest",
-        "python",
+        "python_exec",
         "omitted\n",
         decision="omit",
         preview="Output omitted.",
@@ -333,7 +333,7 @@ def test_explicit_prior_selection_and_terminal_sanitization(tmp_path, monkeypatc
     db = _make_db(tmp_path)
     thread_id = ts.create_root_thread(db, name="explicit")
     _publish_source(db, thread_id, "first", "bash", "safe\x1b[2Jtext\r\nnext\x07\n")
-    _publish_source(db, thread_id, "second", "python", "other\nsource\n")
+    _publish_source(db, thread_id, "second", "python_exec", "other\nsource\n")
     current = _declare_extractor(db, thread_id)
 
     _receipt, metadata, data = _extract(
@@ -456,7 +456,7 @@ def test_default_selection_uses_latest_prior_publication_despite_extraction_sibl
     sibling = {
         "id": "parallel-sibling",
         "type": "function",
-        "function": {"name": "python", "arguments": "{}"},
+        "function": {"name": "python_exec", "arguments": "{}"},
     }
     current = _declare_extractor(db, thread_id, extra_calls=[sibling])
 
@@ -511,7 +511,7 @@ def test_positional_selection_uses_declaration_group_and_index_not_publication_o
         thread_id,
         [
             {"tool_call_id": "group-a-0", "name": "bash", "output": "a-zero\n"},
-            {"tool_call_id": "group-a-1", "name": "python", "output": "a-one\n"},
+            {"tool_call_id": "group-a-1", "name": "python_exec", "output": "a-one\n"},
             {"tool_call_id": "group-a-2", "name": "skill", "output": "a-two\n"},
         ],
         publication_order=["group-a-2", "group-a-0", "group-a-1"],
@@ -521,7 +521,7 @@ def test_positional_selection_uses_declaration_group_and_index_not_publication_o
         thread_id,
         [
             {"tool_call_id": "group-b-0", "name": "bash", "output": "b-zero\n"},
-            {"tool_call_id": "group-b-1", "name": "python", "output": "b-one\n"},
+            {"tool_call_id": "group-b-1", "name": "python_exec", "output": "b-one\n"},
         ],
         publication_order=["group-b-1", "group-b-0"],
     )
@@ -569,7 +569,7 @@ def test_positional_selection_validates_exact_declared_position(
             {"tool_call_id": "eligible", "name": "bash", "output": "ok\n"},
             {
                 "tool_call_id": "omitted",
-                "name": "python",
+                "name": "python_exec",
                 "output": "secret\n",
                 "decision": "omit",
                 "preview": "Output omitted.",

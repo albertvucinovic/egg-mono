@@ -38,12 +38,12 @@ from .reflection import (
 )
 
 SOLVER_SAFE_PROFILE_NAME = "solver_safe"
-SOLVER_SAFE_PROFILE_VERSION = "1"
+SOLVER_SAFE_PROFILE_VERSION = "2"
 _MUTATION_REPAIR_POLICY = "eggopt.gepa.strict-mutation-repair"
 _MUTATION_REPAIR_VERSION = "1"
 SOLVER_SAFE_TOOLS = frozenset(
     {
-        "python",
+        "python_exec",
         "python_repl",
         "bash",
         "bash_repl",

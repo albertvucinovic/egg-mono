@@ -30,7 +30,7 @@ py_files[:50]
 ## Optional bootstrap helpers
 
 There is no special RLM runtime module. The stable runtime API is the small
-`eggtools` bridge (`bash`, `python`, `spawn_agent`, `spawn_agent_auto`,
+`eggtools` bridge (`bash`, `python_exec`, `spawn_agent`, `spawn_agent_auto`,
 `get_child_status`, `wait`, `web_search`, `fetch_url`, ...). When these helpers are useful, paste/adapt this
 snippet into `python_repl`; because the REPL is persistent, you normally only
 need to define it once per session.
@@ -241,7 +241,7 @@ for question in manager_state["open_questions"]:
     tid = spawn_agent_auto(
         question,
         label="worker",
-        allowed_tools=["bash", "python", "python_repl", "web_search", "fetch_url"],
+        allowed_tools=["bash", "python_exec", "python_repl", "web_search", "fetch_url"],
     )
     manager_state["workers"][tid] = {"question": question, "status": "started"}
 

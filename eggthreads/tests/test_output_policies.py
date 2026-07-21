@@ -156,7 +156,7 @@ def test_runner_artifacts_large_python_stdout(tmp_path, monkeypatch):
     tcid = ts.enqueue_user_tool_call(
         db,
         tid,
-        "python",
+        "python_exec",
         {"script": "import sys; sys.stdout.write('x' * 120_000)", "timeout_sec": 3},
         auto_approve=True,
         hidden=True,
@@ -179,6 +179,33 @@ def test_runner_artifacts_large_python_stdout(tmp_path, monkeypatch):
     assert payload["decision"] == "partial"
     assert payload["artifact_path"]
     assert "read_long_tool_output(" in payload["preview"]
+
+
+def test_runner_executes_historical_python_tool_name_with_python_exec(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_SANDBOX_MODE", "off")
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="legacy-python-tool")
+    tcid = ts.enqueue_user_tool_call(
+        db,
+        tid,
+        "python",
+        {"script": "print('legacy-python-call')"},
+        auto_approve=True,
+        hidden=True,
+    )
+
+    runner = ts.ThreadRunner(db, tid, llm=object())
+    assert asyncio.run(runner.run_once()) is True
+
+    state = ts.build_tool_call_states(db, tid)[tcid]
+    assert state.finished_reason == "success"
+    assert "legacy-python-call" in (state.finished_output or "")
+
+    assert asyncio.run(runner.run_once()) is True
+    tool_message = _latest_payload(db, tid, "msg.create", tcid)
+    assert tool_message["name"] == "python_exec"
 
 
 def test_runner_caps_persisted_tool_output_and_artifact_metadata(tmp_path, monkeypatch):

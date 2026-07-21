@@ -1067,7 +1067,7 @@ Create a ToolRegistry with the default set of tools.
 
 Returns a registry pre-populated with common tools:
 - bash: Execute shell commands
-- python: Execute Python scripts
+- python_exec: Execute Python code in the current working directory
 - spawn_agent: Create child threads for delegation
 - spawn_agent_auto: Create auto-approved child threads
 - web_search: Provider-fallback web search. In default `auto` mode, Tavily is
@@ -1083,6 +1083,9 @@ Returns a registry pre-populated with common tools:
   are controlled by `EGG_WEB_FETCH_TIMEOUT_SEC`,
   `EGG_WEB_FETCH_MAX_BYTES`, and `EGG_WEB_FETCH_MAX_CHARS`.
 - wait: Synchronize on child thread completion
+
+`python` is retained only as an execution/policy compatibility name for
+already-persisted tool calls and configurations; it is not exposed to LLMs.
 
 Returns:
     ToolRegistry with default tools registered.

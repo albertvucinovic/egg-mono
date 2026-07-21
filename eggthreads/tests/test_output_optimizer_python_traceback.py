@@ -43,7 +43,7 @@ def test_python_traceback_filter_focuses_long_traceback_and_reports_metadata() -
     raw = _traceback(10)
 
     decision = OutputOptimizer([PythonTracebackFocusFilter(max_frames=5, head_frames=2, tail_frames=2)]).optimize(
-        OptimizeRequest(tool_name="python", output=raw)
+        OptimizeRequest(tool_name="python_exec", output=raw)
     )
 
     assert decision.optimized is True

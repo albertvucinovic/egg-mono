@@ -174,10 +174,24 @@ def test_execution_tools_advertise_current_capabilities() -> None:
     assert bash_capabilities.supports_streaming is True
     assert bash_capabilities.supports_cancellation is True
 
-    python_capabilities = registry._tools["python"]["capabilities"]
+    python_capabilities = registry._tools["python_exec"]["capabilities"]
     assert isinstance(python_capabilities, ToolCapabilities)
     assert python_capabilities.supports_streaming is False
     assert python_capabilities.supports_cancellation is True
+    assert registry.capabilities("python") == python_capabilities
+
+
+def test_historical_default_alias_does_not_shadow_an_exact_custom_tool() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        "python",
+        "Custom tool using the historical name",
+        {"type": "object", "properties": {}},
+        lambda _args: "custom-python",
+    )
+
+    assert registry.resolve_name("python") == "python"
+    assert registry.execute("python", {}) == "custom-python"
 
 
 def test_execute_async_awaits_async_tool() -> None:

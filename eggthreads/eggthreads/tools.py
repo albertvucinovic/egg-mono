@@ -617,6 +617,16 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Dict[str, Any]] = {}
 
+    def resolve_name(self, name: str) -> str:
+        """Resolve a historical default-tool name without shadowing exact tools."""
+
+        if name in self._tools:
+            return name
+        from .tools_config import canonical_tool_name
+
+        canonical = canonical_tool_name(name)
+        return canonical if canonical in self._tools else name
+
     def register(
         self,
         name: str,
@@ -671,7 +681,7 @@ class ToolRegistry:
         return [d["spec"] for d in self._tools.values() if not d.get("local_only")]
 
     def capabilities(self, name: str) -> ToolCapabilities:
-        entry = self._tools.get(name)
+        entry = self._tools.get(self.resolve_name(name))
         if not entry:
             raise KeyError(f"Unknown tool: {name}")
         return entry["capabilities"]
@@ -682,7 +692,7 @@ class ToolRegistry:
         arguments: Any,
         context: Mapping[str, Any],
     ) -> tuple[Callable[..., Any], Dict[str, Any], ToolContext | None]:
-        entry = self._tools.get(name)
+        entry = self._tools.get(self.resolve_name(name))
         if not entry:
             raise KeyError(f"Unknown tool: {name}")
         impl = entry["impl"]
@@ -1071,7 +1081,7 @@ def create_default_tools() -> ToolRegistry:
 
     Returns a registry pre-populated with common tools:
     - bash: Execute shell commands
-    - python: Execute Python scripts
+    - python_exec: Execute Python code in the current working directory
     - spawn_agent: Create child threads for delegation
     - spawn_agent_auto: Create auto-approved child threads
     - web_search: Provider-fallback web search (auto by default)

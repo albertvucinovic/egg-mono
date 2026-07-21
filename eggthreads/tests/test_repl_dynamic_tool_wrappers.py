@@ -38,6 +38,16 @@ def test_memory_repl_generated_tool_wrapper_supports_from_import(tmp_path, monke
     assert "ImportError" not in out
 
 
+def test_memory_repl_exposes_python_exec_wrapper_not_python(monkeypatch):
+    import eggthreads.repl_bridge as repl_bridge
+
+    monkeypatch.setattr(repl_bridge, "call_tool", lambda *_args, **_kwargs: "ok")
+    module = session._make_eggtools_module("test-token")
+
+    assert callable(module.python_exec)
+    assert not hasattr(module, "python")
+
+
 def test_docker_runtime_eggtools_generated_wrapper_supports_from_import(tmp_path):
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
@@ -413,14 +423,20 @@ def test_generated_eggtools_wrappers_include_compact_thread_but_not_removed_comp
 
     assert "compact_thread" in ns["__all__"]
     assert callable(ns["compact_thread"])
+    assert "python_exec" in ns["__all__"]
+    assert callable(ns["python_exec"])
+    assert "python" not in ns["__all__"]
+    assert "python" not in ns
     for name in ("show_compaction_start", "search_compaction_sources", "fetch_compaction_source"):
         assert name not in ns["__all__"]
         assert name not in ns
 
     assert ns["compact_thread"]() == "called:compact_thread"
     assert ns["compact_thread"](start_message="last_user", timeout_sec=3) == "called:compact_thread"
+    assert ns["python_exec"]("print('ok')") == "called:python_exec"
 
     assert calls == [
         ("compact_thread", {}, None),
         ("compact_thread", {"start_message": "last_user"}, 3),
+        ("python_exec", {"script": "print('ok')"}, None),
     ]
