@@ -7,6 +7,7 @@ import math
 import pickle
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from eggflow import FlowExecutor, Task
@@ -100,6 +101,25 @@ class EvaluationSemanticKey:
                 "example_identity": self.example_identity_json,
             },
         )
+
+
+def semantic_workspace_path(
+    root: str | Path,
+    *,
+    candidate_name: str,
+    candidate_digest: str,
+    case_name: str,
+    case_digest: str,
+) -> Path:
+    """Return a readable, collision-resistant candidate/case workspace path."""
+
+    return (
+        Path(root)
+        / "candidates"
+        / f"{_path_segment(candidate_name, 'candidate')}-{_short_digest(candidate_digest)}"
+        / "cases"
+        / f"{_path_segment(case_name, 'case')}-{_short_digest(case_digest)}"
+    )
 
 
 @dataclass
@@ -285,6 +305,24 @@ def _finite_score(value: Any, what: str) -> float:
     if not math.isfinite(result):
         raise ValueError(f"{what} must be finite")
     return result
+
+
+def _path_segment(value: object, fallback: str) -> str:
+    text = "-".join(
+        part
+        for part in "".join(
+            char.casefold() if char.isalnum() else " " for char in str(value or "")
+        ).split()
+        if part
+    )
+    return text[:48] or fallback
+
+
+def _short_digest(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    if len(text) < 8 or any(char not in "0123456789abcdef" for char in text):
+        raise ValueError("workspace digest must be at least eight hexadecimal characters")
+    return text[:8]
 
 
 def _json_value(value: Any, what: str) -> Any:

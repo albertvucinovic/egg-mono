@@ -30,6 +30,7 @@ from eggopt.gepa import (
     EggthreadsCandidateProposer,
     ExampleEvaluation,
     ReflectionEvidence,
+    semantic_workspace_path,
     optimize_with_egg,
 )
 
@@ -77,6 +78,18 @@ def test_reflection_evidence_preserves_structured_json() -> None:
         "Feedback": "compare every action",
         "Score": 2.5,
     }
+
+
+def test_semantic_workspace_path_is_readable_and_unique(tmp_path) -> None:
+    assert semantic_workspace_path(
+        tmp_path,
+        candidate_name="Candidate 003",
+        candidate_digest="abcdef0123456789",
+        case_name="May Case 017",
+        case_digest="12345678deadbeef",
+    ).relative_to(tmp_path).as_posix() == (
+        "candidates/candidate-003-abcdef01/cases/may-case-017-12345678"
+    )
 
 
 class DeterministicDrive:

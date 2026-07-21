@@ -7,6 +7,7 @@ from .evaluation import (
     EvaluationSemanticKey,
     ExampleEvaluation,
     ReflectionEvidence,
+    semantic_workspace_path,
 )
 from .reflection import (
     CandidateMutation,
@@ -44,6 +45,7 @@ __all__ = [
     "ReflectionDrive",
     "ReflectionEvidence",
     "ReflectionOccurrence",
+    "semantic_workspace_path",
     "configure_solver_safe_tools",
     "create_solver_safe_study",
     "optimize_with_egg",
