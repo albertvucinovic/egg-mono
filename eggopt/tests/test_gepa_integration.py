@@ -1011,3 +1011,63 @@ def test_recovery_reuses_persisted_assistant_mutation(tmp_path):
     assert restarted.occurrence(candidate, dataset, ["instruction"]) == occurrence
     completed = store.get(restarted.semantic_key(candidate, dataset, ["instruction"]))
     assert completed is not None and completed["status"] == "COMPLETED"
+
+
+def test_pareto_breadth_sampling_uses_distinct_parents_when_available() -> None:
+    import random
+
+    from eggopt.gepa import ParetoBreadthSampling
+
+    class State:
+        program_candidates = [{"x": "0"}, {"x": "1"}, {"x": "2"}]
+        per_program_tracked_scores = [1.0, 1.0, 1.0]
+
+        @staticmethod
+        def get_pareto_front_mapping():
+            return {"a": {0}, "b": {1}, "c": {2}}
+
+    class Loader:
+        @staticmethod
+        def fetch(ids):
+            return list(ids)
+
+    class Batches:
+        call = 0
+
+        def next_minibatch_ids(self, _loader, _state):
+            self.call += 1
+            return [self.call]
+
+    tasks = ParetoBreadthSampling(2, rng=random.Random(7)).sample_tasks(
+        State(), None, Batches(), Loader()
+    )
+
+    assert len(tasks) == 2
+    assert len({task.parent_idx for task in tasks}) == 2
+    assert [task.minibatch_ids for task in tasks] == [[1], [2]]
+
+
+def test_pareto_breadth_sampling_repeats_only_available_parent() -> None:
+    from eggopt.gepa import ParetoBreadthSampling
+
+    class State:
+        program_candidates = [{"x": "0"}]
+        per_program_tracked_scores = [1.0]
+
+        @staticmethod
+        def get_pareto_front_mapping():
+            return {"only": {0}}
+
+    class Loader:
+        @staticmethod
+        def fetch(ids):
+            return list(ids)
+
+    class Batches:
+        @staticmethod
+        def next_minibatch_ids(_loader, _state):
+            return [1]
+
+    tasks = ParetoBreadthSampling(2).sample_tasks(State(), None, Batches(), Loader())
+
+    assert [task.parent_idx for task in tasks] == [0, 0]

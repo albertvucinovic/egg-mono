@@ -27,6 +27,7 @@ from .production_drive import (
     create_solver_safe_study,
 )
 from .runner import optimize_with_egg
+from .search import ParetoBreadthSampling
 
 __all__ = [
     "CandidateMutation",
@@ -41,6 +42,7 @@ __all__ = [
     "EvaluationSemanticKey",
     "ExampleEvaluation",
     "GEPAResult",
+    "ParetoBreadthSampling",
     "ReflectionConversation",
     "ReflectionDrive",
     "ReflectionEvidence",
