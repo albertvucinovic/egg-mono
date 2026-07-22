@@ -1,6 +1,9 @@
-"""Public Egg integration for upstream GEPA."""
+"""Low-level GEPA integration pieces.
 
-from gepa import GEPAResult
+Most applications should use :class:`eggopt.UpstreamGEPA` or
+:class:`eggopt.NativeGEPA`. These names remain for advanced integrations and
+backward compatibility.
+"""
 
 from .evaluation import (
     EggflowGEPAAdapter,
@@ -8,6 +11,14 @@ from .evaluation import (
     ExampleEvaluation,
     ReflectionEvidence,
     semantic_workspace_path,
+)
+from .production_drive import (
+    SOLVER_SAFE_PROFILE_NAME,
+    SOLVER_SAFE_PROFILE_VERSION,
+    SOLVER_SAFE_TOOLS,
+    EggthreadsReflectionDrive,
+    configure_solver_safe_tools,
+    create_solver_safe_study,
 )
 from .reflection import (
     CandidateMutation,
@@ -18,38 +29,39 @@ from .reflection import (
     ReflectionDrive,
     ReflectionOccurrence,
 )
-from .production_drive import (
-    EggthreadsReflectionDrive,
-    SOLVER_SAFE_PROFILE_NAME,
-    SOLVER_SAFE_PROFILE_VERSION,
-    SOLVER_SAFE_TOOLS,
-    configure_solver_safe_tools,
-    create_solver_safe_study,
-)
-from .runner import optimize_with_egg
-from .search import MaxMutationStagesStopper, ParetoBreadthSampling
 
 __all__ = [
+    "SOLVER_SAFE_PROFILE_NAME",
+    "SOLVER_SAFE_PROFILE_VERSION",
+    "SOLVER_SAFE_TOOLS",
     "CandidateMutation",
     "CandidateMutations",
     "EggflowGEPAAdapter",
     "EggthreadsCandidateProposer",
     "EggthreadsReflectionDrive",
     "EggthreadsReflectionLM",
-    "SOLVER_SAFE_PROFILE_NAME",
-    "SOLVER_SAFE_PROFILE_VERSION",
-    "SOLVER_SAFE_TOOLS",
     "EvaluationSemanticKey",
     "ExampleEvaluation",
-    "GEPAResult",
-    "MaxMutationStagesStopper",
-    "ParetoBreadthSampling",
     "ReflectionConversation",
     "ReflectionDrive",
     "ReflectionEvidence",
     "ReflectionOccurrence",
-    "semantic_workspace_path",
     "configure_solver_safe_tools",
     "create_solver_safe_study",
-    "optimize_with_egg",
+    "semantic_workspace_path",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"GEPAResult", "optimize_with_egg"}:
+        from .runner import GEPAResult, optimize_with_egg
+
+        return {"GEPAResult": GEPAResult, "optimize_with_egg": optimize_with_egg}[name]
+    if name in {"MaxMutationStagesStopper", "ParetoBreadthSampling"}:
+        from .search import MaxMutationStagesStopper, ParetoBreadthSampling
+
+        return {
+            "MaxMutationStagesStopper": MaxMutationStagesStopper,
+            "ParetoBreadthSampling": ParetoBreadthSampling,
+        }[name]
+    raise AttributeError(name)

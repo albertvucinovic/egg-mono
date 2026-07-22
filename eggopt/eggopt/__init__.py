@@ -1,5 +1,6 @@
-"""Egg-integrated optimization algorithms."""
+"""Small, durable optimization interfaces built on Eggflow and Eggthreads."""
 
+from .evaluation import Evaluation
 from .gepa import (
     CandidateMutation,
     CandidateMutations,
@@ -7,20 +8,18 @@ from .gepa import (
     EggthreadsCandidateProposer,
     EggthreadsReflectionDrive,
     EggthreadsReflectionLM,
-    SOLVER_SAFE_PROFILE_NAME,
-    SOLVER_SAFE_PROFILE_VERSION,
-    SOLVER_SAFE_TOOLS,
     EvaluationSemanticKey,
     ExampleEvaluation,
-    GEPAResult,
     ReflectionConversation,
     ReflectionDrive,
     ReflectionEvidence,
     ReflectionOccurrence,
     configure_solver_safe_tools,
     create_solver_safe_study,
-    optimize_with_egg,
+    semantic_workspace_path,
 )
+from .native_gepa import NativeGEPA, NativeGEPAResult
+from .runtime import Reflection
 
 __all__ = [
     "CandidateMutation",
@@ -29,17 +28,29 @@ __all__ = [
     "EggthreadsCandidateProposer",
     "EggthreadsReflectionDrive",
     "EggthreadsReflectionLM",
-    "SOLVER_SAFE_PROFILE_NAME",
-    "SOLVER_SAFE_PROFILE_VERSION",
-    "SOLVER_SAFE_TOOLS",
+    "Evaluation",
     "EvaluationSemanticKey",
     "ExampleEvaluation",
-    "GEPAResult",
+    "NativeGEPA",
+    "NativeGEPAResult",
+    "Reflection",
     "ReflectionConversation",
     "ReflectionDrive",
     "ReflectionEvidence",
     "ReflectionOccurrence",
     "configure_solver_safe_tools",
     "create_solver_safe_study",
-    "optimize_with_egg",
+    "semantic_workspace_path",
 ]
+
+
+def __getattr__(name: str):
+    if name == "UpstreamGEPA":
+        from .upstream_gepa import UpstreamGEPA
+
+        return UpstreamGEPA
+    if name in {"GEPAResult", "optimize_with_egg"}:
+        from .gepa import GEPAResult, optimize_with_egg
+
+        return {"GEPAResult": GEPAResult, "optimize_with_egg": optimize_with_egg}[name]
+    raise AttributeError(name)
