@@ -4,7 +4,7 @@ import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChatPanel } from "@/components/ChatPanel";
-import { ChildrenPanel } from "@/components/ChildrenPanel";
+import { ThreadTree } from "@/components/ThreadTree";
 import { MessageInput } from "@/components/MessageInput";
 import { SystemPanel } from "@/components/SystemPanel";
 import { ApprovalPanel } from "@/components/ApprovalPanel";
@@ -14,7 +14,7 @@ import { useAppStore } from "@/lib/store";
 import { useSSE } from "@/hooks/useSSE";
 import { createThread, openThread, interruptThread, fetchThread, executeCommand, fetchSandboxStatus, SandboxStatus, fetchModels, fetchThreadSettings, setThreadModel, setAutoApproval, fetchTokenStats } from "@/lib/api";
 import { useMutation } from "@tanstack/react-query";
-import { CircleHelp, PanelRight, SlidersHorizontal } from "lucide-react";
+import { CircleHelp, PanelLeft, PanelRight, SlidersHorizontal } from "lucide-react";
 import clsx from "clsx";
 import { formatTokenCount } from "@/lib/tps";
 import { refreshTranscriptTail } from "@/lib/transcript";
@@ -52,6 +52,11 @@ export default function ThreadPage() {
   const [showHelp, setShowHelp] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
   const isDesktopRail = useMediaQuery("(min-width: 1280px)");
+  const wasDesktopRailRef = useRef<boolean | null>(null);
+  const didCloseThreadsOnNarrowRef = useRef(false);
+  const closeThreadsPanel = useCallback(() => {
+    if (useAppStore.getState().panelVisibility.threads) togglePanel("threads");
+  }, [togglePanel]);
   const closeSystemPanel = useCallback(() => {
     if (useAppStore.getState().panelVisibility.system) togglePanel("system");
   }, [togglePanel]);
@@ -59,6 +64,22 @@ export default function ThreadPage() {
   const stageAttachment = useCallback((attachment: import("@/lib/contentParts").AttachmentContentPart) => {
     appendStagedAttachments(threadId, [attachment]);
   }, [appendStagedAttachments, threadId]);
+
+  // A visible desktop rail may become a modal drawer after resize. Do not
+  // surprise the user with a modal they did not explicitly open.
+  useEffect(() => {
+    if (
+      !isDesktopRail &&
+      panelVisibility.threads &&
+      !didCloseThreadsOnNarrowRef.current &&
+      wasDesktopRailRef.current !== false
+    ) {
+      didCloseThreadsOnNarrowRef.current = true;
+      togglePanel("threads");
+    }
+    if (isDesktopRail) didCloseThreadsOnNarrowRef.current = false;
+    wasDesktopRailRef.current = isDesktopRail;
+  }, [isDesktopRail, panelVisibility.threads, togglePanel]);
 
   // Publish route identity before child layout effects run. A detached prior
   // thread must not suppress the new transcript's first pre-paint correction.
@@ -257,6 +278,7 @@ export default function ThreadPage() {
     if ((e.ctrlKey || e.metaKey) && e.key === "n") {
       e.preventDefault();
       createThread({}).then((thread) => {
+        queryClient.invalidateQueries({ queryKey: ["threads"] });
         queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
         router.push(`/${thread.id}`);
         addSystemLog(`Created thread ${thread.id.slice(-8)}`, "success");
@@ -268,6 +290,7 @@ export default function ThreadPage() {
       e.preventDefault();
       executeCommand(threadId, "/spawnChildThread").then((result) => {
         if (result.success && result.data?.child_id) {
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren", threadId] });
           // Don't navigate to child - stay on parent
           addSystemLog(`Spawned child ${result.data.child_id.slice(-8)}`, "success");
@@ -364,6 +387,19 @@ export default function ThreadPage() {
             </div>
           )}
           <div className="eggw-topbar-actions">
+            <IconButton
+              onClick={() => {
+                if (!isDesktopRail && panelVisibility.system) togglePanel("system");
+                togglePanel("threads");
+              }}
+              aria-label={panelVisibility.threads ? "Hide threads panel" : "Show threads panel"}
+              title={panelVisibility.threads ? "Hide threads" : "Show threads"}
+              aria-expanded={panelVisibility.threads}
+              aria-controls="threads-panel"
+              variant={panelVisibility.threads ? "primary" : "secondary"}
+            >
+              <PanelLeft className="h-5 w-5" aria-hidden="true" />
+            </IconButton>
             <IconButton onClick={() => setShowHelp(true)} aria-label="Help" title="Help (?)">
               <CircleHelp className="h-5 w-5" aria-hidden="true" />
             </IconButton>
@@ -376,7 +412,10 @@ export default function ThreadPage() {
               <SlidersHorizontal className="h-5 w-5" aria-hidden="true" />
             </IconButton>
             <IconButton
-              onClick={() => togglePanel("system")}
+              onClick={() => {
+                if (!isDesktopRail && panelVisibility.threads) togglePanel("threads");
+                togglePanel("system");
+              }}
               aria-label={panelVisibility.system ? "Hide system panel" : "Show system panel"}
               title={panelVisibility.system ? "Hide sidebar" : "Show sidebar"}
               aria-expanded={panelVisibility.system}
@@ -483,9 +522,29 @@ export default function ThreadPage() {
 
       {/* Main content */}
       <div className="eggw-main-grid flex min-h-0 flex-1 overflow-hidden">
+        {/* Left sidebar - full thread tree */}
+        {panelVisibility.threads && isDesktopRail && (
+          <aside id="threads-panel" className={clsx("eggw-side-card eggw-threads-rail", !showBorders && "eggw-chrome-borderless")} aria-label="Threads panel" data-overlay-background>
+            <ThreadTree />
+          </aside>
+        )}
+        <OverlayPanel
+          open={panelVisibility.threads && !isDesktopRail}
+          onClose={closeThreadsPanel}
+          title="Threads"
+          description="Navigate the complete live thread tree."
+          variant="drawer"
+          drawerSide="left"
+          closeLabel="Close threads panel"
+          testId="threads-drawer"
+          returnFocusSelector="[aria-controls='threads-panel']"
+          bodyClassName="eggw-tree-drawer-body"
+        >
+          <div id="threads-panel" className="h-full min-h-0"><ThreadTree onNavigate={closeThreadsPanel} /></div>
+        </OverlayPanel>
+
         {/* Center - Chat */}
         <div className={clsx("eggw-chat-card min-w-0 flex-1 flex flex-col overflow-hidden", !showBorders && "eggw-chrome-borderless")} data-overlay-background>
-          {panelVisibility.children && <ChildrenPanel showBorders={showBorders} />}
           {panelVisibility.chat && (
             <ChatPanel
               threadId={threadId}

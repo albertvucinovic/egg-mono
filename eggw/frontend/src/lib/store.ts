@@ -283,8 +283,8 @@ interface AppState {
   setModels: (models: { key: string; provider: string; model_id: string }[]) => void;
 
   // Panel visibility
-  panelVisibility: { chat: boolean; children: boolean; system: boolean };
-  togglePanel: (panel: "chat" | "children" | "system") => void;
+  panelVisibility: { chat: boolean; threads: boolean; system: boolean };
+  togglePanel: (panel: "chat" | "threads" | "system") => void;
 
   // UI preferences
   showBorders: boolean;
@@ -574,8 +574,8 @@ export const useAppStore = create<AppState>((set) => ({
   models: [],
   setModels: (models) => set({ models }),
 
-  // Panel visibility (sidebar hidden by default to maximize screen space)
-  panelVisibility: { chat: true, children: true, system: false },
+  // Panel visibility (the thread tree is the primary navigation rail)
+  panelVisibility: { chat: true, threads: true, system: false },
   togglePanel: (panel) =>
     set((state) => ({
       panelVisibility: {

@@ -3391,6 +3391,29 @@ class TestCommands:
         assert data["message"] == "Usage: /displayVerbosity <max|medium|min>"
         assert data["data"]["action"] == "display_verbosity_usage"
 
+    @pytest.mark.parametrize("panel", ["chat", "threads", "system"])
+    def test_toggle_panel_uses_current_eggw_panel_names(self, client, panel):
+        thread_id = client.post("/api/threads", json={"name": "Panel Toggle"}).json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": f"/togglePanel {panel}"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data"] == {"panel": panel, "action": "toggle"}
+
+    def test_toggle_panel_keeps_children_as_a_threads_alias(self, client):
+        thread_id = client.post("/api/threads", json={"name": "Legacy Panel Toggle"}).json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/togglePanel children"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data"] == {"panel": "threads", "action": "toggle"}
+
     def test_show_command_returns_shared_full_record_target(self, client):
         """EggW uses shared resolution; the browser only presents its target."""
         create_resp = client.post("/api/threads", json={"name": "Show command"})
@@ -3493,6 +3516,7 @@ class TestCommands:
         assert "/schedulers" in data["message"]
         assert "EggW-only commands:" in data["message"]
         assert "/theme [name]" in data["message"]
+        assert "/togglePanel <chat|threads|system>" in data["message"]
         assert "/rename <name>" in data["message"]
         assert "/editAnswer [msg_id|suffix|text]" in data["message"]
         assert "/editor" in data["message"]
@@ -3933,6 +3957,16 @@ class TestAutocomplete:
         displays = {s["display"] for s in response.json()["suggestions"]}
         assert "/spawnChildThread" in displays
         assert "/spawn" not in displays
+
+    def test_toggle_panel_autocomplete_uses_threads_not_children(self, client):
+        response = client.get(
+            "/api/autocomplete",
+            params={"line": "/togglePanel ", "cursor": len("/togglePanel ")},
+        )
+
+        assert response.status_code == 200
+        displays = {suggestion["display"] for suggestion in response.json()["suggestions"]}
+        assert displays == {"chat", "threads", "system"}
 
     def test_show_autocomplete_uses_shared_bounded_record_catalog(self, client):
         create_resp = client.post("/api/threads", json={"name": "Show completion"})

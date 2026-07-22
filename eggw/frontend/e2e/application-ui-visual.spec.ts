@@ -42,14 +42,17 @@ async function mockApplicationUI(page: Page) {
   await page.route(`${API_BASE}/api/threads/${threadId}/state`, (route) => route.fulfill({ status: 200, headers, json: { state: "waiting_output_approval", active_get_user_wait: false } }));
   await page.route(`${API_BASE}/api/threads/${threadId}/settings`, (route) => route.fulfill({ status: 200, headers, json: { auto_approval: false, model_key: "fixture:model" } }));
   await page.route(`${API_BASE}/api/threads/${threadId}/children`, (route) => route.fulfill({
-    status: 200, headers, json: [{ id: childId, name: "Contrast review branch", model_key: "fixture:model", has_children: true }],
+    status: 200, headers, json: [{ id: childId, name: "Contrast review branch", parent_id: threadId, model_key: "fixture:model", has_children: false }],
   }));
   await page.route(`${API_BASE}/api/threads/${threadId}`, (route) => route.fulfill({
     status: 200, headers, json: { id: threadId, name: "Application UI Fixture", has_children: true, model_key: "fixture:model" },
   }));
   await page.route(`${API_BASE}/api/threads/roots`, (route) => route.fulfill({ status: 200, headers, json: [{ id: threadId, name: "Application UI Fixture", has_children: true, model_key: "fixture:model" }] }));
   await page.route(`${API_BASE}/api/models`, (route) => route.fulfill({ status: 200, headers, json: { models: [{ key: "fixture:model" }], default_model: "fixture:model" } }));
-  await page.route(`${API_BASE}/api/threads`, (route) => route.fulfill({ status: 200, headers, json: [{ id: threadId, name: "Application UI Fixture", has_children: true }] }));
+  await page.route(`${API_BASE}/api/threads`, (route) => route.fulfill({ status: 200, headers, json: [
+    { id: threadId, name: "Application UI Fixture", has_children: true },
+    { id: childId, name: "Contrast review branch", parent_id: threadId, model_key: "fixture:model", has_children: false },
+  ] }));
   await page.route(`${API_BASE}/api/autocomplete**`, (route) => route.fulfill({
     status: 200,
     headers,
@@ -102,7 +105,7 @@ const renderedTextPairs = [
   { name: "approval tool label", foreground: ".eggw-approval-tool-name", background: ".eggw-approval-card" },
   { name: "approval summary", foreground: ".eggw-approval-summary", background: ".eggw-approval-summary" },
   { name: "approval code", foreground: ".eggw-approval-card .eggw-code-block", background: ".eggw-approval-card .eggw-code-block" },
-  { name: "branch link", foreground: ".eggw-thread-link", background: ".eggw-children-panel" },
+  { name: "thread tree row", foreground: ".eggw-tree-row", background: ".eggw-tree-row" },
   { name: "selected autocomplete option", foreground: '.eggw-autocomplete-option[aria-selected="true"]', background: '.eggw-autocomplete-option[aria-selected="true"]' },
   { name: "selected autocomplete metadata", foreground: '.eggw-autocomplete-option[aria-selected="true"] .eggw-autocomplete-meta', background: '.eggw-autocomplete-option[aria-selected="true"]' },
   { name: "composer input", foreground: ".eggw-composer-input", background: ".eggw-composer-input" },
@@ -180,11 +183,9 @@ test("all 31 themes expose safe application geometry and focus", async ({ page }
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await page.waitForTimeout(180);
     if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) failures.push(`${theme}: document overflow`);
-    const childRow = page.locator(".eggw-thread-row").first();
-    const childLink = childRow.locator(".eggw-thread-link");
+    const childRow = page.getByRole("treeitem", { name: /Contrast review branch/ });
     const childCopy = childRow.getByRole("button", { name: `Copy thread ID ${childId}` });
     if (!(await childRow.evaluate((element) => element.scrollWidth <= element.clientWidth))) failures.push(`${theme}: child row overflow`);
-    if (!(await childLink.evaluate((element) => element.scrollWidth <= element.clientWidth))) failures.push(`${theme}: child link overflow`);
     if (!(await childCopy.isVisible())) failures.push(`${theme}: child ID copy hidden`);
     await childCopy.focus();
     const childCopyFocus = await childCopy.evaluate((element) => {
@@ -218,7 +219,7 @@ for (const scenario of [
   test(`${scenario.name} visual`, async ({ page }) => {
     await openApplicationUI(page, scenario.theme, { width: scenario.width, height: scenario.height });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(scenario.width);
-    await expect(page.locator(".eggw-chat-card")).toHaveScreenshot(`${scenario.name}.png`, {
+    await expect(page.locator(".eggw-main-grid")).toHaveScreenshot(`${scenario.name}.png`, {
       animations: "disabled",
       caret: "hide",
       maxDiffPixelRatio: 0.015,

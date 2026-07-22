@@ -24,6 +24,7 @@ interface OverlayPanelProps {
   title: string;
   children: ReactNode;
   variant?: "dialog" | "drawer";
+  drawerSide?: "left" | "right";
   description?: string;
   closeLabel?: string;
   testId?: string;
@@ -41,6 +42,7 @@ export function OverlayPanel({
   title,
   children,
   variant = "dialog",
+  drawerSide = "right",
   description,
   closeLabel = `Close ${title}`,
   testId,
@@ -91,7 +93,11 @@ export function OverlayPanel({
 
   const overlay = (
     <div
-      className={clsx("ui-overlay", variant === "drawer" && "ui-overlay-drawer")}
+      className={clsx(
+        "ui-overlay",
+        variant === "drawer" && "ui-overlay-drawer",
+        variant === "drawer" && drawerSide === "left" && "ui-overlay-drawer-left",
+      )}
       onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
       data-testid={testId}
     >

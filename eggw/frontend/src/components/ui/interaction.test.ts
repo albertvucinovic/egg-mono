@@ -25,7 +25,7 @@ describe("global interaction foundation", () => {
     expect(overlay).toContain("element.inert = true");
     expect(overlay).toContain("target.focus()");
     expect(shell).toContain("<HelpDialog");
-    expect(shell.match(/<OverlayPanel/g)).toHaveLength(2);
+    expect(shell.match(/<OverlayPanel/g)).toHaveLength(3);
   });
 
   it("keeps narrow header controls in a settings drawer instead of horizontal overflow", () => {
@@ -33,6 +33,7 @@ describe("global interaction foundation", () => {
     expect(css).toMatch(/@media \(max-width: 1023px\)[\s\S]*\.eggw-topbar-controls\s*\{\s*display: none/);
     expect(shell).toContain('title="Thread settings"');
     expect(shell).toContain('testId="settings-drawer"');
+    expect(shell).toContain('testId="threads-drawer"');
     expect(shell).toContain('testId="system-drawer"');
   });
 });

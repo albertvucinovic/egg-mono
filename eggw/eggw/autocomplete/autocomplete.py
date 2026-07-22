@@ -99,6 +99,14 @@ async def get_autocomplete(
                 )
             except KeyError:
                 registry_items = []
+            # The shared terminal command still names its middle panel
+            # "children". EggW replaced that surface with the full Threads
+            # drawer, so expose the browser's current name here.
+            if cmd == '/togglePanel':
+                registry_items = [
+                    "threads" if item == "children" else item
+                    for item in registry_items
+                ]
             if registry_items:
                 suggestions.extend(
                     dict(item)
@@ -363,7 +371,7 @@ async def get_autocomplete(
 
             elif cmd == '/togglePanel':
                 # Panel name suggestions
-                for panel in ['chat', 'children', 'system']:
+                for panel in ['chat', 'threads', 'system']:
                     if not arg_tok or arg_tok.lower() in panel:
                         suggestions.append({
                             "display": panel,

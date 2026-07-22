@@ -136,6 +136,16 @@ UI:
 - model config: `models.json` / `all-models.json` through `eggllm`;
 - provider keys: environment variables named by each provider's `api_key_env`.
 
+## Thread navigation
+
+EggW renders the complete project thread hierarchy in a live **Threads** panel
+on the left. The selected thread and its ancestors expand automatically. On
+desktop the panel is a hideable rail; on narrower viewports the same tree opens
+as a left-side drawer. New child/runtime threads appear after the canonical
+thread event without reloading the page. Use `/togglePanel threads` or the
+header button to hide or show it (`children` remains accepted as a legacy
+command alias).
+
 ## API overview
 
 Common REST endpoints:

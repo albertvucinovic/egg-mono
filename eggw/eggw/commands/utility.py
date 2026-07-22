@@ -443,6 +443,7 @@ def cmd_help() -> CommandResponse:
 EggW-only commands:
     /rename <name> — Rename the current thread.
     /theme [name] — List or switch browser themes.
+    /togglePanel <chat|threads|system> — Show or hide an EggW panel.
 
 Edit answer:
     /editAnswer [msg_id|suffix|text] — Edit a message by id/suffix, or open text in an editable browser draft.
@@ -476,7 +477,9 @@ Shell:
 def cmd_toggle_panel(panel_name: str) -> CommandResponse:
     """Handle /togglePanel command - toggle panel visibility (frontend-only)."""
     name = panel_name.strip().lower()
-    valid_panels = ["chat", "children", "system"]
+    if name == "children":
+        name = "threads"
+    valid_panels = ["chat", "threads", "system"]
     if name not in valid_panels:
         return CommandResponse(
             success=True,

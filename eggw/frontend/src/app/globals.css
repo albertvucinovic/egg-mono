@@ -755,6 +755,11 @@ code {
   padding-left: max(0.75rem, env(safe-area-inset-left));
 }
 
+.ui-overlay-drawer-left {
+  justify-content: flex-start;
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+}
+
 .ui-drawer-panel {
   width: min(25rem, calc(100vw - 1.5rem));
   height: min(100%, 56rem);
@@ -887,6 +892,20 @@ code {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+
+.eggw-threads-rail {
+  width: 19rem;
+  flex: 0 0 19rem;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.eggw-tree-drawer-body {
+  padding: 0;
   overflow: hidden;
 }
 
@@ -1066,6 +1085,10 @@ code {
     padding: 0;
   }
 
+  .ui-overlay-drawer-left {
+    padding: 0;
+  }
+
   .ui-drawer-panel {
     width: min(23rem, calc(100vw - 0.75rem));
     height: 100%;
@@ -1102,8 +1125,6 @@ code {
 
   .eggw-approval-panel,
   .eggw-approval-card,
-  .eggw-children-panel,
-  .eggw-thread-link,
   .eggw-autocomplete-listbox,
   .eggw-autocomplete-option,
   .eggw-staged-attachment,
@@ -1901,106 +1922,6 @@ code {
   color: var(--text-secondary);
 }
 
-.eggw-children-panel {
-  flex: 0 0 auto;
-  max-height: 10rem;
-  overflow: auto;
-  background: var(--surface-panel);
-}
-
-.eggw-children-panel-bordered {
-  border-bottom: 1px solid var(--border-default);
-}
-
-.eggw-children-heading {
-  min-height: 2.25rem;
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  padding: 0.35rem 0.75rem;
-  border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  font-size: 0.75rem;
-}
-
-.eggw-children-heading h2 {
-  color: var(--text-heading);
-  font-weight: 680;
-}
-
-.eggw-children-heading span {
-  margin-left: auto;
-}
-
-.eggw-children-list {
-  display: grid;
-}
-
-.eggw-thread-row {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
-.eggw-thread-row .eggw-thread-link {
-  padding-right: 2.65rem;
-}
-
-.eggw-thread-link {
-  width: 100%;
-  min-height: 2.5rem;
-  justify-content: flex-start;
-  border: 0;
-  border-radius: 0;
-  color: var(--text-primary);
-  text-align: left;
-}
-
-.eggw-thread-link span {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.eggw-thread-link code,
-.eggw-thread-link small {
-  color: var(--text-secondary);
-  font-size: 0.72rem;
-}
-
-.eggw-thread-link code {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.eggw-thread-id-copy {
-  position: absolute;
-  right: 0.45rem;
-  width: 1.75rem;
-  height: 1.75rem;
-  border-radius: 0.35rem;
-  color: var(--text-secondary);
-}
-
-.eggw-thread-id-copy:hover {
-  background: var(--surface-muted);
-  color: var(--text-primary);
-}
-
-@media (max-width: 639px) {
-  .eggw-thread-row .eggw-thread-link {
-    padding-right: 3.4rem;
-  }
-
-  .eggw-thread-id-copy {
-    right: 0.2rem;
-    width: 2.75rem;
-    height: 2.75rem;
-  }
-}
-
 .eggw-compact-state {
   padding: 0.6rem 0.75rem;
   color: var(--text-secondary);
@@ -2017,6 +1938,17 @@ code {
   color: var(--text-heading);
 }
 
+.eggw-tree-header > div > span {
+  display: block;
+  margin-top: 0.05rem;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+}
+
+.eggw-tree-list {
+  overscroll-behavior: contain;
+}
+
 .eggw-tree-row {
   min-height: 2.5rem;
   display: flex;
@@ -2028,6 +1960,36 @@ code {
   cursor: pointer;
 }
 
+.eggw-tree-expander-spacer {
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 2rem;
+}
+
+.eggw-tree-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 0.05rem;
+  overflow: hidden;
+  font-size: 0.8125rem;
+}
+
+.eggw-tree-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eggw-tree-label code {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .eggw-tree-row:hover,
 .eggw-tree-row:focus-within {
   background: var(--control-bg-hover);
@@ -2037,6 +1999,11 @@ code {
   border-left-color: var(--focus-ring);
   background: var(--selection-bg);
   color: var(--selection-text);
+}
+
+.eggw-tree-row-selected .eggw-tree-label code {
+  color: inherit;
+  opacity: 0.8;
 }
 
 .eggw-tree-icon {

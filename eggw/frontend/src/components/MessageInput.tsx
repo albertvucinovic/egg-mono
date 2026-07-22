@@ -421,23 +421,27 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         // Handle specific command responses
         if (response.data?.child_id) {
           // Spawned a child thread - refresh thread list but stay on parent
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
           // Don't navigate to child - stay on parent
         } else if (response.data?.thread_id) {
           // Thread created/switched/duplicated - refresh and navigate only if
           // this command's source is still the visible composer.
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
           if (variables.threadId === currentThreadId) router.push(`/${response.data.thread_id}`);
         } else if (response.data?.deleted_id) {
           // Thread deleted - refresh lists
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
         }
 
         // Model changed - always refresh settings so dropdown updates
         if (response.data?.model_key) {
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
         }
@@ -469,12 +473,15 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         } else if (response.data?.name !== undefined) {
           // Thread renamed - refresh thread data
           queryClient.invalidateQueries({ queryKey: ["thread", variables.threadId] });
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
         } else if (response.data?.action === "set_theme" && response.data?.theme) {
           if (variables.threadId === currentThreadId) setTheme(response.data.theme);
         } else if (response.data?.action === "toggle" && response.data?.panel) {
-          const panel = response.data.panel as "chat" | "children" | "system";
-          if (variables.threadId === currentThreadId) togglePanel(panel);
+          const panel = response.data.panel as "chat" | "threads" | "system";
+          if (variables.threadId === currentThreadId) {
+            togglePanel(panel);
+          }
         } else if (response.data?.action === "toggle_borders") {
           if (variables.threadId === currentThreadId) toggleBorders();
         } else if (response.data?.action === "set_display_verbosity" && response.data?.display_verbosity) {

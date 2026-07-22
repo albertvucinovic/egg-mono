@@ -978,7 +978,7 @@ export function useSSE(threadId: string | null) {
 
     // Runtime threads are created as real child threads, then linked by a
     // runtime.config event on the parent. Refresh child/root thread queries so
-    // @runtime:* entries appear in the Children panel and tree without a page
+    // @runtime:* entries appear in the Threads panel without a page
     // reload after /pythonRepl or /bashRepl starts them.
     addThreadEventListener("runtime.config", () => {
       try {
@@ -987,6 +987,7 @@ export function useSSE(threadId: string | null) {
           queryKey: ["threadChildren", threadId],
         });
         queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+        queryClient.invalidateQueries({ queryKey: ["threads"] });
         queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
       } catch (err) {
         console.error("Failed to parse runtime.config:", err);
@@ -994,9 +995,9 @@ export function useSSE(threadId: string | null) {
     });
 
     // Child threads can be created by LLM tools, slash commands, runtime
-    // setup, or another Egg frontend.  The parent receives a lightweight
-    // thread.child_created event; refresh active tree/children queries so the
-    // Children panel and thread tree update without a page reload.
+    // setup, or another Egg frontend. The parent receives a lightweight
+    // thread.child_created event; refresh active queries so the Threads panel
+    // updates without a page reload.
     addThreadEventListener("thread.child_created", (e) => {
       try {
         const data = JSON.parse(e.data);

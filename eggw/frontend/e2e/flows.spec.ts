@@ -239,6 +239,14 @@ test.describe('Launcher quick start', () => {
     await mockThreadShell(page, threadId);
     await page.unroute(`${TEST_API_BASE}/api/threads`);
     await page.route(`${TEST_API_BASE}/api/threads`, async (route, request) => {
+      if (request.method() === 'GET') {
+        await route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: [{ id: threadId, name: 'Quick start', has_children: false }],
+        });
+        return;
+      }
       expect(request.postDataJSON()).toEqual({ claim_quick_start: true });
       await route.fulfill({
         status: 200,
@@ -971,6 +979,15 @@ test.describe('Composer draft and autocomplete ownership', () => {
       headers: mockApiHeaders,
       json: { id: threadA, name: threadA, has_children: true },
     }));
+    await page.unroute(`${TEST_API_BASE}/api/threads`);
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [
+        { id: threadA, name: threadA, has_children: true },
+        { id: threadB, name: threadB, parent_id: threadA, has_children: false },
+      ],
+    }));
 
     let resolveFailedSend!: () => void;
     const failedSend = new Promise<void>((resolve) => { resolveFailedSend = resolve; });
@@ -988,7 +1005,7 @@ test.describe('Composer draft and autocomplete ownership', () => {
     const input = page.getByTestId('message-input');
     await expect(input).toBeVisible();
     await input.fill('a'.repeat(200));
-    await page.locator('.eggw-thread-link').filter({ hasText: threadB }).click();
+    await page.getByRole('treeitem', { name: new RegExp(threadB) }).click();
     await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
     await page.getByTestId('message-input').fill('thread b draft');
     await page.goBack();
@@ -2008,6 +2025,14 @@ test.describe('Scroll intent state machines', () => {
       status: 200, headers: mockApiHeaders,
       json: [{ id: otherThread, name: 'Other monotonic route', parent_id: threadId, has_children: false }],
     }));
+    await page.unroute(`${TEST_API_BASE}/api/threads`);
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({
+      status: 200, headers: mockApiHeaders,
+      json: [
+        { id: threadId, name: threadId, has_children: true },
+        { id: otherThread, name: 'Other monotonic route', parent_id: threadId, has_children: false },
+      ],
+    }));
     await page.unroute(`${TEST_API_BASE}/api/threads/${otherThread}`);
     await page.route(`${TEST_API_BASE}/api/threads/${otherThread}`, (route) => route.fulfill({
       status: 200, headers: mockApiHeaders,
@@ -2038,9 +2063,9 @@ test.describe('Scroll intent state machines', () => {
     await monotonicChat.focus();
     await page.keyboard.press('Home');
     await expect(monotonicChat).toContainText('OLDER PAGE MUST REMAIN');
-    await page.getByRole('button', { name: /Other monotonic route/ }).click();
+    await page.getByRole('treeitem', { name: /Other monotonic route/ }).click();
     await expect(page.getByTestId('chat-panel')).toContainText('other route');
-    await page.getByRole('button', { name: /Parent/ }).click();
+    await page.locator(`[role="treeitem"][data-thread-id="${threadId}"]`).click();
     await expect.poll(() => tailRequests).toBeGreaterThanOrEqual(2);
     await expect(page.getByTestId('chat-panel')).toContainText('OLDER PAGE MUST REMAIN');
     await expect(page.getByTestId('chat-panel')).toContainText(`fresh tail ${tailRequests}`);
@@ -2615,41 +2640,40 @@ test.describe('Continuation command without SSE authority', () => {
   });
 });
 
-test.describe('Children panel identity', () => {
-  test('shows every child thread ID with full-ID access when names are ambiguous', async ({ page }) => {
-    const parentId = 'children-identity-parent';
+test.describe('Threads panel tree identity', () => {
+  test('shows the complete hierarchy with unambiguous full-ID access', async ({ page }) => {
+    const rootId = 'threads-identity-root';
+    const parentId = 'threads-identity-parent';
     const firstChildId = '01JCHILDIDENTITY00000000000001';
     const secondChildId = '01JCHILDIDENTITY00000000000002';
-    const unnamedChildId = '01JCHILDIDENTITY00000000000003';
+    const grandchildId = '01JCHILDIDENTITY00000000000003';
     await mockThreadShell(page, parentId);
-    await page.unroute(`${TEST_API_BASE}/api/threads/${parentId}/children`);
-    await page.route(`${TEST_API_BASE}/api/threads/${parentId}/children`, (route) => route.fulfill({
+    await page.unroute(`${TEST_API_BASE}/api/threads`);
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({
       status: 200,
       headers: mockApiHeaders,
       json: [
-        { id: firstChildId, name: 'Duplicate child', parent_id: parentId, model_key: 'provider:first', has_children: false },
-        { id: secondChildId, name: 'Duplicate child', parent_id: parentId, model_key: 'provider:second', has_children: true },
-        { id: unnamedChildId, parent_id: parentId, has_children: false },
+        { id: grandchildId, name: 'Nested grandchild', parent_id: secondChildId, has_children: false, created_at: '2024-01-05T00:00:00Z' },
+        { id: firstChildId, name: 'Duplicate child', parent_id: parentId, has_children: false, created_at: '2024-01-03T00:00:00Z' },
+        { id: rootId, name: 'Tree root', has_children: true, created_at: '2024-01-01T00:00:00Z' },
+        { id: secondChildId, name: 'Duplicate child', parent_id: parentId, has_children: true, created_at: '2024-01-04T00:00:00Z' },
+        { id: parentId, name: 'Current parent', parent_id: rootId, has_children: true, created_at: '2024-01-02T00:00:00Z' },
       ],
     }));
 
     await page.goto(`/${parentId}`);
 
-    const children = page.locator('.eggw-children-list .eggw-thread-row');
-    await expect(children).toHaveCount(3);
-    await expect(children.nth(0).getByText('Duplicate child', { exact: true })).toBeVisible();
-    await expect(children.nth(1).getByText('Duplicate child', { exact: true })).toBeVisible();
-    await expect(children.nth(2).getByText('Unnamed child', { exact: true })).toBeVisible();
-    const childIds = [firstChildId, secondChildId, unnamedChildId];
-    for (let index = 0; index < childIds.length; index += 1) {
-      const childId = childIds[index];
-      const identity = children.nth(index).locator('code');
-      await expect(identity).toHaveText(childId.slice(-8));
-      await expect(identity).toHaveAttribute('title', childId);
-      await expect(identity).toHaveAttribute('aria-label', `Thread ID ${childId}`);
-      await expect(children.nth(index).locator('.eggw-thread-link')).toHaveAttribute('title', `Open child thread ${childId}`);
-      await expect(children.nth(index).getByRole('button', { name: `Copy thread ID ${childId}` })).toHaveAttribute('title', 'Copy full thread ID');
-    }
+    const tree = page.getByRole('tree', { name: 'Threads' });
+    await expect(tree.getByRole('treeitem')).toHaveCount(4);
+    await expect(tree.getByRole('treeitem', { name: /Tree root/ })).toHaveAttribute('aria-expanded', 'true');
+    await expect(tree.getByRole('treeitem', { name: /Current parent/ })).toHaveAttribute('aria-selected', 'true');
+    const duplicateRows = tree.getByRole('treeitem', { name: /Duplicate child/ });
+    await expect(duplicateRows).toHaveCount(2);
+    await expect(duplicateRows.nth(0).locator('code')).toHaveText(firstChildId.slice(-8));
+    await expect(duplicateRows.nth(1).locator('code')).toHaveText(secondChildId.slice(-8));
+
+    await duplicateRows.nth(1).getByRole('button', { name: /Expand Duplicate child/ }).click();
+    await expect(tree.getByRole('treeitem', { name: /Nested grandchild/ })).toBeVisible();
 
     await page.evaluate(() => {
       Object.defineProperty(navigator, 'clipboard', {
@@ -2657,12 +2681,55 @@ test.describe('Children panel identity', () => {
         value: { writeText: (value: string) => { (window as typeof window & { copiedThreadId?: string }).copiedThreadId = value; } },
       });
     });
-    const copySecondId = children.nth(1).getByRole('button', { name: `Copy thread ID ${secondChildId}` });
+    const copySecondId = duplicateRows.nth(1).getByRole('button', { name: `Copy thread ID ${secondChildId}` });
+    await expect(copySecondId).toHaveAttribute('title', 'Copy full thread ID');
     await copySecondId.focus();
-    await expect(copySecondId).toBeFocused();
     await copySecondId.press('Enter');
     await expect.poll(() => page.evaluate(() => (window as typeof window & { copiedThreadId?: string }).copiedThreadId)).toBe(secondChildId);
     await expect(page).toHaveURL(new RegExp(`/${parentId}$`));
+  });
+
+  test('refreshes the whole tree when a live child-created event arrives', async ({ page }) => {
+    const parentId = 'live-tree-parent';
+    const childId = 'live-tree-child';
+    let threads: Array<{ id: string; name: string; parent_id?: string; has_children: boolean }> = [
+      { id: parentId, name: 'Live parent', has_children: false },
+    ];
+    const eventRequests: string[] = [];
+    page.on('request', (request) => { if (request.url().includes(`/api/threads/${parentId}/events`)) eventRequests.push(`seen:${request.url()}`); });
+    await mockThreadShell(page, parentId);
+    await page.unroute(`${TEST_API_BASE}/api/threads`);
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: threads }));
+    await page.unroute(new RegExp(`/api/threads/${parentId}/events(?:\\?.*)?$`));
+    await page.route(`**/api/threads/${parentId}/events**`, async (route) => {
+      eventRequests.push(route.request().url());
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      threads = [
+        { id: parentId, name: 'Live parent', has_children: true },
+        { id: childId, name: 'Live child', parent_id: parentId, has_children: false },
+      ];
+      return route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: `id: 2\nevent: thread.child_created\ndata: ${JSON.stringify({
+          event_id: 'live-child-event', event_seq: 2, type: 'thread.child_created',
+          ts: '2024-01-01T00:00:00Z', msg_id: null, invoke_id: null, chunk_seq: null,
+          payload: { parent_id: parentId, child_id: childId },
+        })}\n\n`,
+      });
+    });
+    await page.unroute(new RegExp(`/api/threads/${parentId}/state(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${parentId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'waiting_user', live_replay_cursor: 0, active_get_user_wait: false },
+    }));
+
+    await page.goto(`/${parentId}`);
+    await expect(page.getByRole('treeitem', { name: /Live parent/ })).toBeVisible();
+    await expect.poll(() => eventRequests.length, { timeout: 15_000 }).toBeGreaterThan(0);
+    await expect(page.getByRole('treeitem', { name: /Live parent/ })).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByRole('treeitem', { name: /Live child/ })).toBeVisible();
   });
 });
 
@@ -2704,7 +2771,10 @@ test.describe('Per-thread transcript state', () => {
       { id: threadA, name: threadA, has_children: false },
       { id: threadB, name: threadB, has_children: false },
     ] }));
-    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: [] }));
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: [
+      { id: threadA, name: threadA, has_children: true },
+      { id: threadB, name: threadB, parent_id: threadA, has_children: false },
+    ] }));
     await page.route(new RegExp(`/api/threads/${threadA}/messages(?:\\?.*)?$`), async (route, request) => {
       const url = new URL(request.url());
       const beforeId = url.searchParams.get('before_id');
@@ -2725,12 +2795,12 @@ test.describe('Per-thread transcript state', () => {
     await page.keyboard.press('Home');
     await expect(threadAChat).toContainText('thread a old');
 
-    await page.locator('.eggw-thread-link').filter({ hasText: threadB }).click();
+    await page.getByRole('treeitem', { name: new RegExp(threadB) }).click();
     await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
     await expect(page.getByTestId('chat-panel')).toContainText('thread b only');
     await expect(page.getByTestId('chat-panel')).not.toContainText('thread a old');
 
-    await page.getByRole('button', { name: /Parent/ }).click();
+    await page.locator(`[role="treeitem"][data-thread-id="${threadA}"]`).click();
     await expect(page).toHaveURL(new RegExp(`/${threadA}$`));
     await expect(page.getByTestId('chat-panel')).toContainText('thread a old');
     await expect(page.getByTestId('chat-panel')).toContainText('thread a new');
@@ -2791,6 +2861,15 @@ test.describe('Per-thread transcript state', () => {
       headers: mockApiHeaders,
       json: [{ id: threadB, name: 'Fast child B', parent_id: threadA, has_children: false }],
     }));
+    await page.unroute(`${TEST_API_BASE}/api/threads`);
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [
+        { id: threadA, name: threadA, has_children: true },
+        { id: threadB, name: 'Fast child B', parent_id: threadA, has_children: false },
+      ],
+    }));
 
     let releaseThreadA!: () => void;
     const threadAReady = new Promise<void>((resolve) => { releaseThreadA = resolve; });
@@ -2814,10 +2893,10 @@ test.describe('Per-thread transcript state', () => {
     });
 
     await page.goto(`/${threadA}`);
-    await expect(page.getByRole('button', { name: /Fast child B/ })).toBeVisible();
+    await expect(page.getByRole('treeitem', { name: /Fast child B/ })).toBeVisible();
     const stateRequestsBeforeNavigation = stateARequests;
     const eventRequestsBeforeNavigation = eventARequests;
-    await page.getByRole('button', { name: /Fast child B/ }).click();
+    await page.getByRole('treeitem', { name: /Fast child B/ }).click();
     await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
     await expect(page.getByTestId('chat-panel')).toContainText('thread b current');
 
@@ -2828,7 +2907,7 @@ test.describe('Per-thread transcript state', () => {
     await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
   });
 
-  test('hydrates a 60-message window when a Children panel click changes routes', async ({ page }) => {
+  test('hydrates a 60-message window when a Threads panel click changes routes', async ({ page }) => {
     const parentId = 'click-hydration-parent';
     const childId = 'click-hydration-child';
     const childMessages = Array.from({ length: 140 }, (_, index) => ({
@@ -2845,6 +2924,15 @@ test.describe('Per-thread transcript state', () => {
       headers: mockApiHeaders,
       json: [{ id: childId, name: 'Hydration child', parent_id: parentId, has_children: false }],
     }));
+    await page.unroute(`${TEST_API_BASE}/api/threads`);
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [
+        { id: parentId, name: parentId, has_children: true },
+        { id: childId, name: 'Hydration child', parent_id: parentId, has_children: false },
+      ],
+    }));
     const childRequests: string[] = [];
     await page.unroute(new RegExp(`/api/threads/${childId}/messages(?:\\?.*)?$`));
     await page.route(new RegExp(`/api/threads/${childId}/messages(?:\\?.*)?$`), async (route, request) => {
@@ -2857,7 +2945,7 @@ test.describe('Per-thread transcript state', () => {
     });
 
     await page.goto(`/${parentId}`);
-    await page.getByRole('button', { name: /Hydration child/ }).click();
+    await page.getByRole('treeitem', { name: /Hydration child/ }).click();
 
     await expect(page).toHaveURL(new RegExp(`/${childId}$`));
     await expect(page.getByText(/Chat Messages · 140 loaded/)).toBeVisible();
@@ -3059,6 +3147,15 @@ test.describe('SSE reconnect integration', () => {
       headers: mockApiHeaders,
       json: [{ id: otherThread, name: 'Replay other thread', parent_id: liveThread, has_children: false }],
     }));
+    await page.unroute(`${TEST_API_BASE}/api/threads`);
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [
+        { id: liveThread, name: liveThread, has_children: true },
+        { id: otherThread, name: 'Replay other thread', parent_id: liveThread, has_children: false },
+      ],
+    }));
     await page.unroute(`${TEST_API_BASE}/api/threads/${otherThread}`);
     await page.route(`${TEST_API_BASE}/api/threads/${otherThread}`, (route) => route.fulfill({
       status: 200,
@@ -3150,9 +3247,9 @@ test.describe('SSE reconnect integration', () => {
     await expect(page.locator('.eggw-message-card')).toHaveCount(61);
 
     for (let switchIndex = 0; switchIndex < 2; switchIndex += 1) {
-      await page.getByRole('button', { name: /Replay other thread/ }).click();
+      await page.getByRole('treeitem', { name: /Replay other thread/ }).click();
       await expect(page.getByTestId('chat-panel')).toContainText('OTHER THREAD ONLY');
-      await page.getByRole('button', { name: /Parent/ }).click();
+      await page.locator(`[role="treeitem"][data-thread-id="${liveThread}"]`).click();
       await expect.poll(() => liveMountConnections).toBeGreaterThanOrEqual(switchIndex + 2);
       await expect(page.getByTestId('streaming-content')).toHaveText(
         `STREAM-BEGIN||STREAM-END${Array.from({ length: switchIndex + 1 }, (_, index) => `|RETURN-${index + 1}`).join('')}`,
@@ -3165,10 +3262,10 @@ test.describe('SSE reconnect integration', () => {
     // If the stream finishes while another route owns the UI, returning must
     // publish the durable tail and remove stale live/wait cards rather than
     // leaving the old ephemeral representation in front of the newest message.
-    await page.getByRole('button', { name: /Replay other thread/ }).click();
+    await page.getByRole('treeitem', { name: /Replay other thread/ }).click();
     await expect(page.getByTestId('chat-panel')).toContainText('OTHER THREAD ONLY');
     completed = true;
-    await page.getByRole('button', { name: /Parent/ }).click();
+    await page.locator(`[role="treeitem"][data-thread-id="${liveThread}"]`).click();
     await expect(page.locator('[data-message-id="route-replay-final"]')).toContainText('FINAL DURABLE ANSWER');
     await expect(page.locator('[data-message-id="route-replay-history-299"]')).toBeVisible();
     await expect(page.getByText(/Chat Messages · 301 loaded/)).toBeVisible();
@@ -4943,7 +5040,7 @@ test.describe('Cross-client model synchronization', () => {
     });
 
     await page.goto(`/${threadId}`);
-    const selector = page.getByLabel('Model');
+    const selector = page.getByLabel('Model', { exact: true });
     await staleSettingsRequested;
     releaseEvents();
     await expect.poll(() => eventConnection).toBeGreaterThanOrEqual(1);
@@ -4960,7 +5057,7 @@ test.describe('Cross-client model synchronization', () => {
     await expect.poll(() => canonicalModel).toBe('Web Model');
     await expect(selector).toHaveValue('Web Model');
     await page.reload();
-    await expect(page.getByLabel('Model')).toHaveValue('Web Model');
+    await expect(page.getByLabel('Model', { exact: true })).toHaveValue('Web Model');
   });
 });
 
