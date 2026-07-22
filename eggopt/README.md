@@ -1,106 +1,100 @@
 # eggopt
 
-Eggopt offers two deliberately small GEPA interfaces:
+Eggopt has one simple native front door and one explicit upstream facade:
 
-- `UpstreamGEPA` runs the maintained external `gepa` algorithm while Eggflow
-  caches metric calls and Eggthreads preserves reflection conversations.
-- `NativeGEPA` is Egg's own dependency-free search: evaluate, reflect, keep the
-  best, repeat. It has no dependency on the external `gepa` package.
-
-Both optimizers own their `flow.db`, `.egg/threads.sqlite`, study thread,
-reflection recovery, and resource lifecycle. Calling `compile()` again with the
-same `run_dir` resumes from durable work instead of repeating model or metric
-calls.
+- `optimize_anything(...)` runs Egg's own GEPA search using only Eggflow and
+  Eggthreads.
+- `UpstreamGEPA` runs the optional external `gepa` package behind Egg's durable
+  runtime.
 
 ## Native GEPA
 
 ```python
-from eggopt import Evaluation, NativeGEPA, Reflection
+from eggopt import NativeGEPAConfig, Reflection, optimize_anything
 
 
-def metric(candidate, example):
-    answer = run_student(candidate, example)
-    return Evaluation(
-        score=grade(answer, example),
-        output=answer,
-        feedback=critique(answer, example),
-        evidence={"example": example},
-    )
+def evaluate(candidate, case):
+    answer = run_my_system(candidate, case)
+    score = grade(answer, case)
+    return score, {"answer": answer, "expected": case["expected"]}
 
 
-optimizer = NativeGEPA(
-    metric=metric,
-    reflection=Reflection.eggthreads(
-        llm=reflection_lm,
-        tools=reflection_tools,
-        identity={"model": "reflection-model-v1"},
-        workspace="runs/my-native-gepa/workspaces/mutation",
-        model_key="reflection-model",
-        models_path="runs/my-native-gepa/models.json",
+result = optimize_anything(
+    seed_candidate={"system_prompt": seed_prompt},
+    evaluator=evaluate,
+    dataset=trainset,
+    valset=valset,             # optional; defaults to dataset
+    objective="Improve accuracy while preserving strict JSON output.",
+    config=NativeGEPAConfig(
+        reflection=Reflection.eggthreads(
+            llm=reflection_lm,
+            tools=reflection_tools,
+            identity={"model": "reflection-model-v1"},
+        ),
+        run_dir="runs/my-gepa",
+        max_evaluator_calls=150,
+        max_candidates=10,
     ),
-    run_dir="runs/my-native-gepa",
-    generations=5,
-    proposals_per_generation=2,
 )
 
-result = optimizer.compile(
-    {"system_prompt": seed_prompt},
-    trainset=trainset,
-    valset=valset,
-)
-
-print(result.best_candidate, result.best_score)
+use(result.best_candidate)
 ```
 
-The native algorithm intentionally reads like its idea:
+`config` has ordinary search defaults. In this first slice, use it to pass a
+reflection strategy (or custom candidate generator). Evaluators return either
+`score` or `(score, feedback)`. Plain sync and async functions are cached as
+Eggflow Tasks. An advanced evaluator may expose `task(candidate, case)` and
+return its own composite Eggflow Task.
 
-1. evaluate the seed;
-2. reflect on the best candidate's evidence;
-3. evaluate the proposed alternatives;
-4. keep the best;
-5. repeat.
+NativeGEPA uses seeded epoch-shuffled minibatches for mutation, checks a child
+on the same minibatch, evaluates accepted children on the full validation set,
+and selects distinct parents from the per-case Pareto frontier. Aggregate score
+determines `best_candidate`.
 
-Its primitive metric result is `Evaluation(score, output, feedback, evidence)`.
-Its result contains candidates, scores, parents, outputs, metric-call count, and
-the best candidate. More elaborate archives should be earned by a real use case,
-not pre-installed as framework furniture.
+Every study is durable:
+
+```text
+Mutation
+├── Candidate 1 Evaluation
+│   ├── Case 1 Evaluation
+│   └── Case 2 Evaluation
+└── Candidate 2 Evaluation
+```
+
+Each case owns `outerContext/innerContext/`. Evaluator Tasks may call
+`current_evaluation()` to discover those paths and create an Actor/Critic
+subtree. Rerunning the same study with larger limits replays finished Tasks and
+continues with new work.
+
+Eggopt also includes the optional reusable `ActorCritic` Task. It creates one
+Actor and one Critic thread for the current case, keeps both across bounded
+revision rounds, gives them a shared sandboxed `innerContext`, and requires only
+the Critic decision envelope `{"decision":"accept|revise","feedback":"..."}`.
+
+```python
+from eggflow import Task
+from eggopt import ActorCritic, Agent
+
+
+class EvaluateCase(Task):
+    def run(self):
+        attempt = yield ActorCritic(
+            actor=Agent(actor_llm, {"role": "actor"}),
+            critic=Agent(critic_llm, {"role": "critic"}),
+            actor_prompt=actor_prompt,
+            critic_prompt=critic_prompt,
+            max_rounds=3,
+        )
+        return hidden_grade(attempt.answer), {"answer": attempt.answer}
+```
+
+Use `plan_optimization(...)` to estimate total and additional evaluator work
+before choosing limits.
 
 ## Upstream GEPA
 
-Install the optional external algorithm:
+Install external GEPA separately, then use `UpstreamGEPA`. It is intentionally
+not routed through `optimize_anything`; the two algorithms keep their own clear
+configuration and search semantics.
 
-```bash
-pip install -e './eggopt[upstream]'
-```
-
-Then use the same client shape:
-
-```python
-from eggopt import Reflection, UpstreamGEPA
-
-optimizer = UpstreamGEPA(
-    metric=metric,
-    reflection=Reflection.eggthreads(
-        llm=reflection_lm,
-        tools=reflection_tools,
-        identity={"model": "reflection-model-v1"},
-        workspace="runs/my-upstream-gepa/workspaces/mutation",
-        model_key="reflection-model",
-        models_path="runs/my-upstream-gepa/models.json",
-    ),
-    run_dir="runs/my-upstream-gepa",
-    max_metric_calls=150,
-)
-
-result = optimizer.compile(
-    {"system_prompt": seed_prompt},
-    trainset=trainset,
-    valset=valset,
-)
-```
-
-`UpstreamGEPA` delegates candidate archives, Pareto behavior, lineage,
-acceptance, and budgets to external GEPA. Eggopt owns the durable runtime around
-it. Advanced clients may still import low-level compatibility components from
-`eggopt.gepa`, but normal clients should not assemble `TaskStore`,
-`FlowExecutor`, `ThreadsDB`, adapters, drives, or recovery calls themselves.
+Advanced legacy integrations remain available from `eggopt.gepa`.
