@@ -11,7 +11,10 @@ from eggthreads import (
     ThreadRunner,
     ThreadsDB,
     ToolRegistry,
+    append_message,
     create_child_thread,
+    create_default_tools,
+    enable_thread_session,
     enqueue_user_tool_call,
     get_thread_sandbox_config,
     get_thread_tools_config,
@@ -394,6 +397,9 @@ def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypa
     assert identity["profile"] == SOLVER_SAFE_PROFILE_NAME
     assert identity["version"] == SOLVER_SAFE_PROFILE_VERSION
     assert set(identity["tools"]) == SOLVER_SAFE_TOOLS
+    assert {"threads", "execute_tool_in_other_thread"}.issubset(
+        SOLVER_SAFE_TOOLS
+    )
     assert identity["sandbox"]["network"]["allowedDomains"] == []
     root_tools = get_thread_tools_config(db, study_id)
     assert root_tools.allowed_tools == SOLVER_SAFE_TOOLS
@@ -412,6 +418,92 @@ def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypa
     assert sandbox.settings["filesystem"]["allowWrite"] == ["."]
     assert ".egg" in sandbox.settings["filesystem"]["denyWrite"]
     assert sandbox.user_control_enabled is False
+
+
+def test_solver_safe_mutation_can_inspect_descendant_transcript(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_ALLOW_MEMORY_SESSION_WITH_SANDBOX", "1")
+    db = _db(tmp_path)
+    study_id, _profile = create_solver_safe_study(
+        db, workspace=tmp_path / "workspace"
+    )
+    child = create_child_thread(db, study_id, name="Candidate Evaluation")
+    child_message = append_message(db, child, "assistant", "descendant evidence")
+    enable_thread_session(db, child, provider="memory")
+    tools = create_default_tools()
+
+    tree = json.loads(tools.execute("threads", {}, db=db, thread_id=study_id))
+    assert child in tree["thread_ids"]
+
+    inspected = asyncio.run(
+        tools.execute_async(
+            "execute_tool_in_other_thread",
+            {
+                "tool_name": "python_repl",
+                "arguments": {
+                    "code": "print([m['msg_id'] for m in all_messages])"
+                },
+                "thread_id": child,
+            },
+            db=db,
+            thread_id=study_id,
+            preserve_tool_result=True,
+        )
+    )
+
+    assert inspected.reason == "success"
+    assert child_message in inspected.output
+
+    set_thread_tool_allowlist(db, child, {"threads"})
+    denied_by_target = asyncio.run(
+        tools.execute_async(
+            "execute_tool_in_other_thread",
+            {
+                "tool_name": "python_repl",
+                "arguments": {"code": "print('unreachable')"},
+                "thread_id": child,
+            },
+            db=db,
+            thread_id=study_id,
+            preserve_tool_result=True,
+        )
+    )
+    assert denied_by_target.reason == "disabled"
+    assert "not allowed for the target" in denied_by_target.output
+
+
+def test_solver_safe_inspection_cannot_cross_subtrees(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _db(tmp_path)
+    study_id, _profile = create_solver_safe_study(
+        db, workspace=tmp_path / "workspace"
+    )
+    mutation = create_child_thread(db, study_id, name="Mutation")
+    owned = create_child_thread(db, mutation, name="Owned Evaluation")
+    sibling = create_child_thread(db, study_id, name="Sibling Mutation")
+    tools = create_default_tools()
+
+    tree = tools.execute("threads", {}, db=db, thread_id=mutation)
+    assert owned in tree
+    assert study_id not in tree
+    assert sibling not in tree
+
+    denied = asyncio.run(
+        tools.execute_async(
+            "execute_tool_in_other_thread",
+            {
+                "tool_name": "python_repl",
+                "arguments": {"code": "print('unreachable')"},
+                "thread_id": sibling,
+            },
+            db=db,
+            thread_id=mutation,
+            preserve_tool_result=True,
+        )
+    )
+
+    assert denied.reason == "denied"
+    assert "strict descendant" in denied.output
 
 
 def test_production_drive_tool_round_trip_policy_affinity_and_cache(

@@ -38,7 +38,7 @@ from .reflection import (
 )
 
 SOLVER_SAFE_PROFILE_NAME = "solver_safe"
-SOLVER_SAFE_PROFILE_VERSION = "2"
+SOLVER_SAFE_PROFILE_VERSION = "3"
 _MUTATION_REPAIR_POLICY = "eggopt.gepa.strict-mutation-repair"
 _MUTATION_REPAIR_VERSION = "1"
 SOLVER_SAFE_TOOLS = frozenset(
@@ -51,6 +51,8 @@ SOLVER_SAFE_TOOLS = frozenset(
         "read_long_tool_output",
         "skill",
         "tool_help",
+        "threads",
+        "execute_tool_in_other_thread",
     }
 )
 

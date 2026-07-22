@@ -71,6 +71,11 @@ Each case owns `outerContext/innerContext/`. Evaluator Tasks may call
 subtree. Rerunning the same study with larger limits replays finished Tasks and
 continues with new work.
 
+The versioned `solver_safe` profile lets a Mutation thread list its own subtree
+with `threads` and run opted-in tools such as `python_repl` in a strict
+descendant through `execute_tool_in_other_thread`. Both caller and target tool
+policies still apply; ancestors, siblings, and unrelated threads remain hidden.
+
 Eggopt also includes the optional reusable `ActorCritic` Task. It creates one
 Actor and one Critic thread for the current case, keeps both across bounded
 revision rounds, gives them a shared sandboxed `innerContext`, and requires only
