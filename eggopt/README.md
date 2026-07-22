@@ -28,7 +28,6 @@ result = optimize_anything(
     config=NativeGEPAConfig(
         reflection=Reflection.eggthreads(
             llm=reflection_lm,
-            tools=reflection_tools,
             identity={"model": "reflection-model-v1"},
         ),
         run_dir="runs/my-gepa",
@@ -71,10 +70,22 @@ Each case owns `outerContext/innerContext/`. Evaluator Tasks may call
 subtree. Rerunning the same study with larger limits replays finished Tasks and
 continues with new work.
 
-The versioned `solver_safe` profile lets a Mutation thread list its own subtree
+Every GEPA-managed LLM thread receives the versioned `solver_safe` registry and
+full safe allowlist by default. Pass an explicit `allowed_tools` subset to
+restrict it. Structural Candidate/Case threads inherit the profile; a domain
+may still explicitly disable or narrow specialized descendants. The profile
+lets a Mutation thread list its own subtree
 with `threads` and run opted-in tools such as `python_repl` in a strict
 descendant through `execute_tool_in_other_thread`. Both caller and target tool
 policies still apply; ancestors, siblings, and unrelated threads remain hidden.
+
+```python
+restricted = Reflection.eggthreads(
+    llm=reflection_lm,
+    identity={"model": "reflection-model-v1"},
+    allowed_tools={"python_exec"},
+)
+```
 
 Eggopt also includes the optional reusable `ActorCritic` Task. It creates one
 Actor and one Critic thread for the current case, keeps both across bounded

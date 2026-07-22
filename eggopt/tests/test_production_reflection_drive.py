@@ -140,9 +140,11 @@ def _reflector(
     identity: dict,
     **drive_options,
 ) -> EggthreadsReflectionLM:
+    allowed_tools = drive_options.pop("allowed_tools", {"python_exec"})
     drive = EggthreadsReflectionDrive(
         llm=llm,
         tools=registry,
+        allowed_tools=allowed_tools,
         drive_identity=identity,
         runner_config=RunnerConfig(tool_timeout_sec=30),
         auto_approve_tools=True,
@@ -196,7 +198,9 @@ class StreamingCeilingLLM:
 def test_malformed_envelope_repairs_in_same_mutation_thread(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = _db(tmp_path)
-    study_id, profile = create_solver_safe_study(db, workspace=tmp_path / "workspace")
+    study_id, profile = create_solver_safe_study(
+        db, workspace=tmp_path / "workspace", allowed_tools={"python_exec"}
+    )
     llm = RepairingLLM(
         [
             "not json and secret transcript details",
@@ -275,7 +279,9 @@ def test_malformed_envelope_repairs_in_same_mutation_thread(tmp_path, monkeypatc
 def test_malformed_envelope_stops_after_configured_repairs(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = _db(tmp_path)
-    study_id, profile = create_solver_safe_study(db, workspace=tmp_path / "workspace")
+    study_id, profile = create_solver_safe_study(
+        db, workspace=tmp_path / "workspace", allowed_tools={"python_exec"}
+    )
     llm = RepairingLLM(["bad", "still bad", "must not run"])
     reflector = _reflector(
         tmp_path,
@@ -299,7 +305,9 @@ def test_malformed_envelope_stops_after_configured_repairs(tmp_path, monkeypatch
 def test_context_ceiling_rejects_before_provider_call(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = _db(tmp_path)
-    study_id, profile = create_solver_safe_study(db, workspace=tmp_path / "workspace")
+    study_id, profile = create_solver_safe_study(
+        db, workspace=tmp_path / "workspace", allowed_tools={"python_exec"}
+    )
     reflector = _reflector(
         tmp_path,
         db,
@@ -324,7 +332,9 @@ def test_streaming_context_ceiling_interrupts_only_reflection_operation(
 ):
     monkeypatch.chdir(tmp_path)
     db = _db(tmp_path)
-    study_id, profile = create_solver_safe_study(db, workspace=tmp_path / "workspace")
+    study_id, profile = create_solver_safe_study(
+        db, workspace=tmp_path / "workspace", allowed_tools={"python_exec"}
+    )
     llm = StreamingCeilingLLM()
     reflector = _reflector(
         tmp_path,
@@ -377,6 +387,7 @@ def test_production_drive_validates_repair_and_ceiling_options():
             EggthreadsReflectionDrive(
                 llm=MustNotRunLLM(),
                 tools=registry,
+                allowed_tools={"python_exec"},
                 drive_identity={"model": "validation-test"},
                 **options,
             )
@@ -384,8 +395,86 @@ def test_production_drive_validates_repair_and_ceiling_options():
         EggthreadsReflectionDrive(
             llm=MustNotRunLLM(),
             tools=registry,
+            allowed_tools={"python_exec"},
             drive_identity={"mutation_repair": "caller override"},
         )
+
+
+def test_production_drive_defaults_to_all_safe_tools_and_can_narrow():
+    default = EggthreadsReflectionDrive(
+        llm=MustNotRunLLM(),
+        drive_identity={"model": "default-tools"},
+    )
+    assert default.allowed_tools == SOLVER_SAFE_TOOLS
+    assert default.semantic_identity["solver_safe"] == {
+        "profile": SOLVER_SAFE_PROFILE_NAME,
+        "version": SOLVER_SAFE_PROFILE_VERSION,
+        "tools": sorted(SOLVER_SAFE_TOOLS),
+    }
+    assert {
+        item["function"]["name"] for item in default.tools.tools_spec()
+    }.issuperset(SOLVER_SAFE_TOOLS)
+
+    restricted = EggthreadsReflectionDrive(
+        llm=MustNotRunLLM(),
+        tools=_registry([], []),
+        allowed_tools={"python_exec"},
+        drive_identity={"model": "restricted-tools"},
+    )
+    assert restricted.allowed_tools == {"python_exec"}
+    assert restricted.semantic_identity["solver_safe"]["tools"] == ["python_exec"]
+
+    with pytest.raises(ValueError, match="unsafe tools"):
+        EggthreadsReflectionDrive(
+            llm=MustNotRunLLM(),
+            allowed_tools={"web_search"},
+            drive_identity={"model": "unsafe-tools"},
+        )
+
+
+def test_reflection_factory_defaults_to_all_safe_tools_and_can_narrow():
+    from eggopt import Reflection
+
+    default = Reflection.eggthreads(
+        llm=MustNotRunLLM(),
+        identity={"model": "default-tools"},
+    )
+    assert default.allowed_tools == SOLVER_SAFE_TOOLS
+
+    restricted = Reflection.eggthreads(
+        llm=MustNotRunLLM(),
+        tools=_registry([], []),
+        allowed_tools={"python_exec"},
+        identity={"model": "restricted-tools"},
+    )
+    assert restricted.allowed_tools == {"python_exec"}
+
+
+def test_runtime_persists_default_and_explicit_gepa_allowlists(tmp_path, monkeypatch):
+    from eggopt import Reflection
+    from eggopt.runtime import Runtime
+
+    monkeypatch.chdir(tmp_path)
+    default = Reflection.eggthreads(
+        llm=MustNotRunLLM(),
+        identity={"model": "default-tools"},
+    )
+    with Runtime.open(tmp_path / "default-run", default) as runtime:
+        assert (
+            get_thread_tools_config(runtime.threads, runtime.study_id).allowed_tools
+            == SOLVER_SAFE_TOOLS
+        )
+
+    restricted = Reflection.eggthreads(
+        llm=MustNotRunLLM(),
+        tools=_registry([], []),
+        allowed_tools={"python_exec"},
+        identity={"model": "restricted-tools"},
+    )
+    with Runtime.open(tmp_path / "restricted-run", restricted) as runtime:
+        assert get_thread_tools_config(
+            runtime.threads, runtime.study_id
+        ).allowed_tools == {"python_exec"}
 
 
 def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypatch):
@@ -418,6 +507,19 @@ def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypa
     assert sandbox.settings["filesystem"]["allowWrite"] == ["."]
     assert ".egg" in sandbox.settings["filesystem"]["denyWrite"]
     assert sandbox.user_control_enabled is False
+
+
+def test_solver_safe_study_accepts_explicit_narrower_allowlist(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _db(tmp_path)
+    study_id, profile = create_solver_safe_study(
+        db,
+        workspace=tmp_path / "workspace",
+        allowed_tools={"python_exec"},
+    )
+
+    assert profile["tools"] == ["python_exec"]
+    assert get_thread_tools_config(db, study_id).allowed_tools == {"python_exec"}
 
 
 def test_solver_safe_mutation_can_inspect_descendant_transcript(tmp_path, monkeypatch):
@@ -513,7 +615,7 @@ def test_production_drive_tool_round_trip_policy_affinity_and_cache(
     monkeypatch.chdir(tmp_path)
     db = _db(tmp_path)
     study_id, profile = create_solver_safe_study(
-        db, workspace=tmp_path / "workspace"
+        db, workspace=tmp_path / "workspace", allowed_tools={"python_exec"}
     )
     executions: list[str] = []
     blocked: list[str] = []
@@ -540,7 +642,7 @@ def test_production_drive_tool_round_trip_policy_affinity_and_cache(
     assert blocked == []
     assert all(names == {"python_exec"} for names in llm.tool_names)
     child_tools = get_thread_tools_config(db, occurrence.mutation_thread_id)
-    assert child_tools.allowed_tools == SOLVER_SAFE_TOOLS
+    assert child_tools.allowed_tools == {"python_exec"}
     assert not child_tools.is_tool_allowed("web_search")
 
     followup, _next = reflector.reflect(
@@ -644,6 +746,7 @@ def test_production_drive_requires_explicit_safe_study(tmp_path, monkeypatch):
     drive = EggthreadsReflectionDrive(
         llm=MustNotRunLLM(),
         tools=registry,
+        allowed_tools={"python_exec"},
         drive_identity={"model": "scripted-model-v1"},
     )
     with pytest.raises(ValueError, match="explicit study_thread_id"):
@@ -664,3 +767,20 @@ def test_production_drive_requires_explicit_safe_study(tmp_path, monkeypatch):
         configure_solver_safe_tools(
             db, child, workspace=tmp_path / "workspace"
         )
+
+
+def test_production_drive_requires_its_configured_allowlist(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _db(tmp_path)
+    study_id, _profile = create_solver_safe_study(
+        db, workspace=tmp_path / "workspace"
+    )
+    restricted = EggthreadsReflectionDrive(
+        llm=MustNotRunLLM(),
+        tools=_registry([], []),
+        allowed_tools={"python_exec"},
+        drive_identity={"model": "restricted-tools"},
+    )
+
+    with pytest.raises(ValueError, match="differs from configured"):
+        restricted.validate_study(db, study_id)

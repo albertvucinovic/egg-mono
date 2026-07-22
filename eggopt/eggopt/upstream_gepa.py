@@ -27,6 +27,7 @@ class UpstreamGEPA(Generic[ExampleT, OutputT]):
         reflection: Reflection | None = None,
         reflection_lm: Any | None = None,
         reflection_tools: ToolRegistry | None = None,
+        reflection_allowed_tools: set[str] | frozenset[str] | None = None,
         run_dir: str | Path | None = None,
         metric_identity: Any | None = None,
         example_id: Any | None = None,
@@ -38,7 +39,8 @@ class UpstreamGEPA(Generic[ExampleT, OutputT]):
                 raise TypeError("run_dir is required with reflection_lm")
             reflection = Reflection.eggthreads(
                 llm=reflection_lm,
-                tools=reflection_tools or ToolRegistry(),
+                tools=reflection_tools,
+                allowed_tools=reflection_allowed_tools,
                 identity={"model": str(reflection_lm)},
                 workspace=Path(run_dir) / "workspaces" / "mutation",
                 runner_config=RunnerConfig(),

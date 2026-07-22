@@ -19,6 +19,8 @@ from .production_drive import (
     EggthreadsReflectionDrive,
     configure_solver_safe_tools,
     create_solver_safe_study,
+    default_solver_safe_tools,
+    solver_safe_tools,
 )
 from .reflection import (
     CandidateMutation,
@@ -48,6 +50,8 @@ __all__ = [
     "ReflectionOccurrence",
     "configure_solver_safe_tools",
     "create_solver_safe_study",
+    "default_solver_safe_tools",
+    "solver_safe_tools",
     "semantic_workspace_path",
 ]
 

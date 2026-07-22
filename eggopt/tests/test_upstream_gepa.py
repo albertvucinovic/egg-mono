@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from eggopt import Reflection, UpstreamGEPA
-from eggopt.gepa import CandidateMutation, ExampleEvaluation, ReflectionEvidence
+from eggopt.gepa import (
+    SOLVER_SAFE_TOOLS,
+    CandidateMutation,
+    ExampleEvaluation,
+    ReflectionEvidence,
+)
 
 
 class Drive:
@@ -55,3 +60,15 @@ def test_upstream_gepa_hides_the_runtime(tmp_path):
     assert result.best_candidate == {"instruction": "1"}
     assert (tmp_path / "upstream" / "flow.db").is_file()
     assert (tmp_path / "upstream" / ".egg" / "threads.sqlite").is_file()
+
+
+def test_upstream_reflection_lm_defaults_to_solver_safe_tools(tmp_path):
+    optimizer = UpstreamGEPA(
+        metric=metric,
+        reflection_lm=object(),
+        run_dir=tmp_path / "upstream",
+        metric_identity={"name": "threshold-v1"},
+    )
+
+    assert optimizer.reflection is not None
+    assert optimizer.reflection.allowed_tools == SOLVER_SAFE_TOOLS

@@ -23,6 +23,7 @@ from eggthreads import (
 
 from ._context import _current_evaluation, _evaluation_runtime
 from ._identity import canonical_json, digest_payload
+from .gepa.production_drive import default_solver_safe_tools, solver_safe_tools
 
 
 @dataclass(frozen=True)
@@ -31,7 +32,9 @@ class Agent:
 
     llm: Any = field(repr=False, compare=False)
     identity: Mapping[str, Any]
-    tools: ToolRegistry = field(default_factory=ToolRegistry, repr=False, compare=False)
+    tools: ToolRegistry = field(
+        default_factory=default_solver_safe_tools, repr=False, compare=False
+    )
     model_key: str | None = None
     models_path: str = "models.json"
     runner_config: RunnerConfig = field(
@@ -41,8 +44,12 @@ class Agent:
 
     def __post_init__(self) -> None:
         canonical_json(self.identity, what="agent identity")
-        if not isinstance(self.tools, ToolRegistry):
-            raise TypeError("agent tools must be a ToolRegistry")
+        tools, allowed = solver_safe_tools(
+            self.tools,
+            allowed_tools=self.allowed_tools,
+        )
+        object.__setattr__(self, "tools", tools)
+        object.__setattr__(self, "allowed_tools", allowed)
 
 
 @dataclass(frozen=True)
@@ -244,13 +251,14 @@ class _ConfigureAgent(Task):
     role: str
 
     def get_cache_key(self) -> str:
+        # v2 makes the full solver-safe default part of durable configuration.
         return digest_payload(
-            "eggopt.actor-critic.configure-agent.v1",
+            "eggopt.actor-critic.configure-agent.v2",
             {
                 "thread": self.thread_id,
                 "agent": self.agent.identity,
                 "workspace": self.workspace,
-                "allowed_tools": sorted(self.agent.allowed_tools or ()),
+                "allowed_tools": sorted(self.agent.allowed_tools),
                 "role": self.role,
             },
         )
@@ -270,21 +278,8 @@ class _ConfigureAgent(Task):
             self.workspace,
             reason="ActorCritic shared innerContext",
         )
-        if self.agent.allowed_tools is None:
-            set_thread_tools_enabled(db, self.thread_id, False)
-        else:
-            available = {
-                item["function"]["name"] for item in self.agent.tools.tools_spec()
-            }
-            unexpected = set(self.agent.allowed_tools) - available
-            if unexpected:
-                raise ValueError(
-                    f"agent allowlist contains unavailable tools: {sorted(unexpected)}"
-                )
-            set_thread_tools_enabled(db, self.thread_id, True)
-            set_thread_tool_allowlist(
-                db, self.thread_id, set(self.agent.allowed_tools)
-            )
+        set_thread_tools_enabled(db, self.thread_id, True)
+        set_thread_tool_allowlist(db, self.thread_id, set(self.agent.allowed_tools))
         set_thread_sandbox_config(
             db,
             self.thread_id,

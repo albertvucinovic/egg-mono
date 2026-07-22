@@ -5,14 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from eggthreads import ThreadsDB, list_children_with_meta
+from eggthreads import ThreadsDB, get_thread_tools_config, list_children_with_meta
 
 from eggopt import (
+    Agent,
     NativeGEPAConfig,
     current_evaluation,
     optimize_anything,
     plan_optimization,
 )
+from eggopt.gepa import SOLVER_SAFE_TOOLS
 
 
 class Evaluator:
@@ -46,6 +48,28 @@ class ContextEvaluator(Evaluator):
     def __call__(self, candidate, case):
         self.contexts.append(dict(current_evaluation()))
         return super().__call__(candidate, case)
+
+
+def test_agent_defaults_to_safe_tools_and_accepts_explicit_subset():
+    default = Agent(object(), {"role": "default"})
+    assert default.allowed_tools == SOLVER_SAFE_TOOLS
+    assert {
+        item["function"]["name"] for item in default.tools.tools_spec()
+    }.issuperset(SOLVER_SAFE_TOOLS)
+
+    restricted = Agent(
+        object(),
+        {"role": "restricted"},
+        allowed_tools=frozenset({"python_exec"}),
+    )
+    assert restricted.allowed_tools == {"python_exec"}
+
+    with pytest.raises(ValueError, match="unsafe tools"):
+        Agent(
+            object(),
+            {"role": "unsafe"},
+            allowed_tools=frozenset({"web_search"}),
+        )
 
 
 def config(tmp_path, evaluator, generator, **changes):
@@ -305,8 +329,6 @@ class ScriptedAgentLLM:
 def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatch):
     from eggflow import Task
     from eggopt import ActorCritic, Agent
-    from eggthreads import ToolRegistry
-
     monkeypatch.chdir(tmp_path)
     run_dir = Path("run") / "actor-critic"
 
@@ -325,8 +347,8 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
     class EvaluateWithActorCritic(Task):
         def run(self):
             result = yield ActorCritic(
-                actor=Agent(actor_llm, {"role": "actor"}, ToolRegistry()),
-                critic=Agent(critic_llm, {"role": "critic"}, ToolRegistry()),
+                actor=Agent(actor_llm, {"role": "actor"}),
+                critic=Agent(critic_llm, {"role": "critic"}),
                 actor_prompt=lambda round_number, state: (
                     "Predict." if round_number == 1 else state["feedback"]
                 ),
@@ -363,6 +385,19 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
     }
     assert actor_llm.calls == critic_llm.calls == 2
 
+    db = ThreadsDB(run_dir / ".egg" / "threads.sqlite")
+    try:
+        for name in ("Actor", "Critic"):
+            thread_id = db.conn.execute(
+                "SELECT thread_id FROM threads WHERE name=?", (name,)
+            ).fetchone()[0]
+            assert (
+                get_thread_tools_config(db, thread_id).allowed_tools
+                == SOLVER_SAFE_TOOLS
+            )
+    finally:
+        db.conn.close()
+
     replay_actor = ScriptedAgentLLM([])
     replay_critic = ScriptedAgentLLM([])
 
@@ -373,8 +408,8 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
     class ReplayTask(Task):
         def run(self):
             result = yield ActorCritic(
-                actor=Agent(replay_actor, {"role": "actor"}, ToolRegistry()),
-                critic=Agent(replay_critic, {"role": "critic"}, ToolRegistry()),
+                actor=Agent(replay_actor, {"role": "actor"}),
+                critic=Agent(replay_critic, {"role": "critic"}),
                 actor_prompt=lambda round_number, state: (
                     "Predict." if round_number == 1 else state["feedback"]
                 ),

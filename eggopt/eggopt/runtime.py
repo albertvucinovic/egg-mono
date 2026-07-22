@@ -10,7 +10,11 @@ from eggflow import FlowExecutor, TaskStore
 from eggthreads import RunnerConfig, ThreadsDB, ToolRegistry, create_root_thread
 
 from .evaluation import Evaluation
-from .gepa.production_drive import EggthreadsReflectionDrive, create_solver_safe_study
+from .gepa.production_drive import (
+    EggthreadsReflectionDrive,
+    create_solver_safe_study,
+    default_solver_safe_tools,
+)
 from .gepa.reflection import EggthreadsReflectionLM, ReflectionDrive
 
 ExampleT = TypeVar("ExampleT")
@@ -30,12 +34,19 @@ class Reflection:
     models_path: str = "models.json"
     study_name: str = "GEPA Study"
 
+    @property
+    def allowed_tools(self) -> frozenset[str] | None:
+        """Explicit GEPA capability set, or ``None`` for non-production drives."""
+
+        return getattr(self.drive, "allowed_tools", None)
+
     @classmethod
     def eggthreads(
         cls,
         *,
         llm: Any,
-        tools: ToolRegistry,
+        tools: ToolRegistry | None = None,
+        allowed_tools: set[str] | frozenset[str] | None = None,
         identity: Mapping[str, Any],
         instruction: str = "Reflect on the evidence and improve the requested components.",
         workspace: str | Path | None = None,
@@ -46,10 +57,13 @@ class Reflection:
         max_correction_turns: int = 0,
         context_ceiling_tokens: int | None = None,
     ) -> Reflection:
+        if tools is None:
+            tools = default_solver_safe_tools()
         return cls(
             drive=EggthreadsReflectionDrive(
                 llm=llm,
                 tools=tools,
+                allowed_tools=allowed_tools,
                 drive_identity=identity,
                 runner_config=runner_config,
                 models_path=models_path,
@@ -105,6 +119,7 @@ class Runtime(Generic[ExampleT, OutputT]):
                     model_key=reflection.model_key,
                     models_path=reflection.models_path,
                     name=name,
+                    allowed_tools=reflection.allowed_tools,
                 )
             else:
                 study_id = create_root_thread(threads, name=name)
