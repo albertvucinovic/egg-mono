@@ -163,6 +163,7 @@ def register_skill_tool(registry: ToolRegistry) -> None:
             },
         },
         impl=render_skill_request,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
 

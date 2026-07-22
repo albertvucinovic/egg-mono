@@ -9,6 +9,7 @@ from .auth import AuthPlugin
 from .answer_user import AnswerUserPlugin
 from .attachments import AttachmentToolsPlugin
 from .compaction import CompactionPlugin
+from .cross_thread_execution import CrossThreadExecutionPlugin
 from .image_generation import ImageGenerationPlugin
 from .inspection import InspectionPlugin
 from .long_output import LongOutputPlugin
@@ -24,7 +25,34 @@ from .tool_output_extraction import ToolOutputExtractionPlugin
 from .tools_admin import ToolsAdminPlugin
 from .web import WebPlugin
 
-__all__ = ["AnswerUserPlugin", "ApprovalPoliciesPlugin", "AttachmentToolsPlugin", "AuthPlugin", "CompactionPlugin", "DiagnosticsPlugin", "DisplayInputPlugin", "ExecutionPlugin", "ImageGenerationPlugin", "InspectionPlugin", "LongOutputPlugin", "ModelPlugin", "OutputOptimizerAdminPlugin", "OutputPoliciesPlugin", "SandboxAdminPlugin", "SandboxProvidersPlugin", "SessionPlugin", "SessionProvidersPlugin", "SkillsPlugin", "SubagentsPlugin", "ThreadUiPlugin", "ToolHelpPlugin", "ToolOutputExtractionPlugin", "ToolsAdminPlugin", "WebPlugin"]
+__all__ = [
+    "AnswerUserPlugin",
+    "ApprovalPoliciesPlugin",
+    "AttachmentToolsPlugin",
+    "AuthPlugin",
+    "CompactionPlugin",
+    "CrossThreadExecutionPlugin",
+    "DiagnosticsPlugin",
+    "DisplayInputPlugin",
+    "ExecutionPlugin",
+    "ImageGenerationPlugin",
+    "InspectionPlugin",
+    "LongOutputPlugin",
+    "ModelPlugin",
+    "OutputOptimizerAdminPlugin",
+    "OutputPoliciesPlugin",
+    "SandboxAdminPlugin",
+    "SandboxProvidersPlugin",
+    "SessionPlugin",
+    "SessionProvidersPlugin",
+    "SkillsPlugin",
+    "SubagentsPlugin",
+    "ThreadUiPlugin",
+    "ToolHelpPlugin",
+    "ToolOutputExtractionPlugin",
+    "ToolsAdminPlugin",
+    "WebPlugin",
+]
 
 
 def __getattr__(name: str):

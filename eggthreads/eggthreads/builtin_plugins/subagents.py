@@ -607,6 +607,7 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
         },
         impl=spawn_agent_tool,
         local_only=False,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
     registry.register(
@@ -633,6 +634,7 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
         },
         impl=spawn_agent_auto_tool,
         local_only=False,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
     registry.register(
@@ -658,6 +660,7 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
         },
         impl=send_message_to_child_tool,
         local_only=False,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
     registry.register(
@@ -676,6 +679,7 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
         },
         impl=continue_subthread_tool,
         local_only=False,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
     registry.register(
@@ -704,6 +708,7 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
         },
         impl=get_child_status_tool,
         local_only=False,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
     registry.register(
@@ -730,6 +735,7 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
         capabilities={
             "supports_cancellation": True,
             "resumes_after_lease_loss": True,
+            "supports_cross_thread_execution": True,
         },
     )
 

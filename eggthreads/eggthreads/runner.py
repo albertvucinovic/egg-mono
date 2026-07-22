@@ -3011,12 +3011,13 @@ class ThreadRunner:
             if m2.get("answer_user_preserve_turn"):
                 continue
             role = m2.get("role")
+            force_mask = bool(m2.pop("force_provider_output_masking", False))
 
             # RA3: user-command tool outputs -> plain user messages
             if role == "tool" and m2.get("user_tool_call") and not m2.get("no_api"):
                 content = m2.get("content", "")
                 # Mask secrets for provider API unless explicitly allowed.
-                if isinstance(content, str) and not allow_raw:
+                if isinstance(content, str) and (not allow_raw or force_mask):
                     try:
                         content = self._filter_tool_output(content, mask_secrets=True)
                     except Exception:
@@ -3039,7 +3040,16 @@ class ThreadRunner:
                 content_has_attachments(content_value, validate=False)
                 or content_has_artifacts(content_value, validate=False)
             ):
-                m2["content"] = content_to_plain_text(content_value)
+                plain_content = content_to_plain_text(content_value)
+                if role == "tool" and force_mask:
+                    try:
+                        plain_content = self._filter_tool_output(
+                            plain_content,
+                            mask_secrets=True,
+                        )
+                    except Exception:
+                        pass
+                m2["content"] = plain_content
 
             # For real tool outputs (role="tool" in the tools protocol),
             # mask secrets before sending to the provider unless raw mode
@@ -3048,7 +3058,7 @@ class ThreadRunner:
             if role == "tool" and not m2.get("no_api"):
                 content = m2.get("content")
                 if isinstance(content, str):
-                    if allow_raw:
+                    if allow_raw and not force_mask:
                         try:
                             m2["content"] = self._filter_tool_output(content, mask_secrets=False)
                         except Exception:
@@ -3058,6 +3068,10 @@ class ThreadRunner:
                             m2["content"] = self._filter_tool_output(content, mask_secrets=True)
                         except Exception:
                             pass
+
+            # Local cross-thread confidentiality metadata has served its only
+            # purpose and must never be forwarded as a provider message field.
+            m2.pop("force_provider_output_masking", None)
 
             # Some providers are strict about assistant/tool pairing and
             # will error if they see assistant messages with no content
@@ -4024,11 +4038,15 @@ class ThreadRunner:
                         finish_reason = tool_result.reason or 'success'
                         already_streamed = tool_result.streamed
                         publication_presentation = dict(tool_result.publication_presentation or {})
+                        force_provider_output_masking = bool(tool_result.force_provider_output_masking)
+                        transcript_content_tool_name = tool_result.transcript_content_tool_name
                     else:
                         full_result = tool_result
                         finish_reason = 'success'
                         already_streamed = False
                         publication_presentation = {}
+                        force_provider_output_masking = False
+                        transcript_content_tool_name = None
                 except asyncio.CancelledError:
                     full_result = (
                         "--- INTERRUPTED ---\n"
@@ -4067,6 +4085,8 @@ class ThreadRunner:
                     finish_reason = 'error'
                     already_streamed = False
                     publication_presentation = {}
+                    force_provider_output_masking = False
+                    transcript_content_tool_name = None
                 if not isinstance(full_result, str):
                     full_result = str(full_result)
 
@@ -4131,17 +4151,22 @@ class ThreadRunner:
                         await asyncio.sleep(0)
                 if cancelled and finish_reason == 'success':
                     finish_reason = 'interrupted'
+                finished_payload: Dict[str, Any] = {
+                    'tool_call_id': tc.tool_call_id,
+                    'reason': finish_reason,
+                    'output': full_result,
+                    'original_char_count': original_output_char_count,
+                    'output_capped': output_was_capped,
+                    'publication_presentation': publication_presentation,
+                }
+                if force_provider_output_masking:
+                    finished_payload['force_provider_output_masking'] = True
+                if transcript_content_tool_name:
+                    finished_payload['transcript_content_tool_name'] = transcript_content_tool_name
                 finished_seq = self._owned_append(
                     invoke_id,
                     type_='tool_call.finished',
-                    payload={
-                        'tool_call_id': tc.tool_call_id,
-                        'reason': finish_reason,
-                        'output': full_result,
-                        'original_char_count': original_output_char_count,
-                        'output_capped': output_was_capped,
-                        'publication_presentation': publication_presentation,
-                    },
+                    payload=finished_payload,
                 )
                 # Auto output-approval: small outputs get decision='whole'
                 # and go through verbatim; long outputs are stored as
@@ -4264,7 +4289,10 @@ class ThreadRunner:
                         # Structured artifact content is safe only for a whole
                         # decision. A partial long-output decision must retain
                         # its bounded preview/read-tool recovery note.
-                        structured_content = _tool_output_content_parts_for_transcript(tool_name, finished_output)
+                        structured_content = _tool_output_content_parts_for_transcript(
+                            tc.transcript_content_tool_name or tool_name,
+                            finished_output,
+                        )
                         content = structured_content if structured_content is not None else str(preview)
                     else:
                         content = str(preview)
@@ -4299,6 +4327,8 @@ class ThreadRunner:
                     'name': tool_name,
                     'user_tool_call': bool(ra.kind == 'RA3_tools_user'),
                 }
+                if tc.force_provider_output_masking:
+                    msg['force_provider_output_masking'] = True
                 try:
                     from .output_optimizer.observability import optimizer_public_metadata_from_output_approval
 

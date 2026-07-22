@@ -101,6 +101,24 @@ reload_thread_context()
 
 Hidden/local-only content is excluded from this model-usable context.
 
+An ancestor can run an opted-in tool with a strict descendant's context while
+keeping the returned result in the ancestor conversation:
+
+```text
+execute_tool_in_other_thread(
+    tool_name="python_repl",
+    arguments={"code": "print([m['content'] for m in all_messages])"},
+    thread_id="<descendant-thread-id>",
+)
+```
+
+For `python_repl` and `bash_repl`, this creates or reuses the runtime child and
+persistent REPL channel under the selected descendant. Hydration therefore
+loads that descendant's effective historical messages, not the ancestor's.
+Self, ancestor, sibling, unrelated, disabled, local-only, and non-opted-in tool
+targets are rejected. The nested result is published only in the calling
+ancestor; normal tool side effects remain in the descendant context.
+
 ## Headless subtree example
 
 The repository includes a headless example that creates a root thread, creates

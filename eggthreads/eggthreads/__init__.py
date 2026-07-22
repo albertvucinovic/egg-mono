@@ -411,7 +411,16 @@ from .tool_output_presentation import (
     number_text_lines,
     split_text_lines,
 )
-from .tools import ToolCapabilities, ToolContext, ToolExecutionResult, ToolRegistry, ToolStreamContext, create_default_tools, create_tool_registry
+from .tools import (
+    ToolCapabilities,
+    ToolContext,
+    ToolExecutionResult,
+    ToolRegistry,
+    ToolStreamContext,
+    create_default_tools,
+    create_tool_registry,
+)
+from .builtin_plugins.cross_thread_execution import execute_tool_in_other_thread_tool
 from .skills import Skill, get_skill, list_skills, load_skill_text, render_skill_index, render_skill_tool_output, search_skills
 
 from .llm import create_llm_client
@@ -476,7 +485,7 @@ __all__ = [
     'get_thread_sandbox_config', 'set_thread_sandbox_config', 'set_subtree_sandbox_config', 'get_thread_sandbox_status',
     'HARD_BYPASS_TOOL_NAMES', 'ToolOutputContract', 'canonical_terminal_safe_output', 'is_hard_bypass_tool', 'tool_output_contract',
     'TextLineRange', 'apply_output_presentation', 'extract_text_line_range', 'line_number_presentation', 'number_text_lines', 'split_text_lines',
-    'ToolCapabilities', 'ToolContext', 'ToolExecutionResult', 'ToolRegistry', 'ToolStreamContext', 'create_default_tools', 'create_tool_registry',
+    'ToolCapabilities', 'ToolContext', 'ToolExecutionResult', 'ToolRegistry', 'ToolStreamContext', 'create_default_tools', 'create_tool_registry', 'execute_tool_in_other_thread_tool',
     'Skill', 'get_skill', 'list_skills', 'load_skill_text', 'render_skill_index', 'render_skill_tool_output', 'search_skills',
     'create_llm_client',
     'count_text_tokens', 'llm_message_tps_for_invoke', 'live_llm_tps_for_invoke', 'tool_message_tps_for_call', 'snapshot_token_stats', 'provider_context_token_stats', 'streaming_token_stats', 'header_token_stats', 'total_token_stats', 'thread_token_stats', 'EventWatcher',

@@ -170,6 +170,7 @@ def register_long_output_tools(registry: ToolRegistry) -> None:
         },
         impl=read_long_tool_output_tool,
         accepts_context=True,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
 

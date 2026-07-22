@@ -148,6 +148,7 @@ def register_attachment_tools(registry: ToolRegistry) -> None:
         },
         impl=add_local_file_to_model_context_tool,
         accepts_context=True,
+        capabilities={"supports_cross_thread_execution": True},
     )
     registry.register(
         name=ADD_PROVIDER_ARTIFACT_TO_MODEL_CONTEXT_TOOL_NAME,
@@ -175,6 +176,7 @@ def register_attachment_tools(registry: ToolRegistry) -> None:
         },
         impl=add_provider_artifact_to_model_context_tool,
         accepts_context=True,
+        capabilities={"supports_cross_thread_execution": True},
     )
     registry.register(
         name=SAVE_PROVIDER_ARTIFACT_TO_FILE_TOOL_NAME,
@@ -205,6 +207,7 @@ def register_attachment_tools(registry: ToolRegistry) -> None:
         },
         impl=save_provider_artifact_to_file_tool,
         accepts_context=True,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
 

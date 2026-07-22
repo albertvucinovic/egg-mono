@@ -169,6 +169,16 @@ class ToolExecutionResult:
     reason: str = "success"
     streamed: bool = False
     publication_presentation: Mapping[str, Any] = field(default_factory=dict)
+    # Some wrapper tools execute work under a stricter thread policy than the
+    # thread that ultimately receives the result.  Persist this bit through the
+    # normal TC4/TC5 publication path so provider-bound sanitization cannot
+    # accidentally use only the receiving thread's less restrictive policy.
+    force_provider_output_masking: bool = False
+    # A wrapper remains the protocol-visible tool name, but its result may carry
+    # canonical content parts produced by another registered tool (for example,
+    # generate_image executed in a descendant).  This optional name is used only
+    # to decode those validated content parts for the local transcript.
+    transcript_content_tool_name: str | None = None
 
     def presented_output(self) -> str:
         from .tool_output_presentation import apply_output_presentation
@@ -183,6 +193,7 @@ class ToolCapabilities:
     supports_streaming: bool = False
     supports_cancellation: bool = False
     resumes_after_lease_loss: bool = False
+    supports_cross_thread_execution: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -191,11 +202,19 @@ class ToolCapabilities:
             return value
         if not value:
             return cls()
-        known = {"supports_streaming", "supports_cancellation", "resumes_after_lease_loss"}
+        known = {
+            "supports_streaming",
+            "supports_cancellation",
+            "resumes_after_lease_loss",
+            "supports_cross_thread_execution",
+        }
         return cls(
             supports_streaming=bool(value.get("supports_streaming", False)),
             supports_cancellation=bool(value.get("supports_cancellation", False)),
             resumes_after_lease_loss=bool(value.get("resumes_after_lease_loss", False)),
+            supports_cross_thread_execution=bool(
+                value.get("supports_cross_thread_execution", False)
+            ),
             metadata={k: v for k, v in value.items() if k not in known},
         )
 
@@ -205,6 +224,8 @@ class ToolCapabilities:
         data["supports_cancellation"] = self.supports_cancellation
         if self.resumes_after_lease_loss:
             data["resumes_after_lease_loss"] = True
+        if self.supports_cross_thread_execution:
+            data["supports_cross_thread_execution"] = True
         return data
 
 
@@ -541,6 +562,8 @@ def _tool_timeout_result(
             reason="timeout",
             streamed=cleanup_result.streamed,
             publication_presentation=cleanup_result.publication_presentation,
+            force_provider_output_masking=cleanup_result.force_provider_output_masking,
+            transcript_content_tool_name=cleanup_result.transcript_content_tool_name,
         )
     return ToolExecutionResult(header, reason="timeout")
 
@@ -685,6 +708,46 @@ class ToolRegistry:
         if not entry:
             raise KeyError(f"Unknown tool: {name}")
         return entry["capabilities"]
+
+    def is_registered(self, name: str) -> bool:
+        """Return whether *name* resolves to a registered tool."""
+
+        return self.resolve_name(name) in self._tools
+
+    def is_local_only(self, name: str) -> bool:
+        """Return registry visibility metadata for a registered tool."""
+
+        entry = self._tools.get(self.resolve_name(name))
+        if entry is None:
+            raise KeyError(f"Unknown tool: {name}")
+        return bool(entry.get("local_only"))
+
+    async def execute_in_thread_context(
+        self,
+        name: str,
+        arguments: Any,
+        *,
+        thread_id: str,
+        **context: Any,
+    ) -> Any:
+        """Execute using an explicit authoritative thread identity.
+
+        Authorization belongs to the higher-level caller (for example the
+        descendant-only wrapper).  This small registry primitive centralizes
+        identity precedence so neither context-aware nor legacy argument-aware
+        tools can retain a caller-supplied ``_thread_id``.
+        """
+
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            raise ValueError("thread_id is required")
+        if isinstance(arguments, dict):
+            arguments = dict(arguments)
+            arguments.pop("_thread_id", None)
+        return await self.execute_async(
+            name,
+            arguments,
+            **{**context, "thread_id": thread_id.strip()},
+        )
 
     def _prepare_call(
         self,
@@ -1051,7 +1114,21 @@ class ToolRegistry:
 def create_tool_registry() -> ToolRegistry:
     """Create a plugin-populated ToolRegistry with Egg's built-in tools."""
 
-    from .builtin_plugins import AnswerUserPlugin, AttachmentToolsPlugin, CompactionPlugin, ExecutionPlugin, ImageGenerationPlugin, LongOutputPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ToolHelpPlugin, ToolOutputExtractionPlugin, WebPlugin
+    from .builtin_plugins import (
+        AnswerUserPlugin,
+        AttachmentToolsPlugin,
+        CompactionPlugin,
+        CrossThreadExecutionPlugin,
+        ExecutionPlugin,
+        ImageGenerationPlugin,
+        LongOutputPlugin,
+        SessionPlugin,
+        SkillsPlugin,
+        SubagentsPlugin,
+        ToolHelpPlugin,
+        ToolOutputExtractionPlugin,
+        WebPlugin,
+    )
     from .plugins import ToolPluginContext, register_plugins
 
     reg = ToolRegistry()
@@ -1069,6 +1146,7 @@ def create_tool_registry() -> ToolRegistry:
             ToolHelpPlugin(),
             SessionPlugin(),
             SubagentsPlugin(),
+            CrossThreadExecutionPlugin(),
             WebPlugin(),
         ],
     )
@@ -1084,6 +1162,7 @@ def create_default_tools() -> ToolRegistry:
     - python_exec: Execute Python code in the current working directory
     - spawn_agent: Create child threads for delegation
     - spawn_agent_auto: Create auto-approved child threads
+    - execute_tool_in_other_thread: Run an opted-in tool in a descendant context
     - web_search: Provider-fallback web search (auto by default)
     - fetch_url: Provider-fallback URL fetch/extraction (auto by default)
     - wait: Synchronize on child thread completion

@@ -440,6 +440,7 @@ def register_session_tools(registry: ToolRegistry) -> None:
         },
         impl=execute_python_repl_tool,
         accepts_context=True,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
     registry.register(
@@ -456,6 +457,7 @@ def register_session_tools(registry: ToolRegistry) -> None:
         },
         impl=execute_bash_repl_tool,
         accepts_context=True,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
 

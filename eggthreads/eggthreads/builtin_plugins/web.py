@@ -331,6 +331,7 @@ def register_web_tools(registry: ToolRegistry) -> None:
         ),
         parameters_schema=search_schema,
         impl=web_search_tool,
+        capabilities={"supports_cross_thread_execution": True},
     )
     registry.register(
         name="fetch_url",
@@ -342,6 +343,7 @@ def register_web_tools(registry: ToolRegistry) -> None:
         ),
         parameters_schema=fetch_schema,
         impl=fetch_url_tool,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
 

@@ -134,18 +134,25 @@ def test_tool_capabilities_are_registry_metadata_not_tool_schema() -> None:
         "Capable tool",
         {"type": "object", "properties": {}},
         lambda args: "ok",
-        capabilities={"supports_streaming": True, "supports_cancellation": True, "mode": "test"},
+        capabilities={
+            "supports_streaming": True,
+            "supports_cancellation": True,
+            "supports_cross_thread_execution": True,
+            "mode": "test",
+        },
     )
 
     capabilities = registry._tools["capable_tool"]["capabilities"]
     assert isinstance(capabilities, ToolCapabilities)
     assert capabilities.supports_streaming is True
     assert capabilities.supports_cancellation is True
+    assert capabilities.supports_cross_thread_execution is True
     assert capabilities.metadata == {"mode": "test"}
     assert capabilities.to_dict() == {
         "mode": "test",
         "supports_streaming": True,
         "supports_cancellation": True,
+        "supports_cross_thread_execution": True,
     }
 
     spec = registry.tools_spec()[0]["function"]
@@ -281,6 +288,35 @@ def test_execute_async_runs_sync_tool_in_worker_thread() -> None:
 
     assert asyncio.run(registry.execute_async("sync_tool", {"value": "ok"})) == "sync-ok"
     assert seen["thread_id"] != main_thread_id
+
+
+def test_execute_in_thread_context_makes_explicit_identity_authoritative() -> None:
+    registry = ToolRegistry()
+    seen = {}
+
+    def impl(args: dict[str, object]) -> str:
+        seen.update(args)
+        return "ok"
+
+    registry.register(
+        "thread_context_tool",
+        "Thread context",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    result = asyncio.run(
+        registry.execute_in_thread_context(
+            "thread_context_tool",
+            {"_thread_id": "attacker", "value": "kept"},
+            thread_id="authoritative",
+        )
+    )
+
+    assert result == "ok"
+    assert seen.pop("_thread_id") == "authoritative"
+    assert callable(seen.pop("_cancel_check"))
+    assert seen == {"value": "kept"}
 
 
 def test_tool_execution_result_unwraps_by_default_and_can_be_preserved() -> None:

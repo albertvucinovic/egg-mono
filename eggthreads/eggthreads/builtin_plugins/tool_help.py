@@ -54,6 +54,7 @@ def register_tool_help_tool(registry: ToolRegistry) -> None:
         },
         impl=tool_help_tool,
         accepts_context=True,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
 

@@ -1070,6 +1070,8 @@ Returns a registry pre-populated with common tools:
 - python_exec: Execute Python code in the current working directory
 - spawn_agent: Create child threads for delegation
 - spawn_agent_auto: Create auto-approved child threads
+- execute_tool_in_other_thread: Execute an opted-in tool in a strict descendant
+  context and return its result to the calling ancestor
 - web_search: Provider-fallback web search. In default `auto` mode, Tavily is
   tried first when `TAVILY_API_KEY` is set, then local SearXNG is used as the
   no-key fallback. Configure an ordered fallback with `EGG_WEB_SEARCH_CHAIN`,
@@ -1089,5 +1091,22 @@ already-persisted tool calls and configurations; it is not exposed to LLMs.
 
 Returns:
     ToolRegistry with default tools registered.
+
+### `execute_tool_in_other_thread(tool_name, arguments, thread_id)`
+
+Execute an opted-in registry tool with a strict descendant as its authoritative
+thread context, then return/publish the nested result in the calling ancestor.
+
+- `thread_id` must be a strict descendant of the calling thread.
+- Both caller and target effective tool policies must allow the wrapper and/or
+  nested tool as applicable; policy failures deny execution.
+- Local-only, recursive, and thread-local-lifecycle-dependent tools are denied.
+- The nested tool receives the target's model, working directory, sandbox,
+  session, and thread identity, but not the ancestor invocation/tool-call IDs.
+- `python_repl` and `bash_repl` reuse the target descendant's runtime child and
+  persistent channel. Hydrated messages therefore come from the descendant.
+- The nested result belongs to the ancestor tool call. Genuine side effects
+  remain in the target context.
+- Provider output is masked when either the caller or target policy requires it.
 
 ---

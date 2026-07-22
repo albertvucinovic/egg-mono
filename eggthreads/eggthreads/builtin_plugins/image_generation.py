@@ -153,6 +153,7 @@ def register_image_generation_tools(registry: ToolRegistry) -> None:
         },
         impl=generate_image_tool,
         accepts_context=True,
+        capabilities={"supports_cross_thread_execution": True},
     )
 
 

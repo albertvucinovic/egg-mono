@@ -667,7 +667,11 @@ def register_execution_tools(registry: ToolRegistry) -> None:
         },
         impl=execute_bash_tool_streaming,
         accepts_context=True,
-        capabilities=ToolCapabilities(supports_streaming=True, supports_cancellation=True),
+        capabilities=ToolCapabilities(
+            supports_streaming=True,
+            supports_cancellation=True,
+            supports_cross_thread_execution=True,
+        ),
     )
 
     registry.register(
@@ -685,7 +689,10 @@ def register_execution_tools(registry: ToolRegistry) -> None:
         },
         impl=execute_python_tool_context,
         accepts_context=True,
-        capabilities=ToolCapabilities(supports_cancellation=True),
+        capabilities=ToolCapabilities(
+            supports_cancellation=True,
+            supports_cross_thread_execution=True,
+        ),
     )
 
 

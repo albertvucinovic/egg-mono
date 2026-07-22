@@ -66,6 +66,8 @@ class ToolCallState:
     finished_output_capped: bool = False
     # Normalized presentation stays separate from canonical finished output.
     publication_presentation: Dict[str, Any] = field(default_factory=dict)
+    force_provider_output_masking: bool = False
+    transcript_content_tool_name: Optional[str] = None
     output_decision: Optional[str] = None  # "whole" | "partial" | "omit"
     summary: Optional[str] = None  # latest one-line running status from tool_call.summary
     published: bool = False  # final tool message written
@@ -403,6 +405,8 @@ def _interrupted_tool_update(tc: ToolCallState, reason: str, output: str) -> Too
         finished_output=output,
         finished_original_char_count=len(output),
         finished_output_capped=False,
+        force_provider_output_masking=False,
+        transcript_content_tool_name=None,
         output_decision=None,
         last_output_approval_payload=None,
         output_decision_event_seq=None,
@@ -717,6 +721,12 @@ def _try_reduce_thread_events_incrementally(
                 finished_output_capped=(
                     False if resume_after_lease_loss else tc.finished_output_capped
                 ),
+                force_provider_output_masking=(
+                    False if resume_after_lease_loss else tc.force_provider_output_masking
+                ),
+                transcript_content_tool_name=(
+                    None if resume_after_lease_loss else tc.transcript_content_tool_name
+                ),
                 output_decision=None if resume_after_lease_loss else tc.output_decision,
                 last_output_approval_payload=(
                     None if resume_after_lease_loss else tc.last_output_approval_payload
@@ -755,6 +765,13 @@ def _try_reduce_thread_events_incrementally(
 
             changes["publication_presentation"] = normalize_publication_presentation(
                 payload.get("publication_presentation")
+            )
+            changes["force_provider_output_masking"] = bool(
+                payload.get("force_provider_output_masking")
+            )
+            content_tool_name = payload.get("transcript_content_tool_name")
+            changes["transcript_content_tool_name"] = (
+                str(content_tool_name) if isinstance(content_tool_name, str) and content_tool_name else None
             )
             changes["state_event_seq"] = ev_seq
             changes["finished_event_seq"] = ev_seq
@@ -1052,6 +1069,8 @@ def _reduce_loaded_thread_events(
                         tc.finished_output = None
                         tc.finished_original_char_count = None
                         tc.finished_output_capped = False
+                        tc.force_provider_output_masking = False
+                        tc.transcript_content_tool_name = None
                         tc.output_decision = None
                         tc.last_output_approval_payload = None
                         tc.output_decision_event_seq = None
@@ -1095,6 +1114,15 @@ def _reduce_loaded_thread_events(
 
                     tc.publication_presentation = normalize_publication_presentation(
                         payload.get("publication_presentation")
+                    )
+                    tc.force_provider_output_masking = bool(
+                        payload.get("force_provider_output_masking")
+                    )
+                    content_tool_name = payload.get("transcript_content_tool_name")
+                    tc.transcript_content_tool_name = (
+                        str(content_tool_name)
+                        if isinstance(content_tool_name, str) and content_tool_name
+                        else None
                     )
                     tc.state_event_seq = ev_seq
                     tc.finished_event_seq = ev_seq

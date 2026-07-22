@@ -245,6 +245,24 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
         ],
         "examples": ['{"script": "pwd && git status --short"}'],
     },
+    "execute_tool_in_other_thread": {
+        "details": "Run an opted-in tool with a strict descendant's thread context and return its result to the calling ancestor.",
+        "use_when": [
+            "You need to inspect or act through a descendant's own sandbox, working directory, model, or persistent session.",
+            "You need python_repl hydrated with the descendant's historical messages while keeping the result in the ancestor conversation.",
+        ],
+        "notes": [
+            "The target must be a strict descendant; self, ancestors, siblings, and unrelated threads are denied.",
+            "The selected tool must be registered, model-visible, opted in to cross-thread dispatch, and enabled by the target's effective tool policy.",
+            "python_repl and bash_repl create or reuse runtime children under the descendant, so their persistent channels and hydrated thread_context belong to that descendant.",
+            "The nested result is published only as this tool's result in the calling ancestor; genuine target-context side effects remain in the descendant.",
+            "Reserved context arguments cannot be supplied through the nested arguments object.",
+        ],
+        "examples": [
+            '{"tool_name": "python_repl", "arguments": {"code": "print([m[\'content\'] for m in all_messages])"}, "thread_id": "01K...child"}',
+            '{"tool_name": "bash", "arguments": {"script": "pwd"}, "thread_id": "01K...child"}',
+        ],
+    },
     "spawn_agent": {
         "details": "Spawn a child agent/thread for delegated sub-work under the current task.",
         "use_when": [
