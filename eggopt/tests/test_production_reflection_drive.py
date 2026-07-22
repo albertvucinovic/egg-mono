@@ -398,16 +398,23 @@ def test_production_drive_validates_repair_and_ceiling_options():
             allowed_tools={"python_exec"},
             drive_identity={"mutation_repair": "caller override"},
         )
+    with pytest.raises(ValueError, match="reserved"):
+        EggthreadsReflectionDrive(
+            llm=MustNotRunLLM(),
+            tools=registry,
+            allowed_tools={"python_exec"},
+            drive_identity={"tool_policy": "caller override"},
+        )
 
 
-def test_production_drive_defaults_to_all_safe_tools_and_can_narrow():
+def test_production_drive_defaults_to_all_safe_tools_and_can_replace():
     default = EggthreadsReflectionDrive(
         llm=MustNotRunLLM(),
         drive_identity={"model": "default-tools"},
     )
     assert default.allowed_tools == SOLVER_SAFE_TOOLS
-    assert default.semantic_identity["solver_safe"] == {
-        "profile": SOLVER_SAFE_PROFILE_NAME,
+    assert default.semantic_identity["tool_policy"] == {
+        "default_profile": SOLVER_SAFE_PROFILE_NAME,
         "version": SOLVER_SAFE_PROFILE_VERSION,
         "tools": sorted(SOLVER_SAFE_TOOLS),
     }
@@ -422,17 +429,33 @@ def test_production_drive_defaults_to_all_safe_tools_and_can_narrow():
         drive_identity={"model": "restricted-tools"},
     )
     assert restricted.allowed_tools == {"python_exec"}
-    assert restricted.semantic_identity["solver_safe"]["tools"] == ["python_exec"]
+    assert restricted.semantic_identity["tool_policy"]["tools"] == ["python_exec"]
 
-    with pytest.raises(ValueError, match="unsafe tools"):
-        EggthreadsReflectionDrive(
-            llm=MustNotRunLLM(),
-            allowed_tools={"web_search"},
-            drive_identity={"model": "unsafe-tools"},
-        )
+    expanded = EggthreadsReflectionDrive(
+        llm=MustNotRunLLM(),
+        allowed_tools={"web_search"},
+        drive_identity={"model": "expanded-tools"},
+    )
+    assert expanded.allowed_tools == {"web_search"}
+    assert expanded.semantic_identity["tool_policy"]["tools"] == ["web_search"]
+
+    custom_registry = ToolRegistry()
+    custom_registry.register(
+        "domain_probe",
+        "Domain-owned inspection tool",
+        {"type": "object", "properties": {}},
+        lambda _args: "ok",
+    )
+    custom = EggthreadsReflectionDrive(
+        llm=MustNotRunLLM(),
+        tools=custom_registry,
+        allowed_tools={"domain_probe"},
+        drive_identity={"model": "custom-tools"},
+    )
+    assert custom.allowed_tools == {"domain_probe"}
 
 
-def test_reflection_factory_defaults_to_all_safe_tools_and_can_narrow():
+def test_reflection_factory_defaults_to_all_safe_tools_and_can_replace():
     from eggopt import Reflection
 
     default = Reflection.eggthreads(
@@ -509,7 +532,7 @@ def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypa
     assert sandbox.user_control_enabled is False
 
 
-def test_solver_safe_study_accepts_explicit_narrower_allowlist(tmp_path, monkeypatch):
+def test_solver_safe_study_accepts_explicit_replacement_allowlist(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = _db(tmp_path)
     study_id, profile = create_solver_safe_study(
@@ -520,6 +543,14 @@ def test_solver_safe_study_accepts_explicit_narrower_allowlist(tmp_path, monkeyp
 
     assert profile["tools"] == ["python_exec"]
     assert get_thread_tools_config(db, study_id).allowed_tools == {"python_exec"}
+
+    custom_id, custom_profile = create_solver_safe_study(
+        db,
+        workspace=tmp_path / "custom-workspace",
+        allowed_tools={"domain_probe"},
+    )
+    assert custom_profile["tools"] == ["domain_probe"]
+    assert get_thread_tools_config(db, custom_id).allowed_tools == {"domain_probe"}
 
 
 def test_solver_safe_mutation_can_inspect_descendant_transcript(tmp_path, monkeypatch):

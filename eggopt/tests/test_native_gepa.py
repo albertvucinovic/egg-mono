@@ -50,7 +50,9 @@ class ContextEvaluator(Evaluator):
         return super().__call__(candidate, case)
 
 
-def test_agent_defaults_to_safe_tools_and_accepts_explicit_subset():
+def test_agent_defaults_to_safe_tools_and_accepts_explicit_replacement():
+    from eggthreads import ToolRegistry
+
     default = Agent(object(), {"role": "default"})
     assert default.allowed_tools == SOLVER_SAFE_TOOLS
     assert {
@@ -64,12 +66,27 @@ def test_agent_defaults_to_safe_tools_and_accepts_explicit_subset():
     )
     assert restricted.allowed_tools == {"python_exec"}
 
-    with pytest.raises(ValueError, match="unsafe tools"):
-        Agent(
-            object(),
-            {"role": "unsafe"},
-            allowed_tools=frozenset({"web_search"}),
-        )
+    expanded = Agent(
+        object(),
+        {"role": "expanded"},
+        allowed_tools=frozenset({"web_search"}),
+    )
+    assert expanded.allowed_tools == {"web_search"}
+
+    custom_tools = ToolRegistry()
+    custom_tools.register(
+        "domain_probe",
+        "Domain-owned tool",
+        {"type": "object", "properties": {}},
+        lambda _args: "ok",
+    )
+    custom = Agent(
+        object(),
+        {"role": "custom"},
+        tools=custom_tools,
+        allowed_tools=frozenset({"domain_probe"}),
+    )
+    assert custom.allowed_tools == {"domain_probe"}
 
 
 def config(tmp_path, evaluator, generator, **changes):

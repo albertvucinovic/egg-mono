@@ -39,7 +39,7 @@ from .reflection import (
 )
 
 SOLVER_SAFE_PROFILE_NAME = "solver_safe"
-SOLVER_SAFE_PROFILE_VERSION = "3"
+SOLVER_SAFE_PROFILE_VERSION = "4"
 _MUTATION_REPAIR_POLICY = "eggopt.gepa.strict-mutation-repair"
 _MUTATION_REPAIR_VERSION = "1"
 SOLVER_SAFE_TOOLS = frozenset(
@@ -58,16 +58,10 @@ SOLVER_SAFE_TOOLS = frozenset(
 )
 
 
-def _solver_safe_allowlist(
+def _gepa_tool_allowlist(
     allowed_tools: set[str] | frozenset[str] | None,
 ) -> frozenset[str]:
-    allowed = SOLVER_SAFE_TOOLS if allowed_tools is None else frozenset(allowed_tools)
-    unexpected = allowed - SOLVER_SAFE_TOOLS
-    if unexpected:
-        raise ValueError(
-            f"solver_safe allowlist contains unsafe tools: {sorted(unexpected)}"
-        )
-    return allowed
+    return SOLVER_SAFE_TOOLS if allowed_tools is None else frozenset(allowed_tools)
 
 
 def solver_safe_tools(
@@ -75,7 +69,7 @@ def solver_safe_tools(
     *,
     allowed_tools: set[str] | frozenset[str] | None = None,
 ) -> tuple[ToolRegistry, frozenset[str]]:
-    """Return GEPA's default registry and an explicit safe capability set.
+    """Return GEPA's default registry and effective capability set.
 
     Supplying a registry replaces implementations, not policy: it must contain
     every allowed tool. ``allowed_tools`` is the explicit capability
@@ -85,7 +79,7 @@ def solver_safe_tools(
     if tools is not None and not isinstance(tools, ToolRegistry):
         raise TypeError("tools must be an Eggthreads ToolRegistry or None")
     registry = create_default_tools() if tools is None else tools
-    allowed = _solver_safe_allowlist(allowed_tools)
+    allowed = _gepa_tool_allowlist(allowed_tools)
     available = {item["function"]["name"] for item in registry.tools_spec()}
     missing = allowed - available
     if missing:
@@ -108,7 +102,7 @@ def configure_solver_safe_tools(
     workspace: str | Path,
     allowed_tools: set[str] | frozenset[str] | None = None,
 ) -> Mapping[str, Any]:
-    """Apply the versioned solver-safe tool and Docker sandbox profile."""
+    """Apply the default solver-safe or explicitly replaced tool profile."""
 
     root = db.get_thread(study_thread_id)
     if root is None:
@@ -120,7 +114,7 @@ def configure_solver_safe_tools(
         raise ValueError("solver_safe must be configured on a study root")
     workspace_path = Path(workspace).resolve()
     workspace_path.mkdir(parents=True, exist_ok=True)
-    allowed = _solver_safe_allowlist(allowed_tools)
+    allowed = _gepa_tool_allowlist(allowed_tools)
     set_thread_working_directory(
         db,
         study_thread_id,
@@ -240,7 +234,9 @@ class EggthreadsReflectionDrive:
         self.max_correction_turns = max_correction_turns
         self.context_ceiling_tokens = context_ceiling_tokens
         identity = json.loads(canonical_json(drive_identity, what="drive_identity"))
-        reserved = {"mutation_repair", "context_ceiling"}.intersection(identity)
+        reserved = {"tool_policy", "mutation_repair", "context_ceiling"}.intersection(
+            identity
+        )
         if reserved:
             raise ValueError(
                 f"drive_identity uses reserved Eggopt key(s): {sorted(reserved)}"
@@ -249,8 +245,8 @@ class EggthreadsReflectionDrive:
             **identity,
             # Runtime policy is semantic: changing it must not replay an older
             # reflection produced with a different capability set.
-            "solver_safe": {
-                "profile": SOLVER_SAFE_PROFILE_NAME,
+            "tool_policy": {
+                "default_profile": SOLVER_SAFE_PROFILE_NAME,
                 "version": SOLVER_SAFE_PROFILE_VERSION,
                 "tools": sorted(self.allowed_tools),
             },
@@ -283,7 +279,7 @@ class EggthreadsReflectionDrive:
             )
         if root_tools_cfg.allowed_tools != self.allowed_tools:
             raise ValueError(
-                "production reflection root allowlist differs from configured solver_safe"
+                "production reflection root allowlist differs from configured tools"
             )
         tools_cfg = get_thread_tools_config(db, study_thread_id)
         if tools_cfg.policy_error:
@@ -294,7 +290,7 @@ class EggthreadsReflectionDrive:
             )
         if tools_cfg.allowed_tools != self.allowed_tools:
             raise ValueError(
-                "production reflection allowlist differs from configured solver_safe"
+                "production reflection allowlist differs from configured tools"
             )
         sandbox = get_thread_sandbox_config(db, study_thread_id)
         _validate_safe_sandbox(sandbox)

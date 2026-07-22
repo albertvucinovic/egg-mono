@@ -71,10 +71,11 @@ subtree. Rerunning the same study with larger limits replays finished Tasks and
 continues with new work.
 
 Every GEPA-managed LLM thread receives the versioned `solver_safe` registry and
-full safe allowlist by default. Pass an explicit `allowed_tools` subset to
-restrict it. Structural Candidate/Case threads inherit the profile; a domain
-may still explicitly disable or narrow specialized descendants. The profile
-lets a Mutation thread list its own subtree
+full safe allowlist by default. Pass an explicit `allowed_tools` list to
+replace it; explicit tools need not belong to the default set, but must be
+present in the selected registry. Structural Candidate/Case threads inherit
+the profile; a domain may still explicitly disable or narrow specialized
+descendants. The profile lets a Mutation thread list its own subtree
 with `threads` and run opted-in tools such as `python_repl` in a strict
 descendant through `execute_tool_in_other_thread`. Both caller and target tool
 policies still apply; ancestors, siblings, and unrelated threads remain hidden.
