@@ -50,8 +50,8 @@ async function mockApplicationUI(page: Page) {
   await page.route(`${API_BASE}/api/threads/roots`, (route) => route.fulfill({ status: 200, headers, json: [{ id: threadId, name: "Application UI Fixture", has_children: true, model_key: "fixture:model" }] }));
   await page.route(`${API_BASE}/api/models`, (route) => route.fulfill({ status: 200, headers, json: { models: [{ key: "fixture:model" }], default_model: "fixture:model" } }));
   await page.route(`${API_BASE}/api/threads`, (route) => route.fulfill({ status: 200, headers, json: [
-    { id: threadId, name: "Application UI Fixture", has_children: true },
-    { id: childId, name: "Contrast review branch", parent_id: threadId, model_key: "fixture:model", has_children: false },
+    { id: threadId, name: "Application UI Fixture", short_recap: "Semantic controls and rendered application contrast", has_children: true, created_at: "2024-01-01T00:00:00Z" },
+    { id: childId, name: "Contrast review branch", short_recap: "Review every supported color theme", parent_id: threadId, model_key: "fixture:model", has_children: false, created_at: "2024-01-02T00:00:00Z" },
   ] }));
   await page.route(`${API_BASE}/api/autocomplete**`, (route) => route.fulfill({
     status: 200,

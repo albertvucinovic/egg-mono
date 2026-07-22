@@ -65,7 +65,7 @@ body {
   width: min(100%, var(--app-shell-max-width));
   margin-inline: auto;
   padding: var(--layout-gutter);
-  gap: var(--layout-gutter);
+  gap: 0;
 }
 
 .eggw-chat-card,
@@ -856,6 +856,14 @@ code {
   gap: 0.4rem;
 }
 
+.eggw-panel-trigger {
+  flex: 0 0 auto;
+}
+
+.eggw-system-trigger {
+  margin-left: 0.15rem;
+}
+
 .eggw-mobile-settings-trigger {
   display: none;
 }
@@ -886,27 +894,60 @@ code {
   min-height: 0;
 }
 
-.eggw-system-rail {
-  width: 20rem;
-  flex: 0 0 20rem;
+.eggw-inline-sidebar {
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  opacity: 1;
+  transform: translateX(0);
+  transition:
+    width 180ms ease,
+    flex-basis 180ms ease,
+    margin 180ms ease,
+    border-width 180ms ease,
+    opacity 120ms ease,
+    transform 180ms ease,
+    visibility 0s linear 0s;
 }
 
 .eggw-threads-rail {
   width: 19rem;
   flex: 0 0 19rem;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  margin-right: var(--layout-gutter);
 }
 
-.eggw-tree-drawer-body {
-  padding: 0;
-  overflow: hidden;
+.eggw-system-rail {
+  width: 20rem;
+  flex: 0 0 20rem;
+  margin-left: var(--layout-gutter);
+}
+
+.eggw-inline-sidebar-closed {
+  width: 0;
+  flex-basis: 0;
+  margin-inline: 0;
+  border-width: 0;
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transition:
+    width 180ms ease,
+    flex-basis 180ms ease,
+    margin 180ms ease,
+    border-width 180ms ease,
+    opacity 120ms ease,
+    transform 180ms ease,
+    visibility 0s linear 180ms;
+}
+
+.eggw-threads-rail.eggw-inline-sidebar-closed {
+  transform: translateX(-1rem);
+}
+
+.eggw-system-rail.eggw-inline-sidebar-closed {
+  transform: translateX(1rem);
 }
 
 .eggw-shortcut-list {
@@ -1039,6 +1080,7 @@ code {
 
   .eggw-topbar-actions {
     gap: 0.3rem;
+    margin-left: auto;
   }
 
   .ui-button,
@@ -1070,6 +1112,25 @@ code {
   .eggw-main-grid {
     padding: 0;
     gap: 0;
+  }
+
+  .eggw-threads-rail {
+    width: min(22rem, 88vw);
+    flex-basis: min(22rem, 88vw);
+    margin-right: 0;
+    border-radius: 0;
+  }
+
+  .eggw-system-rail {
+    width: min(22rem, 88vw);
+    flex-basis: min(22rem, 88vw);
+    margin-left: 0;
+    border-radius: 0;
+  }
+
+  .eggw-inline-sidebar-closed {
+    width: 0;
+    flex-basis: 0;
   }
 
   .eggw-chat-card {
@@ -1945,6 +2006,47 @@ code {
   font-size: 0.7rem;
 }
 
+.eggw-tree-filter {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 0.5rem 0.6rem 0.35rem;
+}
+
+.eggw-tree-filter-icon {
+  position: absolute;
+  left: 0.6rem;
+  z-index: 1;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.eggw-tree-filter-input {
+  width: 100%;
+  min-width: 0;
+  height: 2.25rem;
+  border: 1px solid var(--control-border);
+  border-radius: 0.55rem;
+  padding: 0.35rem 2.15rem 0.35rem 2rem;
+  background: var(--control-bg);
+  color: var(--control-text);
+  font-size: 0.75rem;
+}
+
+.eggw-tree-filter-input::placeholder {
+  color: var(--control-placeholder);
+}
+
+.eggw-tree-filter-clear {
+  position: absolute;
+  right: 0.2rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  min-height: 1.75rem;
+  border-color: transparent;
+  background: transparent;
+}
+
 .eggw-tree-list {
   overscroll-behavior: contain;
 }
@@ -1975,10 +2077,30 @@ code {
   font-size: 0.8125rem;
 }
 
-.eggw-tree-label > span {
+.eggw-tree-name,
+.eggw-tree-description {
   overflow: hidden;
+  min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.eggw-tree-name {
+  font-weight: 650;
+}
+
+.eggw-tree-description {
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  font-weight: 450;
+}
+
+.eggw-tree-name:hover,
+.eggw-tree-description:hover {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .eggw-tree-label code {
@@ -1999,6 +2121,10 @@ code {
   border-left-color: var(--focus-ring);
   background: var(--selection-bg);
   color: var(--selection-text);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--focus-ring) 62%, transparent),
+    0 2px 8px color-mix(in srgb, var(--focus-ring) 18%, transparent);
+  font-weight: 680;
 }
 
 .eggw-tree-row-selected .eggw-tree-label code {
@@ -2010,6 +2136,23 @@ code {
   color: var(--text-secondary);
 }
 
+.eggw-tree-current-icon,
+.eggw-tree-current-label {
+  color: var(--selection-text);
+}
+
+.eggw-tree-current-label {
+  width: max-content;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0.02rem 0.3rem;
+  font-size: 0.58rem;
+  font-weight: 750;
+  letter-spacing: 0.035em;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
 .eggw-tree-icon-button {
   width: 2rem;
   height: 2rem;
@@ -2019,15 +2162,21 @@ code {
 }
 
 .eggw-tree-actions {
+  max-width: 0;
   display: flex;
   gap: 0.15rem;
+  overflow: hidden;
   opacity: 0;
-  transition: opacity 120ms ease;
+  pointer-events: none;
+  transition: opacity 120ms ease, max-width 120ms ease;
 }
 
 .eggw-tree-row:hover .eggw-tree-actions,
 .eggw-tree-row:focus-within .eggw-tree-actions {
+  max-width: 9rem;
+  overflow: visible;
   opacity: 1;
+  pointer-events: auto;
 }
 
 @media (hover: none), (max-width: 639px) {
@@ -2036,13 +2185,23 @@ code {
   }
 
   .eggw-tree-actions {
+    max-width: 9rem;
+    overflow: visible;
     opacity: 1;
+    pointer-events: auto;
   }
 
   .eggw-tree-icon-button {
     width: 2.75rem;
     height: 2.75rem;
     min-height: 2.75rem;
+  }
+
+  .eggw-tree-filter-clear {
+    width: 2.25rem;
+    height: 2.25rem;
+    min-height: 2.25rem;
+    right: 0;
   }
 }
 

@@ -43,6 +43,7 @@ function persistTranscriptMountBoundaries(
 export interface Thread {
   id: string;
   name?: string;
+  short_recap?: string;
   parent_id?: string;
   model_key?: string;
   created_at?: string;

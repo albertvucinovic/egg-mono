@@ -17,7 +17,7 @@ describe("global interaction foundation", () => {
     expect(css).toMatch(/@media \(max-width: 639px\)[\s\S]*\.ui-icon-button[\s\S]*width: 2\.75rem/);
   });
 
-  it("uses one reusable modal interaction implementation for help and drawers", () => {
+  it("uses one reusable modal interaction implementation for help and settings", () => {
     expect(overlay).toContain('role="dialog"');
     expect(overlay).toContain('aria-modal="true"');
     expect(overlay).toContain('event.key === "Escape"');
@@ -25,7 +25,7 @@ describe("global interaction foundation", () => {
     expect(overlay).toContain("element.inert = true");
     expect(overlay).toContain("target.focus()");
     expect(shell).toContain("<HelpDialog");
-    expect(shell.match(/<OverlayPanel/g)).toHaveLength(3);
+    expect(shell.match(/<OverlayPanel/g)).toHaveLength(1);
   });
 
   it("keeps narrow header controls in a settings drawer instead of horizontal overflow", () => {
@@ -33,7 +33,8 @@ describe("global interaction foundation", () => {
     expect(css).toMatch(/@media \(max-width: 1023px\)[\s\S]*\.eggw-topbar-controls\s*\{\s*display: none/);
     expect(shell).toContain('title="Thread settings"');
     expect(shell).toContain('testId="settings-drawer"');
-    expect(shell).toContain('testId="threads-drawer"');
-    expect(shell).toContain('testId="system-drawer"');
+    expect(shell).toContain("eggw-inline-sidebar");
+    expect(shell).not.toContain('testId="threads-drawer"');
+    expect(shell).not.toContain('testId="system-drawer"');
   });
 });

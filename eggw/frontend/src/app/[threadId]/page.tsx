@@ -51,35 +51,21 @@ export default function ThreadPage() {
   const setComposerDraft = useAppStore((state) => state.setComposerDraft);
   const [showHelp, setShowHelp] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
-  const isDesktopRail = useMediaQuery("(min-width: 1280px)");
-  const wasDesktopRailRef = useRef<boolean | null>(null);
-  const didCloseThreadsOnNarrowRef = useRef(false);
-  const closeThreadsPanel = useCallback(() => {
-    if (useAppStore.getState().panelVisibility.threads) togglePanel("threads");
-  }, [togglePanel]);
-  const closeSystemPanel = useCallback(() => {
-    if (useAppStore.getState().panelVisibility.system) togglePanel("system");
-  }, [togglePanel]);
+  const isCompactLayout = useMediaQuery("(max-width: 639px)");
+  const wasCompactLayoutRef = useRef(false);
   const appendStagedAttachments = useAppStore((state) => state.appendStagedAttachments);
   const stageAttachment = useCallback((attachment: import("@/lib/contentParts").AttachmentContentPart) => {
     appendStagedAttachments(threadId, [attachment]);
   }, [appendStagedAttachments, threadId]);
 
-  // A visible desktop rail may become a modal drawer after resize. Do not
-  // surprise the user with a modal they did not explicitly open.
+  // Preserve the usable chat-first mobile default without turning either
+  // sidebar into a modal overlay. The explicit edge controls open them inline.
   useEffect(() => {
-    if (
-      !isDesktopRail &&
-      panelVisibility.threads &&
-      !didCloseThreadsOnNarrowRef.current &&
-      wasDesktopRailRef.current !== false
-    ) {
-      didCloseThreadsOnNarrowRef.current = true;
+    if (isCompactLayout && !wasCompactLayoutRef.current && panelVisibility.threads) {
       togglePanel("threads");
     }
-    if (isDesktopRail) didCloseThreadsOnNarrowRef.current = false;
-    wasDesktopRailRef.current = isDesktopRail;
-  }, [isDesktopRail, panelVisibility.threads, togglePanel]);
+    wasCompactLayoutRef.current = isCompactLayout;
+  }, [isCompactLayout, panelVisibility.threads, togglePanel]);
 
   // Publish route identity before child layout effects run. A detached prior
   // thread must not suppress the new transcript's first pre-paint correction.
@@ -371,6 +357,20 @@ export default function ThreadPage() {
       {/* Responsive application header */}
       <header className="eggw-topbar" data-overlay-background>
         <div className="eggw-topbar-primary">
+          <IconButton
+            onClick={() => {
+              if (isCompactLayout && !panelVisibility.threads && panelVisibility.system) togglePanel("system");
+              togglePanel("threads");
+            }}
+            className="eggw-panel-trigger eggw-threads-trigger"
+            aria-label={panelVisibility.threads ? "Hide threads panel" : "Show threads panel"}
+            title={panelVisibility.threads ? "Hide threads" : "Show threads"}
+            aria-expanded={panelVisibility.threads}
+            aria-controls="threads-panel"
+            variant={panelVisibility.threads ? "primary" : "secondary"}
+          >
+            <PanelLeft className="h-5 w-5" aria-hidden="true" />
+          </IconButton>
           <div className="eggw-brand-group">
             <h1 className="eggw-brand">eggw</h1>
             <div className="eggw-thread-identity">
@@ -387,19 +387,6 @@ export default function ThreadPage() {
             </div>
           )}
           <div className="eggw-topbar-actions">
-            <IconButton
-              onClick={() => {
-                if (!isDesktopRail && panelVisibility.system) togglePanel("system");
-                togglePanel("threads");
-              }}
-              aria-label={panelVisibility.threads ? "Hide threads panel" : "Show threads panel"}
-              title={panelVisibility.threads ? "Hide threads" : "Show threads"}
-              aria-expanded={panelVisibility.threads}
-              aria-controls="threads-panel"
-              variant={panelVisibility.threads ? "primary" : "secondary"}
-            >
-              <PanelLeft className="h-5 w-5" aria-hidden="true" />
-            </IconButton>
             <IconButton onClick={() => setShowHelp(true)} aria-label="Help" title="Help (?)">
               <CircleHelp className="h-5 w-5" aria-hidden="true" />
             </IconButton>
@@ -411,20 +398,21 @@ export default function ThreadPage() {
             >
               <SlidersHorizontal className="h-5 w-5" aria-hidden="true" />
             </IconButton>
-            <IconButton
-              onClick={() => {
-                if (!isDesktopRail && panelVisibility.threads) togglePanel("threads");
-                togglePanel("system");
-              }}
-              aria-label={panelVisibility.system ? "Hide system panel" : "Show system panel"}
-              title={panelVisibility.system ? "Hide sidebar" : "Show sidebar"}
-              aria-expanded={panelVisibility.system}
-              aria-controls="system-panel"
-              variant={panelVisibility.system ? "primary" : "secondary"}
-            >
-              <PanelRight className="h-5 w-5" aria-hidden="true" />
-            </IconButton>
           </div>
+          <IconButton
+            onClick={() => {
+              if (isCompactLayout && !panelVisibility.system && panelVisibility.threads) togglePanel("threads");
+              togglePanel("system");
+            }}
+            className="eggw-panel-trigger eggw-system-trigger"
+            aria-label={panelVisibility.system ? "Hide system panel" : "Show system panel"}
+            title={panelVisibility.system ? "Hide system" : "Show system"}
+            aria-expanded={panelVisibility.system}
+            aria-controls="system-panel"
+            variant={panelVisibility.system ? "primary" : "secondary"}
+          >
+            <PanelRight className="h-5 w-5" aria-hidden="true" />
+          </IconButton>
         </div>
 
         <div className="eggw-topbar-controls" aria-label="Thread settings">
@@ -523,25 +511,19 @@ export default function ThreadPage() {
       {/* Main content */}
       <div className="eggw-main-grid flex min-h-0 flex-1 overflow-hidden">
         {/* Left sidebar - full thread tree */}
-        {panelVisibility.threads && isDesktopRail && (
-          <aside id="threads-panel" className={clsx("eggw-side-card eggw-threads-rail", !showBorders && "eggw-chrome-borderless")} aria-label="Threads panel" data-overlay-background>
-            <ThreadTree />
-          </aside>
-        )}
-        <OverlayPanel
-          open={panelVisibility.threads && !isDesktopRail}
-          onClose={closeThreadsPanel}
-          title="Threads"
-          description="Navigate the complete live thread tree."
-          variant="drawer"
-          drawerSide="left"
-          closeLabel="Close threads panel"
-          testId="threads-drawer"
-          returnFocusSelector="[aria-controls='threads-panel']"
-          bodyClassName="eggw-tree-drawer-body"
+        <aside
+          id="threads-panel"
+          className={clsx(
+            "eggw-side-card eggw-inline-sidebar eggw-threads-rail",
+            panelVisibility.threads ? "eggw-inline-sidebar-open" : "eggw-inline-sidebar-closed",
+            !showBorders && "eggw-chrome-borderless",
+          )}
+          aria-label="Threads panel"
+          data-state={panelVisibility.threads ? "open" : "closed"}
+          data-overlay-background
         >
-          <div id="threads-panel" className="h-full min-h-0"><ThreadTree onNavigate={closeThreadsPanel} /></div>
-        </OverlayPanel>
+          <ThreadTree />
+        </aside>
 
         {/* Center - Chat */}
         <div className={clsx("eggw-chat-card min-w-0 flex-1 flex flex-col overflow-hidden", !showBorders && "eggw-chrome-borderless")} data-overlay-background>
@@ -558,23 +540,19 @@ export default function ThreadPage() {
         </div>
 
         {/* Right sidebar - System log */}
-        {panelVisibility.system && isDesktopRail && (
-          <aside id="system-panel" className={clsx("eggw-side-card eggw-system-rail", !showBorders && "eggw-chrome-borderless")} aria-label="System panel" data-overlay-background>
-            <SystemPanel showBorders={showBorders} />
-          </aside>
-        )}
-        <OverlayPanel
-          open={panelVisibility.system && !isDesktopRail}
-          onClose={closeSystemPanel}
-          title="System panel"
-          description="Thread information, usage, and system activity."
-          variant="drawer"
-          closeLabel="Close system panel"
-          testId="system-drawer"
-          returnFocusSelector="[aria-controls='system-panel']"
+        <aside
+          id="system-panel"
+          className={clsx(
+            "eggw-side-card eggw-inline-sidebar eggw-system-rail",
+            panelVisibility.system ? "eggw-inline-sidebar-open" : "eggw-inline-sidebar-closed",
+            !showBorders && "eggw-chrome-borderless",
+          )}
+          aria-label="System panel"
+          data-state={panelVisibility.system ? "open" : "closed"}
+          data-overlay-background
         >
-          <div id="system-panel" className="h-full min-h-0"><SystemPanel showBorders={showBorders} /></div>
-        </OverlayPanel>
+          <SystemPanel showBorders={showBorders} />
+        </aside>
       </div>
       <EditAnswerModal />
       <ShowRecordModal threadId={threadId} />

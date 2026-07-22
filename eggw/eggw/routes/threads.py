@@ -84,6 +84,7 @@ async def get_threads():
         threads.append(ThreadInfo(
             id=t.thread_id,
             name=t.name,
+            short_recap=t.short_recap,
             parent_id=parent_map.get(t.thread_id),
             model_key=current_thread_model(core.db, t.thread_id),
             created_at=t.created_at,
@@ -120,6 +121,7 @@ async def get_root_threads():
         threads.append(ThreadInfo(
             id=t.thread_id,
             name=t.name,
+            short_recap=t.short_recap,
             parent_id=None,
             model_key=current_thread_model(core.db, t.thread_id),
             created_at=t.created_at,
@@ -142,6 +144,7 @@ async def get_thread(thread_id: str):
     return ThreadInfo(
         id=t.thread_id,
         name=t.name,
+        short_recap=t.short_recap,
         parent_id=get_parent(core.db, t.thread_id),
         model_key=current_thread_model(core.db, t.thread_id),
         created_at=t.created_at,
@@ -214,6 +217,7 @@ async def create_thread(request: CreateThreadRequest):
     return CreateThreadResponse(
         id=t.thread_id,
         name=t.name,
+        short_recap=t.short_recap,
         parent_id=get_parent(core.db, t.thread_id),
         model_key=current_thread_model(core.db, t.thread_id),
         created_at=t.created_at,
@@ -246,6 +250,7 @@ async def update_thread(thread_id: str, name: Optional[str] = None):
     return ThreadInfo(
         id=t.thread_id,
         name=t.name,
+        short_recap=t.short_recap,
         parent_id=get_parent(core.db, t.thread_id),
         model_key=current_thread_model(core.db, t.thread_id),
         created_at=t.created_at,
@@ -278,6 +283,7 @@ async def duplicate_thread_endpoint(thread_id: str, name: Optional[str] = None):
     return ThreadInfo(
         id=t.thread_id,
         name=t.name,
+        short_recap=t.short_recap,
         parent_id=get_parent(core.db, t.thread_id),
         model_key=current_thread_model(core.db, t.thread_id),
         created_at=t.created_at,
@@ -298,6 +304,7 @@ async def get_thread_children(thread_id: str):
         children.append(ThreadInfo(
             id=child_id,
             name=name,
+            short_recap=short_recap,
             parent_id=thread_id,
             model_key=current_thread_model(core.db, child_id),
             created_at=created_at,

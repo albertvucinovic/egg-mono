@@ -212,6 +212,25 @@ class TestThreadOperations:
         thread = next(t for t in response.json() if t["id"] == thread_id)
         assert thread["model_key"] == "Switched Model"
 
+    def test_thread_apis_include_short_recap_for_sidebar_identity(self, client):
+        """The complete tree API exposes the canonical thread description."""
+        response = client.post("/api/threads", json={"name": "Described Thread"})
+        assert response.status_code == 200
+        thread_id = response.json()["id"]
+        core_state.db.conn.execute(
+            "UPDATE threads SET short_recap=? WHERE thread_id=?",
+            ("A durable sidebar description", thread_id),
+        )
+        core_state.db.conn.commit()
+
+        listed = client.get("/api/threads")
+        fetched = client.get(f"/api/threads/{thread_id}")
+
+        assert listed.status_code == 200
+        assert next(item for item in listed.json() if item["id"] == thread_id)["short_recap"] == "A durable sidebar description"
+        assert fetched.status_code == 200
+        assert fetched.json()["short_recap"] == "A durable sidebar description"
+
     def test_settings_observe_cross_process_model_switches_in_canonical_order(self, client):
         """EggW snapshots see terminal Egg writes through a fresh DB reader."""
         from eggthreads import ThreadsDB, set_thread_model

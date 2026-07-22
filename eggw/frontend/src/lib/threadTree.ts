@@ -4,10 +4,35 @@ export interface ThreadTreeNode extends Thread {
   children: ThreadTreeNode[];
 }
 
+function normalizedFilter(value: string): string[] {
+  return value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function matchesThread(thread: Thread, terms: string[]): boolean {
+  const searchable = [thread.name, thread.short_recap, thread.id, thread.model_key]
+    .filter((value): value is string => Boolean(value))
+    .join("\n")
+    .toLocaleLowerCase();
+  return terms.every((term) => searchable.includes(term));
+}
+
+/** Keep matching rows and their ancestor paths while preserving tree order. */
+export function filterThreadForest(forest: ThreadTreeNode[], value: string): ThreadTreeNode[] {
+  const terms = normalizedFilter(value);
+  if (terms.length === 0) return forest;
+
+  const filterNodes = (nodes: ThreadTreeNode[]): ThreadTreeNode[] => nodes.flatMap((node) => {
+    const children = filterNodes(node.children);
+    if (!matchesThread(node, terms) && children.length === 0) return [];
+    return [{ ...node, children }];
+  });
+  return filterNodes(forest);
+}
+
 function compareThreads(left: Thread, right: Thread): number {
-  const createdAt = (left.created_at || "").localeCompare(right.created_at || "");
+  const createdAt = (right.created_at || "").localeCompare(left.created_at || "");
   if (createdAt !== 0) return createdAt;
-  return left.id.localeCompare(right.id);
+  return right.id.localeCompare(left.id);
 }
 
 /** Build a deterministic forest from the flat, authoritative all-threads list. */

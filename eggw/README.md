@@ -139,12 +139,17 @@ UI:
 ## Thread navigation
 
 EggW renders the complete project thread hierarchy in a live **Threads** panel
-on the left. The selected thread and its ancestors expand automatically. On
-desktop the panel is a hideable rail; on narrower viewports the same tree opens
-as a left-side drawer. New child/runtime threads appear after the canonical
-thread event without reloading the page. Use `/togglePanel threads` or the
-header button to hide or show it (`children` remains accepted as a legacy
-command alias).
+on the left. The hierarchy starts fully expanded, sorts every level newest
+first, and keeps the selected thread clearly marked and positioned at the top
+of the panel viewport. The sidebar filter matches names, descriptions, IDs, and
+model keys while retaining each matching thread's ancestor path. Thread names
+and descriptions use wider previews and expose their complete text on hover.
+Threads and System are hideable inline sidebars: they slide into the page and
+take layout space instead of covering the chat. New child/runtime threads
+appear after the canonical thread event without reloading the page. Use
+`/togglePanel threads` or the left-edge header button to hide or show Threads
+(`children` remains accepted as a legacy command alias); the matching System
+control stays on the right edge.
 
 ## API overview
 

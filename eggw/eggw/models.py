@@ -10,6 +10,7 @@ class ThreadInfo(BaseModel):
     """Thread information."""
     id: str
     name: Optional[str] = None
+    short_recap: Optional[str] = None
     parent_id: Optional[str] = None
     model_key: Optional[str] = None
     created_at: Optional[datetime] = None

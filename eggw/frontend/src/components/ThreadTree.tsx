@@ -7,11 +7,13 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CircleDot,
   ClipboardCopy,
   CopyPlus,
   MessageSquare,
   Pencil,
   Plus,
+  Search,
   Trash2,
   X,
 } from "lucide-react";
@@ -23,7 +25,7 @@ import {
   renameThread,
 } from "@/lib/api";
 import { useAppStore, type Thread } from "@/lib/store";
-import { buildThreadForest, threadAncestorIds, type ThreadTreeNode } from "@/lib/threadTree";
+import { buildThreadForest, filterThreadForest, threadAncestorIds, type ThreadTreeNode } from "@/lib/threadTree";
 import { createClientOperationId } from "@/lib/messageOperations";
 import clsx from "clsx";
 import { Button, IconButton } from "@/components/ui/primitives";
@@ -46,6 +48,10 @@ function TreeNode({ thread, level, expandedIds, toggleExpanded, onNavigate }: Tr
   const queryClient = useQueryClient();
   const hasChildren = thread.children.length > 0;
   const expanded = hasChildren && expandedIds.has(thread.id);
+  const isCurrent = currentThreadId === thread.id;
+  const name = thread.name || "Unnamed thread";
+  const description = thread.short_recap?.trim();
+  const identityTitle = [name, description, thread.id].filter(Boolean).join("\n");
 
   const refreshTree = () => {
     void queryClient.invalidateQueries({ queryKey: ["threads"] });
@@ -109,12 +115,14 @@ function TreeNode({ thread, level, expandedIds, toggleExpanded, onNavigate }: Tr
       <div
         role="treeitem"
         data-thread-id={thread.id}
-        aria-label={`${thread.name || "Unnamed thread"} ${thread.id.slice(-8)}`}
+        title={identityTitle}
+        aria-label={`${name} ${thread.id.slice(-8)}${isCurrent ? " Current thread" : ""}`}
         aria-level={level + 1}
-        aria-selected={currentThreadId === thread.id}
+        aria-current={isCurrent ? "page" : undefined}
+        aria-selected={isCurrent}
         aria-expanded={hasChildren ? expanded : undefined}
         tabIndex={0}
-        className={clsx("eggw-tree-row group", currentThreadId === thread.id && "eggw-tree-row-selected")}
+        className={clsx("eggw-tree-row group", isCurrent && "eggw-tree-row-selected")}
         style={{ paddingLeft: `${level * 16 + 8}px` }}
         onClick={navigate}
         onKeyDown={(event) => {
@@ -161,7 +169,11 @@ function TreeNode({ thread, level, expandedIds, toggleExpanded, onNavigate }: Tr
           <span className="eggw-tree-expander-spacer" aria-hidden="true" />
         )}
 
-        <MessageSquare className="eggw-tree-icon h-4 w-4" aria-hidden="true" />
+        {isCurrent ? (
+          <CircleDot className="eggw-tree-icon eggw-tree-current-icon h-4 w-4" aria-hidden="true" />
+        ) : (
+          <MessageSquare className="eggw-tree-icon h-4 w-4" aria-hidden="true" />
+        )}
 
         {isEditing ? (
           <>
@@ -195,7 +207,9 @@ function TreeNode({ thread, level, expandedIds, toggleExpanded, onNavigate }: Tr
         ) : (
           <>
             <span className="eggw-tree-label">
-              <span>{thread.name || "Unnamed thread"}</span>
+              <span className="eggw-tree-name" title={name}>{name}</span>
+              {isCurrent && <strong className="eggw-tree-current-label">Current</strong>}
+              {description && <span className="eggw-tree-description" title={description}>{description}</span>}
               <code title={thread.id}>{thread.id.slice(-8)}</code>
             </span>
             <div className="eggw-tree-actions">
@@ -282,37 +296,89 @@ export function ThreadTree({ onNavigate }: ThreadTreeProps = {}) {
   const addSystemLog = useAppStore((state) => state.addSystemLog);
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const setThreads = useAppStore((state) => state.setThreads);
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("");
+  const treeListRef = useRef<HTMLDivElement>(null);
+  const positionedCurrentIdRef = useRef<string | null>(null);
 
   const { data: threads = [], isLoading, isError } = useQuery<Thread[]>({
     queryKey: ["threads"],
     queryFn: fetchThreads,
   });
   const forest = useMemo(() => buildThreadForest(threads), [threads]);
+  const filteredForest = useMemo(() => filterThreadForest(forest, filter), [filter, forest]);
+  const isFiltering = filter.trim().length > 0;
   const selectedAncestors = useMemo(() => threadAncestorIds(threads, currentThreadId), [currentThreadId, threads]);
+  const allExpandableIds = useMemo(() => {
+    const ids = new Set<string>();
+    const collectBranches = (nodes: ThreadTreeNode[]) => {
+      nodes.forEach((node) => {
+        if (node.children.length > 0) ids.add(node.id);
+        collectBranches(node.children);
+      });
+    };
+    collectBranches(forest);
+    return ids;
+  }, [forest]);
+  const filteredExpandableIds = useMemo(() => {
+    const ids = new Set<string>();
+    const collectBranches = (nodes: ThreadTreeNode[]) => {
+      nodes.forEach((node) => {
+        if (node.children.length > 0) ids.add(node.id);
+        collectBranches(node.children);
+      });
+    };
+    collectBranches(filteredForest);
+    return ids;
+  }, [filteredForest]);
+  const expandedIds = useMemo(() => {
+    if (isFiltering) return filteredExpandableIds;
+    const expanded = new Set<string>();
+    allExpandableIds.forEach((id) => {
+      if (!collapsedIds.has(id)) expanded.add(id);
+    });
+    return expanded;
+  }, [allExpandableIds, collapsedIds, filteredExpandableIds, isFiltering]);
 
   useEffect(() => {
     setThreads(threads);
   }, [setThreads, threads]);
 
   useEffect(() => {
-    const required = new Set(selectedAncestors);
-    if (currentThreadId && threads.some((thread) => thread.id === currentThreadId && thread.has_children)) {
-      required.add(currentThreadId);
+    if (!currentThreadId) {
+      positionedCurrentIdRef.current = null;
+      return;
     }
-    if (required.size === 0) return;
-    setExpandedIds((previous) => {
-      const next = new Set(previous);
-      let changed = false;
-      required.forEach((id) => {
-        if (!next.has(id)) {
-          next.add(id);
-          changed = true;
-        }
-      });
-      return changed ? next : previous;
+    if (positionedCurrentIdRef.current === currentThreadId) return;
+    const list = treeListRef.current;
+    const selected = list?.querySelector<HTMLElement>('[role="treeitem"][aria-current="page"]');
+    if (!list || !selected) return;
+    const frame = window.requestAnimationFrame(() => {
+      const listTop = list.getBoundingClientRect().top;
+      const selectedTop = selected.getBoundingClientRect().top;
+      list.scrollTop += selectedTop - listTop;
+      positionedCurrentIdRef.current = currentThreadId;
     });
-  }, [currentThreadId, selectedAncestors, threads]);
+    return () => window.cancelAnimationFrame(frame);
+  }, [currentThreadId, threads]);
+
+  useEffect(() => {
+    const required = new Set(selectedAncestors);
+    if (currentThreadId && allExpandableIds.has(currentThreadId)) required.add(currentThreadId);
+    if (required.size === 0) return;
+    setCollapsedIds((previous) => {
+      const next = new Set(previous);
+      required.forEach((id) => next.delete(id));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [allExpandableIds, currentThreadId, selectedAncestors]);
+
+  useEffect(() => {
+    setCollapsedIds((previous) => {
+      const next = new Set(Array.from(previous).filter((id) => allExpandableIds.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [allExpandableIds]);
 
   const createMutation = useMutation({
     mutationFn: ({ operationId: _operationId }: { operationId: string }) => createThread({}),
@@ -327,7 +393,7 @@ export function ThreadTree({ onNavigate }: ThreadTreeProps = {}) {
   });
 
   const toggleExpanded = (threadId: string) => {
-    setExpandedIds((previous) => {
+    setCollapsedIds((previous) => {
       const next = new Set(previous);
       if (next.has(threadId)) next.delete(threadId);
       else next.add(threadId);
@@ -353,7 +419,30 @@ export function ThreadTree({ onNavigate }: ThreadTreeProps = {}) {
         </IconButton>
       </div>
 
-      <div className="eggw-tree-list flex-1 overflow-auto py-1" role="tree" aria-label="Threads">
+      <div className="eggw-tree-filter">
+        <Search className="eggw-tree-filter-icon h-4 w-4" aria-hidden="true" />
+        <input
+          type="search"
+          value={filter}
+          onChange={(event) => setFilter(event.target.value)}
+          className="eggw-tree-filter-input"
+          aria-label="Filter threads"
+          placeholder="Filter threads…"
+          autoComplete="off"
+        />
+        {filter && (
+          <IconButton
+            onClick={() => setFilter("")}
+            className="eggw-tree-filter-clear"
+            aria-label="Clear thread filter"
+            title="Clear filter"
+          >
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+          </IconButton>
+        )}
+      </div>
+
+      <div ref={treeListRef} className="eggw-tree-list flex-1 overflow-auto py-1" role="tree" aria-label="Threads">
         {isLoading ? (
           <div className="eggw-compact-state" role="status">Loading threads…</div>
         ) : isError ? (
@@ -365,8 +454,10 @@ export function ThreadTree({ onNavigate }: ThreadTreeProps = {}) {
               Create first thread
             </Button>
           </div>
+        ) : filteredForest.length === 0 ? (
+          <div className="eggw-compact-state" role="status">No threads match “{filter.trim()}”.</div>
         ) : (
-          forest.map((thread) => (
+          filteredForest.map((thread) => (
             <TreeNode
               key={thread.id}
               thread={thread}

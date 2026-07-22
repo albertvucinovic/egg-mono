@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Thread } from "./store";
-import { buildThreadForest, threadAncestorIds } from "./threadTree";
+import { buildThreadForest, filterThreadForest, threadAncestorIds } from "./threadTree";
 
 const thread = (id: string, parentId?: string, createdAt = id): Thread => ({
   id,
@@ -18,9 +18,9 @@ describe("thread tree", () => {
       thread("root", undefined, "1"),
     ]);
 
-    expect(forest.map((node) => node.id)).toEqual(["root", "other-root"]);
-    expect(forest[0].children.map((node) => node.id)).toEqual(["child"]);
-    expect(forest[0].children[0].children.map((node) => node.id)).toEqual(["grandchild"]);
+    expect(forest.map((node) => node.id)).toEqual(["other-root", "root"]);
+    expect(forest[1].children.map((node) => node.id)).toEqual(["child"]);
+    expect(forest[1].children[0].children.map((node) => node.id)).toEqual(["grandchild"]);
   });
 
   it("keeps legacy orphan rows visible as top-level entries", () => {
@@ -29,7 +29,7 @@ describe("thread tree", () => {
       thread("root", undefined, "2"),
     ]);
 
-    expect(forest.map((node) => node.id)).toEqual(["orphan", "root"]);
+    expect(forest.map((node) => node.id)).toEqual(["root", "orphan"]);
   });
 
   it("finds every ancestor of the selected thread and terminates on cycles", () => {
@@ -51,7 +51,35 @@ describe("thread tree", () => {
       thread("cycle-b", "cycle-a"),
     ]);
 
-    expect(forest.map((node) => node.id)).toEqual(["cycle-a", "cycle-b"]);
+    expect(forest.map((node) => node.id)).toEqual(["cycle-b", "cycle-a"]);
     expect(forest.every((node) => node.children.length === 0)).toBe(true);
+  });
+
+  it("sorts every level newest-first by creation time", () => {
+    const forest = buildThreadForest([
+      thread("old-child", "old-root", "2024-01-02"),
+      thread("new-root", undefined, "2024-02-01"),
+      thread("new-child", "old-root", "2024-01-03"),
+      thread("old-root", undefined, "2024-01-01"),
+    ]);
+
+    expect(forest.map((node) => node.id)).toEqual(["new-root", "old-root"]);
+    expect(forest[1].children.map((node) => node.id)).toEqual(["new-child", "old-child"]);
+  });
+
+  it("filters names, recaps, IDs, and models while retaining ancestor context", () => {
+    const forest = buildThreadForest([
+      { ...thread("root"), name: "Research" },
+      { ...thread("matching-child", "root"), name: "Parser", short_recap: "Fix streaming continuity", model_key: "GPT Codex" },
+      { ...thread("sibling", "root"), name: "Unrelated" },
+    ]);
+
+    for (const query of ["parser", "streaming continuity", "matching-child", "gpt codex"]) {
+      const filtered = filterThreadForest(forest, query);
+      expect(filtered.map((node) => node.id)).toEqual(["root"]);
+      expect(filtered[0].children.map((node) => node.id)).toEqual(["matching-child"]);
+    }
+    expect(filterThreadForest(forest, "missing")).toEqual([]);
+    expect(filterThreadForest(forest, " ")).toBe(forest);
   });
 });

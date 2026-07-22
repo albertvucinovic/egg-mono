@@ -781,7 +781,7 @@ test.describe('Image Generation UI', () => {
     });
 
     await page.goto('/image-thread-1');
-    await page.getByTitle('Show sidebar').click();
+    await page.getByTitle('Show system').click();
     await expect(page.locator('text=System Log')).toBeVisible({ timeout: 5000 });
 
     await page.getByTestId('image-generation-toggle').click();
@@ -2653,10 +2653,10 @@ test.describe('Threads panel tree identity', () => {
       status: 200,
       headers: mockApiHeaders,
       json: [
-        { id: grandchildId, name: 'Nested grandchild', parent_id: secondChildId, has_children: false, created_at: '2024-01-05T00:00:00Z' },
+        { id: grandchildId, name: 'Nested grandchild', short_recap: 'Streaming continuity investigation', parent_id: secondChildId, has_children: false, created_at: '2024-01-05T00:00:00Z' },
         { id: firstChildId, name: 'Duplicate child', parent_id: parentId, has_children: false, created_at: '2024-01-03T00:00:00Z' },
-        { id: rootId, name: 'Tree root', has_children: true, created_at: '2024-01-01T00:00:00Z' },
-        { id: secondChildId, name: 'Duplicate child', parent_id: parentId, has_children: true, created_at: '2024-01-04T00:00:00Z' },
+        { id: rootId, name: 'Tree root with a deliberately long descriptive name', has_children: true, created_at: '2024-01-01T00:00:00Z' },
+        { id: secondChildId, name: 'Duplicate child', parent_id: parentId, model_key: 'Unique Filter Model', has_children: true, created_at: '2024-01-04T00:00:00Z' },
         { id: parentId, name: 'Current parent', parent_id: rootId, has_children: true, created_at: '2024-01-02T00:00:00Z' },
       ],
     }));
@@ -2664,16 +2664,28 @@ test.describe('Threads panel tree identity', () => {
     await page.goto(`/${parentId}`);
 
     const tree = page.getByRole('tree', { name: 'Threads' });
-    await expect(tree.getByRole('treeitem')).toHaveCount(4);
-    await expect(tree.getByRole('treeitem', { name: /Tree root/ })).toHaveAttribute('aria-expanded', 'true');
-    await expect(tree.getByRole('treeitem', { name: /Current parent/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(tree.getByRole('treeitem')).toHaveCount(5);
+    const root = tree.getByRole('treeitem', { name: /Tree root/ });
+    await expect(root).toHaveAttribute('aria-expanded', 'true');
+    await expect(root.locator('.eggw-tree-name')).toHaveAttribute('title', 'Tree root with a deliberately long descriptive name');
+    expect(await root.locator('.eggw-tree-name').evaluate((element) => element.clientWidth)).toBeGreaterThan(100);
+    const current = tree.getByRole('treeitem', { name: /Current parent/ });
+    await expect(current).toHaveAttribute('aria-selected', 'true');
+    await expect(current).toHaveAttribute('aria-current', 'page');
+    await expect(current.getByText('Current', { exact: true })).toBeVisible();
     const duplicateRows = tree.getByRole('treeitem', { name: /Duplicate child/ });
     await expect(duplicateRows).toHaveCount(2);
-    await expect(duplicateRows.nth(0).locator('code')).toHaveText(firstChildId.slice(-8));
-    await expect(duplicateRows.nth(1).locator('code')).toHaveText(secondChildId.slice(-8));
-
-    await duplicateRows.nth(1).getByRole('button', { name: /Expand Duplicate child/ }).click();
+    await expect(duplicateRows.nth(0).locator('code')).toHaveText(secondChildId.slice(-8));
+    await expect(duplicateRows.nth(1).locator('code')).toHaveText(firstChildId.slice(-8));
     await expect(tree.getByRole('treeitem', { name: /Nested grandchild/ })).toBeVisible();
+    await expect(tree.getByRole('treeitem', { name: /Nested grandchild/ }).locator('.eggw-tree-description')).toHaveAttribute('title', 'Streaming continuity investigation');
+    const description = tree.getByRole('treeitem', { name: /Nested grandchild/ }).locator('.eggw-tree-description');
+    await description.hover();
+    expect(await description.evaluate((element) => getComputedStyle(element).whiteSpace)).toBe('normal');
+
+    await duplicateRows.nth(0).getByRole('button', { name: /Collapse Duplicate child/ }).click();
+    await expect(tree.getByRole('treeitem', { name: /Nested grandchild/ })).toBeHidden();
+    await duplicateRows.nth(0).getByRole('button', { name: /Expand Duplicate child/ }).click();
 
     await page.evaluate(() => {
       Object.defineProperty(navigator, 'clipboard', {
@@ -2681,12 +2693,26 @@ test.describe('Threads panel tree identity', () => {
         value: { writeText: (value: string) => { (window as typeof window & { copiedThreadId?: string }).copiedThreadId = value; } },
       });
     });
-    const copySecondId = duplicateRows.nth(1).getByRole('button', { name: `Copy thread ID ${secondChildId}` });
+    const copySecondId = duplicateRows.nth(0).getByRole('button', { name: `Copy thread ID ${secondChildId}` });
     await expect(copySecondId).toHaveAttribute('title', 'Copy full thread ID');
     await copySecondId.focus();
     await copySecondId.press('Enter');
     await expect.poll(() => page.evaluate(() => (window as typeof window & { copiedThreadId?: string }).copiedThreadId)).toBe(secondChildId);
     await expect(page).toHaveURL(new RegExp(`/${parentId}$`));
+
+    const filter = page.getByRole('searchbox', { name: 'Filter threads' });
+    await filter.fill('streaming continuity');
+    await expect(tree.getByRole('treeitem')).toHaveCount(4);
+    await expect(tree.getByRole('treeitem', { name: /Nested grandchild/ })).toBeVisible();
+    await filter.fill('unique filter model');
+    await expect(tree.getByRole('treeitem')).toHaveCount(3);
+    await expect(duplicateRows.nth(0)).toBeVisible();
+    await filter.fill(secondChildId.slice(-10));
+    await expect(duplicateRows.nth(0)).toBeVisible();
+    await filter.fill('definitely missing');
+    await expect(tree.getByText('No threads match “definitely missing”.')).toBeVisible();
+    await page.getByRole('button', { name: 'Clear thread filter' }).click();
+    await expect(tree.getByRole('treeitem')).toHaveCount(5);
   });
 
   test('refreshes the whole tree when a live child-created event arrives', async ({ page }) => {
@@ -5150,7 +5176,7 @@ test.describe('Commands', () => {
     await input.press('Enter');
 
     // Should see help response
-    await expect(page.locator('text=Available commands').or(page.locator('text=/help'))).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('static-transcript-owner').getByText(/Commands:[\s\S]*\/help/)).toBeVisible({ timeout: 5000 });
   });
 });
 

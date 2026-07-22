@@ -24,12 +24,12 @@ for (const scenario of [
     await openShell(page, scenario.width, scenario.height, scenario.theme);
     await expectNoDocumentOverflow(page);
     await expect(page.getByRole("button", { name: "Help" })).toBeVisible();
-    await expect(page.getByRole("button", { name: scenario.width >= 1280 ? "Hide threads panel" : "Show threads panel" })).toBeVisible();
+    await expect(page.getByRole("button", { name: scenario.width < 640 ? "Show threads panel" : "Hide threads panel" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Show system panel" })).toBeVisible();
     expect(await page.getByRole("button", { name: "Help" }).evaluate((element) => getComputedStyle(element).borderTopWidth)).toBe("1px");
 
     if (scenario.width < 1024) {
-      await expect(page.getByRole("button", { name: "Show threads panel" })).toBeVisible();
+      await expect(page.getByRole("button", { name: scenario.width < 640 ? "Show threads panel" : "Hide threads panel" })).toBeVisible();
       await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
       await expect(page.getByLabel("Thread settings")).toBeHidden();
       await page.getByRole("button", { name: "Open settings" }).click();
@@ -54,36 +54,49 @@ for (const scenario of [
   });
 }
 
-test("Threads uses a hideable desktop rail and responsive left drawer", async ({ page }) => {
+test("Threads and System are inline sliding sidebars", async ({ page }) => {
   await openShell(page, 1440, 1000, "forest-background");
-  const hideTrigger = page.getByRole("button", { name: "Hide threads panel" });
-  await expect(page.getByRole("complementary", { name: "Threads panel" })).toBeVisible();
+  const main = page.locator(".eggw-main-grid");
+  const chat = page.locator(".eggw-chat-card");
+  const threads = page.getByRole("complementary", { name: "Threads panel" });
+  const system = page.getByRole("complementary", { name: "System panel" });
+  const initialChatWidth = await chat.evaluate((element) => element.getBoundingClientRect().width);
+
+  await expect(threads).toBeVisible();
   await expect(page.getByRole("tree", { name: "Threads" })).toBeVisible();
-  await hideTrigger.click();
-  await expect(page.getByRole("complementary", { name: "Threads panel" })).toBeHidden();
+  await expect(threads).toHaveAttribute("data-state", "open");
+  expect(await threads.evaluate((element) => element.parentElement?.classList.contains("eggw-main-grid"))).toBe(true);
 
-  const showTrigger = page.getByRole("button", { name: "Show threads panel" });
-  await showTrigger.click();
-  await expect(page.getByRole("complementary", { name: "Threads panel" })).toBeVisible();
+  await page.getByRole("button", { name: "Hide threads panel" }).click();
+  await expect(threads).toHaveAttribute("data-state", "closed");
+  await expect.poll(() => chat.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(initialChatWidth);
 
-  await page.setViewportSize({ width: 900, height: 900 });
-  await expect(page.getByRole("dialog", { name: "Threads" })).toBeHidden();
-  const narrowTrigger = page.getByRole("button", { name: "Show threads panel" });
-  await narrowTrigger.click();
-  const drawer = page.getByRole("dialog", { name: "Threads" });
-  await expect(drawer).toBeVisible();
-  await expect(drawer.getByRole("button", { name: "Close threads panel" })).toBeFocused();
-  const drawerRect = await drawer.evaluate((element) => element.getBoundingClientRect());
-  expect(drawerRect.left).toBeLessThan(20);
-  await page.keyboard.press("Escape");
-  await expect(drawer).toBeHidden();
-  await expect(narrowTrigger).toBeFocused();
+  await page.getByRole("button", { name: "Show threads panel" }).click();
+  await expect(threads).toHaveAttribute("data-state", "open");
+  await page.getByRole("button", { name: "Show system panel" }).click();
+  await expect(system).toHaveAttribute("data-state", "open");
+  await expect.poll(() => chat.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThan(initialChatWidth);
+  const widthWithSystem = await chat.evaluate((element) => element.getBoundingClientRect().width);
+  await page.getByRole("button", { name: "Hide system panel" }).click();
+  await expect(system).toHaveAttribute("data-state", "closed");
+  await expect.poll(() => chat.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(widthWithSystem);
+  await expect(page.getByRole("dialog", { name: /Threads|System panel/ })).toHaveCount(0);
+
+  const positions = await page.locator(".eggw-topbar-primary").evaluate((header) => {
+    const threadsButton = header.querySelector<HTMLElement>(".eggw-threads-trigger")!;
+    const systemButton = header.querySelector<HTMLElement>(".eggw-system-trigger")!;
+    const bounds = header.getBoundingClientRect();
+    return {
+      threadsLeft: threadsButton.getBoundingClientRect().left - bounds.left,
+      systemRight: bounds.right - systemButton.getBoundingClientRect().right,
+    };
+  });
+  expect(positions.threadsLeft).toBeLessThan(32);
+  expect(positions.systemRight).toBeLessThan(32);
 });
 
 test("help dialog traps focus, makes shell inert, closes on Escape, and returns focus", async ({ page }) => {
   await openShell(page, 390, 844, "colorful-light-background");
-  await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog", { name: "Threads" })).toBeHidden();
   const trigger = page.getByRole("button", { name: "Help" });
   await trigger.click();
   const dialog = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
@@ -97,23 +110,6 @@ test("help dialog traps focus, makes shell inert, closes on Escape, and returns 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(trigger).toBeFocused();
-});
-
-test("System uses desktop rail and responsive modal drawer with focus return", async ({ page }) => {
-  await openShell(page, 1440, 1000, "forest-background");
-  const trigger = page.getByRole("button", { name: "Show system panel" });
-  await trigger.click();
-  await expect(page.getByRole("complementary", { name: "System panel" })).toBeVisible();
-  await expect(page.getByRole("dialog", { name: "System panel" })).toHaveCount(0);
-
-  await page.setViewportSize({ width: 900, height: 900 });
-  const drawer = page.getByRole("dialog", { name: "System panel" });
-  await expect(drawer).toBeVisible();
-  await drawer.getByRole("button", { name: "Close system panel" }).focus();
-  await expect(drawer.getByRole("button", { name: "Close system panel" })).toBeFocused();
-  await page.keyboard.press("Escape");
-  await expect(drawer).toBeHidden();
-  await expect(page.getByRole("button", { name: "Show system panel" })).toBeVisible();
 });
 
 test("visible keyboard focus uses the semantic focus ring", async ({ page }) => {
