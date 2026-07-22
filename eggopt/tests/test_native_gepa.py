@@ -134,6 +134,27 @@ def test_minibatch_acceptance_rejects_unknown_policy():
         NativeGEPAConfig(minibatch_acceptance="unknown")
 
 
+def test_async_custom_generator_uses_shared_await_task(tmp_path):
+    async def generate(_parents, _evidence, _objective):
+        return {"instruction": "1"}
+
+    result = optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=[{"id": "easy", "target": 1}],
+        objective="Reach the target.",
+        config=config(
+            tmp_path,
+            Evaluator(),
+            generate,
+            max_candidates=1,
+            parents_per_candidate=1,
+        ),
+    )
+
+    assert result.best_candidate == {"instruction": "1"}
+
+
 def test_larger_limits_continue_without_repeating_cached_work(tmp_path):
     dataset = [
         {"id": "easy", "target": 1},

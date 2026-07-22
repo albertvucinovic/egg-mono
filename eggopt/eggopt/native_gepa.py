@@ -17,6 +17,7 @@ from eggthreads import ThreadsDB, append_message
 
 from ._identity import canonical_candidate, canonical_json, digest_payload
 from ._native_evaluation import (
+    _Await,
     _EvaluateCandidate,
     _completed_evaluator_calls,
     _feedback,
