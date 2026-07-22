@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict
 
-from ..output_paths import _ARTIFACT_ID_ALPHABET, safe_thread_dir_name
+from ..attachment_tools import artifact_workspace_from_db
+from ..output_paths import _ARTIFACT_ID_ALPHABET, thread_artifact_dir
 from ..plugins import PluginContext
 from ..tool_output_presentation import line_number_presentation
 from ..tools import ToolContext, ToolExecutionResult, ToolRegistry
@@ -29,10 +29,6 @@ def _artifact_error(message: str) -> str:
     return f"Error: {message}"
 
 
-def _artifact_base_dir(owner_thread_id: str) -> Path:
-    return Path.cwd().resolve() / ".egg" / "egg_outputs" / safe_thread_dir_name(owner_thread_id)
-
-
 def read_long_tool_output_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
     calling_thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
     if not calling_thread_id:
@@ -49,10 +45,10 @@ def read_long_tool_output_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
     if chunk_number < 1:
         return _artifact_error("chunk_number must be an integer starting at 1.")
 
+    db = _context_db(ctx)
     descendant_thread_id = str(args.get("descendant_thread_id") or "").strip()
     owner_thread_id = calling_thread_id
     if descendant_thread_id:
-        db = _context_db(ctx)
         try:
             from ..api import is_descendant_thread
 
@@ -63,7 +59,7 @@ def read_long_tool_output_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
             return _artifact_error("access denied: descendant_thread_id is not a descendant of the calling thread.")
         owner_thread_id = descendant_thread_id
 
-    artifact_dir = _artifact_base_dir(owner_thread_id) / artifact_id
+    artifact_dir = thread_artifact_dir(artifact_workspace_from_db(db), owner_thread_id) / artifact_id
     metadata_path = artifact_dir / "metadata.json"
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -170,7 +166,6 @@ def register_long_output_tools(registry: ToolRegistry) -> None:
         },
         impl=read_long_tool_output_tool,
         accepts_context=True,
-        capabilities={"supports_cross_thread_execution": True},
     )
 
 

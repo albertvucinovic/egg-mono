@@ -154,6 +154,34 @@ def test_read_long_tool_output_ancestor_can_read_descendant(tmp_path, monkeypatc
     assert result.endswith("child artifact")
 
 
+def test_read_long_tool_output_uses_db_workspace_outside_cwd(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    elsewhere = tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    monkeypatch.chdir(workspace)
+    db = ts.ThreadsDB(workspace / ".egg" / "threads.sqlite")
+    db.init_schema()
+    root = ts.create_root_thread(db, name="root")
+    child = ts.create_child_thread(db, root, name="child")
+    grandchild = ts.create_child_thread(db, child, name="grandchild")
+    _preview, saved = stash_tool_output_and_build_preview(
+        db, grandchild, "tc", "deep descendant artifact", max_chars=1
+    )
+    assert Path(saved).parent == workspace / ".egg" / "egg_outputs" / grandchild
+
+    monkeypatch.chdir(elsewhere)
+    result = _read_artifact(
+        db,
+        root,
+        _artifact_id(saved),
+        descendant_thread_id=grandchild,
+    )
+
+    assert f"owner_thread_id: {grandchild}" in result
+    assert result.endswith("deep descendant artifact")
+
+
 def test_read_long_tool_output_descendant_denied_ancestor(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)

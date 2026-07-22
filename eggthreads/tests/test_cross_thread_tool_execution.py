@@ -40,6 +40,7 @@ def test_cross_thread_tool_is_registered_with_expected_schema() -> None:
     assert spec["parameters"]["additionalProperties"] is False
     assert registry.capabilities(TOOL_NAME).supports_cancellation is True
     assert registry.capabilities(TOOL_NAME).supports_cross_thread_execution is False
+    assert registry.capabilities("read_long_tool_output").supports_cross_thread_execution is False
 
     supported = {
         name
@@ -53,6 +54,7 @@ def test_cross_thread_tool_is_registered_with_expected_schema() -> None:
         "extract_tool_output",
         "get_user_message_while_preserving_llm_turn",
         "answer_user_while_preserving_llm_turn",
+        "read_long_tool_output",
     }.isdisjoint(supported)
 
 
@@ -151,6 +153,29 @@ def test_cross_thread_dispatch_rejects_missing_target_before_tool_disclosure(tmp
     assert result.reason == "error"
     assert "target thread not found" in result.output
     assert "unknown tool" not in result.output
+
+
+def test_cross_thread_dispatch_rejects_long_output_reader(tmp_path) -> None:
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    child = ts.create_child_thread(db, root, name="child")
+    registry = create_default_tools()
+
+    result = _execute(
+        registry,
+        db,
+        root,
+        child,
+        "read_long_tool_output",
+        {
+            "artifact_id": "missing1",
+            "chunk_number": 1,
+            "descendant_thread_id": child,
+        },
+    )
+
+    assert result.reason == "unsupported"
+    assert "has not opted in to cross-thread execution" in result.output
 
 
 def test_cross_thread_dispatch_enforces_target_policy_and_visibility(tmp_path) -> None:
