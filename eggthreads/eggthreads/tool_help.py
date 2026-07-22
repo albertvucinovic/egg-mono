@@ -88,11 +88,13 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
         "notes": [
             "Use the short artifact id shown in the preview, not arbitrary paths.",
             "Read only the chunks needed for the task.",
+            "For descendant artifacts, call `read_long_tool_output` directly from the ancestor with `descendant_thread_id`; do not invoke it through `execute_tool_in_other_thread`.",
             "Pass `line_numbers: true` to number only chunk-body lines with absolute original-output coordinates; metadata headers remain unnumbered.",
         ],
         "examples": [
             '{"artifact_id": "abc123", "chunk_number": 1}',
             '{"artifact_id": "abc123", "chunk_number": 2, "line_numbers": true}',
+            '{"artifact_id": "abc123", "chunk_number": 1, "descendant_thread_id": "child-thread-id"}',
         ],
     },
     "extract_tool_output": {

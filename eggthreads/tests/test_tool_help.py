@@ -53,6 +53,19 @@ def test_python_exec_is_the_llm_facing_python_tool_and_documents_cwd() -> None:
     assert "current working directory" in output
 
 
+def test_long_output_help_documents_direct_descendant_reads() -> None:
+    output = create_default_tools().execute(
+        "tool_help", {"tool_name": "read_long_tool_output"}
+    )
+
+    assert "call `read_long_tool_output` directly from the ancestor" in output
+    assert "do not invoke it through `execute_tool_in_other_thread`" in output
+    assert (
+        '{"artifact_id": "abc123", "chunk_number": 1, '
+        '"descendant_thread_id": "child-thread-id"}'
+    ) in output
+
+
 def test_tool_help_for_generate_image_includes_dynamic_config(tmp_path) -> None:
     models_path = tmp_path / "models.json"
     image_models_path = tmp_path / "image-generation-models.json"
