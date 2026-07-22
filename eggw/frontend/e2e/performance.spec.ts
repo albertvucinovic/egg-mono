@@ -99,7 +99,7 @@ test.describe('Deterministic performance gates', () => {
     await expect(page.getByText('Streaming performance fixture').first()).toBeVisible();
   });
 
-  test('5M-token-equivalent history reaches oldest with bounded initial and live windows', async ({ page }) => {
+  test('5M-token-equivalent history reaches oldest with a bounded initial window and retained growth', async ({ page }) => {
     test.setTimeout(240_000);
     const threadId = 'performance-five-million';
     const messagesPerPage = 300;
@@ -210,19 +210,23 @@ test.describe('Deterministic performance gates', () => {
       await page.getByTestId('show-more-loaded-messages').click();
     }
     await expect(page.locator('[data-message-id="five-million-23-0"]')).toBeVisible();
-    await expect(page.getByTestId('return-to-live-tail')).toHaveCount(0);
+    await expect(page.getByTestId('return-to-live-tail')).toBeVisible();
     expect(requestedPages).toEqual(Array.from({ length: pageCount - 1 }, (_, index) => index + 1));
     expect(tailRequests).toBeLessThanOrEqual(2);
 
     // The live card remains mounted below retained history, but detached intent
     // prevents automatic following until End explicitly returns to the tail.
+    // End scrolls only; it must not reclaim the monotonically grown transcript.
+    const mountedBeforeEnd = await page.locator('[data-message-id]').count();
+    const oldestMountedBeforeEnd = await page.locator('[data-message-id]').first().getAttribute('data-message-id');
     await chat.evaluate((element) => { element.scrollTop = element.scrollHeight; });
     await expect(page.getByTestId('streaming-content')).toContainText('live-start');
     await chat.focus();
     await page.keyboard.press('End');
     await expect(page.locator('[data-message-id="five-million-0-299"]')).toBeVisible();
     await expect(page.getByTestId('streaming-content')).toContainText('live-start');
-    await assertInitiallyBounded();
+    expect(await page.locator('[data-message-id]').count()).toBe(mountedBeforeEnd);
+    expect(await page.locator('[data-message-id]').first().getAttribute('data-message-id')).toBe(oldestMountedBeforeEnd);
 
     await expect.poll(() => eventConnections).toBeGreaterThanOrEqual(2);
     await page.waitForTimeout(150);
@@ -235,7 +239,7 @@ test.describe('Deterministic performance gates', () => {
     // 100 body chunks themselves remain isolated in the imperative streaming leaf.
     expect(afterLive.transcriptCommits - beforeLive.transcriptCommits).toBeLessThanOrEqual(1);
     await input.pressSequentially(' after live', { delay: 0 });
-    await assertInitiallyBounded();
+    expect(await page.locator('[data-message-id]').count()).toBe(mountedBeforeEnd);
   });
 
   test('1,100 delta burst bypasses React commits and bounds tool previews', async ({ page }) => {

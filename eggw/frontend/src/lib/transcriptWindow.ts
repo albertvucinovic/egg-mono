@@ -1,9 +1,16 @@
 import type { Message } from "./store";
 
-// Sixty messages is the smallest useful launch/navigation context promised by
-// EggW. Browsing prepends additional chunks without unmounting content that the
-// user has already rendered farther down the transcript.
+// Sixty messages is an initial rendering budget, not a sliding window. Once a
+// transcript has mounted, its oldest mounted record is pinned and later records
+// grow the mounted suffix instead of evicting content from its top.
 export const TRANSCRIPT_WINDOW_MESSAGES = 60;
+
+export function initialTranscriptStartIndex(
+  totalMessages: number,
+  initialLimit = TRANSCRIPT_WINDOW_MESSAGES,
+): number {
+  return Math.max(0, totalMessages - initialLimit);
+}
 
 export interface TranscriptWindow {
   messages: Message[];
@@ -25,7 +32,7 @@ export function transcriptWindow(
     : -1;
   const startIndex = anchoredIndex >= 0
     ? anchoredIndex
-    : Math.max(0, messages.length - initialLimit);
+    : initialTranscriptStartIndex(messages.length, initialLimit);
   const endIndex = messages.length;
   return {
     messages: messages.slice(startIndex, endIndex),

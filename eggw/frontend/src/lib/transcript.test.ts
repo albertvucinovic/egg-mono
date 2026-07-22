@@ -1045,13 +1045,12 @@ describe("thread-keyed transcript cache", () => {
     expect(secondReveal.messages).toHaveLength(180);
     expect(secondReveal.messages[0].id).toBe("retained-120");
     expect(secondReveal.messages.at(-1)?.id).toBe("retained-299");
-    expect(secondReveal.newerHiddenCount).toBe(0);
     expect(initial.messages.every((message) =>
       secondReveal.messages.some((candidate) => candidate.id === message.id)
     )).toBe(true);
   });
 
-  it("freezes the rendered suffix while detached tail messages arrive", () => {
+  it("grows a pinned rendered suffix when tail messages arrive", () => {
     const transcript = data([
       page(Array.from({ length: 300 }, (_, index) => `detached-${index}`), 1),
     ]);
@@ -1062,17 +1061,18 @@ describe("thread-keyed transcript cache", () => {
     );
     const appended = data([appendedPage]);
 
-    const frozen = transcriptRenderWindow(
+    const grown = transcriptRenderWindow(
       appended,
       detached.startIndex,
       TRANSCRIPT_WINDOW_MESSAGES,
-      detached.endIndex,
     );
 
-    expect(frozen.messages[0].id).toBe("detached-120");
-    expect(frozen.messages.at(-1)?.id).toBe("detached-299");
-    expect(frozen.newerHiddenCount).toBe(2);
-    expect(frozen.atLiveTail).toBe(false);
+    expect(grown.messages).toHaveLength(182);
+    expect(grown.messages[0].id).toBe("detached-120");
+    expect(grown.messages.at(-1)?.id).toBe("detached-301");
+    expect(detached.messages.every((message) =>
+      grown.messages.some((candidate) => candidate.id === message.id)
+    )).toBe(true);
   });
 
   it("indexes answered get-user identities across loaded pages without render-window drift", () => {

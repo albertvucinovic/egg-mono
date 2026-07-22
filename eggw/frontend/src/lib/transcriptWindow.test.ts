@@ -71,4 +71,14 @@ describe("transcript render window", () => {
     const initial = transcriptWindow(loaded, null);
     expect(expandedTranscriptStartId(loaded, initial.startIndex)).toBe("message-60");
   });
+
+  it("keeps a pinned boundary while the live tail grows", () => {
+    const initial = messages(300);
+    const startMessageId = transcriptWindow(initial, null).messages[0].id;
+    const grown = transcriptWindow(messages(302), startMessageId);
+
+    expect(grown.messages).toHaveLength(62);
+    expect(grown.messages[0].id).toBe("message-240");
+    expect(grown.messages.at(-1)?.id).toBe("message-301");
+  });
 });

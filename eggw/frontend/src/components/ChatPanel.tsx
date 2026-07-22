@@ -67,9 +67,18 @@ import {
 import { AnimationFrameCoalescer, IntervalCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
 import { recordReactCommit, recordStreamingFlush } from "@/lib/performanceInstrumentation";
 import {
+  initialTranscriptStartIndex,
   TRANSCRIPT_WINDOW_MESSAGES,
 } from "@/lib/transcriptWindow";
-import { expandedTranscriptStartIndex, oldestTranscriptFrontier, transcriptIndex, transcriptRenderWindow } from "@/lib/transcriptIndex";
+import {
+  expandedTranscriptStartIndex,
+  oldestTranscriptFrontier,
+  setTranscriptMountedStartIndex,
+  transcriptIndex,
+  transcriptMessageIndex,
+  transcriptMountedStartIndex,
+  transcriptRenderWindow,
+} from "@/lib/transcriptIndex";
 import {
   IDLE_HISTORY_DEMAND,
   reduceHistoryDemand,
@@ -85,6 +94,7 @@ import { OverlayPanel } from "@/components/ui/OverlayPanel";
 const STICKY_BOTTOM_THRESHOLD_PX = 16;
 const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
 const TRANSCRIPT_SCROLLBACK_THRESHOLD_PX = 240;
+const TRANSCRIPT_VIEWPORT_FILL_EPSILON_PX = 1;
 const THREAD_LINK_SUFFIX_LENGTH = 8;
 const TOOL_ARGUMENT_PREVIEW_INTERVAL_MS = 100;
 
@@ -1486,23 +1496,47 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     operation: number;
   } | null>(null);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
-  const [renderStartIndex, setRenderStartIndex] = useState<number | null>(null);
-  const [renderEndIndex, setRenderEndIndex] = useState<number | null>(null);
-  const routeIdentityRef = useRef(threadId);
-  const latestRenderedEndIndexRef = useRef(0);
-
   const currentThreadId = threadId;
   const queryClient = useQueryClient();
   const transcriptQuery = useInfiniteQuery(transcriptInfiniteQueryOptions(threadId, queryClient));
+  const { isLoading, isError } = transcriptQuery;
   const transcriptMetadata = useMemo(() => transcriptIndex(transcriptQuery.data), [transcriptQuery.data]);
   const totalMessages = transcriptMetadata.totalMessages;
   const hasOlderTranscript = Boolean(oldestTranscriptFrontier(transcriptQuery.data));
+  const savedMountBoundary = useAppStore(
+    (state) => state.transcriptMountBoundaryByThread[threadId],
+  );
+  const setTranscriptMountBoundary = useAppStore(
+    (state) => state.setTranscriptMountBoundary,
+  );
+  const indexedStartIndex = transcriptMountedStartIndex(transcriptQuery.data);
+  const savedStartIndex = indexedStartIndex === null
+    ? savedMountBoundary?.startMessageId
+      ? transcriptMessageIndex(transcriptQuery.data, savedMountBoundary.startMessageId)
+      : savedMountBoundary?.startIndex ?? null
+    : null;
+  const renderStartIndex = indexedStartIndex ?? savedStartIndex;
+  const routeIdentityRef = useRef(threadId);
+  const [detachedTailCount, setDetachedTailCount] = useState<number | null>(null);
+  const autoFillRafRef = useRef<number | null>(null);
+
   const displayVerbosity = useAppStore((state) => state.displayVerbosity);
   const renderedTranscript = useMemo(
-    () => transcriptRenderWindow(transcriptQuery.data, renderStartIndex, TRANSCRIPT_WINDOW_MESSAGES, renderEndIndex),
-    [transcriptQuery.data, renderEndIndex, renderStartIndex]
+    () => transcriptRenderWindow(transcriptQuery.data, renderStartIndex, TRANSCRIPT_WINDOW_MESSAGES),
+    [transcriptQuery.data, renderStartIndex]
   );
-  latestRenderedEndIndexRef.current = renderedTranscript.endIndex;
+  const setMountedStartIndex = useCallback((startIndex: number) => {
+    setTranscriptMountedStartIndex(transcriptQuery.data, startIndex);
+    const startMessageId = transcriptRenderWindow(
+      transcriptQuery.data,
+      startIndex,
+      TRANSCRIPT_WINDOW_MESSAGES,
+    ).startMessageId || undefined;
+    setTranscriptMountBoundary(threadId, {
+      startMessageId,
+      startIndex,
+    });
+  }, [setTranscriptMountBoundary, threadId, transcriptQuery.data]);
   const historyAvailabilityRef = useRef({ canReveal: false, canFetch: false });
   historyAvailabilityRef.current = {
     canReveal: renderedTranscript.hiddenCount > 0,
@@ -1520,7 +1554,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
   const visibleStreamingToolCalls = streamingToolCalls || {};
   const visibleStreamingToolOutputs = streamingToolOutputs || {};
   const hasLiveTools = Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0;
-  const showLiveCard = renderedTranscript.atLiveTail && (isStreaming || hasLiveTools);
+  const showLiveCard = isStreaming || hasLiveTools;
   // Ordinary live tools remain expanded at every verbosity. Timing owns its
   // one-second updates in memoized leaves, so transcript/layout ownership never
   // re-renders merely because countdown text changed.
@@ -1547,9 +1581,22 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     lastToolOutputIndexRef.current = {};
     lastToolCallArgIndexRef.current = {};
     lastToolCallChunksRef.current = {};
-    if (renderStartIndex !== null) setRenderStartIndex(null);
-    if (renderEndIndex !== null) setRenderEndIndex(null);
   }
+
+  useLayoutEffect(() => {
+    if (
+      !transcriptQuery.data
+      || indexedStartIndex !== null
+      || savedStartIndex !== null
+    ) return;
+    setMountedStartIndex(initialTranscriptStartIndex(totalMessages));
+  }, [
+    indexedStartIndex,
+    savedStartIndex,
+    setMountedStartIndex,
+    totalMessages,
+    transcriptQuery.data,
+  ]);
 
   const distanceFromBottom = useCallback(() => {
     if (!scrollRef.current) return 0;
@@ -1579,7 +1626,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
       cancelAnimationFrame(liveEdgeCheckRafRef.current);
       liveEdgeCheckRafRef.current = null;
     }
-    setRenderEndIndex((current) => current ?? latestRenderedEndIndexRef.current);
+    setDetachedTailCount((current) => current ?? totalMessages);
     liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, {
       type: "user_toward_history",
     });
@@ -1587,7 +1634,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
     }
-  }, []);
+  }, [totalMessages]);
 
   const scheduleLiveEdgeCheck = useCallback((scrollport: HTMLDivElement) => {
     if (liveEdgeCheckRafRef.current !== null) cancelAnimationFrame(liveEdgeCheckRafRef.current);
@@ -1626,7 +1673,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     clearOlderBoundary();
   }, [clearOlderBoundary]);
 
-  const enterLiveNavigation = useCallback((resetWindow: boolean) => {
+  const enterLiveNavigation = useCallback(() => {
     if (liveEdgeCheckRafRef.current !== null) {
       cancelAnimationFrame(liveEdgeCheckRafRef.current);
       liveEdgeCheckRafRef.current = null;
@@ -1635,8 +1682,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     resetOlderNavigationState();
     revealingLoadedRef.current = false;
     beginNavigation("live");
-    setRenderEndIndex(null);
-    if (resetWindow) setRenderStartIndex(null);
+    setDetachedTailCount(null);
     liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, {
       type: "user_reached_live_edge",
     });
@@ -1644,13 +1690,12 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
   }, [beginNavigation, resetOlderNavigationState, scrollToBottom, threadId]);
 
   const followBottom = useCallback(() => {
-    enterLiveNavigation(true);
+    enterLiveNavigation();
   }, [enterLiveNavigation]);
 
   const followLocalLiveEdge = useCallback(() => {
-    if (!renderedTranscript.atLiveTail) return;
-    enterLiveNavigation(false);
-  }, [enterLiveNavigation, renderedTranscript.atLiveTail]);
+    enterLiveNavigation();
+  }, [enterLiveNavigation]);
   followLocalLiveEdgeRef.current = followLocalLiveEdge;
 
   const captureHistoryAnchor = useCallback(() => {
@@ -1716,9 +1761,9 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
         fallbackHeight: el?.scrollHeight ?? 0,
         operation,
       };
-      setRenderStartIndex(startIndex);
+      setMountedStartIndex(startIndex);
     },
-    [captureHistoryAnchor]
+    [captureHistoryAnchor, setMountedStartIndex]
   );
 
   const loadOlderMessages = useCallback(async (operation: number) => {
@@ -1743,7 +1788,6 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
       }
       const updatedMetadata = transcriptIndex(updated);
       const addedCount = Math.max(0, updatedMetadata.totalMessages - totalMessages);
-      setRenderEndIndex((current) => current === null ? null : current + addedCount);
       const nextStartIndex = Math.max(
         0,
         renderedTranscript.startIndex + addedCount - TRANSCRIPT_WINDOW_MESSAGES,
@@ -1754,7 +1798,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
         fallbackHeight: previousScrollHeight,
         operation,
       };
-      setRenderStartIndex(nextStartIndex);
+      setMountedStartIndex(nextStartIndex);
     } catch (error) {
       if (operation !== navigationOperationRef.current || navigationDirectionRef.current !== "older") return;
       console.error("Failed to load older messages:", error);
@@ -1766,6 +1810,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     renderedTranscript.startIndex,
     restoreHistoryAnchor,
     settleHistoryDemand,
+    setMountedStartIndex,
     queryClient,
     threadId,
     hasOlderTranscript,
@@ -1798,6 +1843,51 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     historyDemandRef.current = next;
     if (previous.phase === "idle" && next.phase !== "idle") runHistoryDemand();
   }, [detachFromBottom, renderedTranscript.hiddenCount, runHistoryDemand, hasOlderTranscript]);
+
+  const revealLoadedHistoryToFillViewport = useCallback(() => {
+    const scrollport = scrollRef.current;
+    const content = scrollport?.querySelector<HTMLElement>("[data-testid='chat-panel-content']");
+    if (
+      !scrollport
+      || !content
+      || isLoading
+      || liveEdgeStateRef.current !== "following"
+      || renderedTranscript.hiddenCount <= 0
+      || pendingHistoryAnchorRef.current
+      || loadingOlderRef.current
+      || revealingLoadedRef.current
+      || historyDemandRef.current.phase !== "idle"
+      || content.scrollHeight > scrollport.clientHeight + TRANSCRIPT_VIEWPORT_FILL_EPSILON_PX
+    ) {
+      return;
+    }
+    // Reveal only already-loaded records. Network pagination remains owned by
+    // explicit upward user intent once the loaded prefix has been exhausted.
+    setMountedStartIndex(expandedTranscriptStartIndex(renderedTranscript.startIndex));
+  }, [
+    isLoading,
+    renderedTranscript.hiddenCount,
+    renderedTranscript.startIndex,
+    setMountedStartIndex,
+  ]);
+
+  useLayoutEffect(() => {
+    if (autoFillRafRef.current !== null) cancelAnimationFrame(autoFillRafRef.current);
+    autoFillRafRef.current = requestAnimationFrame(() => {
+      autoFillRafRef.current = null;
+      revealLoadedHistoryToFillViewport();
+    });
+    return () => {
+      if (autoFillRafRef.current !== null) cancelAnimationFrame(autoFillRafRef.current);
+      autoFillRafRef.current = null;
+    };
+  }, [
+    displayVerbosity,
+    renderedTranscript.startIndex,
+    revealLoadedHistoryToFillViewport,
+    showLiveCard,
+    transcriptMetadata.revision,
+  ]);
 
   useLayoutEffect(() => {
     const pending = pendingHistoryAnchorRef.current;
@@ -2104,7 +2194,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
 
     // Render any existing buffer content (catches up when joining mid-stream).
     // When isStreaming changes to true, refs should be available after render.
-    const timeoutId = isStreaming && renderedTranscript.atLiveTail
+    const timeoutId = isStreaming
       ? scheduleInitialStreamingFlush(flushStreamingText)
       : null;
 
@@ -2123,7 +2213,6 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     };
   }, [
     isStreaming,
-    renderedTranscript.atLiveTail,
     flushStreamingText,
     scheduleInitialStreamingFlush,
     scheduleStreamingTextFlush,
@@ -2212,7 +2301,6 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     }
   }, [showLiveCard]);
 
-  const { isLoading, isError } = transcriptQuery;
   useEffect(() => {
     const ownedThreadId = threadId;
     return () => {
@@ -2240,8 +2328,10 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
       pendingHistoryBoundaryRef.current = null;
       if (liveEdgeCheckRafRef.current !== null) cancelAnimationFrame(liveEdgeCheckRafRef.current);
       if (historyBoundaryRafRef.current !== null) cancelAnimationFrame(historyBoundaryRafRef.current);
+      if (autoFillRafRef.current !== null) cancelAnimationFrame(autoFillRafRef.current);
       liveEdgeCheckRafRef.current = null;
       historyBoundaryRafRef.current = null;
+      autoFillRafRef.current = null;
     };
   }, [threadId]);
 
@@ -2273,6 +2363,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     if (typeof ResizeObserver === "undefined") return;
 
     const observer = new ResizeObserver(() => {
+      revealLoadedHistoryToFillViewport();
       scrollToBottom();
     });
     observer.observe(scrollRef.current);
@@ -2281,7 +2372,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
     }
 
     return () => observer.disconnect();
-  }, [currentThreadId, isStreaming, transcriptMetadata.revision, scrollToBottom]);
+  }, [currentThreadId, isStreaming, transcriptMetadata.revision, revealLoadedHistoryToFillViewport, scrollToBottom]);
 
   if (!currentThreadId) {
     return <div className="eggw-transcript-state m-auto max-w-xl">Select a thread to view messages</div>;
@@ -2290,6 +2381,9 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
   const formattedStreamingTps =
     isStreaming && streamingKind === "llm" ? formatStreamingTps(streamingTps) : formatStreamingTps(transcriptMetadata.tailTps);
   const streamingRoleLabel = streamingKind === "tool" ? "Tool" : "Assistant";
+  const newerMessagesCount = detachedTailCount === null
+    ? 0
+    : Math.max(0, totalMessages - detachedTailCount);
 
   const panel = (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -2320,7 +2414,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
         className="eggw-transcript-scroll flex-1 overflow-auto px-4 py-6 md:px-8"
         data-testid="chat-panel"
       >
-        {renderedTranscript.newerHiddenCount > 0 && (
+        {newerMessagesCount > 0 && (
           <div
             className="eggw-live-tail-escape"
             data-testid="live-tail-escape"
@@ -2328,7 +2422,7 @@ function ChatPanelImpl({ threadId, showBorders = true, streamingTps = null, onSt
             aria-live="polite"
           >
             <span>
-              {renderedTranscript.newerHiddenCount.toLocaleString()} newer {renderedTranscript.newerHiddenCount === 1 ? "message" : "messages"}
+              {newerMessagesCount.toLocaleString()} newer {newerMessagesCount === 1 ? "message" : "messages"}
             </span>
             <Button variant="primary" onClick={showLiveTranscript} data-testid="return-to-live-tail">
               Return to live tail

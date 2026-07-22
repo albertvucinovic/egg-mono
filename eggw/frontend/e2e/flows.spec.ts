@@ -1453,6 +1453,43 @@ test.describe('Streaming', () => {
 });
 
 test.describe('Scroll intent state machines', () => {
+  test('reveals loaded minimum-verbosity history until the viewport is filled', async ({ page }) => {
+    const threadId = 'minimum-underfilled-viewport';
+    let messageRequests = 0;
+    await page.setViewportSize({ width: 1280, height: 2000 });
+    const activityMessages = Array.from({ length: 300 }, (_, index) => index % 2 === 0
+      ? {
+          id: `underfill-call-${index}`,
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: `underfill-tool-${index}`, name: 'bash', arguments: { script: `echo ${index}` } }],
+        }
+      : {
+          id: `underfill-result-${index}`,
+          role: 'tool',
+          name: 'bash',
+          tool_call_id: `underfill-tool-${index - 1}`,
+          content: `result ${index}`,
+        });
+    await mockThreadShell(page, threadId);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      messageRequests += 1;
+      expect(new URL(request.url()).searchParams.get('before_id')).toBeNull();
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { items: activityMessages, snapshot_cursor: 300, next_before: 'older-not-loaded' },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await expect(page.locator('select[title="Transcript display verbosity"]')).toHaveValue('min');
+    await expect(page.locator('[data-source-message-count="300"]')).toBeVisible();
+    await expect(page.getByTestId('show-more-loaded-messages')).toHaveCount(0);
+    expect(messageRequests).toBe(1);
+  });
+
   test('services clamped top demand and reveals loaded history before fetching', async ({ page }) => {
     const threadId = 'scroll-top-demand';
     let messageRequests = 0;
@@ -1595,10 +1632,10 @@ test.describe('Scroll intent state machines', () => {
     await expect(page.getByText(/Chat Messages · 302 loaded/)).toBeVisible();
     await expect(page.getByTestId('live-tail-escape')).toContainText('2 newer messages');
     await expect(page.getByTestId('return-to-live-tail')).toBeVisible();
-    await expect(page.locator('[data-message-id="detached-newest-302"]')).toHaveCount(0);
-    expect(await page.getByTestId('static-transcript-owner').locator(':scope > *').evaluateAll((nodes) =>
+    await expect(page.locator('[data-message-id="detached-newest-302"]')).toBeAttached();
+    expect((await page.getByTestId('static-transcript-owner').locator(':scope > *').evaluateAll((nodes) =>
       nodes.map((node) => node.getAttribute('data-message-id') || node.getAttribute('data-source-message-id')),
-    )).toEqual(frozenIds);
+    )).slice(0, frozenIds.length)).toEqual(frozenIds);
     await expect(page.locator('[data-message-id="detached-history-299"]')).toHaveAttribute('data-retained-bottom', 'true');
     expect(Math.abs(await chat.evaluate((element) => element.scrollTop) - detachedScrollTop)).toBeLessThan(120);
     await expect.poll(() => chat.evaluate(
@@ -1626,6 +1663,9 @@ test.describe('Scroll intent state machines', () => {
     await expect(page.getByTestId('live-tail-escape')).toHaveCount(0);
     await expect(page.locator('[data-message-id="detached-newest-301"]')).toBeVisible();
     await expect(page.locator('[data-message-id="detached-newest-302"]')).toBeVisible();
+    await expect(page.locator('[data-message-id="detached-history-120"]')).toBeAttached();
+    await expect(page.locator('[data-message-id="detached-history-299"]')).toBeAttached();
+    expect(await page.getByTestId('static-transcript-owner').locator(':scope > *').count()).toBe(frozenIds.length + 2);
   });
 
   test('does not jump to the live edge while an older page is loading', async ({ page }) => {
@@ -1744,6 +1784,9 @@ test.describe('Scroll intent state machines', () => {
     const chat = page.getByTestId('chat-panel');
     await connected;
     await expect(page.locator('[data-message-id="live-wheel-59"]')).toBeVisible();
+    const mountedBeforeAppend = await page.locator('[data-message-id]').evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute('data-message-id')),
+    );
     await chat.hover();
     await page.mouse.wheel(0, -600);
     await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(16);
@@ -1751,6 +1794,10 @@ test.describe('Scroll intent state machines', () => {
     await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(16);
     releaseUpdate();
     await expect(page.locator('[data-message-id="live-wheel-newest"]')).toBeVisible();
+    expect(await page.locator('[data-message-id]').evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute('data-message-id')),
+    )).toEqual([...mountedBeforeAppend, 'live-wheel-newest']);
+    await expect(page.locator('[data-message-id="live-wheel-0"]')).toBeAttached();
     await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(16);
   });
 
@@ -1765,11 +1812,12 @@ test.describe('Scroll intent state machines', () => {
     await expect(page.locator('[data-message-id="key-newer-120"]')).toBeVisible();
     await page.keyboard.press('Home');
     await expect(page.locator('[data-message-id="key-newer-60"]')).toBeVisible();
-    await chat.evaluate((element) => { element.scrollTop = element.scrollHeight; });
     await chat.focus();
-    await page.keyboard.press('PageDown');
-    await expect(page.locator('[data-message-id="key-newer-120"]')).toBeVisible();
+    await page.keyboard.press('End');
+    await expect(page.locator('[data-message-id="key-newer-60"]')).toBeAttached();
     await expect(page.locator('[data-message-id="key-newer-239"]')).toBeVisible();
+    await expect(page.locator('[data-message-id]')).toHaveCount(180);
+    await expect.poll(() => chat.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(16);
     await expect(page.getByTestId('live-tail-escape')).toHaveCount(0);
   });
 
@@ -1941,7 +1989,7 @@ test.describe('Scroll intent state machines', () => {
     await page.goto(`/${threadId}`);
     await expect.poll(() => request).toBeGreaterThanOrEqual(2);
     await expect(page.getByText(/Chat Messages · 600 loaded/)).toBeVisible();
-    for (let reveal = 0; reveal < 9; reveal += 1) {
+    while (await page.getByTestId('show-more-loaded-messages').isVisible()) {
       await page.getByTestId('show-more-loaded-messages').click();
     }
     await expect(page.getByTestId('chat-panel')).toContainText('OLDEST DISPLACED TAIL ENTRY');
@@ -2687,6 +2735,49 @@ test.describe('Per-thread transcript state', () => {
     await expect(page.getByTestId('chat-panel')).toContainText('thread a old');
     await expect(page.getByTestId('chat-panel')).toContainText('thread a new');
     await expect(page.getByTestId('chat-panel')).not.toContainText('thread b only');
+  });
+
+  test('preserves each thread mounted boundary across route switches', async ({ page }) => {
+    const threadA = 'mount-boundary-thread-a';
+    const threadB = 'mount-boundary-thread-b';
+    const messages = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => ({
+      id: `${prefix}-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `${prefix} ${index} ${'mounted transcript row '.repeat(8)}`,
+    }));
+    await mockThreadShell(page, threadA, { messages: messages('boundary-a', 240) });
+    await mockThreadShell(page, threadB, { messages: messages('boundary-b', 180) });
+
+    await page.goto(`/${threadA}`);
+    const chat = page.getByTestId('chat-panel');
+    await expect(page.locator('[data-message-id="boundary-a-180"]')).toBeAttached();
+    await chat.focus();
+    await page.keyboard.press('Home');
+    await expect(page.locator('[data-message-id="boundary-a-120"]')).toBeAttached();
+    await chat.focus();
+    await page.keyboard.press('Home');
+    await expect(page.locator('[data-message-id="boundary-a-60"]')).toBeAttached();
+    await expect(page.locator('[data-message-id]')).toHaveCount(180);
+    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('60 earlier');
+
+    await page.goto(`/${threadB}`);
+    await expect(page.locator('[data-message-id="boundary-b-120"]')).toBeAttached();
+    await expect(page.locator('[data-message-id]')).toHaveCount(60);
+    await page.getByTestId('chat-panel').focus();
+    await page.keyboard.press('Home');
+    await expect(page.locator('[data-message-id="boundary-b-60"]')).toBeAttached();
+    await expect(page.locator('[data-message-id]')).toHaveCount(120);
+
+    await page.goto(`/${threadA}`);
+    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('60 earlier');
+    await expect(page.locator('[data-message-id="boundary-a-60"]')).toBeAttached();
+    await expect(page.locator('[data-message-id]')).toHaveCount(180);
+    await expect(page.locator('[data-message-id^="boundary-b-"]')).toHaveCount(0);
+
+    await page.goto(`/${threadB}`);
+    await expect(page.locator('[data-message-id="boundary-b-60"]')).toBeAttached();
+    await expect(page.locator('[data-message-id]')).toHaveCount(120);
+    await expect(page.locator('[data-message-id^="boundary-a-"]')).toHaveCount(0);
   });
 
   test('cancels stale SSE setup ownership when route changes mid-snapshot', async ({ page }) => {

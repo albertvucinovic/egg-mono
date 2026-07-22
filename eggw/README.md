@@ -199,11 +199,15 @@ lifecycle frames. Live tool cards are retained by `tool_call_id` across
 an explicit terminal boundary covers them. High-rate text, reasoning, tool
 output, and tool-argument bodies stay in thread-keyed mutable buffers and flush
 directly to the DOM; React/Zustand receive semantic lifecycle metadata only.
-The mounted historical transcript is a bounded newest window while all loaded
-React Query pages remain authoritative. Operators can expand toward loaded
-history. Transcript scrolling follows provider output only while the reader is
-at the latest content; scrolling into history detaches the view until the
-reader returns to the tail. Display verbosity is monotonic: `max` opens full
+The mounted historical transcript starts with the newest 60 records while all
+loaded React Query pages remain authoritative. Its oldest mounted record is
+then retained per thread: loaded history is prepended in chunks, new tail
+records append without pruning older mounted content, and an underfilled
+viewport automatically reveals already-loaded history. Transcript scrolling
+follows provider output only while the reader is at the latest content;
+scrolling into history detaches the view until the reader returns to the tail.
+Returning to the tail scrolls without shrinking the mounted transcript. Display
+verbosity is monotonic: `max` opens full
 execution detail, `medium` keeps the conversation visible with reasoning and
 tool internals collapsed but inspectable, and `min` keeps the conversation plus
 compact historical execution summaries. System messages, including the initial

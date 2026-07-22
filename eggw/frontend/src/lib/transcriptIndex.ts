@@ -3,6 +3,7 @@ import type { Message } from "./store";
 import { getUserAnswerToolCallId, getUserToolCallIds, isGetUserMessageTool, toolCallId } from "./toolPresentation";
 import type { TranscriptData, TranscriptPage } from "./transcript";
 import {
+  initialTranscriptStartIndex,
   previousTranscriptStartIndex,
   TRANSCRIPT_WINDOW_MESSAGES,
 } from "./transcriptWindow";
@@ -15,6 +16,7 @@ export interface TranscriptHistoryNode {
 }
 
 export interface TranscriptHistory {
+  mountedStartIndex: number | null;
   newest: TranscriptHistoryNode | null;
   oldest: TranscriptHistoryNode | null;
   tail: TranscriptPage;
@@ -280,6 +282,7 @@ export function transcriptHistory(
 ): TranscriptHistory {
   if (!data) {
     return {
+      mountedStartIndex: null,
       newest: null,
       oldest: null,
       tail: EMPTY_PAGE,
@@ -304,6 +307,7 @@ export function transcriptHistory(
   if (indexed.eggw_history) return indexed.eggw_history;
   const tail = data.pages[0] || EMPTY_PAGE;
   const history: TranscriptHistory = {
+    mountedStartIndex: null,
     newest: null,
     oldest: null,
     tail,
@@ -532,8 +536,6 @@ export interface TranscriptRenderWindow {
   startIndex: number;
   endIndex: number;
   hiddenCount: number;
-  newerHiddenCount: number;
-  atLiveTail: boolean;
   startMessageId: string | null;
 }
 
@@ -560,41 +562,34 @@ function sameRenderedMessage(left: Message, right: Message): boolean {
   });
 }
 
-/** Visit only the pages needed for the bounded tail or revealed suffix. */
+/** Visit only the pages needed for the initial tail or its pinned growing suffix. */
 export function transcriptRenderWindow(
   data: InfiniteData<TranscriptPage, unknown> | undefined,
   startIndex: number | null,
   initialLimit = TRANSCRIPT_WINDOW_MESSAGES,
-  endIndex: number | null = null,
 ): TranscriptRenderWindow {
   const history = transcriptHistory(data);
+  // The initial tail is bounded, but a concrete start is a pinned lower bound:
+  // tail growth and live-edge navigation may extend its end, never advance it.
+  // Clamping to initialStart also makes a retained numeric boundary safe after
+  // an authoritative shrink.
+  const initialStart = initialTranscriptStartIndex(history.totalMessages, initialLimit);
   const resolvedStart =
     startIndex === null
-      ? Math.max(0, history.totalMessages - initialLimit)
-      : Math.max(0, Math.min(startIndex, history.totalMessages));
-  // A detached viewer freezes its rendered end so genuinely new tail messages
-  // can remain hidden without unmounting anything already present in the DOM.
-  const resolvedEnd = endIndex === null
-    ? history.totalMessages
-    : Math.max(resolvedStart, Math.min(endIndex, history.totalMessages));
+      ? initialStart
+      : Math.max(0, Math.min(startIndex, initialStart));
+  const resolvedEnd = history.totalMessages;
   const wanted = Math.max(0, resolvedEnd - resolvedStart);
-  const skipNewest = history.totalMessages - resolvedEnd;
   const reversed: Message[] = [];
-  let newerSeen = 0;
   const collect = (page: TranscriptPage) => {
     visitPage(history);
     for (let index = page.items.length - 1; index >= 0; index -= 1) {
-      if (reversed.length >= wanted && newerSeen >= skipNewest) return;
+      if (reversed.length >= wanted) return;
       const message = page.items[index];
       visitMessage(history);
       if (message.id && history.ownerByMessageId.get(message.id) !== page)
         continue;
-      if (newerSeen < skipNewest) {
-        newerSeen += 1;
-        continue;
-      }
       reversed.push(message);
-      newerSeen += 1;
     }
   };
   if (wanted > 0) collect(history.tail);
@@ -626,8 +621,6 @@ export function transcriptRenderWindow(
     startIndex: resolvedStart,
     endIndex: resolvedEnd,
     hiddenCount: resolvedStart,
-    newerHiddenCount: history.totalMessages - resolvedEnd,
-    atLiveTail: resolvedEnd === history.totalMessages,
     startMessageId: messages[0]?.id || null,
   };
 }
@@ -637,6 +630,41 @@ export function expandedTranscriptStartIndex(
   expansion = TRANSCRIPT_WINDOW_MESSAGES,
 ): number {
   return previousTranscriptStartIndex(currentStartIndex, expansion);
+}
+
+export function transcriptMountedStartIndex(
+  data: InfiniteData<TranscriptPage, unknown> | undefined,
+): number | null {
+  return transcriptHistory(data).mountedStartIndex;
+}
+
+export function transcriptMessageIndex(
+  data: InfiniteData<TranscriptPage, unknown> | undefined,
+  messageId: string | undefined,
+): number | null {
+  if (!messageId) return null;
+  const history = transcriptHistory(data);
+  let index = 0;
+  for (let node = history.oldest; node; node = node.newer) {
+    for (const message of node.page.items) {
+      if (message.id && history.ownerByMessageId.get(message.id) !== node.page) continue;
+      if (message.id === messageId) return index;
+      index += 1;
+    }
+  }
+  for (const message of history.tail.items) {
+    if (message.id && history.ownerByMessageId.get(message.id) !== history.tail) continue;
+    if (message.id === messageId) return index;
+    index += 1;
+  }
+  return null;
+}
+
+export function setTranscriptMountedStartIndex(
+  data: InfiniteData<TranscriptPage, unknown> | undefined,
+  startIndex: number,
+): void {
+  transcriptHistory(data).mountedStartIndex = Math.max(0, startIndex);
 }
 
 /** Full traversal is reserved for compatibility/tests, never the render selector. */

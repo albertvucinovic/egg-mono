@@ -2,6 +2,44 @@ import { create } from "zustand";
 import type { AttachmentContentPart, EggMessageContent } from "./contentParts";
 import { DEFAULT_THEME, normalizeThemeName, type ThemeName } from "./themes";
 
+const TRANSCRIPT_MOUNT_BOUNDARIES_SESSION_KEY = "eggw-transcript-mount-boundaries";
+const MAX_TRANSCRIPT_MOUNT_BOUNDARIES = 100;
+
+function initialTranscriptMountBoundaries(): Record<string, TranscriptMountBoundary> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(TRANSCRIPT_MOUNT_BOUNDARIES_SESSION_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, TranscriptMountBoundary] => (
+        typeof entry[0] === "string"
+        && Boolean(entry[0])
+        && typeof entry[1] === "object"
+        && entry[1] !== null
+        && (
+          (entry[1] as TranscriptMountBoundary).startMessageId === undefined
+          || typeof (entry[1] as TranscriptMountBoundary).startMessageId === "string"
+        )
+        && Number.isSafeInteger((entry[1] as TranscriptMountBoundary).startIndex)
+        && (entry[1] as TranscriptMountBoundary).startIndex >= 0
+      )),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function persistTranscriptMountBoundaries(
+  boundaries: Record<string, TranscriptMountBoundary>,
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(TRANSCRIPT_MOUNT_BOUNDARIES_SESSION_KEY, JSON.stringify(boundaries));
+  } catch {
+    // Session storage can be unavailable in privacy-restricted contexts.
+  }
+}
+
 export interface Thread {
   id: string;
   name?: string;
@@ -83,6 +121,11 @@ export interface ShowRecordTarget {
   paired_message_ids: string[];
   message: Message;
   tool_call?: Record<string, any> | null;
+}
+
+export interface TranscriptMountBoundary {
+  startMessageId?: string;
+  startIndex: number;
 }
 
 export interface StreamingToolTimeout {
@@ -252,6 +295,8 @@ interface AppState {
   setDisplayVerbosity: (level: DisplayVerbosity) => void;
   showRecordTargetByThread: Record<string, ShowRecordTarget>;
   setShowRecordTarget: (threadId: string, target: ShowRecordTarget | null) => void;
+  transcriptMountBoundaryByThread: Record<string, TranscriptMountBoundary>;
+  setTranscriptMountBoundary: (threadId: string, boundary: TranscriptMountBoundary) => void;
 
   // Theme
   theme: ThemeName;
@@ -552,6 +597,24 @@ export const useAppStore = create<AppState>((set) => ({
     if (target) next[threadId] = target;
     else delete next[threadId];
     return { showRecordTargetByThread: next };
+  }),
+  transcriptMountBoundaryByThread: initialTranscriptMountBoundaries(),
+  setTranscriptMountBoundary: (threadId, boundary) => set((state) => {
+    const current = state.transcriptMountBoundaryByThread[threadId];
+    if (
+      current?.startIndex === boundary.startIndex
+      && current.startMessageId === boundary.startMessageId
+    ) return state;
+    const transcriptMountBoundaryByThread = {
+      ...state.transcriptMountBoundaryByThread,
+      [threadId]: boundary,
+    };
+    const threadIds = Object.keys(transcriptMountBoundaryByThread);
+    while (threadIds.length > MAX_TRANSCRIPT_MOUNT_BOUNDARIES) {
+      delete transcriptMountBoundaryByThread[threadIds.shift()!];
+    }
+    persistTranscriptMountBoundaries(transcriptMountBoundaryByThread);
+    return { transcriptMountBoundaryByThread };
   }),
 
   // Theme
