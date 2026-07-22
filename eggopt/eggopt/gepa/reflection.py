@@ -373,6 +373,66 @@ class EggthreadsReflectionLM:
             raise RuntimeError("reflection result mapping is incomplete")
         return [output for output in outputs if output is not None]
 
+    async def reflect_in_study_async(
+        self,
+        candidate: dict[str, str],
+        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+        components_to_update: list[str],
+    ) -> CandidateMutation:
+        """Run one cached mutation turn in the persistent study conversation.
+
+        NativeGEPA uses one long-lived Mutation conversation as its hierarchy
+        root. Upstream GEPA keeps its existing per-lineage iteration threads
+        through ``reflect_many``.
+        """
+
+        jobs = [(candidate, reflective_dataset, components_to_update)]
+        request = self._request_many(candidate, jobs)
+        key = self.semantic_key_many(candidate, jobs)
+        persisted = _load_response(self.threads_db, self.study_thread_id, key)
+        cached = self.executor.store.get(key)
+        if persisted is not None:
+            mutations = persisted[0]
+        elif cached is not None and cached["status"] == "COMPLETED":
+            mutations = await self.executor.run(_CachedReflectionTask(key))
+        else:
+            request_id = _root_request_id(
+                self.threads_db, self.study_thread_id, key
+            )
+            if request_id is None:
+                request_id = append_message(
+                    self.threads_db,
+                    self.study_thread_id,
+                    "user",
+                    _request_content(request),
+                    extra={
+                        "eggopt_kind": _REFLECTION_REQUEST_KIND,
+                        "semantic_key": key,
+                        "request": dict(request),
+                    },
+                )
+            mutations = await self.executor.run(
+                _ReflectionTask(
+                    semantic_key=key,
+                    threads_db=self.threads_db,
+                    occurrence=ReflectionOccurrence(
+                        self.study_thread_id,
+                        self.study_thread_id,
+                        self.study_thread_id,
+                        request_id,
+                    ),
+                    request=request,
+                    drive=self.drive,
+                    resume=_thread_has_prior_response(
+                        self.threads_db, self.study_thread_id
+                    ),
+                    fail_after_response=self.fail_after_response,
+                )
+            )
+        if len(mutations) != 1:
+            raise ValueError("NativeGEPA generation must return exactly one mutation")
+        return mutations.items[0]
+
     def semantic_key_many(
         self,
         candidate: Mapping[str, str],
@@ -465,6 +525,55 @@ class EggthreadsReflectionLM:
         )
         if not isinstance(mutations, CandidateMutations):
             raise TypeError("reflection task must return CandidateMutations")
+        return mutations
+
+    def resume_uncommitted_in_study(self) -> CandidateMutations | None:
+        """Resume NativeGEPA's one pending request on the study root."""
+
+        pending: list[tuple[str, dict[str, Any], str]] = []
+        answered: set[str] = set()
+        requests: dict[str, tuple[str, dict[str, Any]]] = {}
+        for message in _projection(self.threads_db, self.study_thread_id).messages:
+            payload = message.payload
+            key = payload.get("semantic_key")
+            if not isinstance(key, str):
+                continue
+            if payload.get("eggopt_kind") == _REFLECTION_REQUEST_KIND:
+                request = payload.get("request")
+                if isinstance(request, dict):
+                    requests[key] = (message.msg_id, request)
+            elif payload.get("eggopt_kind") == _REFLECTION_RESPONSE_KIND:
+                answered.add(key)
+        for key, (message_id, request) in requests.items():
+            if key not in answered:
+                pending.append((message_id, request, key))
+        if not pending:
+            return None
+        if len(pending) != 1:
+            raise RuntimeError("study has multiple uncommitted mutation requests")
+        request_id, request, key = pending[0]
+        mutations = _run_sync(
+            self.executor.run(
+                _ReflectionTask(
+                    semantic_key=key,
+                    threads_db=self.threads_db,
+                    occurrence=ReflectionOccurrence(
+                        self.study_thread_id,
+                        self.study_thread_id,
+                        self.study_thread_id,
+                        request_id,
+                    ),
+                    request=request,
+                    drive=self.drive,
+                    resume=_thread_has_prior_response(
+                        self.threads_db, self.study_thread_id
+                    ),
+                    fail_after_response=self.fail_after_response,
+                )
+            )
+        )
+        if not isinstance(mutations, CandidateMutations):
+            raise TypeError("mutation task must return CandidateMutations")
         return mutations
 
     async def _mutate_many_async(
@@ -632,6 +741,17 @@ def _find_occurrence(
                 request_message_id=request_id,
                 response_message_id=response_id,
             )
+    return None
+
+
+def _root_request_id(db: ThreadsDB, thread_id: str, semantic_key: str) -> str | None:
+    for message in _projection(db, thread_id).messages:
+        payload = message.payload
+        if (
+            payload.get("eggopt_kind") == _REFLECTION_REQUEST_KIND
+            and payload.get("semantic_key") == semantic_key
+        ):
+            return message.msg_id
     return None
 
 

@@ -75,7 +75,14 @@ class Runtime(Generic[ExampleT, OutputT]):
     reflection: EggthreadsReflectionLM
 
     @classmethod
-    def open(cls, root: str | Path, reflection: Reflection) -> Runtime[Any, Any]:
+    def open(
+        cls,
+        root: str | Path,
+        reflection: Reflection,
+        *,
+        study_name: str | None = None,
+        default_workspace: str | Path | None = None,
+    ) -> Runtime[Any, Any]:
         root = Path(root).resolve()
         root.mkdir(parents=True, exist_ok=True)
         egg = root / ".egg"
@@ -85,17 +92,22 @@ class Runtime(Generic[ExampleT, OutputT]):
         threads.init_schema()
         study_id = _study_id(threads)
         if study_id is None:
-            workspace = Path(reflection.workspace or root / "workspaces" / "mutation")
+            workspace = Path(
+                reflection.workspace
+                or default_workspace
+                or root / "workspaces" / "mutation"
+            )
+            name = study_name or reflection.study_name
             if getattr(reflection.drive, "requires_study_thread", False):
                 study_id, _ = create_solver_safe_study(
                     threads,
                     workspace=workspace,
                     model_key=reflection.model_key,
                     models_path=reflection.models_path,
-                    name=reflection.study_name,
+                    name=name,
                 )
             else:
-                study_id = create_root_thread(threads, name=reflection.study_name)
+                study_id = create_root_thread(threads, name=name)
             threads.append_event(
                 event_id=uuid4().hex,
                 thread_id=study_id,

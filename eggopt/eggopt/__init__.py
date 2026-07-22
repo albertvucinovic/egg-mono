@@ -1,5 +1,7 @@
 """Small, durable optimization interfaces built on Eggflow and Eggthreads."""
 
+from .actor_critic import ActorCritic, ActorCriticResult, Agent
+from ._context import current_evaluation
 from .evaluation import Evaluation
 from .gepa import (
     CandidateMutation,
@@ -18,10 +20,22 @@ from .gepa import (
     create_solver_safe_study,
     semantic_workspace_path,
 )
-from .native_gepa import NativeGEPA, NativeGEPAResult
+from .native_gepa import (
+    GenerateCandidate,
+    NativeGEPA,
+    NativeGEPAConfig,
+    NativeGEPAResult,
+    OptimizationPlan,
+    SelectParents,
+    optimize_anything,
+    plan_optimization,
+)
 from .runtime import Reflection
 
 __all__ = [
+    "ActorCritic",
+    "ActorCriticResult",
+    "Agent",
     "CandidateMutation",
     "CandidateMutations",
     "EggflowGEPAAdapter",
@@ -31,16 +45,23 @@ __all__ = [
     "Evaluation",
     "EvaluationSemanticKey",
     "ExampleEvaluation",
+    "GenerateCandidate",
     "NativeGEPA",
+    "NativeGEPAConfig",
     "NativeGEPAResult",
+    "OptimizationPlan",
+    "SelectParents",
     "Reflection",
     "ReflectionConversation",
     "ReflectionDrive",
     "ReflectionEvidence",
     "ReflectionOccurrence",
     "configure_solver_safe_tools",
+    "current_evaluation",
     "create_solver_safe_study",
     "semantic_workspace_path",
+    "optimize_anything",
+    "plan_optimization",
 ]
 
 
