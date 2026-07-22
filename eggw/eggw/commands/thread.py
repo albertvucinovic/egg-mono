@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from eggthreads import (
     create_root_thread,
@@ -12,6 +12,8 @@ from eggthreads import (
     append_message,
     delete_thread,
     list_threads,
+    get_thread_tree,
+    resolve_thread_tree_root,
     list_children_with_meta,
     get_parent,
     current_thread_model,
@@ -22,7 +24,6 @@ from eggthreads import (
     is_thread_continuable,
     interrupt_thread,
     parse_args,
-    get_thread_statuses_bulk,
 )
 from eggthreads.api import append_continue_recovery_notice
 
@@ -49,28 +50,6 @@ def _thread_has_active_lease(thread_id: str) -> bool:
         return False
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     return str(lease_until) > now_iso
-
-
-def _threads_status_mode(arg: str) -> tuple[bool, str]:
-    """Return (include_runnability, mode_label) for /threads.
-
-    Full runnability discovery reduces each thread's event log.  That is useful
-    when explicitly requested, but it is far too expensive as the default for a
-    large database with many long threads.
-    """
-
-    args = parse_args(arg or "")
-    raw = (
-        args.get("status")
-        or args.get("state")
-        or args.get("runnability")
-        or args.get("runnable")
-        or args.positional_or(0)
-        or ""
-    )
-    mode = str(raw).strip().lower()
-    include_runnability = mode in {"full", "all", "runnable", "runnability", "true", "1", "yes", "on"}
-    return include_runnability, "full" if include_runnability else "fast"
 
 
 async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
@@ -189,91 +168,73 @@ async def cmd_switch_thread(selector: str) -> CommandResponse:
 
 
 async def cmd_list_threads(arg: str = "") -> CommandResponse:
-    """Handle /threads command - shows thread tree structure (optimized)."""
-    # Fetch all data in bulk to avoid N+1 queries
-    all_threads = list_threads(core.db)
-    if not all_threads:
+    """Handle /threads, optionally rendering one selected subtree."""
+    from eggthreads import parse_thread_tree_request
+
+    selector, status_mode = parse_thread_tree_request(arg or "")
+    root_id: str | None = None
+    if selector:
+        try:
+            root_id = resolve_thread_tree_root(core.db, selector)
+        except ValueError as exc:
+            return CommandResponse(success=False, message=str(exc))
+
+    tree = get_thread_tree(
+        core.db, root_id, include_runnability=status_mode == "full"
+    )
+    if not tree:
         return CommandResponse(success=True, message="No threads found")
 
-    # Build lookup maps
-    threads_by_id = {t.thread_id: t for t in all_threads}
+    nodes_by_id: Dict[str, Dict[str, Any]] = {}
 
-    # Fetch all parent-child relationships in one query
-    children_map: Dict[str, List[str]] = {}  # parent_id -> [child_ids]
-    parent_map: Dict[str, str] = {}  # child_id -> parent_id
-    try:
-        cur = core.db.conn.execute("SELECT parent_id, child_id FROM children")
-        for row in cur.fetchall():
-            parent_id, child_id = row[0], row[1]
-            if parent_id not in children_map:
-                children_map[parent_id] = []
-            children_map[parent_id].append(child_id)
-            parent_map[child_id] = parent_id
-    except Exception:
-        pass
+    pending_nodes = list(reversed(tree))
+    while pending_nodes:
+        node = pending_nodes.pop()
+        nodes_by_id[str(node["id"])] = node
+        pending_nodes.extend(reversed(node["children"]))
 
-    # Find roots (threads with no parent). Runtime threads should be real
-    # children of the thread that started the REPL tool call, but legacy
-    # unparented rows still need to remain visible/inspectable rather than
-    # being hidden.
-    roots = [t.thread_id for t in all_threads if t.thread_id not in parent_map]
+    all_tids = list(nodes_by_id)
 
-    # Pre-compute real-time status for all threads.  By default this only does
-    # the cheap active-lease/streaming query.  Full runnability discovery folds
-    # every thread's event log and can take many seconds on large DBs; keep it
-    # behind an explicit option.
-    include_runnability, status_mode = _threads_status_mode(arg)
-    all_tids = [t.thread_id for t in all_threads]
-    status_map = get_thread_statuses_bulk(core.db, all_tids, skip_runnability=not include_runnability)
-
-    def format_thread(tid: str, indent: int = 0, max_depth: int = 50) -> list[str]:
-        """Format a thread and its children recursively."""
-        if indent > max_depth:
-            return ["  " * indent + "... (max depth reached)"]
-
-        lines = []
-        t = threads_by_id.get(tid)
-        if not t:
-            return lines
-
-        # Build thread line
+    lines: list[str] = []
+    pending_render = [(root, 0) for root in reversed(tree)]
+    while pending_render:
+        node, indent = pending_render.pop()
+        if indent > 50:
+            lines.append("  " * indent + "... (max depth reached)")
+            continue
+        tid = str(node["id"])
         prefix = "  " * indent + ("├─ " if indent > 0 else "")
-        name_part = f" ({t.name})" if t.name else ""
-        model = current_thread_model(core.db, tid) or ""
+        name = node.get("name")
+        name_part = f" ({name})" if name else ""
+        model = node.get("model") or ""
         model_part = f" [{model}]" if model else ""
-        # Use real-time status instead of stale database status
-        state = status_map.get(tid, "idle")
+        state = node.get("state") or "idle"
         state_part = f" <{state}>" if state != "idle" else ""
-
         lines.append(f"{prefix}{tid[-8:]}{name_part}{model_part}{state_part}")
+        pending_render.extend(
+            (child, indent + 1) for child in reversed(node["children"])
+        )
 
-        # Get children and recurse
-        children = children_map.get(tid, [])
-        for child_id in children:
-            lines.extend(format_thread(child_id, indent + 1, max_depth))
-
-        return lines
-
-    lines = []
-    for root_id in roots:
-        lines.extend(format_thread(root_id))
-
-    total = len(all_threads)
-    visible_total = len(lines)
+    total = len(all_tids)
     notes: list[str] = []
-    if not include_runnability:
-        notes.append("fast status mode: streaming only; use `/threads status=full` to scan runnable state")
+    if status_mode != "full":
+        notes.append(
+            "fast status mode: streaming only; use `/threads status=full` to scan runnable state"
+        )
     note_part = ""
     if notes:
         note_part = "\n" + "\n".join(f"Note: {note}" for note in notes)
     return CommandResponse(
         success=True,
-        message=f"Threads ({total} total, {len(roots)} roots, {visible_total} shown):{note_part}\n" + "\n".join(lines),
+        message=(
+            f"Threads ({total} total, {len(tree)} roots, {len(lines)} shown):"
+            f"{note_part}\n" + "\n".join(lines)
+        ),
         data={
-            "threads": roots,
+            "threads": [str(root["id"]) for root in tree],
             "thread_ids": all_tids,
             "total": total,
-            "visible_total": visible_total,
+            "visible_total": len(lines),
             "status_mode": status_mode,
         },
     )

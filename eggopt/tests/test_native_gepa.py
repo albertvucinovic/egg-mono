@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from eggthreads import ThreadsDB, list_children_with_meta
 
 from eggopt import (
@@ -87,6 +89,49 @@ def test_optimize_anything_is_case_wise_pareto_search(tmp_path):
     assert generator.calls == 2
     assert generator.requests[0][2] == "Reach every target."
     assert 1 <= len(generator.requests[1][0]) <= 2
+
+
+def test_minibatch_acceptance_can_send_ties_to_full_validation(tmp_path):
+    dataset = [{"id": "already-passing", "target": 0}]
+
+    strict = optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=dataset,
+        objective="Keep passing.",
+        config=config(
+            tmp_path / "strict",
+            Evaluator(),
+            Increment(),
+            max_candidates=1,
+            parents_per_candidate=1,
+        ),
+    )
+    allow_equal = optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=dataset,
+        objective="Keep passing.",
+        config=config(
+            tmp_path / "allow-equal",
+            Evaluator(),
+            Increment(),
+            max_candidates=1,
+            parents_per_candidate=1,
+            minibatch_acceptance="improvement_or_equal",
+        ),
+    )
+
+    assert strict.candidates == ({"instruction": "0"},)
+    assert allow_equal.candidates == (
+        {"instruction": "0"},
+        {"instruction": "1"},
+    )
+
+
+def test_minibatch_acceptance_rejects_unknown_policy():
+    with pytest.raises(ValueError, match="minibatch_acceptance"):
+        NativeGEPAConfig(minibatch_acceptance="unknown")
 
 
 def test_larger_limits_continue_without_repeating_cached_work(tmp_path):

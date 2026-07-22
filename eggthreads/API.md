@@ -1072,6 +1072,7 @@ Returns a registry pre-populated with common tools:
 - spawn_agent_auto: Create auto-approved child threads
 - execute_tool_in_other_thread: Execute an opted-in tool in a strict descendant
   context and return its result to the calling ancestor
+- threads: Return the calling thread's accessible subtree as nested JSON
 - web_search: Provider-fallback web search. In default `auto` mode, Tavily is
   tried first when `TAVILY_API_KEY` is set, then local SearXNG is used as the
   no-key fallback. Configure an ordered fallback with `EGG_WEB_SEARCH_CHAIN`,
@@ -1108,5 +1109,20 @@ thread context, then return/publish the nested result in the calling ancestor.
 - The nested result belongs to the ancestor tool call. Genuine side effects
   remain in the target context.
 - Provider output is masked when either the caller or target policy requires it.
+
+### `threads(thread_id=None, status="fast")`
+
+Return a nested JSON thread tree containing full `id`, `name`, `description`,
+effective `model`, real-time `state`, and `children` fields. Fast status is the
+default and always detects streaming without scanning every thread for pending
+work; `status="full"` also distinguishes runnable from idle. The envelope
+reports `status_mode`, `runnability_checked`, counts, and ordered
+full `thread_ids`, so fast-mode idle is not mistaken for a complete
+runnability check. With no argument,
+the tree is rooted at the calling thread. `thread_id` may select the caller
+itself or one of its descendants; ancestors, siblings, unrelated threads, and
+missing threads are not exposed. Descriptions are the stored short recaps. This
+shares its tree-building data implementation with `/threads`; `/threads
+<selector>` renders that subtree.
 
 ---

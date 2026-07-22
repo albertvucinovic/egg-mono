@@ -668,8 +668,10 @@ def test_thread_ui_commands_are_registered_handlers(tmp_path, monkeypatch) -> No
 
     registry.execute("listChildren", make_context())
     registry.execute("threads", make_context())
+    registry.execute("threads", make_context(), child)
     assert ("Subtree", f"tree:{root}") in printed
     assert ("Threads", "tree:all") in printed
+    assert ("Subtree", f"tree:{child}") in printed
 
     registry.execute("newThread", make_context(), "created")
     assert current["thread_id"] != root

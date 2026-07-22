@@ -323,6 +323,21 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
         ],
         "examples": ['{"child_thread_ids": ["thread-id"], "max_errors": 5}'],
     },
+    "threads": {
+        "details": "Return the calling thread's accessible subtree as nested JSON with full ids, names, descriptions, effective models, real-time states, and child nodes.",
+        "use_when": [
+            "You need a descendant id before using execute_tool_in_other_thread.",
+            "You need to retain the hierarchy while discovering delegated child work.",
+        ],
+        "notes": [
+            "With no thread_id, the result is rooted at the calling thread.",
+            "thread_id may select only the calling thread or one of its descendants; ancestors, siblings, and unrelated threads are denied.",
+            "Descriptions come from each thread's short recap.",
+            "Fast status (default) detects streaming without scanning runnability; status=full also distinguishes runnable from idle.",
+            "The response includes status_mode and runnability_checked so idle is not mistaken for a full runnability check.",
+        ],
+        "examples": ['{}', '{"thread_id": "01K...descendant"}', '{"status": "full"}'],
+    },
     "wait": {
         "details": "Wait for one or more child threads to finish and return their last assistant message.",
         "use_when": [

@@ -1125,6 +1125,7 @@ def create_tool_registry() -> ToolRegistry:
         SessionPlugin,
         SkillsPlugin,
         SubagentsPlugin,
+        ThreadUiPlugin,
         ToolHelpPlugin,
         ToolOutputExtractionPlugin,
         WebPlugin,
@@ -1146,6 +1147,7 @@ def create_tool_registry() -> ToolRegistry:
             ToolHelpPlugin(),
             SessionPlugin(),
             SubagentsPlugin(),
+            ThreadUiPlugin(),
             CrossThreadExecutionPlugin(),
             WebPlugin(),
         ],
@@ -1163,6 +1165,7 @@ def create_default_tools() -> ToolRegistry:
     - spawn_agent: Create child threads for delegation
     - spawn_agent_auto: Create auto-approved child threads
     - execute_tool_in_other_thread: Run an opted-in tool in a descendant context
+    - threads: List the calling thread's descendant tree with model/state metadata
     - web_search: Provider-fallback web search (auto by default)
     - fetch_url: Provider-fallback URL fetch/extraction (auto by default)
     - wait: Synchronize on child thread completion

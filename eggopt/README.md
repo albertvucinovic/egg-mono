@@ -34,6 +34,7 @@ result = optimize_anything(
         run_dir="runs/my-gepa",
         max_evaluator_calls=150,
         max_candidates=10,
+        minibatch_acceptance="strict_improvement",
     ),
 )
 
@@ -50,6 +51,10 @@ NativeGEPA uses seeded epoch-shuffled minibatches for mutation, checks a child
 on the same minibatch, evaluates accepted children on the full validation set,
 and selects distinct parents from the per-case Pareto frontier. Aggregate score
 determines `best_candidate`.
+
+`minibatch_acceptance="strict_improvement"` is the default: a child tied with
+the selected parents' per-case score envelope is rejected. Use
+`"improvement_or_equal"` to send tied children to full validation as well.
 
 Every study is durable:
 

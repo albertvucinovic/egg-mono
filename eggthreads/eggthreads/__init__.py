@@ -71,6 +71,12 @@ from .api import (
     get_parent,
     list_children_with_meta,
     list_children_ids,
+    get_thread_tree,
+    resolve_thread_tree_root,
+    serialize_thread_tree,
+    parse_thread_tree_request,
+    thread_tree_response,
+    serialize_thread_tree_response,
     current_open_invoke,
     create_snapshot,
     create_snapshot_async,
@@ -421,6 +427,7 @@ from .tools import (
     create_tool_registry,
 )
 from .builtin_plugins.cross_thread_execution import execute_tool_in_other_thread_tool
+from .builtin_plugins.thread_ui import threads_tool
 from .skills import Skill, get_skill, list_skills, load_skill_text, render_skill_index, render_skill_tool_output, search_skills
 
 from .llm import create_llm_client
@@ -435,7 +442,7 @@ __all__ = [
     'resolve_show_record', 'show_record_completion_items', 'show_record_target',
     'set_default_tool_timeout', 'get_default_tool_timeout',
     'validate_model_handle', 'create_root_thread', 'create_child_thread', 'append_message', 'append_normal_user_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable', 'get_thread_status', 'get_thread_statuses_bulk', 'get_thread_auto_approval_status',
-    'list_threads', 'list_root_threads', 'get_parent', 'list_children_with_meta', 'list_children_ids', 'current_open_invoke',
+    'list_threads', 'list_root_threads', 'get_parent', 'list_children_with_meta', 'list_children_ids', 'get_thread_tree', 'resolve_thread_tree_root', 'serialize_thread_tree', 'parse_thread_tree_request', 'thread_tree_response', 'serialize_thread_tree_response', 'current_open_invoke',
     'create_snapshot', 'create_snapshot_async',
     'current_thread_model', 'current_thread_model_info', 'duplicate_thread', 'duplicate_thread_up_to',
     'collect_subtree', 'list_active_threads', 'wait_subtree_idle', 'wait_thread_settled',
@@ -485,7 +492,7 @@ __all__ = [
     'get_thread_sandbox_config', 'set_thread_sandbox_config', 'set_subtree_sandbox_config', 'get_thread_sandbox_status',
     'HARD_BYPASS_TOOL_NAMES', 'ToolOutputContract', 'canonical_terminal_safe_output', 'is_hard_bypass_tool', 'tool_output_contract',
     'TextLineRange', 'apply_output_presentation', 'extract_text_line_range', 'line_number_presentation', 'number_text_lines', 'split_text_lines',
-    'ToolCapabilities', 'ToolContext', 'ToolExecutionResult', 'ToolRegistry', 'ToolStreamContext', 'create_default_tools', 'create_tool_registry', 'execute_tool_in_other_thread_tool',
+    'ToolCapabilities', 'ToolContext', 'ToolExecutionResult', 'ToolRegistry', 'ToolStreamContext', 'create_default_tools', 'create_tool_registry', 'execute_tool_in_other_thread_tool', 'threads_tool',
     'Skill', 'get_skill', 'list_skills', 'load_skill_text', 'render_skill_index', 'render_skill_tool_output', 'search_skills',
     'create_llm_client',
     'count_text_tokens', 'llm_message_tps_for_invoke', 'live_llm_tps_for_invoke', 'tool_message_tps_for_call', 'snapshot_token_stats', 'provider_context_token_stats', 'streaming_token_stats', 'header_token_stats', 'total_token_stats', 'thread_token_stats', 'EventWatcher',

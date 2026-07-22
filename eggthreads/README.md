@@ -119,6 +119,17 @@ Self, ancestor, sibling, unrelated, disabled, local-only, and non-opted-in tool
 targets are rejected. The nested result is published only in the calling
 ancestor; normal tool side effects remain in the descendant context.
 
+Use the model-visible `threads` tool to discover accessible target ids without
+crossing that boundary. It returns the calling thread's subtree as nested JSON
+with full ids, names, short-recap descriptions, effective models, real-time
+states, and children. Fast status detects streaming; `status="full"` also
+distinguishes runnable from idle. The response reports `status_mode`,
+`runnability_checked`, counts, and ordered full `thread_ids`. An optional
+`thread_id` may narrow the result to the calling thread or one of its
+descendants; ancestors, siblings, and unrelated threads are denied. The same
+tree data implementation backs `/threads`, and `/threads <selector>` renders
+the selected subtree.
+
 ## Headless subtree example
 
 The repository includes a headless example that creates a root thread, creates

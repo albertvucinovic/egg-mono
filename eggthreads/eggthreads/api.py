@@ -3899,6 +3899,328 @@ def list_children_ids(db: ThreadsDB, parent_id: str) -> list[str]:
         return []
 
 
+def resolve_thread_tree_root(db: ThreadsDB, selector: str) -> str:
+    """Resolve one command-facing thread selector without ambiguous guessing."""
+
+    value = str(selector or "").strip()
+    if not value:
+        raise ValueError("thread selector is required")
+    rows = list_threads(db)
+    for row in rows:
+        if row.thread_id == value:
+            return row.thread_id
+
+    lowered = value.lower()
+    candidate_sets = (
+        [row.thread_id for row in rows if row.thread_id.lower().endswith(lowered)],
+        [row.thread_id for row in rows if lowered in row.thread_id.lower()],
+        [
+            row.thread_id
+            for row in rows
+            if isinstance(row.name, str) and lowered in row.name.lower()
+        ],
+        [
+            row.thread_id
+            for row in rows
+            if isinstance(row.short_recap, str) and lowered in row.short_recap.lower()
+        ],
+    )
+    matches = next((items for items in candidate_sets if items), [])
+    if not matches:
+        raise ValueError(f"no thread matches selector: {value}")
+    if len(matches) > 1:
+        raise ValueError(f"ambiguous thread selector: {value}")
+    return matches[0]
+
+
+def parse_thread_tree_request(arg: str) -> tuple[Optional[str], str]:
+    """Parse shared ``/threads`` selector and fast/full status options."""
+
+    from .arg_parser import parse_args
+
+    parsed = parse_args(arg or "")
+    status_value = (
+        parsed.get("status")
+        or parsed.get("state")
+        or parsed.get("runnability")
+        or parsed.get("runnable")
+    )
+    positional = list(parsed.positional)
+    full_values = {
+        "full", "all", "runnable", "runnability", "true", "1", "yes", "on"
+    }
+    fast_values = {"fast", "streaming", "false", "0", "no", "off"}
+    if status_value is None and len(positional) == 1:
+        positional_mode = positional[0].strip().lower()
+        if positional_mode in full_values or positional_mode in fast_values:
+            status_value = positional.pop(0)
+
+    selector = " ".join(positional).strip() or None
+    mode = str(status_value or "fast").strip().lower()
+    return selector, "full" if mode in full_values else "fast"
+
+
+def _thread_metadata_by_ids(
+    db: ThreadsDB, thread_ids: list[str]
+) -> Dict[str, ThreadRow]:
+    """Bulk-load lightweight thread rows without snapshot JSON."""
+
+    result: Dict[str, ThreadRow] = {}
+    for offset in range(0, len(thread_ids), 500):
+        chunk = thread_ids[offset : offset + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = db.conn.execute(
+            "SELECT thread_id, name, short_recap, status, NULL AS snapshot_json, "
+            "snapshot_last_event_seq, initial_model_key, depth, created_at "
+            f"FROM threads WHERE thread_id IN ({placeholders})",
+            tuple(chunk),
+        )
+        for row in cur.fetchall():
+            thread = ThreadRow(**dict(row))
+            result[thread.thread_id] = thread
+    return result
+
+
+def _thread_models_by_id(
+    db: ThreadsDB, metadata_by_id: Mapping[str, ThreadRow]
+) -> Dict[str, Optional[str]]:
+    """Return effective model keys in bulk using ``current_thread_model`` rules."""
+
+    models: Dict[str, Optional[str]] = {
+        thread_id: (
+            row.initial_model_key.strip()
+            if isinstance(row.initial_model_key, str) and row.initial_model_key.strip()
+            else None
+        )
+        for thread_id, row in metadata_by_id.items()
+    }
+    thread_ids = list(metadata_by_id)
+    for offset in range(0, len(thread_ids), 500):
+        chunk = thread_ids[offset : offset + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = db.conn.execute(
+            "SELECT thread_id, payload_json FROM events "
+            f"WHERE type='model.switch' AND thread_id IN ({placeholders}) "
+            "ORDER BY event_seq ASC",
+            tuple(chunk),
+        )
+        latest_payload: Dict[str, Any] = {}
+        for thread_id, payload_json in cur.fetchall():
+            latest_payload[thread_id] = payload_json
+        for thread_id, payload_json in latest_payload.items():
+            try:
+                payload = (
+                    json.loads(payload_json)
+                    if isinstance(payload_json, str)
+                    else (payload_json or {})
+                )
+            except Exception:
+                payload = {}
+            model_key = payload.get("model_key") if isinstance(payload, dict) else None
+            if isinstance(model_key, str) and model_key.strip():
+                models[thread_id] = model_key.strip()
+    return models
+
+
+def get_thread_tree(
+    db: ThreadsDB,
+    root_id: Optional[str] = None,
+    *,
+    include_runnability: bool = False,
+) -> list[Dict[str, Any]]:
+    """Return thread metadata as a nested forest, optionally rooted at one thread.
+
+    Each node contains the full thread id, optional name, short recap as
+    ``description``, effective ``model``, real-time ``state``, and a nested
+    ``children`` list. Fast mode always detects streaming; full mode also
+    distinguishes runnable from idle. Traversal rejects cycles or
+    multiple-parent links so permission-sensitive callers fail closed.
+    """
+
+    if root_id is None:
+        relationship_rows = db.conn.execute(
+            "SELECT parent_id, child_id FROM children ORDER BY rowid"
+        ).fetchall()
+    else:
+        relationship_rows = db.conn.execute(
+            """
+            WITH RECURSIVE subtree(thread_id) AS (
+                SELECT ?
+                UNION
+                SELECT c.child_id
+                FROM children c
+                JOIN subtree s ON c.parent_id=s.thread_id
+            )
+            SELECT c.parent_id, c.child_id
+            FROM children c
+            WHERE c.parent_id IN (SELECT thread_id FROM subtree)
+               OR c.child_id IN (SELECT thread_id FROM subtree)
+            ORDER BY c.rowid
+            """,
+            (root_id,),
+        ).fetchall()
+    children_by_parent: Dict[str, list[str]] = {}
+    parents_by_child: Dict[str, list[str]] = {}
+    for parent_id, child_id in relationship_rows:
+        children_by_parent.setdefault(parent_id, []).append(child_id)
+        parents_by_child.setdefault(child_id, []).append(parent_id)
+
+    if root_id is None:
+        rows = list_threads(db)
+        metadata_by_id = {row.thread_id: row for row in rows}
+        root_ids = [
+            row.thread_id for row in rows if row.thread_id not in parents_by_child
+        ]
+    else:
+        root = db.get_thread_metadata(root_id)
+        if root is None:
+            raise ValueError(f"thread not found: {root_id}")
+        metadata_by_id = {root_id: root}
+        root_ids = [root_id]
+
+    scheduled = set(root_ids)
+    visited: set[str] = set()
+    ordered_ids: list[str] = []
+    included_children: Dict[str, list[str]] = {}
+    stack = list(reversed(root_ids))
+    while stack:
+        thread_id = stack.pop()
+        if thread_id in visited:
+            raise ValueError("invalid thread tree: cycle detected")
+        visited.add(thread_id)
+        ordered_ids.append(thread_id)
+
+        children: list[str] = []
+        for child_id in children_by_parent.get(thread_id, []):
+            parents = parents_by_child.get(child_id, [])
+            if len(parents) > 1:
+                raise ValueError("invalid thread tree: a thread has multiple parents")
+            if len(parents) != 1 or parents[0] != thread_id:
+                raise ValueError("invalid thread tree: invalid parent relationship")
+            if child_id in scheduled:
+                raise ValueError("invalid thread tree: cycle detected")
+            scheduled.add(child_id)
+            children.append(child_id)
+        included_children[thread_id] = children
+        stack.extend(reversed(children))
+
+    if root_id is None:
+        if visited != set(metadata_by_id):
+            raise ValueError("invalid thread tree: cycle or orphaned relationship detected")
+    else:
+        metadata_by_id = _thread_metadata_by_ids(db, ordered_ids)
+        if set(metadata_by_id) != visited:
+            missing = next(iter(visited - set(metadata_by_id)), "unknown")
+            raise ValueError(f"invalid thread tree: thread not found: {missing}")
+
+    state_by_id = get_thread_statuses_bulk(
+        db, ordered_ids, skip_runnability=not include_runnability
+    )
+    model_by_id = _thread_models_by_id(db, metadata_by_id)
+
+    nodes = {
+        thread_id: {
+            "id": thread_id,
+            "name": metadata_by_id[thread_id].name,
+            "description": metadata_by_id[thread_id].short_recap,
+            "state": state_by_id.get(thread_id, "idle"),
+            "model": model_by_id.get(thread_id),
+            "children": [],
+        }
+        for thread_id in ordered_ids
+    }
+    for thread_id in ordered_ids:
+        nodes[thread_id]["children"] = [
+            nodes[child_id] for child_id in included_children[thread_id]
+        ]
+    return [nodes[thread_id] for thread_id in root_ids]
+
+
+def serialize_thread_tree(tree: list[Dict[str, Any]]) -> str:
+    """Serialize the fixed nested thread-tree schema without recursive calls."""
+
+    parts: list[str] = []
+    actions: list[tuple[str, Any]] = [("array", tree)]
+    while actions:
+        kind, value = actions.pop()
+        if kind == "text":
+            parts.append(value)
+            continue
+        if kind == "array":
+            parts.append("[")
+            actions.append(("text", "]"))
+            for index in range(len(value) - 1, -1, -1):
+                actions.append(("node", value[index]))
+                if index > 0:
+                    actions.append(("text", ","))
+            continue
+
+        node = value
+        parts.append(
+            '{"id":'
+            + json.dumps(node["id"], ensure_ascii=False)
+            + ',"name":'
+            + json.dumps(node.get("name"), ensure_ascii=False)
+            + ',"description":'
+            + json.dumps(node.get("description"), ensure_ascii=False)
+            + ',"state":'
+            + json.dumps(node.get("state"), ensure_ascii=False)
+            + ',"model":'
+            + json.dumps(node.get("model"), ensure_ascii=False)
+            + ',"children":'
+        )
+        actions.append(("text", "}"))
+        actions.append(("array", node["children"]))
+    return "".join(parts)
+
+
+def thread_tree_response(
+    root_thread_id: Optional[str],
+    tree: list[Dict[str, Any]],
+    *,
+    status_mode: str,
+) -> Dict[str, Any]:
+    """Build shared summary metadata for command and tool tree responses."""
+
+    thread_ids: list[str] = []
+    stack = list(reversed(tree))
+    while stack:
+        node = stack.pop()
+        thread_ids.append(str(node["id"]))
+        stack.extend(reversed(node["children"]))
+    return {
+        "root_thread_id": root_thread_id,
+        "status_mode": "full" if status_mode == "full" else "fast",
+        "runnability_checked": status_mode == "full",
+        "total": len(thread_ids),
+        "root_count": len(tree),
+        "thread_ids": thread_ids,
+        "threads": tree,
+    }
+
+
+def serialize_thread_tree_response(response: Mapping[str, Any]) -> str:
+    """Serialize a shared thread-tree response without recursive JSON encoding."""
+
+    return (
+        '{"root_thread_id":'
+        + json.dumps(response.get("root_thread_id"), ensure_ascii=False)
+        + ',"status_mode":'
+        + json.dumps(response.get("status_mode"), ensure_ascii=False)
+        + ',"runnability_checked":'
+        + ("true" if response.get("runnability_checked") else "false")
+        + ',"total":'
+        + str(int(response.get("total") or 0))
+        + ',"root_count":'
+        + str(int(response.get("root_count") or 0))
+        + ',"thread_ids":'
+        + json.dumps(response.get("thread_ids") or [], ensure_ascii=False)
+        + ',"threads":'
+        + serialize_thread_tree(response.get("threads") or [])
+        + "}"
+    )
+
+
 def current_open_invoke(db: ThreadsDB, thread_id: str) -> Optional[str]:
     try:
         row = db.current_open(thread_id)
@@ -4296,9 +4618,15 @@ def is_descendant_thread(db: ThreadsDB, ancestor_id: str, thread_id: str) -> boo
         if current in seen:
             return False
         seen.add(current)
-        parent = get_parent(db, current)
-        if parent is None:
+        try:
+            parents = db.conn.execute(
+                "SELECT parent_id FROM children WHERE child_id=?", (current,)
+            ).fetchall()
+        except Exception:
             return False
+        if len(parents) != 1 or not isinstance(parents[0][0], str):
+            return False
+        parent = parents[0][0]
         if parent == ancestor_id:
             return True
         current = parent

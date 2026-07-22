@@ -7,9 +7,10 @@ import random
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from operator import ge, gt
 from pathlib import Path
 from statistics import fmean
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from eggflow import FlowExecutor, Task
 from eggthreads import ThreadsDB, append_message
@@ -29,8 +30,13 @@ from .runtime import Reflection, Runtime
 CaseT = TypeVar("CaseT")
 OutputT = TypeVar("OutputT")
 Candidate = dict[str, str]
+MinibatchAcceptance = Literal["strict_improvement", "improvement_or_equal"]
 
 _GENERATION = "eggopt.native-gepa.generate.v1"
+_MINIBATCH_ACCEPTANCE = {
+    "strict_improvement": gt,
+    "improvement_or_equal": ge,
+}
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,7 @@ class NativeGEPAConfig:
     max_candidates: int = 10
     reflection_minibatch_size: int = 3
     parents_per_candidate: int = 1
+    minibatch_acceptance: MinibatchAcceptance = "strict_improvement"
     seed: int = 0
     run_dir: str | Path = ".eggopt/native-gepa"
     reflection: Reflection | None = None
@@ -65,6 +72,11 @@ class NativeGEPAConfig:
             or self.max_concurrent_evaluations < 1
         ):
             raise ValueError("max_concurrent_evaluations must be positive or None")
+        if self.minibatch_acceptance not in _MINIBATCH_ACCEPTANCE:
+            raise ValueError(
+                "minibatch_acceptance must be 'strict_improvement' or "
+                "'improvement_or_equal'"
+            )
         if self.evaluator_identity is not None:
             canonical_json(self.evaluator_identity, what="evaluator identity")
         if self.generator is not None and not (
@@ -413,11 +425,11 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             calls = _completed_evaluator_calls(self.flow)
             # Multiple selected parents may specialize on different cases;
             # compare the child with the strongest per-case parent envelope.
-            parent_total = sum(
-                max(item.scores[case] for item in parent_evaluations)
-                for case in range(len(batch))
-            )
-            if sum(child_batch.scores) <= parent_total:
+            if not _accept_minibatch(
+                child_batch.scores,
+                parent_evaluations,
+                self.config.minibatch_acceptance,
+            ):
                 continue
 
             full_needed = _new_call_count(
@@ -562,6 +574,15 @@ def _minibatch_indices(size: int, batch_size: int, seed: int, generation: int):
     padded = order + [order[index % size] for index in range(padding)]
     start = chunk * batch_size
     return tuple(padded[start : start + min(batch_size, size)])
+
+
+def _accept_minibatch(child_scores, parent_evaluations, criterion):
+    parent_total = sum(
+        max(item.scores[case] for item in parent_evaluations)
+        for case in range(len(child_scores))
+    )
+    child_total = sum(child_scores)
+    return _MINIBATCH_ACCEPTANCE[criterion](child_total, parent_total)
 
 
 def _case_fronts(scores: Sequence[Sequence[float]]) -> tuple[tuple[int, ...], ...]:

@@ -22,9 +22,7 @@ from eggthreads import (
     COMPACTION_EVENT_TYPE,
     list_children_with_meta,
     list_root_threads,
-    list_threads,
     get_thread_status,
-    get_thread_statuses_bulk,
 )
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.output_optimizer.observability import format_output_optimizer_summary
@@ -105,131 +103,79 @@ class FormattingMixin:
         )
 
     def format_tree(
-        self, root_tid: Optional[str] = None, *, include_root: bool = True
+        self,
+        root_tid: Optional[str] = None,
+        *,
+        include_root: bool = True,
+        include_runnability: bool = False,
     ) -> str:
-        """Format a thread tree, optionally omitting the selected root row."""
-        # Fetch all data upfront to avoid N+1 queries
-        all_threads = list_threads(self.db)
-        if not all_threads:
+        """Format the shared thread-tree representation for terminal display."""
+        from rich.markup import escape as rich_escape
+
+        from eggthreads import get_thread_tree
+
+        tree = get_thread_tree(
+            self.db,
+            root_tid,
+            include_runnability=include_runnability,
+        )
+        if not tree:
             return 'No threads.'
 
-        # Build lookup maps
-        threads_by_id = {t.thread_id: t for t in all_threads}
-
-        # Fetch all parent-child relationships in one query
-        children_map: Dict[str, List[str]] = {}  # parent_id -> [child_ids]
-        parent_set: Set[str] = set()  # threads that have a parent
-        try:
-            cur = self.db.conn.execute("SELECT parent_id, child_id FROM children ORDER BY rowid")
-            for row in cur.fetchall():
-                parent_id, child_id = row[0], row[1]
-                if parent_id not in children_map:
-                    children_map[parent_id] = []
-                children_map[parent_id].append(child_id)
-                parent_set.add(child_id)
-        except Exception:
-            pass
-
-        # Fetch all model settings in one query
-        model_map: Dict[str, str] = {}
-        try:
-            cur = self.db.conn.execute("SELECT thread_id, value FROM thread_config WHERE key = 'model_key'")
-            for row in cur.fetchall():
-                model_map[row[0]] = row[1]
-        except Exception:
-            pass
-
-        # For threads without explicit model, use initial_model_key
-        for t in all_threads:
-            if t.thread_id not in model_map and t.initial_model_key:
-                model_map[t.thread_id] = t.initial_model_key
-
-        # Compute real-time status for all threads in one batch (efficient)
-        all_tids = [t.thread_id for t in all_threads]
-        status_map = get_thread_statuses_bulk(self.db, all_tids, skip_runnability=True)
-
-        # Get roots with live schedulers from self.
         scheduled_set: Set[str] = set()
         try:
             from eggthreads.runner import scheduler_task_is_live
 
             active = getattr(self, 'active_schedulers', {}) or {}
             scheduled_set = {
-                rid for rid, entry in active.items()
-                if isinstance(entry, dict) and scheduler_task_is_live(entry.get('task'))
+                rid
+                for rid, entry in active.items()
+                if isinstance(entry, dict)
+                and scheduler_task_is_live(entry.get('task'))
             }
         except Exception:
             pass
 
         current_thread = getattr(self, 'current_thread', None)
 
-        def format_line_fast(tid: str) -> str:
-            """Format thread line using pre-fetched data."""
-            from rich.markup import escape as rich_escape
-
-            th = threads_by_id.get(tid)
-            if not th:
-                return f"[dim]{tid[-8:]}[/dim] (not found)"
-
-            status = status_map.get(tid, 'idle')
-            # Escape user content to prevent Rich markup interference
-            recap = rich_escape((th.short_recap or 'No recap').strip())
-            mk = rich_escape(model_map.get(tid, 'default'))
-            label = rich_escape(th.name or '')
-            id_short = tid[-8:]
-
+        def format_line(node: Dict[str, Any]) -> str:
+            tid = str(node["id"])
+            status = str(node.get("state") or 'idle')
+            recap = rich_escape((node.get("description") or 'No recap').strip())
+            model = rich_escape(node.get("model") or 'default')
+            label = rich_escape(node.get("name") or '')
             sflag = '[bold yellow]STREAMING[/bold yellow] ' if status == 'streaming' else ''
             cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid == current_thread else ''
             sched_tag = '[bold cyan][SCHED][/bold cyan] ' if tid in scheduled_set else ''
-
-            # Color status based on real-time state
             if status == 'streaming':
                 status_tag = f"[bold yellow]{status}[/]"
             elif status == 'runnable':
                 status_tag = f"[bold green]{status}[/]"
             else:
                 status_tag = f"[dim]{status}[/]"
-
             return (
-                f"{cur_tag}{sched_tag}{sflag}[dim]{id_short}[/dim] {status_tag} - {recap} "
-                f"[dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
+                f"{cur_tag}{sched_tag}{sflag}[dim]{tid[-8:]}[/dim] {status_tag} - {recap} "
+                f"[dim][model: {model}][/dim]"
+                + (f"  [dim]{label}[/dim]" if label else '')
             )
 
-        def render_tree(tid: str, prefix: str = '', is_last: bool = True, out: Optional[List[str]] = None):
-            if out is None:
-                out = []
-            connector = '└─ ' if is_last else '├─ '
-            indent_next = '   ' if is_last else '│  '
-            base_line = format_line_fast(tid)
-            out.append(prefix + connector + base_line)
-
-            kids = children_map.get(tid, [])
-            for i, cid in enumerate(kids):
-                last = (i == len(kids) - 1)
-                render_tree(cid, prefix + indent_next, last, out)
-            return out
-
-        # Find roots. Runtime threads should be real children of the thread
-        # that started the REPL tool call, but legacy unparented rows still
-        # need to remain visible/inspectable rather than being hidden.
-        if root_tid:
-            roots = [root_tid]
-        else:
-            roots = [t.thread_id for t in all_threads if t.thread_id not in parent_set]
-
-        lines: List[str] = []
-        if not roots:
-            return 'No threads.'
+        roots = tree
         if root_tid and not include_root:
-            root_children = children_map.get(root_tid, [])
-            for index, child_id in enumerate(root_children):
-                lines.extend(render_tree(
-                    child_id,
-                    is_last=index == len(root_children) - 1,
-                ))
-            return "\n".join(lines)
-        for rid in roots:
-            lines.extend(render_tree(rid))
+            roots = tree[0]["children"]
+        lines: List[str] = []
+        pending_render = [
+            (root, "", index == len(roots) - 1)
+            for index, root in reversed(list(enumerate(roots)))
+        ]
+        while pending_render:
+            node, prefix, is_last = pending_render.pop()
+            lines.append(prefix + ('└─ ' if is_last else '├─ ') + format_line(node))
+            children = node["children"]
+            next_prefix = prefix + ('   ' if is_last else '│  ')
+            pending_render.extend(
+                (child, next_prefix, index == len(children) - 1)
+                for index, child in reversed(list(enumerate(children)))
+            )
         return "\n".join(lines)
 
     def format_children_panel(self, root_tid: str) -> str:

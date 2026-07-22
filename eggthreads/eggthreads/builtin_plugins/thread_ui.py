@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..plugins import PluginContext
+from ..tools import ToolContext, ToolExecutionResult, ToolRegistry
+
+
+TOOL_NAME = "threads"
 
 
 def _log(context: Any, message: str) -> None:
@@ -137,6 +141,77 @@ def resolve_thread_selector(context: Any, selector: str) -> str | None:
     return _sort_thread_matches_newest_first(context.db, matches)[0]
 
 
+def _thread_tree(
+    db: Any,
+    root_thread_id: str | None = None,
+    *,
+    include_runnability: bool = False,
+) -> list[dict[str, Any]]:
+    """Load the shared nested representation used by the command and tool."""
+
+    from ..api import get_thread_tree
+
+    return get_thread_tree(
+        db, root_thread_id, include_runnability=include_runnability
+    )
+
+
+def threads_tool(args: dict[str, Any], ctx: ToolContext) -> str | ToolExecutionResult:
+    """Return only the calling thread's subtree (or a selected descendant subtree)."""
+
+    caller_thread_id = str(ctx.thread_id or "").strip()
+    if not caller_thread_id:
+        return ToolExecutionResult("Error: threads requires a calling thread.", reason="error")
+
+    from .execution import _thread_db
+
+    db = _thread_db(ctx.db)
+    close_db = db is not ctx.db
+    try:
+        if db.get_thread_metadata(caller_thread_id) is None:
+            return ToolExecutionResult(
+                f"Error: calling thread not found: {caller_thread_id}.", reason="error"
+            )
+
+        requested_root = str(args.get("thread_id") or "").strip()
+        root_thread_id = requested_root or caller_thread_id
+        if root_thread_id != caller_thread_id:
+            from ..api import is_descendant_thread
+
+            if not is_descendant_thread(db, caller_thread_id, root_thread_id):
+                return ToolExecutionResult(
+                    "Error: thread_id must be the calling thread or one of its descendants.",
+                    reason="denied",
+                )
+
+        try:
+            tree = _thread_tree(
+                db,
+                root_thread_id,
+                include_runnability=args.get("status") == "full",
+            )
+        except ValueError as exc:
+            return ToolExecutionResult(f"Error: could not read thread tree: {exc}", reason="error")
+        except Exception:
+            return ToolExecutionResult("Error: could not read thread tree.", reason="error")
+        from ..api import serialize_thread_tree_response, thread_tree_response
+
+        status_mode = "full" if args.get("status") == "full" else "fast"
+        return serialize_thread_tree_response(
+            thread_tree_response(
+                root_thread_id,
+                tree,
+                status_mode=status_mode,
+            )
+        )
+    finally:
+        if close_db:
+            try:
+                db.conn.close()
+            except Exception:
+                pass
+
+
 def new_thread_command(context: Any, arg: str):
     from ..api import append_message, create_root_thread, create_snapshot
     from ..command_catalog import CommandResult
@@ -170,10 +245,47 @@ def threads_command(context: Any, arg: str):
     from ..command_catalog import CommandResult
 
     try:
-        text = context.format_threads() if context.format_threads is not None else "No thread formatter available."
+        from ..api import parse_thread_tree_request
+
+        selector, status_mode = parse_thread_tree_request(arg or "")
+        root_thread_id = None
+        if selector:
+            try:
+                from ..api import resolve_thread_tree_root
+
+                root_thread_id = resolve_thread_tree_root(context.db, selector)
+            except ValueError as exc:
+                _log(context, str(exc))
+                return CommandResult(clear_input=False)
+
+        if context.format_threads is not None:
+            try:
+                text = context.format_threads(
+                    root_thread_id,
+                    include_runnability=status_mode == "full",
+                )
+            except TypeError:
+                # Compatibility for lightweight frontend/test callbacks that
+                # predate the shared status-mode keyword.
+                text = context.format_threads(root_thread_id)
+        else:
+            from ..api import serialize_thread_tree_response, thread_tree_response
+
+            tree = _thread_tree(
+                context.db,
+                root_thread_id,
+                include_runnability=status_mode == "full",
+            )
+            text = serialize_thread_tree_response(
+                thread_tree_response(
+                    root_thread_id,
+                    tree,
+                    status_mode=status_mode,
+                )
+            )
         _log(context, "Threads by subtree (see console for full).")
         if context.console_print_block is not None:
-            context.console_print_block("Threads", text, border_style="blue")
+            context.console_print_block("Subtree" if root_thread_id else "Threads", text, border_style="blue")
         else:
             _log(context, text)
     except Exception as e:
@@ -382,7 +494,7 @@ def continue_thread_command(context: Any, arg: str):
 def register_thread_ui_commands(registry: Any) -> None:
     from ..command_catalog import CommandSpec
 
-    registry.register(CommandSpec("threads", threads_command, category="threads", usage="/threads", description="List threads."))
+    registry.register(CommandSpec("threads", threads_command, category="threads", usage="/threads [selector] [status=fast|full]", description="List all threads or one selected subtree with real-time status."))
     registry.register(CommandSpec("thread", thread_command, category="threads", usage="/thread <selector>", description="Switch to a thread."))
     registry.register(CommandSpec("newThread", new_thread_command, category="threads", usage="/newThread <name>", description="Create a new root thread."))
     registry.register(CommandSpec("deleteThread", delete_thread_command, category="threads", usage="/deleteThread <selector>", description="Delete a thread."))
@@ -392,12 +504,42 @@ def register_thread_ui_commands(registry: Any) -> None:
     registry.register(CommandSpec("continue", continue_thread_command, category="threads", usage="/continue [msg_id=<id>]", description="Continue a thread from a specific point."))
 
 
+def register_threads_tool(registry: ToolRegistry) -> None:
+    registry.register(
+        name=TOOL_NAME,
+        description=(
+            "Return the calling thread's subtree as nested JSON with full ids, names, descriptions, "
+            "effective models, real-time states, and children. Pass thread_id to select a subtree "
+            "rooted at a descendant. Ancestors, siblings, and unrelated threads are not accessible."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "thread_id": {
+                    "type": "string",
+                    "description": "Optional calling-thread or descendant id whose subtree should be returned.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["fast", "full"],
+                    "description": "Status detail: fast (default) detects streaming; full also checks runnable versus idle.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        impl=threads_tool,
+        accepts_context=True,
+    )
+
+
 @dataclass(frozen=True)
 class ThreadUiPlugin:
     name: str = "thread_ui"
     version: str = "0"
 
     def register(self, context: PluginContext) -> None:
+        if context.tool_registry is not None:
+            register_threads_tool(context.tool_registry)
         if context.command_registry is not None:
             register_thread_ui_commands(context.command_registry)
 
@@ -411,8 +553,10 @@ __all__ = [
     "new_thread_command",
     "parent_thread_command",
     "register_thread_ui_commands",
+    "register_threads_tool",
     "resolve_thread_selector",
     "select_threads_by_selector",
     "thread_command",
+    "threads_tool",
     "threads_command",
 ]
