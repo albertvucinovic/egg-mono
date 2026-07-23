@@ -552,6 +552,7 @@ def test_reflection_factory_defaults_to_all_safe_tools_and_can_replace():
 def test_runtime_persists_default_and_explicit_gepa_allowlists(tmp_path, monkeypatch):
     from eggopt import Reflection
     from eggopt.runtime import Runtime
+    from eggthreads import get_context_limit
 
     monkeypatch.chdir(tmp_path)
     default = Reflection.eggthreads(
@@ -569,11 +570,13 @@ def test_runtime_persists_default_and_explicit_gepa_allowlists(tmp_path, monkeyp
         tools=_registry([], []),
         allowed_tools={"python_exec"},
         identity={"model": "restricted-tools"},
+        runner_config=RunnerConfig(context_limit=24_000),
     )
     with Runtime.open(tmp_path / "restricted-run", restricted) as runtime:
         assert get_thread_tools_config(
             runtime.threads, runtime.study_id
         ).allowed_tools == {"python_exec"}
+        assert get_context_limit(runtime.threads, runtime.study_id) == 24_000
 
 
 def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypatch):

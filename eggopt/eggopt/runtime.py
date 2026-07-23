@@ -8,7 +8,13 @@ from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
 from eggflow import FlowExecutor, TaskStore
-from eggthreads import RunnerConfig, ThreadsDB, ToolRegistry, create_root_thread
+from eggthreads import (
+    RunnerConfig,
+    ThreadsDB,
+    ToolRegistry,
+    create_root_thread,
+    set_context_limit,
+)
 
 from .evaluation import Evaluation
 from .gepa.production_drive import (
@@ -133,6 +139,15 @@ class Runtime(Generic[ExampleT, OutputT]):
                 payload={"study_id": study_id},
             )
             threads.conn.commit()
+        runner_config = getattr(reflection.drive, "runner_config", None)
+        context_limit = getattr(runner_config, "context_limit", None)
+        if context_limit is not None:
+            set_context_limit(
+                threads,
+                study_id,
+                context_limit,
+                reason="Eggopt reflection context budget",
+            )
         flow = FlowExecutor(store)
         reflector = EggthreadsReflectionLM(
             flow,
