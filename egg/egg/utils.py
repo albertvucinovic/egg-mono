@@ -51,6 +51,7 @@ Commands:
     /toggleBorders
     /theme [name]
     /redraw
+    /syntaxHighlighting [on|off] — full-screen tool syntax highlighting (default: off)
     /displayMode (full-screen|inline) — full-screen uses alt-screen with
       in-app scrolling + streaming-as-static; inline uses the terminal's
       native scrollback (HEAD behavior, smallest diff, shell-integrated).

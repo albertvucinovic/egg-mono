@@ -103,6 +103,7 @@ def test_default_command_registry_contains_existing_ui_commands() -> None:
         "skill",
         "startSearxng",
         "displayMode",
+        "syntaxHighlighting",
         "authStatus",
         "show",
     ]:
@@ -954,6 +955,11 @@ def test_display_input_commands_are_registered_handlers() -> None:
     assert registry.get("redraw").handler is display_input.redraw_command
     assert registry.get("displayMode").handler is display_input.display_mode_command
     assert registry.get("displayVerbosity").handler is display_input.display_verbosity_command
+    assert (
+        registry.get("syntaxHighlighting").handler
+        is display_input.syntax_highlighting_command
+    )
+    assert registry.complete("syntaxHighlighting", CommandContext(), "") == ["on", "off"]
     assert registry.get("paste").handler is display_input.paste_command
     assert registry.get("enterMode").handler is display_input.enter_mode_command
 
@@ -986,6 +992,7 @@ def test_display_input_commands_change_app_state() -> None:
         _display_is_inline = False
         _pending_mode_change = False
         _display_verbosity = "max"
+        _syntax_highlighting = False
         _borders_visible = False
         _original_box_styles = {"chat": "chat-box", "system": "system-box", "children": "children-box", "approval": "approval-box"}
         chat_output = Panel()
@@ -1003,6 +1010,7 @@ def test_display_input_commands_change_app_state() -> None:
     registry.execute("togglePanel", ctx, "chat")
     registry.execute("displayMode", ctx, "inline")
     registry.execute("displayVerbosity", ctx, "min")
+    registry.execute("syntaxHighlighting", ctx, "on")
     registry.execute("redraw", ctx)
     registry.execute("enterMode", ctx, "newline")
 
@@ -1010,6 +1018,7 @@ def test_display_input_commands_change_app_state() -> None:
     assert app._display_is_inline is True
     assert app._pending_mode_change is True
     assert app._display_verbosity == "min"
+    assert app._syntax_highlighting is True
     assert app.enter_sends is False
     assert "manual" in redrawn
 

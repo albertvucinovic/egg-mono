@@ -1609,9 +1609,12 @@ class PanelsMixin:
         )
 
     def _syntax_highlighting_enabled(self) -> bool:
-        """Syntax spans are intentionally disabled in inline display mode."""
+        """Return whether optional full-screen syntax spans are enabled."""
 
-        return not bool(getattr(self, '_display_is_inline', False))
+        return (
+            bool(getattr(self, '_syntax_highlighting', False))
+            and not bool(getattr(self, '_display_is_inline', False))
+        )
 
     def _remember_tool_call_presentations(self, messages: Any, *, replace: bool = True) -> None:
         """Index declared calls so result messages can recover their command."""

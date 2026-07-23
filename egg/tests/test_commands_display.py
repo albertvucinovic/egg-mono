@@ -237,6 +237,83 @@ class TestCmdDisplayVerbosity:
         )
 
 
+class TestCmdSyntaxHighlighting:
+    """Tests for opt-in full-screen syntax highlighting."""
+
+    def test_default_is_off(self, egg_app):
+        assert egg_app._syntax_highlighting is False
+
+    def test_no_argument_toggles_on(self, egg_app, monkeypatch):
+        redrawn = []
+        monkeypatch.setattr(
+            egg_app,
+            "redraw_static_view",
+            lambda **kwargs: redrawn.append(kwargs),
+        )
+
+        egg_app.handle_command("/syntaxHighlighting")
+
+        assert egg_app._syntax_highlighting is True
+        assert redrawn == [{"reason": "syntax highlighting changed"}]
+
+    def test_enables_and_redraws_full_transcript(self, egg_app, monkeypatch):
+        redrawn = []
+        monkeypatch.setattr(
+            egg_app,
+            "redraw_static_view",
+            lambda **kwargs: redrawn.append(kwargs),
+        )
+
+        egg_app.handle_command("/syntaxHighlighting on")
+
+        assert egg_app._syntax_highlighting is True
+        assert redrawn == [{"reason": "syntax highlighting changed"}]
+        assert any("now on" in message for message in egg_app._system_log)
+
+    def test_disables_and_same_state_is_truthful_noop(self, egg_app, monkeypatch):
+        redrawn = []
+        monkeypatch.setattr(
+            egg_app,
+            "redraw_static_view",
+            lambda **kwargs: redrawn.append(kwargs),
+        )
+        egg_app.handle_command("/syntaxHighlighting on")
+
+        egg_app.handle_command("/syntaxHighlighting off")
+        egg_app.handle_command("/syntaxHighlighting off")
+
+        assert egg_app._syntax_highlighting is False
+        assert redrawn == [
+            {"reason": "syntax highlighting changed"},
+            {"reason": "syntax highlighting changed"},
+        ]
+        assert any("already off" in message for message in egg_app._system_log)
+
+    def test_invalid_value_does_not_change_state(self, egg_app):
+        egg_app.handle_command("/syntaxHighlighting maybe")
+
+        assert egg_app._syntax_highlighting is False
+        assert any(
+            "/syntaxHighlighting [on|off]" in message
+            for message in egg_app._system_log
+        )
+
+    def test_command_is_process_local_not_persisted_in_thread(self, egg_app, monkeypatch):
+        events_before = egg_app.db.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE thread_id=?",
+            (egg_app.current_thread,),
+        ).fetchone()[0]
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda **_kwargs: None)
+
+        egg_app.handle_command("/syntaxHighlighting on")
+
+        events_after = egg_app.db.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE thread_id=?",
+            (egg_app.current_thread,),
+        ).fetchone()[0]
+        assert events_after == events_before
+
+
 class TestCmdTheme:
     """Tests for terminal Egg /theme."""
 

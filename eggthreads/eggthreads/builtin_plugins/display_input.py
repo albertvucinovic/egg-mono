@@ -132,6 +132,56 @@ def display_verbosity_command(context: Any, arg: str):
     return CommandResult(clear_input=True, message=message)
 
 
+def syntax_highlighting_command(context: Any, arg: str):
+    """Toggle or report optional terminal syntax highlighting."""
+
+    from ..command_catalog import CommandResult
+
+    app = _app(context)
+    if app is None:
+        _log(context, "/syntaxHighlighting requires an app context")
+        return CommandResult(clear_input=False)
+    value = (arg or "").strip().lower()
+    current = bool(getattr(app, "_syntax_highlighting", False))
+    if not value:
+        enabled = not current
+    else:
+        aliases = {
+            "on": True,
+            "true": True,
+            "yes": True,
+            "1": True,
+            "off": False,
+            "false": False,
+            "no": False,
+            "0": False,
+        }
+        if value not in aliases:
+            message = (
+                "Usage: /syntaxHighlighting [on|off]   "
+                f"(current: {'on' if current else 'off'}; full-screen only)"
+            )
+            _log(context, message)
+            return CommandResult(clear_input=False, message=message)
+        enabled = aliases[value]
+    if enabled == current:
+        state = "on" if enabled else "off"
+        message = f"Syntax highlighting already {state}."
+        _log(context, message)
+        return CommandResult(clear_input=True, message=message)
+
+    app._syntax_highlighting = enabled
+    state = "on" if enabled else "off"
+    message = f"Syntax highlighting is now {state} (full-screen only)."
+    _log(context, message)
+    try:
+        app.redraw_static_view(reason="syntax highlighting changed")
+    except Exception as e:
+        _log(context, f"/syntaxHighlighting redraw error: {e}")
+        return CommandResult(clear_input=False, message=f"{message} Redraw failed: {e}")
+    return CommandResult(clear_input=True, message=message)
+
+
 def toggle_borders_command(context: Any, arg: str):
     from ..command_catalog import CommandResult
 
@@ -227,6 +277,16 @@ def register_display_input_commands(registry: Any) -> None:
     registry.register(CommandSpec("redraw", redraw_command, category="display", usage="/redraw", description="Redraw the static transcript."))
     registry.register(CommandSpec("displayMode", display_mode_command, category="display", usage="/displayMode <full-screen|inline>", description="Switch display mode.", complete=lambda ctx, arg: _complete_from(["full-screen", "inline"], arg)))
     registry.register(CommandSpec("displayVerbosity", display_verbosity_command, category="display", usage="/displayVerbosity <max|medium|min>", description="Set transcript display verbosity.", complete=lambda ctx, arg: _complete_from(["max", "medium", "min"], arg)))
+    registry.register(
+        CommandSpec(
+            "syntaxHighlighting",
+            syntax_highlighting_command,
+            category="display",
+            usage="/syntaxHighlighting [on|off]",
+            description="Toggle full-screen tool syntax highlighting.",
+            complete=lambda ctx, arg: _complete_from(["on", "off"], arg),
+        )
+    )
     registry.register(CommandSpec("paste", paste_command, category="input", usage="/paste", description="Paste clipboard content into the input panel."))
     registry.register(CommandSpec("enterMode", enter_mode_command, category="input", usage="/enterMode <send|newline>", description="Set Enter key behavior.", complete=lambda ctx, arg: _complete_from(["send", "newline"], arg)))
 
@@ -249,6 +309,7 @@ __all__ = [
     "paste_command",
     "redraw_command",
     "register_display_input_commands",
+    "syntax_highlighting_command",
     "toggle_borders_command",
     "toggle_panel_command",
 ]

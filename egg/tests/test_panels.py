@@ -1269,6 +1269,7 @@ class TestConsolePrintMessage:
     def test_full_screen_medium_highlights_scripts_and_paired_bash_results(self, egg_app):
         egg_app._display_is_inline = False
         egg_app._display_verbosity = "medium"
+        egg_app._syntax_highlighting = True
         assistant = {
             'role': 'assistant',
             'content': '',
@@ -1296,9 +1297,31 @@ class TestConsolePrintMessage:
         assert any(call_text.plain[span.start:span.end] == 'cat' for span in call_text.spans)
         assert any(result_text.plain[span.start:span.end] == 'def' for span in result_text.spans)
 
+    def test_full_screen_medium_syntax_highlighting_is_off_by_default(self, egg_app):
+        egg_app._display_is_inline = False
+        egg_app._display_verbosity = "medium"
+        message = {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [{
+                'function': {
+                    'name': 'python_exec',
+                    'arguments': {'script': 'def answer():\n    return 42'},
+                },
+            }],
+        }
+
+        text = egg_app._static_transcript_message_renderables(message)[0].renderable.renderable
+        styled_values = {text.plain[span.start:span.end] for span in text.spans}
+
+        assert egg_app._syntax_highlighting is False
+        assert 'def' not in styled_values
+        assert 'return' not in styled_values
+
     def test_inline_medium_explicitly_disables_syntax_highlighting(self, egg_app):
         egg_app._display_is_inline = True
         egg_app._display_verbosity = "medium"
+        egg_app._syntax_highlighting = True
         assistant = {
             'role': 'assistant',
             'content': '',
@@ -1320,6 +1343,7 @@ class TestConsolePrintMessage:
     def test_full_screen_syntax_highlighting_honors_active_theme(self, egg_app):
         egg_app._display_is_inline = False
         egg_app._display_verbosity = "medium"
+        egg_app._syntax_highlighting = True
         egg_app.apply_theme("ocean")
         message = {
             'role': 'assistant',

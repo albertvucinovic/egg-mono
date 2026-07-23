@@ -214,6 +214,10 @@ class EggDisplayApp(
         # UI-only, process-local transcript display verbosity. This does not
         # define a persisted or cross-client setting authority.
         self._display_verbosity: str = 'min'
+        # Syntax highlighting is an optional, process-local full-screen
+        # presentation aid. Keep it off by default so medium tool output stays
+        # visually restrained unless the user explicitly enables it.
+        self._syntax_highlighting: bool = False
 
         # Panels
         # Single-column layout (system, children, chat, input)

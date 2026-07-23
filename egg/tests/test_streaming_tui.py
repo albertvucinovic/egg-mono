@@ -784,6 +784,11 @@ def test_completed_tool_call_arguments_are_highlighted_only_full_screen(tmp_path
 
     app._display_is_inline = False
     asyncio.run(app.ingest_event_for_live(event, tid))
+    app._flush_stream_render_buffer_now(force=True)
+    assert calls == []
+
+    app._syntax_highlighting = True
+    asyncio.run(app.ingest_event_for_live(event, tid))
     assert calls
     rendered = "".join(calls)
     assert rendered.startswith("<END><BEGIN>")

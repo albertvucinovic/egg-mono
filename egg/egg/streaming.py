@@ -565,7 +565,7 @@ class StreamingMixin:
                             if 'arguments' in function
                             else raw_call.get('arguments')
                         )
-                        if bool(getattr(self, '_display_is_inline', False)):
+                        if not self._syntax_highlighting_enabled():
                             continue
                         if not self._replace_streamed_tool_call_arguments_with_highlight(name, arguments):
                             # Keep replay/full-screen output correct even when a
@@ -756,7 +756,7 @@ class StreamingMixin:
     def _highlight_completed_tool_call_arguments(self, tool_name: Any, arguments: Any) -> str | None:
         """Return safe Rich markup for completed full-screen script arguments."""
 
-        if bool(getattr(self, '_display_is_inline', False)):
+        if not self._syntax_highlighting_enabled():
             return None
         decoded = decode_tool_arguments(arguments)
         fields = [
