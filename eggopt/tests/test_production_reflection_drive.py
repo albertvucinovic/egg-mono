@@ -370,7 +370,7 @@ def test_streaming_context_ceiling_interrupts_only_reflection_operation(
     events = list(db.events_since(occurrence.mutation_thread_id, 0))
     assert any(event["type"] == "control.interrupt" for event in events)
     assert reflector.drive.semantic_identity["context_ceiling"] == {
-        "policy": "eggopt.gepa.streaming-context-ceiling",
+        "policy": "eggopt.gepa.streaming-context-limit",
         "version": "1",
         "max_tokens": 180,
     }

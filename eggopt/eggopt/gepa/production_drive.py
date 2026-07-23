@@ -267,7 +267,7 @@ class EggthreadsReflectionDrive:
                 "max_correction_turns": max_correction_turns,
             },
             "context_ceiling": {
-                "policy": "eggopt.gepa.streaming-context-ceiling",
+                "policy": "eggopt.gepa.streaming-context-limit",
                 "version": "1",
                 "max_tokens": context_limit,
             },
