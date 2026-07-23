@@ -7,6 +7,12 @@ from typing import Any, Iterable
 
 from rich.text import Text
 
+from .syntax_highlighting import (
+    infer_tool_output_syntax,
+    syntax_highlight_text,
+    tool_argument_syntax_lexer,
+)
+
 
 MEDIUM_TOOL_PREVIEW_MAX_LINES = 20
 MEDIUM_TOOL_PREVIEW_HEAD_LINES = 12
@@ -344,21 +350,65 @@ def _append_line(text: Text, line: str, style: str) -> None:
     text.append(line, style=style)
 
 
-def _styled_tool_arguments_rendered(rendered: str, styles: MediumToolStyles) -> Text:
-    """Color semantic labels while preserving argument values literally."""
+def _append_text_line(text: Text, line: Text, *, prefix: str = "") -> None:
+    if text:
+        text.append("\n")
+    if prefix:
+        text.append(prefix)
+    text.append_text(line)
+
+
+def _styled_tool_arguments_rendered(
+    rendered: str,
+    styles: MediumToolStyles,
+    *,
+    tool_name: str = "",
+    syntax_theme: Any = None,
+) -> Text:
+    """Color semantic labels and known script blocks without parsing markup."""
 
     text = Text()
     continuation_style = styles.argument_value
+    syntax_lexer: str | None = None
+    syntax_lines: list[str] = []
+    syntax_indent = ""
+
+    def flush_syntax_lines() -> None:
+        nonlocal syntax_lines, syntax_indent
+        if not syntax_lines or syntax_lexer is None:
+            return
+        source_lines = [
+            line[len(syntax_indent):] if syntax_indent and line.startswith(syntax_indent) else line
+            for line in syntax_lines
+        ]
+        highlighted = syntax_highlight_text("\n".join(source_lines), syntax_lexer, syntax_theme)
+        highlighted_lines = highlighted.split("\n", allow_blank=True)
+        for index, line in enumerate(highlighted_lines):
+            raw_line = syntax_lines[index] if index < len(syntax_lines) else ""
+            prefix = syntax_indent if syntax_indent and raw_line.startswith(syntax_indent) else ""
+            _append_text_line(text, line, prefix=prefix)
+        syntax_lines = []
+        syntax_indent = ""
+
     for raw_line in rendered.splitlines():
         stripped = raw_line.lstrip(" ")
         indent = raw_line[:len(raw_line) - len(stripped)]
         if stripped in {"(no arguments)", "(no output)", "(no streamed output)"}:
+            flush_syntax_lines()
+            _append_line(text, raw_line, styles.muted)
+            continuation_style = styles.muted
+            syntax_lexer = None
+            continue
+        if stripped.startswith("… omitted "):
+            flush_syntax_lines()
             _append_line(text, raw_line, styles.muted)
             continuation_style = styles.muted
             continue
-        if stripped.startswith("… omitted ") or stripped.startswith("Inspect complete persisted record:"):
+        if stripped.startswith("Inspect complete persisted record:"):
+            flush_syntax_lines()
             _append_line(text, raw_line, styles.muted)
             continuation_style = styles.muted
+            syntax_lexer = None
             continue
         key, separator, remainder = stripped.partition(":")
         is_labeled_argument = (
@@ -370,6 +420,7 @@ def _styled_tool_arguments_rendered(rendered: str, styles: MediumToolStyles) -> 
             and len(key) <= 80
         )
         if is_labeled_argument:
+            flush_syntax_lines()
             if text:
                 text.append("\n")
             text.append(indent)
@@ -378,13 +429,36 @@ def _styled_tool_arguments_rendered(rendered: str, styles: MediumToolStyles) -> 
             if remainder:
                 text.append(remainder, style=styles.argument_value)
             continuation_style = styles.argument_value
+            syntax_lexer = (
+                tool_argument_syntax_lexer(tool_name, key)
+                if syntax_theme is not None and not remainder
+                else None
+            )
+            continue
+        if syntax_lexer is not None:
+            if not syntax_lines:
+                syntax_indent = raw_line[:len(raw_line) - len(raw_line.lstrip(" "))]
+            syntax_lines.append(raw_line)
             continue
         _append_line(text, raw_line, continuation_style)
+    flush_syntax_lines()
     return text
 
 
-def _tool_argument_text(value: Any, styles: MediumToolStyles) -> Text:
-    return _styled_tool_arguments_rendered(format_medium_tool_arguments(value), styles)
+def _tool_argument_text(
+    value: Any,
+    styles: MediumToolStyles,
+    *,
+    tool_name: str = "",
+    syntax_theme: Any = None,
+    inspect_message_id: str = "",
+) -> Text:
+    return _styled_tool_arguments_rendered(
+        format_medium_tool_arguments(value, inspect_message_id=inspect_message_id),
+        styles,
+        tool_name=tool_name,
+        syntax_theme=syntax_theme,
+    )
 
 
 def medium_tool_calls_text(
@@ -392,6 +466,7 @@ def medium_tool_calls_text(
     *,
     styles: MediumToolStyles,
     inspect_message_id: str = "",
+    syntax_theme: Any = None,
 ) -> Text:
     """Return theme-aware Rich text for a grouped medium tool declaration."""
 
@@ -409,7 +484,12 @@ def medium_tool_calls_text(
             text.append(" · ", style=styles.muted)
             text.append("tool_call_id:", style=styles.muted)
             text.append(f" {call.tool_call_id}", style=styles.muted)
-        arguments = _tool_argument_text(call.arguments, styles)
+        arguments = _tool_argument_text(
+            call.arguments,
+            styles,
+            tool_name=call.name,
+            syntax_theme=syntax_theme,
+        )
         if "… omitted " in arguments.plain:
             any_bounded = True
         text.append("\n")
@@ -431,12 +511,16 @@ def medium_tool_arguments_text(
     *,
     styles: MediumToolStyles,
     inspect_message_id: str = "",
+    tool_name: str = "",
+    syntax_theme: Any = None,
 ) -> Text:
-    rendered = format_medium_tool_arguments(
+    return _tool_argument_text(
         arguments,
+        styles,
+        tool_name=tool_name,
+        syntax_theme=syntax_theme,
         inspect_message_id=inspect_message_id,
     )
-    return _styled_tool_arguments_rendered(rendered, styles)
 
 
 def medium_tool_result_text(
@@ -446,6 +530,9 @@ def medium_tool_result_text(
     inspect_message_id: str = "",
     recovery_hint: str = "",
     streamed: bool = False,
+    tool_name: str = "",
+    tool_arguments: Any = None,
+    syntax_theme: Any = None,
 ) -> Text:
     """Return literal result content with semantic metadata styling only."""
 
@@ -461,25 +548,71 @@ def medium_tool_result_text(
             recovery_hint=recovery_hint,
         )
     text = Text()
-    for raw_line in rendered.splitlines():
-        if raw_line.startswith("… omitted "):
+    lines = rendered.splitlines()
+    channel = ""
+    section: list[str] = []
+    metadata_break_pending = False
+
+    def flush_section() -> None:
+        nonlocal section
+        if not section:
+            return
+        body = "\n".join(section)
+        hint = (
+            infer_tool_output_syntax(tool_name, tool_arguments, body, channel=channel)
+            if syntax_theme is not None
+            else None
+        )
+        if hint is None:
+            for line in section:
+                _append_line(text, line, styles.result)
+        else:
+            highlighted = syntax_highlight_text(body, hint.lexer, syntax_theme)
+            for line in highlighted.split("\n"):
+                if text:
+                    text.append("\n")
+                text.append_text(line)
+        section = []
+
+    for raw_line in lines:
+        if metadata_break_pending and raw_line == "":
+            _append_line(text, "", styles.result)
+            metadata_break_pending = False
+            continue
+        metadata_break_pending = False
+        if raw_line in {"--- STDOUT ---", "--- STDERR ---"}:
+            flush_section()
+            channel = "stdout" if raw_line == "--- STDOUT ---" else "stderr"
             _append_line(text, raw_line, styles.muted)
+            continue
+        if raw_line.startswith("… omitted "):
+            flush_section()
+            _append_line(text, raw_line, styles.muted)
+            channel = ""
         elif raw_line.startswith("Inspect complete persisted record:"):
+            flush_section()
             prefix, _separator, command = raw_line.partition(":")
             if text:
                 text.append("\n")
             text.append(f"{prefix}:", style=styles.muted)
             text.append(command, style=styles.command)
+            metadata_break_pending = True
+            channel = ""
         elif raw_line.startswith("Raw output:"):
+            flush_section()
             command = raw_line[len("Raw output:"):]
             if text:
                 text.append("\n")
             text.append("Raw output:", style=styles.muted)
             text.append(command, style=styles.command)
+            metadata_break_pending = True
+            channel = ""
         elif raw_line in {"(no output)", "(no streamed output)"}:
+            flush_section()
             _append_line(text, raw_line, styles.muted)
         else:
-            _append_line(text, raw_line, styles.result)
+            section.append(raw_line)
+    flush_section()
     return text
 
 

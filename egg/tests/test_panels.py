@@ -1266,6 +1266,83 @@ class TestConsolePrintMessage:
         assert on_panel.box == rich_box.SQUARE
         assert any(str(span.style) == 'egg.accent' for span in on_panel.renderable.spans)
 
+    def test_full_screen_medium_highlights_scripts_and_paired_bash_results(self, egg_app):
+        egg_app._display_is_inline = False
+        egg_app._display_verbosity = "medium"
+        assistant = {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [{
+                'id': 'call-syntax',
+                'function': {
+                    'name': 'bash',
+                    'arguments': {'script': 'cat example.py'},
+                },
+            }],
+        }
+        result = {
+            'role': 'tool',
+            'name': 'bash',
+            'tool_call_id': 'call-syntax',
+            'content': '--- STDOUT ---\ndef answer():\n    return 42',
+        }
+
+        egg_app._remember_tool_call_presentations([assistant, result])
+        call_text = egg_app._static_transcript_message_renderables(assistant)[0].renderable.renderable
+        result_text = egg_app._static_transcript_message_renderables(result)[0].renderable.renderable
+
+        assert call_text.plain.endswith('script:\n     cat example.py')
+        assert result_text.plain == '--- STDOUT ---\ndef answer():\n    return 42'
+        assert any(call_text.plain[span.start:span.end] == 'cat' for span in call_text.spans)
+        assert any(result_text.plain[span.start:span.end] == 'def' for span in result_text.spans)
+
+    def test_inline_medium_explicitly_disables_syntax_highlighting(self, egg_app):
+        egg_app._display_is_inline = True
+        egg_app._display_verbosity = "medium"
+        assistant = {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [{
+                'id': 'call-inline-syntax',
+                'function': {
+                    'name': 'python_exec',
+                    'arguments': {'script': 'def answer():\n    return 42'},
+                },
+            }],
+        }
+
+        text = egg_app._static_transcript_message_renderables(assistant)[0].renderable.renderable
+        styled = [(text.plain[span.start:span.end], str(span.style)) for span in text.spans]
+
+        assert ('script', 'bold cyan') in styled
+        assert not any(value in {'def', 'return', 'answer'} for value, _style in styled)
+
+    def test_full_screen_syntax_highlighting_honors_active_theme(self, egg_app):
+        egg_app._display_is_inline = False
+        egg_app._display_verbosity = "medium"
+        egg_app.apply_theme("ocean")
+        message = {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [{
+                'function': {
+                    'name': 'python_exec',
+                    'arguments': {'script': 'def answer():\n    return 42'},
+                },
+            }],
+        }
+
+        text = egg_app._static_transcript_message_renderables(message)[0].renderable.renderable
+        keyword_styles = [
+            span.style
+            for span in text.spans
+            if text.plain[span.start:span.end] in {'def', 'return'}
+        ]
+
+        assert keyword_styles
+        accent_color = egg_app.console.get_style('egg.accent').color
+        assert all(getattr(style, 'color', None) == accent_color for style in keyword_styles)
+
     @pytest.mark.parametrize("verbosity", ["max", "medium", "min"])
     def test_answer_user_preserve_turn_note_visible_at_all_verbosities(self, egg_app, monkeypatch, verbosity):
         """Assistant notes should render as distinct full-body panels even in min."""

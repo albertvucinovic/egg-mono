@@ -5,6 +5,8 @@ import json
 import re
 import uuid
 
+from rich.text import Text
+
 
 def _uid() -> str:
     return uuid.uuid4().hex
@@ -747,6 +749,54 @@ def test_streaming_tool_call_arguments_use_theme_style(tmp_path, monkeypatch):
     rendered = "".join(calls)
     assert "[egg.tool_call_dim]" in rendered
     assert "Tool Call Args: bash" in rendered
+
+
+def test_completed_tool_call_arguments_are_highlighted_only_full_screen(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    calls = []
+
+    class Renderer:
+        def stream_end(self):
+            calls.append("<END>")
+
+        def stream_begin(self):
+            calls.append("<BEGIN>")
+
+        def stream_append(self, payload):
+            calls.append(payload)
+
+    app._renderer = Renderer()
+    event = {
+        "type": "msg.create",
+        "invoke_id": _uid(),
+        "payload_json": json.dumps({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call-complete",
+                "function": {
+                    "name": "python_exec",
+                    "arguments": {"script": "def answer():\n    return 42"},
+                },
+            }],
+        }),
+    }
+
+    app._display_is_inline = False
+    asyncio.run(app.ingest_event_for_live(event, tid))
+    assert calls
+    rendered = "".join(calls)
+    assert rendered.startswith("<END><BEGIN>")
+    assert "Tool Call Args: python_exec" in rendered
+    assert "def answer" in Text.from_markup(rendered).plain
+    assert "\x1b" not in rendered  # Rich markup, not pre-rendered terminal control bytes.
+    assert "bold cyan" in rendered
+
+    calls.clear()
+    app._display_is_inline = True
+    asyncio.run(app.ingest_event_for_live(event, tid))
+    app._flush_stream_render_buffer_now(force=True)
+    assert calls == []
 
 
 def test_streaming_assistant_text_uses_theme_style(tmp_path, monkeypatch):

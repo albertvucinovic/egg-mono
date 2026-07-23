@@ -9,10 +9,16 @@ from typing import Any, Dict, Optional
 
 from eggthreads import create_snapshot, EventWatcher, ThreadsDB
 from eggdisplay import ChunkedText
+from rich.markup import escape as rich_escape
 
 from .panels import (
     CHILDREN_PANEL_RELEVANT_EVENT_TYPES,
     GET_USER_INPUT_RELEVANT_EVENT_TYPES,
+)
+from .syntax_highlighting import (
+    decode_tool_arguments,
+    syntax_highlight_text,
+    tool_argument_syntax_lexer,
 )
 
 
@@ -543,6 +549,31 @@ class StreamingMixin:
                         self._live_state['timeout_started_at'] = self._event_started_at_epoch(
                             e["ts"] if "ts" in e.keys() else None
                         ) or self._live_state.get('started_at')
+                calls = payload.get('tool_calls')
+                if isinstance(calls, list):
+                    for raw_call in calls:
+                        if not isinstance(raw_call, dict):
+                            continue
+                        function = (
+                            raw_call.get('function')
+                            if isinstance(raw_call.get('function'), dict)
+                            else raw_call
+                        )
+                        name = function.get('name') or raw_call.get('name') or 'tool'
+                        arguments = (
+                            function.get('arguments')
+                            if 'arguments' in function
+                            else raw_call.get('arguments')
+                        )
+                        if bool(getattr(self, '_display_is_inline', False)):
+                            continue
+                        if not self._replace_streamed_tool_call_arguments_with_highlight(name, arguments):
+                            # Keep replay/full-screen output correct even when a
+                            # lightweight renderer cannot perform replacement.
+                            self._stream_append_on_renderer(
+                                f"\n[Tool Call Args: {name}]\n{arguments}",
+                                style=_tool_call_args_stream_style(self),
+                            )
         elif t == 'tool_call.execution_started':
             try:
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
@@ -721,6 +752,68 @@ class StreamingMixin:
             return raw if "[" not in raw else raw.replace('[', '\\[')
         escaped = (text or "").replace('[', '\\[')
         return f"[{style}]{escaped}[/{style}]" if style else escaped
+
+    def _highlight_completed_tool_call_arguments(self, tool_name: Any, arguments: Any) -> str | None:
+        """Return safe Rich markup for completed full-screen script arguments."""
+
+        if bool(getattr(self, '_display_is_inline', False)):
+            return None
+        decoded = decode_tool_arguments(arguments)
+        fields = [
+            (str(key), str(value), tool_argument_syntax_lexer(tool_name, key))
+            for key, value in decoded.items()
+            if isinstance(value, str) and tool_argument_syntax_lexer(tool_name, key) is not None
+        ]
+        if len(fields) != 1:
+            return None
+        key, value, lexer = fields[0]
+        if len(value) > 4096 or len(value.splitlines()) > 20:
+            return None
+        try:
+            highlighted = syntax_highlight_text(value, lexer or "", self._medium_syntax_theme())
+            body = highlighted.markup
+        except Exception:
+            return None
+        label_style = _tool_call_args_stream_style(self)
+        label = rich_escape(f"\n[Tool Call Args: {tool_name}]\n{key}:\n  ")
+        label = f"[{label_style}]{label}[/{label_style}]" if label_style else label
+        return label + body.replace("\n", "\n  ")
+
+    def _replace_streamed_tool_call_arguments_with_highlight(
+        self,
+        tool_name: Any,
+        arguments: Any,
+    ) -> bool:
+        """Replace an unexecuted streamed declaration with its highlighted form.
+
+        Tool arguments arrive first as incomplete JSON deltas. Once the final
+        assistant message is published, rebuilding the transient stream is the
+        only way to avoid showing both the plain partial JSON and the completed
+        highlighted script before the final result replaces the stream.
+        """
+
+        highlighted = self._highlight_completed_tool_call_arguments(tool_name, arguments)
+        if not highlighted:
+            return False
+        renderer = getattr(self, '_renderer', None)
+        if renderer is None or not hasattr(renderer, 'stream_append'):
+            return False
+        self._flush_stream_render_buffer_now(force=True)
+        try:
+            renderer.stream_end()
+            renderer.stream_begin()
+            for chunk in _iter_stream_text(self._live_state.get('reason')):
+                self._stream_append_on_renderer(chunk, style=STREAM_STYLE_REASON)
+            for chunk in _iter_stream_text(self._live_state.get('content')):
+                self._stream_append_on_renderer(chunk, style=_assistant_stream_style(self))
+            for _name, text in (self._live_state.get('tools') or {}).items():
+                for chunk in _iter_stream_text(text):
+                    self._stream_append_on_renderer(chunk, style=STREAM_STYLE_TOOL_OUTPUT)
+            self._flush_stream_render_buffer_now(force=True)
+            renderer.stream_append(highlighted)
+            return True
+        except Exception:
+            return False
 
     def _clear_stream_render_buffer(self) -> None:
         try:

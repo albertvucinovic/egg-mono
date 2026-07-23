@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from rich.style import Style
+
+from egg.syntax_highlighting import semantic_syntax_theme
 from egg.tool_presentation import (
     MediumToolStyles,
     bounded_medium_preview,
@@ -19,6 +22,17 @@ SEMANTIC_STYLES = MediumToolStyles(
     result="white",
     muted="dim",
     command="bold cyan",
+)
+
+
+SYNTAX_THEME = semantic_syntax_theme(
+    foreground=Style(color="white"),
+    muted=Style(dim=True),
+    accent=Style(color="cyan"),
+    string=Style(color="yellow"),
+    name=Style(color="green"),
+    number=Style(color="magenta"),
+    error=Style(color="red"),
 )
 
 
@@ -234,3 +248,54 @@ def test_medium_multiline_argument_does_not_reclassify_value_colons_as_keys():
     styled = [(rendered.plain[span.start:span.end], str(span.style)) for span in rendered.spans]
     assert any("https://example.test/path" in value and style == "white" for value, style in styled)
     assert any("label: value" in value and style == "white" for value, style in styled)
+
+
+def test_medium_bash_script_argument_uses_syntax_spans_and_keeps_literal_text():
+    script = 'for item in one two; do\n  echo "[red]$item[/red]"\ndone'
+    rendered = medium_tool_calls_text([
+        {
+            "function": {
+                "name": "bash",
+                "arguments": {"script": script, "timeout": 30},
+            },
+        },
+    ], styles=SEMANTIC_STYLES, syntax_theme=SYNTAX_THEME)
+
+    assert 'for item in one two; do' in rendered.plain
+    assert 'echo "[red]$item[/red]"' in rendered.plain
+    assert 'done' in rendered.plain
+    styled = [(rendered.plain[span.start:span.end], str(span.style)) for span in rendered.spans]
+    assert any(value == "for" and "cyan" in style for value, style in styled)
+    assert "[red]$item[/red]" in rendered.plain
+
+
+def test_medium_python_repl_code_uses_python_syntax_spans():
+    rendered = medium_tool_calls_text([
+        {
+            "function": {
+                "name": "python_repl",
+                "arguments": {"code": "def answer():\n    return 42"},
+            },
+        },
+    ], styles=SEMANTIC_STYLES, syntax_theme=SYNTAX_THEME)
+
+    styled = [(rendered.plain[span.start:span.end], str(span.style)) for span in rendered.spans]
+    assert any(value == "def" and "cyan" in style for value, style in styled)
+    assert any(value == "answer" and "green" in style for value, style in styled)
+
+
+def test_medium_bash_result_highlights_sections_without_styling_metadata_as_code():
+    rendered = medium_tool_result_text(
+        '--- STDOUT ---\n{"ok": true}\n--- STDERR ---\nplain diagnostic',
+        styles=SEMANTIC_STYLES,
+        tool_name="bash",
+        tool_arguments={"script": "jq . result.json"},
+        syntax_theme=SYNTAX_THEME,
+    )
+
+    assert rendered.plain == '--- STDOUT ---\n{"ok": true}\n--- STDERR ---\nplain diagnostic'
+    styled = [(rendered.plain[span.start:span.end], str(span.style)) for span in rendered.spans]
+    assert ("--- STDOUT ---", "dim") in styled
+    assert ("--- STDERR ---", "dim") in styled
+    assert any('"ok"' in value and "yellow" in style for value, style in styled)
+    assert any("plain diagnostic" in value and style == "white" for value, style in styled)

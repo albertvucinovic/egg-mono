@@ -36,6 +36,7 @@ from .tool_presentation import (
     tool_call_presentation,
     tool_result_recovery_hint,
 )
+from .syntax_highlighting import semantic_syntax_theme
 
 
 CHILDREN_PANEL_FALLBACK_REFRESH_SEC = 1.0
@@ -174,6 +175,7 @@ class TranscriptScrollbackSource:
                     for msg_id, info in per_message.items()
                     if isinstance(msg_id, str) and isinstance(info, dict)
                 }
+            self._panels._remember_tool_call_presentations(msgs)
         except Exception:
             msgs = []
         try:
@@ -1582,6 +1584,63 @@ class PanelsMixin:
             command="bold cyan",
         )
 
+    def _medium_syntax_theme(self) -> Any:
+        """Resolve a transparent syntax palette through the active Egg theme."""
+
+        get_style = self.console.get_style
+        if getattr(self, '_rich_theme', None) is not None:
+            return semantic_syntax_theme(
+                foreground=get_style("egg.foreground"),
+                muted=get_style("egg.muted"),
+                accent=get_style("egg.accent"),
+                string=get_style("egg.tool_call"),
+                name=get_style("egg.tool"),
+                number=get_style("egg.reasoning"),
+                error=get_style("egg.tool_call"),
+            )
+        return semantic_syntax_theme(
+            foreground=get_style("white"),
+            muted=get_style("dim"),
+            accent=get_style("bold cyan"),
+            string=get_style("yellow"),
+            name=get_style("green"),
+            number=get_style("magenta"),
+            error=get_style("red"),
+        )
+
+    def _syntax_highlighting_enabled(self) -> bool:
+        """Syntax spans are intentionally disabled in inline display mode."""
+
+        return not bool(getattr(self, '_display_is_inline', False))
+
+    def _remember_tool_call_presentations(self, messages: Any, *, replace: bool = True) -> None:
+        """Index declared calls so result messages can recover their command."""
+
+        current = getattr(self, '_tool_call_presentation_index', None)
+        index: Dict[str, Any] = (
+            {}
+            if replace or not isinstance(current, dict)
+            else dict(current)
+        )
+        for message in messages if isinstance(messages, list) else ():
+            if not isinstance(message, dict):
+                continue
+            calls = message.get('tool_calls')
+            if not isinstance(calls, list):
+                continue
+            for raw_call in calls:
+                call = tool_call_presentation(raw_call)
+                if call.tool_call_id:
+                    index[call.tool_call_id] = call
+        self._tool_call_presentation_index = index
+
+    def _tool_result_call_presentation(self, message: Dict[str, Any]) -> Any:
+        call_id = str(message.get('tool_call_id') or '')
+        index = getattr(self, '_tool_call_presentation_index', None)
+        if call_id and isinstance(index, dict):
+            return index.get(call_id)
+        return None
+
     def _assistant_body_style(self, *, markdown: bool = False, note: bool = False) -> Optional[str]:
         """Return assistant body style without changing the default theme."""
         if getattr(self, '_rich_theme', None) is not None:
@@ -1832,6 +1891,11 @@ class PanelsMixin:
                             tcs,
                             styles=self._medium_tool_styles(),
                             inspect_message_id=str(msg_id or ''),
+                            syntax_theme=(
+                                self._medium_syntax_theme()
+                                if self._syntax_highlighting_enabled()
+                                else None
+                            ),
                         )
                         if verbosity == 'medium'
                         else Text("\n".join(lines), no_wrap=False, overflow='fold', style=tool_call_body_style)
@@ -1876,6 +1940,12 @@ class PanelsMixin:
                                     styles=self._medium_tool_styles(),
                                     inspect_message_id=str(msg_id or ''),
                                     streamed=True,
+                                    tool_name=str(nm or ''),
+                                    syntax_theme=(
+                                        self._medium_syntax_theme()
+                                        if self._syntax_highlighting_enabled()
+                                        else None
+                                    ),
                                 ),
                                 " | ".join(title_parts),
                                 streamed_result_border,
@@ -1926,6 +1996,12 @@ class PanelsMixin:
                                     txt,
                                     styles=self._medium_tool_styles(),
                                     inspect_message_id=str(msg_id or ''),
+                                    tool_name=str(nm or ''),
+                                    syntax_theme=(
+                                        self._medium_syntax_theme()
+                                        if self._syntax_highlighting_enabled()
+                                        else None
+                                    ),
                                 ),
                                 " | ".join(title_parts),
                                 tool_call_border_style,
@@ -1976,12 +2052,20 @@ class PanelsMixin:
                 panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             elif verbosity == 'medium':
                 result_border_style = "egg.tool" if getattr(self, '_rich_theme', None) is not None else 'yellow'
+                result_call = self._tool_result_call_presentation(m)
                 panel(
                     medium_tool_result_text(
                         content,
                         styles=self._medium_tool_styles(),
                         inspect_message_id=str(msg_id or ''),
                         recovery_hint=tool_result_recovery_hint(m),
+                        tool_name=(result_call.name if result_call is not None else str(name)),
+                        tool_arguments=(result_call.arguments if result_call is not None else None),
+                        syntax_theme=(
+                            self._medium_syntax_theme()
+                            if self._syntax_highlighting_enabled()
+                            else None
+                        ),
                     ),
                     title,
                     result_border_style,
@@ -2012,6 +2096,9 @@ class PanelsMixin:
         live observability.
         """
         self._mark_static_transcript_changed()
+        calls = m.get('tool_calls') if isinstance(m, dict) else None
+        if isinstance(calls, list):
+            self._remember_tool_call_presentations([m], replace=False)
         hidden_details = self._ensure_static_hidden_details_state()
         before_hidden = self._has_static_hidden_details_activity(hidden_details)
         items = self._static_transcript_message_renderables(m, hidden_details)
@@ -2135,6 +2222,7 @@ class PanelsMixin:
             except Exception:
                 self._live_print(heading)
         msgs = snapshot_messages(self.db, tid)
+        self._remember_tool_call_presentations(msgs)
         markers_by_start_seq = self._compaction_markers_by_start_seq(tid)
         verbosity = self._panel_display_verbosity_level()
         if verbosity == 'min':
