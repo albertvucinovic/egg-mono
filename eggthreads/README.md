@@ -115,9 +115,11 @@ execute_tool_in_other_thread(
 For `python_repl` and `bash_repl`, this creates or reuses the runtime child and
 persistent REPL channel under the selected descendant. Hydration therefore
 loads that descendant's effective historical messages, not the ancestor's.
-Self, ancestor, sibling, unrelated, disabled, local-only, and non-opted-in tool
-targets are rejected. The nested result is published only in the calling
-ancestor; normal tool side effects remain in the descendant context.
+Self, ancestor, sibling, unrelated, caller-disabled, local-only, and non-opted-in
+tool targets are rejected. A descendant's own allowlist still limits what its
+LLM may invoke, but does not revoke an authorized ancestor's supervisory
+dispatch into that descendant context. The nested result is published only in
+the calling ancestor; normal tool side effects remain in the descendant context.
 
 Use the model-visible `threads` tool to discover accessible target ids without
 crossing that boundary. It returns the calling thread's subtree as nested JSON

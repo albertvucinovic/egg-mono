@@ -178,21 +178,52 @@ def test_cross_thread_dispatch_rejects_long_output_reader(tmp_path) -> None:
     assert "has not opted in to cross-thread execution" in result.output
 
 
-def test_cross_thread_dispatch_enforces_target_policy_and_visibility(tmp_path) -> None:
+def test_cross_thread_dispatch_uses_callers_authority_not_targets_self_policy(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_ALLOW_MEMORY_SESSION_WITH_SANDBOX", "1")
     db = _make_db(tmp_path)
     root = ts.create_root_thread(db, name="root")
     child = ts.create_child_thread(db, root, name="child")
+    child_message = ts.append_message(db, child, "assistant", "supervised evidence")
+    ts.enable_thread_session(db, child, provider="memory")
     registry = create_default_tools()
 
-    ts.set_thread_tool_allowlist(db, child, [TOOL_NAME, "python_repl"])
-    denied = _execute(registry, db, root, child, "skill", {})
-    assert denied.reason == "disabled"
-    assert "not allowed" in denied.output
+    ts.set_thread_tool_allowlist(db, child, ["threads"])
+    child_policy = ts.get_thread_tools_config(db, child)
+    assert child_policy.is_tool_allowed("python_repl") is False
+
+    supervised = _execute(
+        registry,
+        db,
+        root,
+        child,
+        "python_repl",
+        {"code": "print([m['msg_id'] for m in all_messages])"},
+    )
+    assert supervised.reason == "success"
+    assert child_message in supervised.output
 
     ts.set_thread_tools_enabled(db, child, False)
-    disabled = _execute(registry, db, root, child, "python_repl", {"code": "1"})
-    assert disabled.reason == "disabled"
-    assert "LLM tools are disabled" in disabled.output
+    child_policy = ts.get_thread_tools_config(db, child)
+    assert child_policy.llm_tools_enabled is False
+    still_supervised = _execute(
+        registry,
+        db,
+        root,
+        child,
+        "python_repl",
+        {"code": "print('ancestor-authorized')"},
+    )
+    assert still_supervised.reason == "success"
+    assert "ancestor-authorized" in still_supervised.output
+
+
+def test_cross_thread_dispatch_still_rejects_local_only_tool(tmp_path) -> None:
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    child = ts.create_child_thread(db, root, name="child")
 
     custom = ToolRegistry()
     from eggthreads.builtin_plugins.cross_thread_execution import register_cross_thread_execution_tool
@@ -222,6 +253,34 @@ def test_cross_thread_dispatch_cannot_bypass_calling_ancestor_tool_policy(tmp_pa
 
     assert result.reason == "disabled"
     assert "not allowed" in result.output
+    assert ts.find_runtime_thread(db, child, language="python") is None
+
+
+def test_restricted_descendant_still_cannot_self_invoke_python_repl(tmp_path) -> None:
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    child = ts.create_child_thread(db, root, name="child")
+    registry = create_default_tools()
+    ts.set_thread_tool_allowlist(db, child, ["threads"])
+    call_id = ts.enqueue_user_tool_call(
+        db,
+        child,
+        "python_repl",
+        {"code": "print('must-not-run')"},
+        auto_approve=True,
+    )
+    runner = ts.ThreadRunner(
+        db,
+        child,
+        llm=object(),
+        config=ts.RunnerConfig(no_api_calls=True),
+        tools=registry,
+    )
+
+    assert asyncio.run(runner.run_once()) is True
+    state = ts.build_tool_call_states(db, child)[call_id]
+    assert state.finished_reason == "disabled"
+    assert "not allowed for this thread" in str(state.finished_output)
     assert ts.find_runtime_thread(db, child, language="python") is None
 
 

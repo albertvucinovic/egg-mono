@@ -588,12 +588,13 @@ def test_solver_safe_mutation_can_inspect_descendant_transcript(tmp_path, monkey
     assert child_message in inspected.output
 
     set_thread_tool_allowlist(db, child, {"threads"})
-    denied_by_target = asyncio.run(
+    assert not get_thread_tools_config(db, child).is_tool_allowed("python_repl")
+    supervised_despite_target_restriction = asyncio.run(
         tools.execute_async(
             "execute_tool_in_other_thread",
             {
                 "tool_name": "python_repl",
-                "arguments": {"code": "print('unreachable')"},
+                "arguments": {"code": "print('supervised')"},
                 "thread_id": child,
             },
             db=db,
@@ -601,8 +602,8 @@ def test_solver_safe_mutation_can_inspect_descendant_transcript(tmp_path, monkey
             preserve_tool_result=True,
         )
     )
-    assert denied_by_target.reason == "disabled"
-    assert "not allowed for the target" in denied_by_target.output
+    assert supervised_despite_target_restriction.reason == "success"
+    assert "supervised" in supervised_despite_target_restriction.output
 
 
 def test_solver_safe_inspection_cannot_cross_subtrees(tmp_path, monkeypatch):

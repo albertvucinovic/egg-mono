@@ -77,8 +77,10 @@ present in the selected registry. Structural Candidate/Case threads inherit
 the profile; a domain may still explicitly disable or narrow specialized
 descendants. The profile lets a Mutation thread list its own subtree
 with `threads` and run opted-in tools such as `python_repl` in a strict
-descendant through `execute_tool_in_other_thread`. Both caller and target tool
-policies still apply; ancestors, siblings, and unrelated threads remain hidden.
+descendant's context through `execute_tool_in_other_thread`. The caller's policy
+authorizes this supervisory action; a descendant's own narrowed allowlist still
+limits its self-invocation but does not block its
+authorized ancestor. Ancestors, siblings, and unrelated threads remain hidden.
 
 ```python
 restricted = Reflection.eggthreads(

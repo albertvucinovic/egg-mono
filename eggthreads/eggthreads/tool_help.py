@@ -255,7 +255,10 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
         ],
         "notes": [
             "The target must be a strict descendant; self, ancestors, siblings, and unrelated threads are denied.",
-            "The selected tool must be registered, model-visible, opted in to cross-thread dispatch, and enabled by the target's effective tool policy.",
+            "The selected tool must be registered, model-visible, opted in to cross-thread dispatch, "
+            "and allowed by the calling ancestor's effective tool policy.",
+            "The descendant's own allowlist controls what that descendant may invoke; it does not "
+            "revoke an ancestor's authority to run an allowed tool in descendant context.",
             "python_repl and bash_repl create or reuse runtime children under the descendant, so their persistent channels and hydrated thread_context belong to that descendant.",
             "The nested result is published only as this tool's result in the calling ancestor; genuine target-context side effects remain in the descendant.",
             "Reserved context arguments cannot be supplied through the nested arguments object.",

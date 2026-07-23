@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Execute an enabled tool with a strict descendant's thread context."""
+"""Execute a caller-authorized tool with a strict descendant's context."""
 
 import asyncio
 from dataclasses import dataclass, replace
@@ -88,7 +88,7 @@ async def execute_tool_in_other_thread_tool(
     args: Dict[str, Any],
     ctx: ToolContext,
 ) -> ToolExecutionResult:
-    """Dispatch a tool directly with a strict descendant as ToolContext.thread_id."""
+    """Dispatch a caller-authorized tool with a descendant as its context."""
 
     caller_thread_id = str(ctx.thread_id or "").strip()
     target_thread_id = str(args.get("thread_id") or "").strip()
@@ -162,17 +162,10 @@ async def execute_tool_in_other_thread_tool(
                 reason="disabled",
             )
 
-        target_tools = get_thread_tools_config(db, target_thread_id)
-        if target_tools.policy_error:
-            return _error(
-                f"target tool policy is unavailable; execution denied: {target_tools.policy_error}",
-                reason="policy_error",
-            )
-        if not target_tools.llm_tools_enabled:
-            return _error("LLM tools are disabled for the target thread.", reason="disabled")
-        if not target_tools.is_tool_allowed(resolved_name):
-            return _error(f"tool '{resolved_name}' is not allowed for the target thread.", reason="disabled")
-
+        # The descendant policy governs what its own LLM/RA calls may expose or
+        # execute. This wrapper is a distinct supervisory action already
+        # authorized by the ancestor, so do not re-authorize it as though the
+        # descendant had requested the nested tool itself.
         _bind_legacy_thread_identity(nested_args, target_thread_id)
 
         target_model = current_thread_model(db, target_thread_id)
@@ -229,9 +222,9 @@ async def execute_tool_in_other_thread_tool(
     else:
         result = ToolExecutionResult(str(nested_result))
 
-    # Descendant output may only reach the ancestor provider unmasked when both
-    # effective policies allow raw output.  The caller-side decision is made by
-    # the outer runner's normal sanitizer; record the stricter target decision.
+    # Execution authority belongs to the caller, but output disclosure remains
+    # bounded by both contexts. The caller-side decision is made by the outer
+    # runner's normal sanitizer; record the stricter target decision here.
     return replace(
         result,
         streamed=False,
@@ -250,10 +243,11 @@ def register_cross_thread_execution_tool(registry: ToolRegistry) -> None:
     registry.register(
         name=TOOL_NAME,
         description=(
-            "Execute an enabled tool using a strict descendant thread's context, while returning the result "
-            "to the calling ancestor. The target must be a descendant and the selected tool must be enabled "
-            "there. Context-bound tools such as python_repl use the descendant's persistent session and "
-            "hydrated thread history."
+            "Execute a caller-authorized tool using a strict descendant thread's context, while returning "
+            "the result to the calling ancestor. The target must be a descendant. The selected tool is "
+            "authorized by the calling ancestor, not by the descendant's self-invocation policy. "
+            "Context-bound tools such as python_repl use the descendant's persistent session and hydrated "
+            "thread history."
         ),
         parameters_schema={
             "type": "object",

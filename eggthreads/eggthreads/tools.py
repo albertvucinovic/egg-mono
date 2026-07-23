@@ -732,10 +732,11 @@ class ToolRegistry:
     ) -> Any:
         """Execute using an explicit authoritative thread identity.
 
-        Authorization belongs to the higher-level caller (for example the
-        descendant-only wrapper).  This small registry primitive centralizes
-        identity precedence so neither context-aware nor legacy argument-aware
-        tools can retain a caller-supplied ``_thread_id``.
+        Authorization belongs to the higher-level caller (for example an
+        ancestor-authorized descendant-context wrapper), not automatically to
+        the contextual thread's self-invocation policy. This small registry
+        primitive centralizes identity precedence so neither context-aware nor
+        legacy argument-aware tools can retain a caller-supplied ``_thread_id``.
         """
 
         if not isinstance(thread_id, str) or not thread_id.strip():

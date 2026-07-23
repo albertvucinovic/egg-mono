@@ -1099,8 +1099,10 @@ Execute an opted-in registry tool with a strict descendant as its authoritative
 thread context, then return/publish the nested result in the calling ancestor.
 
 - `thread_id` must be a strict descendant of the calling thread.
-- Both caller and target effective tool policies must allow the wrapper and/or
-  nested tool as applicable; policy failures deny execution.
+- The calling ancestor's effective policy must allow both the wrapper and nested
+  tool; caller policy failures deny execution.
+- The target's policy controls its own tool exposure and self-invocation, not an
+  authorized ancestor's supervisory dispatch into the target context.
 - Local-only, recursive, and thread-local-lifecycle-dependent tools are denied.
 - The nested tool receives the target's model, working directory, sandbox,
   session, and thread identity, but not the ancestor invocation/tool-call IDs.
