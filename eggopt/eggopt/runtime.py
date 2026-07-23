@@ -13,6 +13,7 @@ from eggthreads import (
     ThreadsDB,
     ToolRegistry,
     create_root_thread,
+    get_context_limit,
     set_context_limit,
 )
 
@@ -141,7 +142,7 @@ class Runtime(Generic[ExampleT, OutputT]):
             threads.conn.commit()
         runner_config = getattr(reflection.drive, "runner_config", None)
         context_limit = getattr(runner_config, "context_limit", None)
-        if context_limit is not None:
+        if context_limit is not None and get_context_limit(threads, study_id) != context_limit:
             set_context_limit(
                 threads,
                 study_id,
