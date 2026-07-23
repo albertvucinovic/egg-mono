@@ -28,10 +28,11 @@ from .min_run_summary import (
     serialize_min_tool_call_tokens,
 )
 from .tool_presentation import (
-    format_medium_tool_arguments,
+    MediumToolStyles,
     format_medium_tool_calls,
-    format_medium_tool_result,
-    format_medium_streamed_tool_result,
+    medium_tool_arguments_text,
+    medium_tool_calls_text,
+    medium_tool_result_text,
     tool_call_presentation,
     tool_result_recovery_hint,
 )
@@ -1558,6 +1559,29 @@ class PanelsMixin:
             return themed.get(variant, themed["body"])
         return fallback.get(variant, fallback["body"])
 
+    def _medium_tool_styles(self) -> MediumToolStyles:
+        """Resolve restrained semantic tool colors through the active theme."""
+
+        if getattr(self, '_rich_theme', None) is not None:
+            return MediumToolStyles(
+                call="egg.accent",
+                call_name="egg.tool_call_title",
+                argument_key="egg.accent",
+                argument_value="egg.foreground",
+                result="egg.foreground",
+                muted="egg.muted",
+                command="egg.accent",
+            )
+        return MediumToolStyles(
+            call="bold cyan",
+            call_name="bold yellow",
+            argument_key="bold cyan",
+            argument_value="white",
+            result="white",
+            muted="dim",
+            command="bold cyan",
+        )
+
     def _assistant_body_style(self, *, markdown: bool = False, note: bool = False) -> Optional[str]:
         """Return assistant body style without changing the default theme."""
         if getattr(self, '_rich_theme', None) is not None:
@@ -1803,8 +1827,17 @@ class PanelsMixin:
                             tool_call_id=tc_id,
                         )
                 else:
+                    tool_calls_renderable = (
+                        medium_tool_calls_text(
+                            tcs,
+                            styles=self._medium_tool_styles(),
+                            inspect_message_id=str(msg_id or ''),
+                        )
+                        if verbosity == 'medium'
+                        else Text("\n".join(lines), no_wrap=False, overflow='fold', style=tool_call_body_style)
+                    )
                     items.append(self._static_transcript_panel_renderable(
-                        Text("\n".join(lines), no_wrap=False, overflow='fold', style=tool_call_body_style),
+                        tool_calls_renderable,
                         tc_title,
                         tool_call_border_style,
                     ))
@@ -1825,6 +1858,9 @@ class PanelsMixin:
                                 'yellow',
                             ))
                         elif verbosity == 'medium':
+                            streamed_result_border = (
+                                "egg.tool" if getattr(self, '_rich_theme', None) is not None else 'yellow'
+                            )
                             title_parts = [out_title]
                             if model_key:
                                 title_parts.append(f"[dim](model: {model_key})[/dim]")
@@ -1835,14 +1871,14 @@ class PanelsMixin:
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
                             items.append(self._static_transcript_panel_renderable(
-                                Text(
-                                    format_medium_streamed_tool_result(txt, inspect_message_id=str(msg_id or '')),
-                                    no_wrap=False,
-                                    overflow='fold',
-                                    style='yellow',
+                                medium_tool_result_text(
+                                    txt,
+                                    styles=self._medium_tool_styles(),
+                                    inspect_message_id=str(msg_id or ''),
+                                    streamed=True,
                                 ),
                                 " | ".join(title_parts),
-                                'yellow',
+                                streamed_result_border,
                             ))
                         else:
                             title_parts = [out_title]
@@ -1876,10 +1912,6 @@ class PanelsMixin:
                                 tool_call_border_style,
                             ))
                         elif verbosity == 'medium':
-                            preview = format_medium_tool_arguments(
-                                txt,
-                                inspect_message_id=str(msg_id or ''),
-                            )
                             title_parts = [call_title]
                             if model_key:
                                 title_parts.append(f"[dim](model: {model_key})[/dim]")
@@ -1890,7 +1922,11 @@ class PanelsMixin:
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
                             items.append(self._static_transcript_panel_renderable(
-                                Text(preview, no_wrap=False, overflow='fold', style=tool_call_body_style),
+                                medium_tool_arguments_text(
+                                    txt,
+                                    styles=self._medium_tool_styles(),
+                                    inspect_message_id=str(msg_id or ''),
+                                ),
                                 " | ".join(title_parts),
                                 tool_call_border_style,
                             ))
@@ -1939,19 +1975,16 @@ class PanelsMixin:
             if verbosity == 'max':
                 panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             elif verbosity == 'medium':
+                result_border_style = "egg.tool" if getattr(self, '_rich_theme', None) is not None else 'yellow'
                 panel(
-                    Text(
-                        format_medium_tool_result(
-                            content,
-                            inspect_message_id=str(msg_id or ''),
-                            recovery_hint=tool_result_recovery_hint(m),
-                        ),
-                        no_wrap=False,
-                        overflow='fold',
-                        style='yellow',
+                    medium_tool_result_text(
+                        content,
+                        styles=self._medium_tool_styles(),
+                        inspect_message_id=str(msg_id or ''),
+                        recovery_hint=tool_result_recovery_hint(m),
                     ),
                     title,
-                    'yellow',
+                    result_border_style,
                 )
             else:
                 self._record_static_hidden_detail_in_state(

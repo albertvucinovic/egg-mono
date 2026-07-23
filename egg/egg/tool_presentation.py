@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from rich.text import Text
+
 
 MEDIUM_TOOL_PREVIEW_MAX_LINES = 20
 MEDIUM_TOOL_PREVIEW_HEAD_LINES = 12
@@ -28,6 +30,19 @@ class ToolCallPresentation:
     name: str
     arguments: Any
     tool_call_id: str
+
+
+@dataclass(frozen=True)
+class MediumToolStyles:
+    """Theme-resolved semantic styles for medium tool presentation."""
+
+    call: str
+    call_name: str
+    argument_key: str
+    argument_value: str
+    result: str
+    muted: str
+    command: str
 
 
 def tool_call_presentation(tool_call: Any) -> ToolCallPresentation:
@@ -323,11 +338,157 @@ def format_medium_streamed_tool_result(content: Any, *, inspect_message_id: str 
     )
 
 
+def _append_line(text: Text, line: str, style: str) -> None:
+    if text:
+        text.append("\n")
+    text.append(line, style=style)
+
+
+def _styled_tool_arguments_rendered(rendered: str, styles: MediumToolStyles) -> Text:
+    """Color semantic labels while preserving argument values literally."""
+
+    text = Text()
+    continuation_style = styles.argument_value
+    for raw_line in rendered.splitlines():
+        stripped = raw_line.lstrip(" ")
+        indent = raw_line[:len(raw_line) - len(stripped)]
+        if stripped in {"(no arguments)", "(no output)", "(no streamed output)"}:
+            _append_line(text, raw_line, styles.muted)
+            continuation_style = styles.muted
+            continue
+        if stripped.startswith("… omitted ") or stripped.startswith("Inspect complete persisted record:"):
+            _append_line(text, raw_line, styles.muted)
+            continuation_style = styles.muted
+            continue
+        key, separator, remainder = stripped.partition(":")
+        is_labeled_argument = (
+            len(indent) == 0
+            and bool(separator and key)
+            and not key.startswith(('{', '[', '"'))
+            and not key.startswith(("http", "https", "/"))
+            and " " not in key
+            and len(key) <= 80
+        )
+        if is_labeled_argument:
+            if text:
+                text.append("\n")
+            text.append(indent)
+            text.append(key, style=styles.argument_key)
+            text.append(":", style=styles.muted)
+            if remainder:
+                text.append(remainder, style=styles.argument_value)
+            continuation_style = styles.argument_value
+            continue
+        _append_line(text, raw_line, continuation_style)
+    return text
+
+
+def _tool_argument_text(value: Any, styles: MediumToolStyles) -> Text:
+    return _styled_tool_arguments_rendered(format_medium_tool_arguments(value), styles)
+
+
+def medium_tool_calls_text(
+    tool_calls: Iterable[Any],
+    *,
+    styles: MediumToolStyles,
+    inspect_message_id: str = "",
+) -> Text:
+    """Return theme-aware Rich text for a grouped medium tool declaration."""
+
+    raw_calls = list(tool_calls)
+    text = Text()
+    any_bounded = False
+    for index, raw_call in enumerate(raw_calls, start=1):
+        if text:
+            text.append("\n\n")
+        call = tool_call_presentation(raw_call)
+        text.append(f"{index}.", style=styles.call)
+        text.append(" ")
+        text.append(call.name, style=styles.call_name)
+        if call.tool_call_id:
+            text.append(" · ", style=styles.muted)
+            text.append("tool_call_id:", style=styles.muted)
+            text.append(f" {call.tool_call_id}", style=styles.muted)
+        arguments = _tool_argument_text(call.arguments, styles)
+        if "… omitted " in arguments.plain:
+            any_bounded = True
+        text.append("\n")
+        for line_index, line in enumerate(arguments.split("\n")):
+            if line_index:
+                text.append("\n")
+            text.append("   ")
+            text.append_text(line)
+    message_id = str(inspect_message_id or "").strip()
+    if message_id and any_bounded:
+        text.append("\n\n")
+        text.append("Inspect complete persisted record:", style=styles.muted)
+        text.append(f" /show {message_id}", style=styles.command)
+    return text
+
+
+def medium_tool_arguments_text(
+    arguments: Any,
+    *,
+    styles: MediumToolStyles,
+    inspect_message_id: str = "",
+) -> Text:
+    rendered = format_medium_tool_arguments(
+        arguments,
+        inspect_message_id=inspect_message_id,
+    )
+    return _styled_tool_arguments_rendered(rendered, styles)
+
+
+def medium_tool_result_text(
+    content: Any,
+    *,
+    styles: MediumToolStyles,
+    inspect_message_id: str = "",
+    recovery_hint: str = "",
+    streamed: bool = False,
+) -> Text:
+    """Return literal result content with semantic metadata styling only."""
+
+    if streamed:
+        rendered = format_medium_streamed_tool_result(
+            content,
+            inspect_message_id=inspect_message_id,
+        )
+    else:
+        rendered = format_medium_tool_result(
+            content,
+            inspect_message_id=inspect_message_id,
+            recovery_hint=recovery_hint,
+        )
+    text = Text()
+    for raw_line in rendered.splitlines():
+        if raw_line.startswith("… omitted "):
+            _append_line(text, raw_line, styles.muted)
+        elif raw_line.startswith("Inspect complete persisted record:"):
+            prefix, _separator, command = raw_line.partition(":")
+            if text:
+                text.append("\n")
+            text.append(f"{prefix}:", style=styles.muted)
+            text.append(command, style=styles.command)
+        elif raw_line.startswith("Raw output:"):
+            command = raw_line[len("Raw output:"):]
+            if text:
+                text.append("\n")
+            text.append("Raw output:", style=styles.muted)
+            text.append(command, style=styles.command)
+        elif raw_line in {"(no output)", "(no streamed output)"}:
+            _append_line(text, raw_line, styles.muted)
+        else:
+            _append_line(text, raw_line, styles.result)
+    return text
+
+
 __all__ = [
     "MEDIUM_TOOL_PREVIEW_HEAD_LINES",
     "MEDIUM_TOOL_PREVIEW_MAX_CHARS",
     "MEDIUM_TOOL_PREVIEW_MAX_LINES",
     "MEDIUM_TOOL_PREVIEW_TAIL_LINES",
+    "MediumToolStyles",
     "ToolCallPresentation",
     "bounded_medium_preview",
     "format_medium_streamed_tool_result",
@@ -335,6 +496,9 @@ __all__ = [
     "format_medium_tool_calls",
     "format_medium_tool_result",
     "format_tool_arguments",
+    "medium_tool_arguments_text",
+    "medium_tool_calls_text",
+    "medium_tool_result_text",
     "tool_call_presentation",
     "tool_result_recovery_hint",
 ]

@@ -1166,9 +1166,16 @@ class TestConsolePrintMessage:
             },
         })
 
+        result_text = items[0].renderable.renderable
         rendered = self._render_panel_text(items[0].renderable)
         assert 'optimized result preview' in rendered
         assert "Raw output: read_long_tool_output('rawabc123', chunk_number=1)" in rendered
+        raw_command = " read_long_tool_output('rawabc123', chunk_number=1)"
+        assert any(
+            result_text.plain[span.start:span.end] == raw_command
+            and str(span.style) == 'bold cyan'
+            for span in result_text.spans
+        )
 
     def test_medium_tool_result_uses_head_and_tail_preview(self, egg_app):
         egg_app._display_verbosity = "medium"
@@ -1188,6 +1195,76 @@ class TestConsolePrintMessage:
         assert 'result-line-20' not in rendered
         assert 'omitted 20 lines' in rendered
         assert 'Inspect complete persisted record: /show msg-long-result' in rendered
+        result_text = items[0].renderable.renderable
+        assert any(
+            'omitted 20 lines' in result_text.plain[span.start:span.end]
+            and str(span.style) == 'dim'
+            for span in result_text.spans
+        )
+        assert any(
+            '/show msg-long-result' in result_text.plain[span.start:span.end]
+            and str(span.style) == 'bold cyan'
+            for span in result_text.spans
+        )
+
+    def test_medium_tool_panels_use_theme_semantic_styles(self, egg_app):
+        egg_app._display_verbosity = "medium"
+        egg_app.apply_theme("ocean")
+
+        call_items = egg_app._static_transcript_message_renderables({
+            'role': 'assistant',
+            'content': '',
+            'msg_id': 'msg-semantic-call',
+            'tool_calls': [{
+                'id': 'call-semantic',
+                'function': {
+                    'name': 'bash',
+                    'arguments': {'script': 'echo [red]literal[/red]', 'timeout': 30},
+                },
+            }],
+        })
+        result_items = egg_app._static_transcript_message_renderables({
+            'role': 'tool',
+            'name': 'bash',
+            'content': '[red]literal result[/red]',
+            'msg_id': 'msg-semantic-result',
+            'tool_call_id': 'call-semantic',
+        })
+
+        call_text = call_items[0].renderable.renderable
+        result_text = result_items[0].renderable.renderable
+        assert call_text.plain.find('[red]literal[/red]') >= 0
+        assert result_text.plain == '[red]literal result[/red]'
+        assert any(str(span.style) == 'egg.accent' for span in call_text.spans)
+        assert any(str(span.style) == 'egg.tool_call_title' for span in call_text.spans)
+        assert any(str(span.style) == 'egg.muted' for span in call_text.spans)
+        assert any(str(span.style) == 'egg.foreground' for span in result_text.spans)
+        assert str(call_items[0].renderable.border_style) == 'egg.tool_call'
+        assert str(result_items[0].renderable.border_style) == 'egg.tool'
+
+    def test_medium_semantic_coloring_still_honors_toggle_borders(self, egg_app, monkeypatch):
+        from rich import box as rich_box
+
+        egg_app._display_verbosity = "medium"
+        egg_app.apply_theme("ocean")
+        message = {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [{
+                'id': 'call-colored-border',
+                'function': {'name': 'bash', 'arguments': {'script': 'echo border'}},
+            }],
+        }
+
+        off_panel = egg_app._static_transcript_message_renderables(message)[0].renderable
+        assert off_panel.box == rich_box.MINIMAL
+        assert any(str(span.style) == 'egg.accent' for span in off_panel.renderable.spans)
+
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        egg_app.handle_command("/toggleBorders")
+        on_panel = egg_app._static_transcript_message_renderables(message)[0].renderable
+        assert on_panel.box == rich_box.SQUARE
+        assert any(str(span.style) == 'egg.accent' for span in on_panel.renderable.spans)
 
     @pytest.mark.parametrize("verbosity", ["max", "medium", "min"])
     def test_answer_user_preserve_turn_note_visible_at_all_verbosities(self, egg_app, monkeypatch, verbosity):

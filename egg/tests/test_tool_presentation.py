@@ -1,10 +1,24 @@
 from __future__ import annotations
 
 from egg.tool_presentation import (
+    MediumToolStyles,
     bounded_medium_preview,
     format_medium_tool_arguments,
     format_medium_tool_calls,
     format_medium_tool_result,
+    medium_tool_calls_text,
+    medium_tool_result_text,
+)
+
+
+SEMANTIC_STYLES = MediumToolStyles(
+    call="bold cyan",
+    call_name="bold yellow",
+    argument_key="bold cyan",
+    argument_value="white",
+    result="white",
+    muted="dim",
+    command="bold cyan",
 )
 
 
@@ -168,3 +182,55 @@ def test_medium_tool_group_without_ids_stays_readable_without_guessing():
     assert "1. bash\n" in rendered
     assert "2. bash\n" in rendered
     assert "tool_call_id:" not in rendered
+
+
+def test_medium_tool_call_rich_text_uses_semantic_styles_and_literal_values():
+    rendered = medium_tool_calls_text([
+        {
+            "id": "call-color",
+            "function": {
+                "name": "bash",
+                "arguments": {
+                    "script": "echo [red]literal[/red]",
+                    "timeout": 30,
+                },
+            },
+        },
+    ], styles=SEMANTIC_STYLES)
+
+    assert "echo [red]literal[/red]" in rendered.plain
+    styled = [(rendered.plain[span.start:span.end], str(span.style)) for span in rendered.spans]
+    assert ("1.", "bold cyan") in styled
+    assert ("bash", "bold yellow") in styled
+    assert ("script", "bold cyan") in styled
+    assert ("tool_call_id:", "dim") in styled
+    # User/tool-supplied Rich-looking text is one literal value span, never parsed.
+    assert any("[red]literal[/red]" in value and style == "white" for value, style in styled)
+
+
+def test_medium_tool_result_styles_only_metadata_not_literal_output():
+    rendered = medium_tool_result_text(
+        "[red]literal result[/red]",
+        styles=SEMANTIC_STYLES,
+    )
+
+    assert rendered.plain == "[red]literal result[/red]"
+    assert len(rendered.spans) == 1
+    assert str(rendered.spans[0].style) == "white"
+
+
+def test_medium_multiline_argument_does_not_reclassify_value_colons_as_keys():
+    rendered = medium_tool_calls_text([
+        {
+            "function": {
+                "name": "bash",
+                "arguments": {
+                    "script": "echo start\nhttps://example.test/path\nlabel: value",
+                },
+            },
+        },
+    ], styles=SEMANTIC_STYLES)
+
+    styled = [(rendered.plain[span.start:span.end], str(span.style)) for span in rendered.spans]
+    assert any("https://example.test/path" in value and style == "white" for value, style in styled)
+    assert any("label: value" in value and style == "white" for value, style in styled)
