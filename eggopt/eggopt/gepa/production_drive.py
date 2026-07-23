@@ -245,7 +245,7 @@ class EggthreadsReflectionDrive:
         self.max_correction_turns = max_correction_turns
         self.context_limit = context_limit
         identity = json.loads(canonical_json(drive_identity, what="drive_identity"))
-        reserved = {"tool_policy", "mutation_repair", "context_ceiling"}.intersection(
+        reserved = {"tool_policy", "mutation_repair", "context_limit"}.intersection(
             identity
         )
         if reserved:
@@ -266,7 +266,7 @@ class EggthreadsReflectionDrive:
                 "version": _MUTATION_REPAIR_VERSION,
                 "max_correction_turns": max_correction_turns,
             },
-            "context_ceiling": {
+            "context_limit": {
                 "policy": "eggopt.gepa.streaming-context-limit",
                 "version": "1",
                 "max_tokens": context_limit,

@@ -303,7 +303,7 @@ def test_malformed_envelope_stops_after_configured_repairs(tmp_path, monkeypatch
     assert len(llm.messages) == 2
 
 
-def test_context_ceiling_rejects_before_provider_call(tmp_path, monkeypatch):
+def test_context_limit_rejects_before_provider_call(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = _db(tmp_path)
     study_id, profile = create_solver_safe_study(
@@ -328,7 +328,7 @@ def test_context_ceiling_rejects_before_provider_call(tmp_path, monkeypatch):
     assert reflector.drive.llm.calls == 0
 
 
-def test_streaming_context_ceiling_interrupts_only_reflection_operation(
+def test_streaming_context_limit_interrupts_only_reflection_operation(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -369,7 +369,7 @@ def test_streaming_context_ceiling_interrupts_only_reflection_operation(
     assert db.get_thread(occurrence.mutation_thread_id).status == "active"
     events = list(db.events_since(occurrence.mutation_thread_id, 0))
     assert any(event["type"] == "control.interrupt" for event in events)
-    assert reflector.drive.semantic_identity["context_ceiling"] == {
+    assert reflector.drive.semantic_identity["context_limit"] == {
         "policy": "eggopt.gepa.streaming-context-limit",
         "version": "1",
         "max_tokens": 180,
