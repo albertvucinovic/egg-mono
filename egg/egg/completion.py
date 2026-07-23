@@ -410,26 +410,6 @@ class EggCompleter(Completer):
                     yield Completion(p, start_position=-len(prefix))
             return
 
-        # /setSandboxConfiguration: suggest config files from .egg/sandbox
-        if text.startswith('/setSandboxConfiguration '):
-            prefix = text[len('/setSandboxConfiguration '):]
-            try:
-                from eggthreads import get_srt_sandbox_configuration  # type: ignore
-                from pathlib import Path as _Path
-
-                cfg = get_srt_sandbox_configuration()
-                cfg_dir = _Path(cfg.settings_dir)
-                if cfg_dir.is_dir():
-                    files = [p.name for p in cfg_dir.glob('*.json')]
-                else:
-                    files = []
-            except Exception:
-                files = []
-            for name in sorted(files):
-                if name.startswith(prefix):
-                    yield Completion(name, start_position=-len(prefix))
-            return
-
         if text.startswith('/sessionOn '):
             prefix = text[len('/sessionOn '):]
             try:
@@ -946,22 +926,6 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             except Exception:
                 names = []
             return _mk_items(names, arg_tok)
-
-        if cmd == '/setSandboxConfiguration':
-            # Suggest available .json files from .egg/sandbox
-            try:
-                from eggthreads import get_srt_sandbox_configuration  # type: ignore
-                from pathlib import Path as _Path
-
-                cfg = get_srt_sandbox_configuration()
-                cfg_dir = _Path(cfg.settings_dir)
-                if cfg_dir.is_dir():
-                    files = [p.name for p in cfg_dir.glob('*.json')]
-                else:
-                    files = []
-            except Exception:
-                files = []
-            return _mk_items(files, arg_tok)
 
         if cmd == '/sessionOn':
             return _mk_items(SESSION_ON_COMPLETIONS, arg_tok)

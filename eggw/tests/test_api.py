@@ -4029,6 +4029,24 @@ class TestAutocomplete:
         displays = {suggestion["display"] for suggestion in response.json()["suggestions"]}
         assert displays == {"chat", "threads", "system"}
 
+    def test_sandbox_configuration_autocomplete_includes_stock_suggestions(
+        self, client, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        line = "/setSandboxConfiguration read"
+        response = client.get(
+            "/api/autocomplete",
+            params={"line": line, "cursor": len(line)},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["suggestions"] == [{
+            "display": "readOnly.json",
+            "insert": "readOnly.json",
+            "replace": 4,
+            "meta": "Project read-only, direct internet blocked",
+        }]
+
     def test_show_autocomplete_uses_shared_bounded_record_catalog(self, client):
         create_resp = client.post("/api/threads", json={"name": "Show completion"})
         thread_id = create_resp.json()["id"]

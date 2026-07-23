@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from pathlib import Path
 from typing import Optional, List
 
 from fastapi import APIRouter
@@ -210,24 +209,6 @@ async def get_autocomplete(
                     matched_count += 1
                     if matched_count >= 50:  # Limit results after filtering
                         break
-
-            elif cmd == '/setSandboxConfiguration':
-                # Suggest sandbox config files from .egg/sandbox/
-                sandbox_dir = Path.cwd() / ".egg" / "sandbox"
-                if sandbox_dir.is_dir():
-                    try:
-                        arg_lower = arg_tok.lower()
-                        for f in sorted(sandbox_dir.iterdir()):
-                            if f.is_file() and f.suffix == '.json':
-                                name = f.name
-                                if not arg_lower or arg_lower in name.lower():
-                                    suggestions.append({
-                                        "display": name,
-                                        "insert": name,
-                                        "replace": len(arg_tok),
-                                    })
-                    except Exception:
-                        pass
 
             elif cmd == '/skill':
                 arg_lower = arg_tok.lower()

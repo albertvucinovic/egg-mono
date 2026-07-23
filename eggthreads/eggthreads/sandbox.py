@@ -68,6 +68,7 @@ other eggthreads modules to prevent circular imports.
 """
 
 from dataclasses import dataclass, field
+import copy
 import json
 import os
 import hashlib
@@ -766,8 +767,6 @@ def apply_mandatory_protections(provider_name: str, settings: Dict[str, Any],
     
     Returns: Updated settings with protections applied
     """
-    import copy
-    
     # Make a copy to avoid modifying original
     result = copy.deepcopy(settings) if isinstance(settings, dict) else {}
     
@@ -1187,19 +1186,85 @@ def _default_config_dict() -> Dict[str, object]:
             "denyWrite": [".egg"],
         },
     }
-def _default_config_path() -> Path:
-    """Return the path to the default config, creating it if needed."""
+
+
+_STOCK_SANDBOX_CONFIG_DESCRIPTIONS: Dict[str, str] = {
+    "default.json": "Standard sandbox: project read-write, direct internet blocked",
+    "readOnly.json": "Project read-only, direct internet blocked",
+    "allowInternet.json": "Project read-write, direct internet enabled through Docker bridge",
+}
+
+
+def _stock_sandbox_config_dicts() -> Dict[str, Dict[str, object]]:
+    """Return independent settings snapshots for the built-in config files."""
+
+    default = _default_config_dict()
+    read_only = copy.deepcopy(default)
+    filesystem = read_only.get("filesystem")
+    if isinstance(filesystem, dict):
+        filesystem["allowWrite"] = []
+
+    allow_internet = copy.deepcopy(default)
+    allow_internet["network"] = "bridge"
+
+    return {
+        "default.json": default,
+        "readOnly.json": read_only,
+        "allowInternet.json": allow_internet,
+    }
+
+
+def _ensure_stock_sandbox_configs() -> Path:
+    """Create missing stock configs without replacing workspace-owned edits."""
 
     cfg_dir = _ensure_sandbox_dir()
-    path = cfg_dir / "default.json"
-    if not path.exists():
+    for filename, settings in _stock_sandbox_config_dicts().items():
+        path = cfg_dir / filename
         try:
-            path.write_text(json.dumps(_default_config_dict(), indent=2), encoding="utf-8")
-        except Exception:
-            # If writing fails we still return the path; callers will
-            # fall back to an in‑memory default when loading.
+            with path.open("x", encoding="utf-8") as handle:
+                json.dump(settings, handle, indent=2)
+                handle.write("\n")
+        except FileExistsError:
             pass
-    return path
+        except Exception:
+            # Best-effort, matching the existing default-config behavior. The
+            # caller will either use the in-memory default or report a missing
+            # named configuration when applying it.
+            pass
+    return cfg_dir
+
+
+def sandbox_configuration_completion_items(fragment: str = "") -> List[Dict[str, object]]:
+    """Return named sandbox configuration files for shared UI completion."""
+
+    cfg_dir = _ensure_stock_sandbox_configs()
+    token = (fragment or "").split()[-1] if (fragment or "").split() else ""
+    token_lower = token.lower()
+    paths = sorted(cfg_dir.glob("*.json"), key=lambda path: path.name.lower())
+    prefix = [path for path in paths if path.name.lower().startswith(token_lower)]
+    contains = [
+        path
+        for path in paths
+        if token_lower in path.name.lower() and path not in prefix
+    ]
+    return [
+        {
+            "display": path.name,
+            "insert": path.name,
+            "replace": len(token),
+            "meta": _STOCK_SANDBOX_CONFIG_DESCRIPTIONS.get(
+                path.name,
+                "Custom sandbox configuration",
+            ),
+        }
+        for path in prefix + contains
+    ]
+
+
+def _default_config_path() -> Path:
+    """Return the default path, creating all missing stock configs."""
+
+    return _ensure_stock_sandbox_configs() / "default.json"
 
 
 # Global enable flag for this process.  Sandboxing starts out enabled
@@ -1228,11 +1293,11 @@ def _normalize_name(name: str) -> str:
 def _config_source_path(name: Optional[str] = None) -> Path:
     """Return the *source* config path for a given name.
 
-    If the named file does not exist, the default config path is
-    returned instead.
+    If the named file does not exist, the default config path is returned.
+    Missing stock configuration files are materialized first.
     """
 
-    cfg_dir = _ensure_sandbox_dir()
+    cfg_dir = _ensure_stock_sandbox_configs()
     if not name:
         return _default_config_path()
     norm = _normalize_name(name)
@@ -1244,8 +1309,6 @@ def _config_source_path(name: Optional[str] = None) -> Path:
 
 def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
     """Return a copy of *cfg* with mandatory protections applied."""
-
-    import copy
 
     out = copy.deepcopy(cfg) if isinstance(cfg, dict) else {}
     fs = out.setdefault("filesystem", {})
@@ -1658,7 +1721,7 @@ def set_thread_sandbox_config(
         # full JSON in the event.
         if isinstance(config_name, str) and config_name.strip():
             norm = _normalize_name(config_name)
-            cfg_dir = _ensure_sandbox_dir()
+            cfg_dir = _ensure_stock_sandbox_configs()
             path = cfg_dir / norm
             if not path.exists():
                 raise ValueError(f"sandbox configuration file not found: {path}")
@@ -1839,9 +1902,9 @@ class SrtSandboxConfiguration:
 
 
 def get_srt_sandbox_configuration() -> SrtSandboxConfiguration:
-    """Return metadata for the working-directory settings folder."""
+    """Return metadata after creating missing working-directory stock configs."""
 
-    cfg_dir = _ensure_sandbox_dir()
+    cfg_dir = _ensure_stock_sandbox_configs()
     return SrtSandboxConfiguration(
         settings_dir=str(cfg_dir),
         default_path=str(_default_config_path()),

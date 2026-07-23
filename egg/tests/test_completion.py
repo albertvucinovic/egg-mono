@@ -358,6 +358,24 @@ class TestGetAutocompleteItems:
 
         assert {item["display"] for item in items} == {"alpha", "Beta"}
 
+    def test_sandbox_configuration_completion_includes_stock_suggestions(
+        self, isolated_db
+    ):
+        items = get_autocomplete_items(
+            "/setSandboxConfiguration allow",
+            len("/setSandboxConfiguration allow"),
+            isolated_db,
+            lambda: "tid",
+            None,
+        )
+
+        assert items == [{
+            "display": "allowInternet.json",
+            "insert": "allowInternet.json",
+            "replace": 5,
+            "meta": "Project read-write, direct internet enabled through Docker bridge",
+        }]
+
     def test_returns_skill_name_completions(self, isolated_db):
         """Should suggest packaged skill names for /skill."""
         items = get_autocomplete_items("/skill r", 8, isolated_db, lambda: "tid", None)

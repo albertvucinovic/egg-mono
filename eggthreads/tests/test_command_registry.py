@@ -854,13 +854,16 @@ def test_skills_commands_are_registered_handlers(tmp_path) -> None:
     assert "rlm" in registry.complete("skill", ctx, "r")
 
 
-def test_sandbox_admin_commands_are_registered_handlers(monkeypatch) -> None:
+def test_sandbox_admin_commands_are_registered_handlers(monkeypatch, tmp_path) -> None:
     from eggthreads.builtin_plugins import sandbox_admin
+
+    monkeypatch.chdir(tmp_path)
 
     registry = create_default_command_registry()
 
     assert registry.get("toggleSandboxing").handler is sandbox_admin.toggle_sandboxing_command
     assert registry.get("setSandboxConfiguration").handler is sandbox_admin.set_sandbox_configuration_command
+    assert registry.get("setSandboxConfiguration").complete is sandbox_admin.sandbox_configuration_completions
     assert registry.get("getSandboxingConfig").handler is sandbox_admin.get_sandboxing_config_command
 
     logs: list[str] = []
@@ -892,6 +895,13 @@ def test_sandbox_admin_commands_are_registered_handlers(monkeypatch) -> None:
     assert set_calls[1]["config_name"] == "locked.json"
     assert any(title == "Sandbox Configuration" and "Sandbox Configuration and Control" in text for title, text in printed)
     assert any("Sandbox configuration applied" in message for message in logs)
+    completions = registry.complete("setSandboxConfiguration", ctx, "only")
+    assert completions == [{
+        "display": "readOnly.json",
+        "insert": "readOnly.json",
+        "replace": 4,
+        "meta": "Project read-only, direct internet blocked",
+    }]
 
 
 def test_display_input_commands_are_registered_handlers() -> None:

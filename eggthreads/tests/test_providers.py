@@ -30,6 +30,87 @@ def test_get_provider_names(eggthreads):
     assert len(names) == 3
 
 
+def test_stock_sandbox_configs_are_created_without_overwriting(eggthreads, tmp_path):
+    sandbox = eggthreads.sandbox
+    sandbox_dir = tmp_path / ".egg" / "sandbox"
+    sandbox_dir.mkdir(parents=True)
+    custom_read_only = {"provider": "docker", "custom": True}
+    (sandbox_dir / "readOnly.json").write_text(json.dumps(custom_read_only), encoding="utf-8")
+
+    metadata = sandbox.get_srt_sandbox_configuration()
+
+    assert Path(metadata.settings_dir) == sandbox_dir
+    assert json.loads((sandbox_dir / "readOnly.json").read_text()) == custom_read_only
+    default = json.loads((sandbox_dir / "default.json").read_text())
+    allow_internet = json.loads((sandbox_dir / "allowInternet.json").read_text())
+    assert default == sandbox._default_config_dict()
+    assert allow_internet == {**default, "network": "bridge"}
+
+    (sandbox_dir / "allowInternet.json").write_text(
+        json.dumps({"provider": "docker", "network": "custom-network"}),
+        encoding="utf-8",
+    )
+    sandbox.get_srt_sandbox_configuration()
+    assert json.loads((sandbox_dir / "allowInternet.json").read_text())["network"] == "custom-network"
+
+    (sandbox_dir / "allowInternet.json").write_text(
+        json.dumps(allow_internet),
+        encoding="utf-8",
+    )
+
+    db = eggthreads.ThreadsDB()
+    db.init_schema()
+    thread_id = eggthreads.create_root_thread(db, name="stock config")
+    sandbox.set_thread_sandbox_config(
+        db,
+        thread_id,
+        enabled=True,
+        config_name="allowInternet",
+    )
+    applied = sandbox.get_thread_sandbox_config(db, thread_id)
+    assert applied.source == "file:allowInternet.json"
+    assert applied.settings["network"] == "bridge"
+
+
+def test_stock_read_only_and_allow_internet_provider_translation(eggthreads, tmp_path):
+    sandbox = eggthreads.sandbox
+    sandbox.get_srt_sandbox_configuration()
+    sandbox_dir = tmp_path / ".egg" / "sandbox"
+    read_only = json.loads((sandbox_dir / "readOnly.json").read_text())
+    allow_internet = json.loads((sandbox_dir / "allowInternet.json").read_text())
+
+    default = sandbox._default_config_dict()
+    expected_read_only = json.loads(json.dumps(default))
+    expected_read_only["filesystem"]["allowWrite"] = []
+    assert read_only == expected_read_only
+    assert read_only["provider"] == "docker"
+    assert allow_internet["provider"] == "docker"
+
+    mount_args = sandbox._docker_mount_args_from_filesystem_policy(
+        working_dir=tmp_path,
+        workspace="/workspace",
+        settings=read_only,
+    )
+    volumes = [mount_args[index + 1] for index, arg in enumerate(mount_args[:-1]) if arg == "-v"]
+    assert f"{tmp_path}:/workspace/host:ro" in volumes
+    assert f"{tmp_path}:/workspace/host" not in volumes
+    allowed, reason = sandbox.sandbox_write_policy_decision(
+        enabled=True,
+        provider="docker",
+        settings=read_only,
+        target_path=tmp_path / "blocked.txt",
+        working_dir=tmp_path,
+    )
+    assert allowed is False
+    assert "allowWrite" in reason
+
+    provider = sandbox._PROVIDERS["docker"]
+    with patch.object(provider, "is_available", return_value=True):
+        wrapped = provider.wrap_argv(["true"], allow_internet, working_dir=tmp_path)
+    network_index = wrapped.index("--network")
+    assert wrapped[network_index + 1] == "bridge"
+
+
 def test_sandbox_provider_registry_populated_by_plugin(eggthreads):
     """Built-in sandbox providers are registered through the plugin seam."""
     sandbox = eggthreads.sandbox

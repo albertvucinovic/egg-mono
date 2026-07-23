@@ -95,6 +95,7 @@ Commands Available:
     • Loads JSON file from .egg/sandbox/ directory
     • Applies full settings to current thread and subtree
     • File should contain provider field and provider-specific settings
+    • Stock files: default.json, readOnly.json, allowInternet.json
 
 UI Indicators:
 
@@ -230,6 +231,12 @@ def set_sandbox_configuration_command(context: Any, arg: str):
     return CommandResult(clear_input=True)
 
 
+def sandbox_configuration_completions(context: Any, arg: str):
+    from ..sandbox import sandbox_configuration_completion_items
+
+    return sandbox_configuration_completion_items(arg)
+
+
 def get_sandboxing_config_command(context: Any, arg: str):
     from ..command_catalog import CommandResult
     import eggthreads as _eggthreads
@@ -268,7 +275,16 @@ def register_sandbox_admin_commands(registry: Any) -> None:
     from ..command_catalog import CommandSpec
 
     registry.register(CommandSpec("toggleSandboxing", toggle_sandboxing_command, category="sandbox", usage="/toggleSandboxing", description="Toggle sandboxing for the thread subtree."))
-    registry.register(CommandSpec("setSandboxConfiguration", set_sandbox_configuration_command, category="sandbox", usage="/setSandboxConfiguration <file.json>", description="Apply sandbox configuration."))
+    registry.register(
+        CommandSpec(
+            "setSandboxConfiguration",
+            set_sandbox_configuration_command,
+            category="sandbox",
+            usage="/setSandboxConfiguration <file.json>",
+            description="Apply sandbox configuration.",
+            complete=sandbox_configuration_completions,
+        )
+    )
     registry.register(CommandSpec("getSandboxingConfig", get_sandboxing_config_command, category="sandbox", usage="/getSandboxingConfig", description="Show current sandbox configuration."))
 
 
@@ -286,6 +302,7 @@ __all__ = [
     "SANDBOX_CONFIGURATION_HELP",
     "SandboxAdminPlugin",
     "get_sandboxing_config_command",
+    "sandbox_configuration_completions",
     "register_sandbox_admin_commands",
     "set_sandbox_configuration_command",
     "toggle_sandboxing_command",
