@@ -319,7 +319,7 @@ def test_context_limit_rejects_before_provider_call(tmp_path, monkeypatch):
         context_limit=1,
     )
 
-    with pytest.raises(Exception, match="context ceiling reached before provider call"):
+    with pytest.raises(Exception, match="context limit reached before provider call"):
         reflector(
             {"instruction": "seed"},
             {"instruction": [{"Feedback": "stream"}]},
@@ -351,7 +351,7 @@ def test_streaming_context_limit_interrupts_only_reflection_operation(
     # The inherited Mutation context is the operation whose live stream is bounded.
     assert provider_context_token_stats(db, study_id)["context_tokens"] < 180
 
-    with pytest.raises(Exception, match="context ceiling reached"):
+    with pytest.raises(Exception, match="context limit reached"):
         reflector(
             {"instruction": "seed"},
             {"instruction": [{"Feedback": "stream"}]},

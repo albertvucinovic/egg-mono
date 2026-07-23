@@ -440,7 +440,7 @@ class EggthreadsReflectionDrive:
         )
         if current >= self.context_limit:
             raise RuntimeError(
-                "reflection context ceiling reached before provider call; "
+                "reflection context limit reached before provider call; "
                 f"operation terminated ({current} >= {self.context_limit})"
             )
         task = asyncio.create_task(runner.run_once())
@@ -457,7 +457,7 @@ class EggthreadsReflectionDrive:
                         db,
                         thread_id,
                         reason=(
-                            "eggopt reflection context ceiling reached: "
+                            "eggopt reflection context limit reached: "
                             f"{current + live} >= {self.context_limit}"
                         ),
                     )
@@ -466,7 +466,7 @@ class EggthreadsReflectionDrive:
                     except asyncio.CancelledError:
                         pass
                     raise RuntimeError(
-                        "reflection context ceiling reached; operation terminated"
+                        "reflection context limit reached; operation terminated"
                     )
             return await task
         finally:
