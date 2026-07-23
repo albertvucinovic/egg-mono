@@ -5771,6 +5771,123 @@ def enqueue_user_tool_call(
     return tc_id
 
 
+def enqueue_synthetic_user_tool_call(
+    db: ThreadsDB,
+    thread_id: str,
+    name: str,
+    arguments: Any,
+    *,
+    origin: str,
+    approval_reason: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    tool_call_id: Optional[str] = None,
+) -> str:
+    """Enqueue one generated, auto-approved, provider-hidden RA3 request."""
+    tool_name = (name or "").strip()
+    if not tool_name:
+        raise ValueError("tool name is required")
+    synthetic_origin = (origin or "").strip()
+    if not synthetic_origin:
+        raise ValueError("synthetic tool request origin is required")
+    tc_id = tool_call_id or _ulid_like()
+    metadata = {
+        "synthetic_user_tool_request": True,
+        "synthetic_user_tool_request_version": "1",
+    }
+    if extra:
+        metadata.update(dict(extra))
+    return enqueue_user_tool_call(
+        db,
+        thread_id,
+        tool_name,
+        arguments,
+        content=_synthetic_user_tool_request_content(
+            tool_name, arguments, tool_call_id=tc_id, origin=synthetic_origin
+        ),
+        hidden=True,
+        keep_user_turn=True,
+        origin=synthetic_origin,
+        auto_approve=True,
+        approval_reason=(approval_reason or f"Auto-approved generated {synthetic_origin} tool call"),
+        extra=metadata,
+        tool_call_id=tc_id,
+    )
+
+
+def _synthetic_user_tool_request_content(
+    name: str,
+    arguments: Any,
+    *,
+    tool_call_id: str,
+    origin: str,
+) -> str:
+    parsed = _synthetic_tool_arguments(arguments)
+    lines = [
+        "Generated auto-approved user tool request as a synthetic message:",
+        "",
+        f"- Tool: `{name}`",
+        f"- Tool-call ID: `{tool_call_id}`",
+        f"- Origin: `{origin}`",
+        "- Approval: `auto-approved`",
+        "- Provider visibility: `no_api`",
+        "- Keep user turn: `true`",
+        "",
+        "Arguments:",
+        "",
+    ]
+    if isinstance(parsed, Mapping):
+        code_field = _synthetic_code_field(name, parsed)
+        ordinary = {key: value for key, value in parsed.items() if key != code_field}
+        if ordinary:
+            lines.extend(("```json", _pretty_json(ordinary), "```", ""))
+        if code_field is not None:
+            lines.extend((
+                f"`{code_field}`:",
+                "",
+                f"```{_synthetic_code_language(name, code_field)}",
+                str(parsed[code_field]),
+                "```",
+            ))
+        elif not ordinary:
+            lines.extend(("```json", "{}", "```"))
+    else:
+        lines.extend(("```json", _pretty_json(parsed), "```"))
+    return "\n".join(lines)
+
+
+def _synthetic_tool_arguments(arguments: Any) -> Any:
+    if not isinstance(arguments, str):
+        return arguments if arguments is not None else {}
+    try:
+        return json.loads(arguments)
+    except json.JSONDecodeError:
+        return {"raw_arguments": arguments}
+
+
+def _synthetic_code_field(name: str, arguments: Mapping[str, Any]) -> Optional[str]:
+    preferred = "code" if "repl" in name else "script"
+    for field in (preferred, "script", "code"):
+        if isinstance(arguments.get(field), str):
+            return field
+    return None
+
+
+def _synthetic_code_language(name: str, field: str) -> str:
+    normalized = name.casefold()
+    if "python" in normalized or field == "code":
+        return "python"
+    if "bash" in normalized or normalized in {"shell", "sh"}:
+        return "bash"
+    return "text"
+
+
+def _pretty_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    except (TypeError, ValueError):
+        return json.dumps(str(value), ensure_ascii=False)
+
+
 def execute_bash_command(db: ThreadsDB, thread_id: str, script: str, hidden: bool = False) -> str:
     """Execute a bash command as a user tool call (RA3).
 

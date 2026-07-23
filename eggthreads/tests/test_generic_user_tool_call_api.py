@@ -46,6 +46,135 @@ def test_enqueue_user_tool_call_creates_hidden_approved_ra3(tmp_path):
     assert payload["origin"] == "repl"
 
 
+def test_synthetic_user_tool_call_is_full_approved_and_no_api(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    tool_call_id = "01KYSYNTHETICTOOLCALL000001"
+
+    tcid = ts.enqueue_synthetic_user_tool_call(
+        db,
+        tid,
+        "python_exec",
+        {"script": "import json\nprint(json.dumps({'valid': True}))", "timeout": 5},
+        origin="test-suite",
+        tool_call_id=tool_call_id,
+    )
+
+    assert tcid == tool_call_id
+    payload = json.loads(
+        db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create'",
+            (tid,),
+        ).fetchone()[0]
+    )
+    assert payload["no_api"] is True
+    assert payload["keep_user_turn"] is True
+    assert payload["synthetic_user_tool_request"] is True
+    assert payload["synthetic_user_tool_request_version"] == "1"
+    assert payload["origin"] == "test-suite"
+    assert payload["content"] == (
+        "Generated auto-approved user tool request as a synthetic message:\n\n"
+        "- Tool: `python_exec`\n"
+        f"- Tool-call ID: `{tool_call_id}`\n"
+        "- Origin: `test-suite`\n"
+        "- Approval: `auto-approved`\n"
+        "- Provider visibility: `no_api`\n"
+        "- Keep user turn: `true`\n\n"
+        "Arguments:\n\n"
+        "```json\n{\n  \"timeout\": 5\n}\n```\n\n"
+        "`script`:\n\n```python\n"
+        "import json\nprint(json.dumps({'valid': True}))\n```"
+    )
+    assert ts.build_tool_call_states(db, tid)[tcid].approval_decision == "granted"
+
+
+def test_synthetic_user_tool_call_renders_generic_arguments_as_pretty_json(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+
+    ts.enqueue_synthetic_user_tool_call(
+        db,
+        tid,
+        "wait",
+        {"thread_ids": ["child"], "timeout": 30},
+        origin="test-suite",
+    )
+
+    payload = json.loads(
+        db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create'",
+            (tid,),
+        ).fetchone()[0]
+    )
+    assert (
+        "```json\n{\n  \"thread_ids\": [\n    \"child\"\n  ],\n"
+        "  \"timeout\": 30\n}\n```" in payload["content"]
+    )
+
+
+def test_synthetic_request_is_not_duplicated_into_tool_result(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    registry = ts.ToolRegistry()
+    registry.register(
+        "echo",
+        "Echo",
+        {"type": "object", "properties": {"value": {"type": "string"}}},
+        lambda arguments: arguments["value"],
+    )
+    tcid = ts.enqueue_synthetic_user_tool_call(
+        db, tid, "echo", {"value": "result only"}, origin="test-suite"
+    )
+    runner = ts.ThreadRunner(
+        db,
+        tid,
+        llm=object(),
+        config=ts.RunnerConfig(no_api_calls=True),
+        tools=registry,
+    )
+    while ts.build_tool_call_states(db, tid)[tcid].state != "TC6":
+        assert asyncio.run(runner.run_once()) is True
+
+    result = ts.wait_for_tool_call_result(db, tid, tcid, timeout_sec=0)
+    assert result.content == "result only"
+    payload = json.loads(
+        db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' "
+            "AND json_extract(payload_json, '$.tool_call_id')=?",
+            (tid, tcid),
+        ).fetchone()[0]
+    )
+    assert payload["content"] == "result only"
+    assert payload["no_api"] is True
+
+
+def test_visible_user_tool_request_keeps_existing_command_plus_result(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    registry = ts.ToolRegistry()
+    registry.register(
+        "echo",
+        "Echo",
+        {"type": "object", "properties": {"value": {"type": "string"}}},
+        lambda arguments: arguments["value"],
+    )
+    tcid = ts.enqueue_user_tool_call(
+        db,
+        tid,
+        "echo",
+        {"value": "result"},
+        content="$ echo visible",
+        hidden=False,
+        auto_approve=True,
+    )
+    runner = ts.ThreadRunner(db, tid, llm=object(), tools=registry)
+    while ts.build_tool_call_states(db, tid)[tcid].state != "TC6":
+        assert asyncio.run(runner.run_once()) is True
+
+    result = ts.wait_for_tool_call_result(db, tid, tcid, timeout_sec=0)
+    assert result.content == "$ echo visible\n\nresult"
+
+
 def test_wait_for_tool_call_result_returns_details_and_timeout(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")

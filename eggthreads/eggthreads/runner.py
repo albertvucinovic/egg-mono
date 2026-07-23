@@ -4301,11 +4301,14 @@ class ThreadRunner:
                 # command text so that the message containing the output also
                 # includes the command itself.
                 if ra.kind == 'RA3_tools_user':
-                    cmd_text = self._get_parent_message_content(tc.parent_msg_id)
-                    if not cmd_text:
-                        cmd_text = self._render_tool_invocation(tc)
-                    if self._user_tool_call_wants_raw_result(tc):
+                    if self._parent_msg_is_synthetic_tool_request(tc.parent_msg_id):
                         cmd_text = None
+                    else:
+                        cmd_text = self._get_parent_message_content(tc.parent_msg_id)
+                        if not cmd_text:
+                            cmd_text = self._render_tool_invocation(tc)
+                        if self._user_tool_call_wants_raw_result(tc):
+                            cmd_text = None
                     if cmd_text:
                         # Avoid duplicating the command if the preview already starts with it.
                         if not content.startswith(cmd_text):
@@ -4404,6 +4407,28 @@ class ThreadRunner:
         except Exception:
             payload = {}
         return bool(payload.get('no_api'))
+
+    def _parent_msg_is_synthetic_tool_request(self, msg_id: str) -> bool:
+        """Return whether an RA3 parent is a generated synthetic request."""
+        if not msg_id:
+            return False
+        try:
+            row = self.db.conn.execute(
+                "SELECT payload_json FROM events WHERE msg_id=? AND type='msg.create' "
+                "ORDER BY event_seq DESC LIMIT 1",
+                (msg_id,),
+            ).fetchone()
+            payload = (
+                json.loads(row[0])
+                if row and isinstance(row[0], str)
+                else (row[0] if row else {})
+            )
+            return bool(
+                isinstance(payload, dict)
+                and payload.get('synthetic_user_tool_request')
+            )
+        except Exception:
+            return False
 
     def _user_tool_call_wants_raw_result(self, tc: ToolCallState) -> bool:
         """Return True for internal RA3 calls whose result is consumed by code.

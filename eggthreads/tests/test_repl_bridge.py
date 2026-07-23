@@ -20,6 +20,9 @@ def test_repl_bridge_call_tool_enqueues_ra3_and_direct_drives(tmp_path, monkeypa
     parent = ts.create_root_thread(db, name="parent")
     ts.enable_thread_session(db, parent, provider="memory")
     runtime = ts.get_or_create_runtime_thread(db, parent, language="python")
+    threads_before = {
+        row[0] for row in db.conn.execute("SELECT thread_id FROM threads")
+    }
 
     # Runtime must allow bash for this programmatic call.
     ts.set_thread_tools_enabled(db, runtime, True)
@@ -44,6 +47,9 @@ def test_repl_bridge_call_tool_enqueues_ra3_and_direct_drives(tmp_path, monkeypa
     tc = next(iter(states.values()))
     assert tc.name == "bash"
     assert tc.state == "TC6"
+    assert {
+        row[0] for row in db.conn.execute("SELECT thread_id FROM threads")
+    } == threads_before
 
     # The runtime transcript stores a hidden RA3 user message.
     row = db.conn.execute(
@@ -54,6 +60,11 @@ def test_repl_bridge_call_tool_enqueues_ra3_and_direct_drives(tmp_path, monkeypa
     payload = json.loads(row[0])
     assert payload["origin"] == "repl"
     assert payload["no_api"] is True
+    assert payload["synthetic_user_tool_request"] is True
+    assert payload["content"].startswith(
+        "Generated auto-approved user tool request as a synthetic message:"
+    )
+    assert "```bash\necho bridge-ok\n```" in payload["content"]
     assert payload["tool_calls"][0]["function"]["arguments"]
     call_args = json.loads(payload["tool_calls"][0]["function"]["arguments"])
     assert call_args["timeout"] == 5.0
