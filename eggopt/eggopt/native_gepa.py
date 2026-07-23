@@ -56,6 +56,7 @@ class NativeGEPAConfig:
     evaluator_identity: Any | None = None
     case_id: Callable[[Any], Any] | None = field(default=None, repr=False, compare=False)
     max_concurrent_evaluations: int | None = 1
+    evaluator_context_limit: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -73,6 +74,12 @@ class NativeGEPAConfig:
             or self.max_concurrent_evaluations < 1
         ):
             raise ValueError("max_concurrent_evaluations must be positive or None")
+        if self.evaluator_context_limit is not None and (
+            isinstance(self.evaluator_context_limit, bool)
+            or not isinstance(self.evaluator_context_limit, int)
+            or self.evaluator_context_limit < 1
+        ):
+            raise ValueError("evaluator_context_limit must be positive or None")
         if self.minibatch_acceptance not in _MINIBATCH_ACCEPTANCE:
             raise ValueError(
                 "minibatch_acceptance must be 'strict_improvement' or "
@@ -465,6 +472,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             self.evaluator,
             self.evaluator_identity,
             self.config.max_concurrent_evaluations,
+            self.config.evaluator_context_limit,
         )
 
 

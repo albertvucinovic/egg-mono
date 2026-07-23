@@ -51,6 +51,10 @@ on the same minibatch, evaluates accepted children on the full validation set,
 and selects distinct parents from the per-case Pareto frontier. Aggregate score
 determines `best_candidate`.
 
+`NativeGEPAConfig(evaluator_context_limit=...)` applies one explicit context
+budget to every Case Evaluation thread and its descendants. It is independent
+of model capacity and becomes part of the durable evaluation identity.
+
 `minibatch_acceptance="strict_improvement"` is the default: a child tied with
 the selected parents' per-case score envelope is rejected. Use
 `"improvement_or_equal"` to send tied children to full validation as well.

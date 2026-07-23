@@ -14,6 +14,8 @@ from eggthreads import (
     ThreadsDB,
     append_message,
     create_child_thread,
+    get_context_limit,
+    set_context_limit,
     set_thread_working_directory,
 )
 
@@ -335,6 +337,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
     evaluator: Any = field(repr=False, compare=False)
     evaluator_identity: Any
     max_concurrency: int | None
+    context_limit: int | None
 
     def get_cache_key(self) -> str:
         return digest_payload(
@@ -343,6 +346,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                 "candidate": canonical_candidate(self.candidate),
                 "cases": self.case_identities,
                 "evaluator": self.evaluator_identity,
+                "context_limit": self.context_limit,
             },
         )
 
@@ -363,6 +367,15 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
             )
             for identity in self.case_identities
         ]
+        if self.context_limit is not None:
+            for thread_id, _workspace, _runtime_key in case_nodes:
+                if get_context_limit(self.threads, thread_id) != self.context_limit:
+                    set_context_limit(
+                        self.threads,
+                        thread_id,
+                        self.context_limit,
+                        reason="NativeGEPA evaluator context budget",
+                    )
         tasks = [
             _EvaluateCase(
                 self.evaluator,

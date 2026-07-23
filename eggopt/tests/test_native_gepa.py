@@ -101,6 +101,12 @@ def test_agent_context_limit_must_be_a_positive_integer(limit):
         )
 
 
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_native_gepa_evaluator_context_limit_must_be_positive(limit):
+    with pytest.raises(ValueError, match="evaluator_context_limit"):
+        NativeGEPAConfig(evaluator_context_limit=limit)
+
+
 def config(tmp_path, evaluator, generator, **changes):
     base = NativeGEPAConfig(
         run_dir=tmp_path / "native",
@@ -129,7 +135,12 @@ def test_optimize_anything_is_case_wise_pareto_search(tmp_path):
         evaluator=evaluator,
         dataset=dataset,
         objective="Reach every target.",
-        config=config(tmp_path, evaluator, generator),
+        config=config(
+            tmp_path,
+            evaluator,
+            generator,
+            evaluator_context_limit=9_000,
+        ),
     )
 
     assert result.best_candidate == {"instruction": "2"}
@@ -142,6 +153,22 @@ def test_optimize_anything_is_case_wise_pareto_search(tmp_path):
     assert generator.calls == 2
     assert generator.requests[0][2] == "Reach every target."
     assert 1 <= len(generator.requests[1][0]) <= 2
+
+    from eggthreads import get_context_limit
+
+    db = ThreadsDB(tmp_path / "native" / ".egg" / "threads.sqlite")
+    try:
+        case_ids = [
+            row[0]
+            for row in db.conn.execute(
+                "SELECT thread_id FROM events WHERE type='eggopt.native-gepa.structure.v1' "
+                "AND json_extract(payload_json, '$.kind')='case'"
+            )
+        ]
+        assert case_ids
+        assert all(get_context_limit(db, thread_id) == 9_000 for thread_id in case_ids)
+    finally:
+        db.conn.close()
 
 
 def test_minibatch_acceptance_can_send_ties_to_full_validation(tmp_path):
