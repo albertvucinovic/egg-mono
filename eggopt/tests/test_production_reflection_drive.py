@@ -328,6 +328,37 @@ def test_context_limit_rejects_before_provider_call(tmp_path, monkeypatch):
     assert reflector.drive.llm.calls == 0
 
 
+def test_context_limit_preflight_counts_full_history_after_compaction(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    db = _db(tmp_path)
+    study_id, profile = create_solver_safe_study(
+        db, workspace=tmp_path / "workspace", allowed_tools={"python_exec"}
+    )
+    reflector = _reflector(
+        tmp_path,
+        db,
+        study_id,
+        MustNotRunLLM(),
+        _registry([], []),
+        {"model": "compacted-full-context", "profile": profile},
+        context_limit=100,
+    )
+    monkeypatch.setattr(
+        "eggopt._full_context.thread_token_stats",
+        lambda _db, _thread: {"context_tokens": 10, "full_thread_tokens": 100},
+    )
+
+    with pytest.raises(Exception, match="context limit reached before provider call"):
+        reflector(
+            {"instruction": "seed"},
+            {"instruction": [{"Feedback": "stream"}]},
+            ["instruction"],
+        )
+    assert reflector.drive.llm.calls == 0
+
+
 def test_streaming_context_limit_interrupts_only_reflection_operation(
     tmp_path, monkeypatch
 ):
@@ -370,8 +401,8 @@ def test_streaming_context_limit_interrupts_only_reflection_operation(
     events = list(db.events_since(occurrence.mutation_thread_id, 0))
     assert any(event["type"] == "control.interrupt" for event in events)
     assert reflector.drive.semantic_identity["context_limit"] == {
-        "policy": "eggopt.gepa.streaming-context-limit",
-        "version": "1",
+        "policy": "eggopt.gepa.full-context-limit",
+        "version": "2",
         "max_tokens": 180,
     }
 
@@ -396,6 +427,14 @@ def test_production_drive_validates_repair_and_ceiling_options():
                 drive_identity={"model": "validation-test"},
                 **options,
             )
+    with pytest.raises(ValueError, match="provider-context limit"):
+        EggthreadsReflectionDrive(
+            llm=MustNotRunLLM(),
+            tools=registry,
+            allowed_tools={"python_exec"},
+            drive_identity={"model": "wrong-context-limit"},
+            runner_config=RunnerConfig(context_limit=100),
+        )
     with pytest.raises(ValueError, match="reserved"):
         EggthreadsReflectionDrive(
             llm=MustNotRunLLM(),
@@ -489,6 +528,7 @@ def test_production_drive_defaults_to_all_safe_tools_and_can_replace():
         drive_identity={"model": "default-tools"},
     )
     assert default.allowed_tools == SOLVER_SAFE_TOOLS
+    assert {"python_repl", "skill"}.issubset(default.allowed_tools)
     assert default.semantic_identity["tool_policy"] == {
         "default_profile": SOLVER_SAFE_PROFILE_NAME,
         "version": SOLVER_SAFE_PROFILE_VERSION,

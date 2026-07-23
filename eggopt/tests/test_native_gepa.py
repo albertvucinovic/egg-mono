@@ -91,13 +91,32 @@ def test_agent_defaults_to_safe_tools_and_accepts_explicit_replacement():
 
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
 def test_agent_context_limit_must_be_a_positive_integer(limit):
-    from eggthreads import RunnerConfig
-
     with pytest.raises(ValueError, match="context_limit"):
         Agent(
             object(),
             {"role": "invalid-context-budget"},
-            runner_config=RunnerConfig(context_limit=limit),
+            context_limit=limit,
+        )
+
+
+def test_agent_separates_full_context_budget_from_eggthreads_runner_config():
+    from eggthreads import RunnerConfig
+
+    agent = Agent(
+        object(),
+        {"role": "full-context-budget"},
+        runner_config=RunnerConfig(auto_compact_threshold_tokens=700),
+        context_limit=9_000,
+    )
+
+    assert agent.context_limit == 9_000
+    assert agent.runner_config.context_limit is None
+    assert agent.runner_config.auto_compact_threshold_tokens == 700
+    with pytest.raises(ValueError, match="provider-context limit"):
+        Agent(
+            object(),
+            {"role": "wrong-context-budget"},
+            runner_config=RunnerConfig(context_limit=9_000),
         )
 
 
@@ -235,7 +254,7 @@ def test_async_custom_generator_uses_shared_await_task(tmp_path):
     assert result.best_candidate == {"instruction": "1"}
 
 
-def test_larger_limits_continue_without_repeating_cached_work(tmp_path):
+def test_changed_stopping_budgets_continue_without_invalidating_cached_work(tmp_path):
     dataset = [
         {"id": "easy", "target": 1},
         {"id": "hard", "target": 2},
@@ -252,6 +271,7 @@ def test_larger_limits_continue_without_repeating_cached_work(tmp_path):
             first_evaluator,
             first_generator,
             max_candidates=1,
+            max_evaluator_calls=6,
         ),
     )
 
@@ -262,7 +282,13 @@ def test_larger_limits_continue_without_repeating_cached_work(tmp_path):
         evaluator=continued_evaluator,
         dataset=dataset,
         objective="Reach every target.",
-        config=config(tmp_path, continued_evaluator, continued_generator),
+        config=config(
+            tmp_path,
+            continued_evaluator,
+            continued_generator,
+            max_candidates=2,
+            max_evaluator_calls=20,
+        ),
     )
 
     assert first.best_candidate == {"instruction": "1"}
@@ -509,6 +535,64 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
         assert [row[0] for row in pair] == ["Actor", "Critic"]
     finally:
         db.conn.close()
+
+
+def test_actor_critic_context_limit_uses_full_history_not_provider_context(
+    tmp_path, monkeypatch
+):
+    from eggflow import Task
+    from eggopt import ActorCritic, Agent
+
+    monkeypatch.chdir(tmp_path)
+    run_dir = Path("run") / "actor-critic-full-context"
+    actor_llm = ScriptedAgentLLM([])
+
+    @dataclass
+    class Accept(Task):
+        def run(self):
+            return {"decision": "accept", "feedback": "Valid."}
+
+    class EvaluateWithActorCritic(Task):
+        def run(self):
+            return (
+                yield ActorCritic(
+                    actor=Agent(
+                        actor_llm,
+                        {"role": "actor-full-context"},
+                        context_limit=100,
+                    ),
+                    critic=Accept(),
+                    actor_prompt=lambda _round, _state: "Predict.",
+                    max_rounds=1,
+                )
+            )
+
+    class Evaluator:
+        def task(self, _candidate, _case):
+            return EvaluateWithActorCritic()
+
+    monkeypatch.setattr(
+        "eggopt._full_context.thread_token_stats",
+        lambda _db, _thread: {"context_tokens": 10, "full_thread_tokens": 100},
+    )
+
+    with pytest.raises(Exception, match="full context limit reached before provider call"):
+        optimize_anything(
+            {"instruction": "0"},
+            evaluator=Evaluator(),
+            dataset=[{"id": "one"}],
+            objective="Produce valid JSON.",
+            config=NativeGEPAConfig(
+                run_dir=run_dir,
+                max_candidates=1,
+                max_evaluator_calls=1,
+                generator=Increment(),
+                evaluator_identity={"name": "actor-full-context-test"},
+                case_id=lambda case: case["id"],
+                evaluator_context_limit=100,
+            ),
+        )
+    assert actor_llm.calls == 0
 
 
 def test_actor_critic_accepts_a_task_as_critic(tmp_path, monkeypatch):
