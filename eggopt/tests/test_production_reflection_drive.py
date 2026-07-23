@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -378,6 +379,10 @@ def test_streaming_context_ceiling_interrupts_only_reflection_operation(
 def test_production_drive_validates_repair_and_ceiling_options():
     registry = _registry([], [])
     for options, message in [
+        ({"max_runner_steps": 0}, "max_runner_steps"),
+        ({"max_runner_steps": True}, "max_runner_steps"),
+        ({"max_runner_steps": -math.inf}, "max_runner_steps"),
+        ({"max_runner_steps": 1.5}, "max_runner_steps"),
         ({"max_correction_turns": -1}, "max_correction_turns"),
         ({"max_correction_turns": True}, "max_correction_turns"),
         ({"context_ceiling_tokens": 0}, "context_ceiling_tokens"),
@@ -405,6 +410,77 @@ def test_production_drive_validates_repair_and_ceiling_options():
             allowed_tools={"python_exec"},
             drive_identity={"tool_policy": "caller override"},
         )
+
+
+def test_reflection_runner_steps_default_to_infinity_and_recovery_preserves_policy():
+    from eggopt import Reflection
+
+    default = Reflection.eggthreads(
+        llm=MustNotRunLLM(),
+        identity={"model": "runner-policy"},
+    )
+    assert default.drive.max_runner_steps == math.inf
+
+    bounded = Reflection.eggthreads(
+        llm=MustNotRunLLM(),
+        identity={"model": "runner-policy"},
+        max_runner_steps=17,
+    )
+    assert bounded.drive.max_runner_steps == 17
+    assert bounded.drive.semantic_identity == default.drive.semantic_identity
+
+    class RecoveryProbe(EggthreadsReflectionDrive):
+        async def resume(self, conversation, request):
+            del conversation, request
+            return self.max_runner_steps
+
+    infinite = RecoveryProbe(
+        llm=MustNotRunLLM(),
+        drive_identity={"model": "infinite-recovery"},
+    )
+    bounded_recovery = RecoveryProbe(
+        llm=MustNotRunLLM(),
+        drive_identity={"model": "bounded-recovery"},
+        max_runner_steps=17,
+    )
+    assert asyncio.run(infinite.continue_for_recovery(None, {})) == math.inf
+    assert asyncio.run(bounded_recovery.continue_for_recovery(None, {})) == 17
+
+
+def test_unbounded_reflection_runner_can_settle_after_more_than_thirty_two_steps(
+    monkeypatch,
+):
+    drive = EggthreadsReflectionDrive(
+        llm=MustNotRunLLM(),
+        drive_identity={"model": "long-runner"},
+    )
+
+    class Runner:
+        def __init__(self):
+            self.steps = 0
+
+        async def run_once(self):
+            self.steps += 1
+            return True
+
+    class DB:
+        @staticmethod
+        def max_event_seq(_thread_id):
+            return 0
+
+    runner = Runner()
+    monkeypatch.setattr(
+        "eggopt.gepa.production_drive.thread_state",
+        lambda _db, _thread_id: "waiting_user" if runner.steps == 33 else "running",
+    )
+    monkeypatch.setattr(
+        "eggopt.gepa.production_drive._runner_error_after",
+        lambda _db, _thread_id, _after_seq: None,
+    )
+
+    asyncio.run(drive._run_until_settled(runner, DB(), "mutation"))
+
+    assert runner.steps == 33
 
 
 def test_production_drive_defaults_to_all_safe_tools_and_can_replace():

@@ -90,6 +90,19 @@ restricted = Reflection.eggthreads(
 )
 ```
 
+Reflection runner steps are unbounded by default; the selected model's context
+window remains the natural bound. Applications may opt into a finite runner
+guard and an earlier hard context ceiling explicitly:
+
+```python
+bounded = Reflection.eggthreads(
+    llm=reflection_lm,
+    identity={"model": "reflection-model-v1"},
+    max_runner_steps=128,
+    context_ceiling_tokens=240_000,
+)
+```
+
 Eggopt also includes the optional reusable `ActorCritic` Task. It creates a
 Critic thread with an Actor child for the current case, keeps both across bounded
 revision rounds, gives them a shared sandboxed `innerContext`, and requires only

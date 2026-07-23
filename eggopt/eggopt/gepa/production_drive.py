@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -199,7 +200,7 @@ class EggthreadsReflectionDrive:
         models_path: str = "models.json",
         all_models_path: str = "all-models.json",
         auto_approve_tools: bool = False,
-        max_runner_steps: int = 32,
+        max_runner_steps: int | float = math.inf,
         max_correction_turns: int = 0,
         context_ceiling_tokens: int | None = None,
     ) -> None:
@@ -214,9 +215,19 @@ class EggthreadsReflectionDrive:
         self.models_path = models_path
         self.all_models_path = all_models_path
         self.auto_approve_tools = bool(auto_approve_tools)
-        self.max_runner_steps = int(max_runner_steps)
-        if self.max_runner_steps < 1:
-            raise ValueError("max_runner_steps must be positive")
+        if isinstance(max_runner_steps, bool):
+            raise ValueError("max_runner_steps must be a positive integer or math.inf")
+        if max_runner_steps == math.inf:
+            self.max_runner_steps: int | float = math.inf
+        elif (
+            not isinstance(max_runner_steps, int)
+            or max_runner_steps < 1
+        ):
+            raise ValueError("max_runner_steps must be a positive integer or math.inf")
+        else:
+            self.max_runner_steps = max_runner_steps
+        # Intentionally not part of semantic_identity: this controls how long
+        # one process drives the same durable conversation, not its semantics.
         if (
             isinstance(max_correction_turns, bool)
             or not isinstance(max_correction_turns, int)
@@ -387,7 +398,9 @@ class EggthreadsReflectionDrive:
         db: ThreadsDB,
         thread_id: str,
     ) -> None:
-        for _ in range(self.max_runner_steps):
+        steps = 0
+        while steps < self.max_runner_steps:
+            steps += 1
             before_seq = db.max_event_seq(thread_id)
             progressed = await self._run_step(runner, db, thread_id)
             state = thread_state(db, thread_id)
@@ -410,14 +423,9 @@ class EggthreadsReflectionDrive:
         conversation: ReflectionConversation,
         request: Mapping[str, Any],
     ) -> CandidateMutation | CandidateMutations:
-        """Continue an interrupted turn beyond the normal per-drive step slice."""
+        """Continue an interrupted turn with the configured runner-step policy."""
 
-        original = self.max_runner_steps
-        self.max_runner_steps = max(original, 256)
-        try:
-            return await self.resume(conversation, request)
-        finally:
-            self.max_runner_steps = original
+        return await self.resume(conversation, request)
 
     async def _run_step(
         self,
