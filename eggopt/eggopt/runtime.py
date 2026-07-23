@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,7 @@ class Reflection:
         models_path: str = "models.json",
         runner_config: RunnerConfig | None = None,
         auto_approve_tools: bool = False,
+        max_runner_steps: int | float = math.inf,
         max_correction_turns: int = 0,
         context_ceiling_tokens: int | None = None,
     ) -> Reflection:
@@ -68,6 +70,7 @@ class Reflection:
                 runner_config=runner_config,
                 models_path=models_path,
                 auto_approve_tools=auto_approve_tools,
+                max_runner_steps=max_runner_steps,
                 max_correction_turns=max_correction_turns,
                 context_ceiling_tokens=context_ceiling_tokens,
             ),
