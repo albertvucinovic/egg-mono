@@ -13,6 +13,7 @@ from eggthreads import (
     ThreadRunner,
     ToolRegistry,
     append_message,
+    approve_tool_calls_for_thread,
     create_child_thread,
     load_thread_projection,
     set_thread_tool_allowlist,
@@ -47,6 +48,7 @@ class Agent:
         default_factory=RunnerConfig, repr=False, compare=False
     )
     context_limit: int | None = None
+    auto_approve_tools: bool = False
     allowed_tools: frozenset[str] | None = None
     system_prompt: str | None = None
 
@@ -487,6 +489,13 @@ class _AgentTurn(Task):
                 _record_answer(db, self.thread_id, semantic_key, persisted_answer)
                 return persisted_answer
         after_seq = _prompt_event_seq(db, self.thread_id, semantic_key)
+        if self.agent.auto_approve_tools:
+            approve_tool_calls_for_thread(
+                db,
+                self.thread_id,
+                decision="global_approval",
+                reason="Application opted into auto-approval for this agent",
+            )
         runner = ThreadRunner(
             db,
             self.thread_id,
