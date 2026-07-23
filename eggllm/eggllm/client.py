@@ -66,29 +66,6 @@ class LLMClient:
         os.environ["DEFAULT_MODEL"] = resolved
         return resolved
 
-    def model_context_window_tokens(self, model_key: Optional[str] = None) -> int:
-        """Return the configured context-window length for a chat model."""
-
-        key = model_key or self.current_model_key
-        resolved = self.registry.resolve(key) if key else None
-        if not resolved:
-            raise KeyError(f"Unknown model: {key}")
-        self._ensure_chat_model(resolved)
-        value = self.registry.get_effective_model_config(resolved).get("max_tokens")
-        if isinstance(value, bool):
-            value = None
-        try:
-            tokens = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Model '{resolved}' has no positive max_tokens context window"
-            ) from exc
-        if tokens < 1:
-            raise ValueError(
-                f"Model '{resolved}' has no positive max_tokens context window"
-            )
-        return tokens
-
 
     def set_model_with_config(self, key: str, concrete_model_info: Optional[Dict[str, Any]] = None) -> str:
         """Set the current model, optionally adding ephemeral configuration.
