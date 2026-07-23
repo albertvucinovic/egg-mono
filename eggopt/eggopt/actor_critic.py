@@ -14,6 +14,7 @@ from eggthreads import (
     ToolRegistry,
     append_message,
     create_child_thread,
+    get_context_limit,
     load_thread_projection,
     set_context_limit,
     set_thread_tool_allowlist,
@@ -352,7 +353,11 @@ class _ConfigureAgent(Task):
             self.workspace,
             reason="ActorCritic shared innerContext",
         )
-        if self.agent.runner_config.context_limit is not None:
+        if (
+            self.agent.runner_config.context_limit is not None
+            and get_context_limit(db, self.thread_id)
+            != self.agent.runner_config.context_limit
+        ):
             set_context_limit(
                 db,
                 self.thread_id,
