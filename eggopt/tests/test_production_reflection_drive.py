@@ -385,8 +385,10 @@ def test_production_drive_validates_repair_and_ceiling_options():
         ({"max_runner_steps": 1.5}, "max_runner_steps"),
         ({"max_correction_turns": -1}, "max_correction_turns"),
         ({"max_correction_turns": True}, "max_correction_turns"),
-        ({"context_ceiling_tokens": 0}, "context_ceiling_tokens"),
-        ({"context_ceiling_tokens": True}, "context_ceiling_tokens"),
+        ({"context_ceiling_tokens": 0}, "context_limit"),
+        ({"context_ceiling_tokens": True}, "context_limit"),
+        ({"context_limit": 0}, "context_limit"),
+        ({"context_limit": True}, "context_limit"),
     ]:
         with pytest.raises(ValueError, match=message):
             EggthreadsReflectionDrive(
@@ -402,6 +404,15 @@ def test_production_drive_validates_repair_and_ceiling_options():
             tools=registry,
             allowed_tools={"python_exec"},
             drive_identity={"mutation_repair": "caller override"},
+        )
+    with pytest.raises(ValueError, match="deprecated alias"):
+        EggthreadsReflectionDrive(
+            llm=MustNotRunLLM(),
+            tools=registry,
+            allowed_tools={"python_exec"},
+            drive_identity={"model": "duplicate-context-limit"},
+            context_limit=100,
+            context_ceiling_tokens=100,
         )
     with pytest.raises(ValueError, match="reserved"):
         EggthreadsReflectionDrive(

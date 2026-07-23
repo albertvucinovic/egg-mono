@@ -202,8 +202,22 @@ class EggthreadsReflectionDrive:
         auto_approve_tools: bool = False,
         max_runner_steps: int | float = math.inf,
         max_correction_turns: int = 0,
+        context_limit: int | None = None,
         context_ceiling_tokens: int | None = None,
     ) -> None:
+        if context_limit is not None and context_ceiling_tokens is not None:
+            raise ValueError(
+                "use context_limit; context_ceiling_tokens is a deprecated alias"
+            )
+        if context_limit is None:
+            context_limit = context_ceiling_tokens
+        runner_context_limit = (runner_config or RunnerConfig()).context_limit
+        if runner_context_limit is not None:
+            if context_limit is not None and context_limit != runner_context_limit:
+                raise ValueError(
+                    "context_limit conflicts with runner_config.context_limit"
+                )
+            context_limit = runner_context_limit
         tools, allowed_tools = solver_safe_tools(
             tools,
             allowed_tools=allowed_tools,
@@ -234,16 +248,17 @@ class EggthreadsReflectionDrive:
             or max_correction_turns < 0
         ):
             raise ValueError("max_correction_turns must be a non-negative integer")
-        if context_ceiling_tokens is not None and (
-            isinstance(context_ceiling_tokens, bool)
-            or not isinstance(context_ceiling_tokens, int)
-            or context_ceiling_tokens < 1
+        if context_limit is not None and (
+            isinstance(context_limit, bool)
+            or not isinstance(context_limit, int)
+            or context_limit < 1
         ):
             raise ValueError(
-                "context_ceiling_tokens must be a positive integer or None"
+                "context_limit must be a positive integer or None"
             )
         self.max_correction_turns = max_correction_turns
-        self.context_ceiling_tokens = context_ceiling_tokens
+        self.context_limit = context_limit
+        self.context_ceiling_tokens = context_limit
         identity = json.loads(canonical_json(drive_identity, what="drive_identity"))
         reserved = {"tool_policy", "mutation_repair", "context_ceiling"}.intersection(
             identity
@@ -269,7 +284,7 @@ class EggthreadsReflectionDrive:
             "context_ceiling": {
                 "policy": "eggopt.gepa.streaming-context-ceiling",
                 "version": "1",
-                "max_tokens": context_ceiling_tokens,
+                "max_tokens": context_limit,
             },
         }
 

@@ -103,7 +103,7 @@ bounded = Reflection.eggthreads(
     llm=reflection_lm,
     identity={"model": "reflection-model-v1"},
     max_runner_steps=128,
-    context_ceiling_tokens=240_000,
+    context_limit=240_000,
 )
 ```
 

@@ -64,6 +64,7 @@ class Reflection:
         auto_approve_tools: bool = False,
         max_runner_steps: int | float = math.inf,
         max_correction_turns: int = 0,
+        context_limit: int | None = None,
         context_ceiling_tokens: int | None = None,
     ) -> Reflection:
         if tools is None:
@@ -79,6 +80,7 @@ class Reflection:
                 auto_approve_tools=auto_approve_tools,
                 max_runner_steps=max_runner_steps,
                 max_correction_turns=max_correction_turns,
+                context_limit=context_limit,
                 context_ceiling_tokens=context_ceiling_tokens,
             ),
             identity=identity,
@@ -140,8 +142,7 @@ class Runtime(Generic[ExampleT, OutputT]):
                 payload={"study_id": study_id},
             )
             threads.conn.commit()
-        runner_config = getattr(reflection.drive, "runner_config", None)
-        context_limit = getattr(runner_config, "context_limit", None)
+        context_limit = getattr(reflection.drive, "context_limit", None)
         if context_limit is not None and get_context_limit(threads, study_id) != context_limit:
             set_context_limit(
                 threads,
