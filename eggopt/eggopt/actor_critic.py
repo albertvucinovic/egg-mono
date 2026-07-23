@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from eggflow import Task
+from eggflow import Task, keyed
 from eggthreads import (
     RunnerConfig,
     ThreadRunner,
@@ -41,6 +42,7 @@ class Agent:
         default_factory=RunnerConfig, repr=False, compare=False
     )
     allowed_tools: frozenset[str] | None = None
+    system_prompt: str | None = None
 
     def __post_init__(self) -> None:
         canonical_json(self.identity, what="agent identity")
@@ -50,6 +52,8 @@ class Agent:
         )
         object.__setattr__(self, "tools", tools)
         object.__setattr__(self, "allowed_tools", allowed)
+        if self.system_prompt is not None and not self.system_prompt:
+            raise ValueError("agent system_prompt must be non-empty or None")
 
 
 @dataclass(frozen=True)
@@ -69,32 +73,54 @@ class ActorCritic(Task):
     """Bounded, recoverable Actor → Critic → revision loop."""
 
     actor: Agent = field(repr=False, compare=False)
-    critic: Agent = field(repr=False, compare=False)
+    critic: Agent | Task = field(repr=False, compare=False)
     actor_prompt: Callable[[int, Mapping[str, Any]], str] = field(
         repr=False, compare=False
     )
-    critic_prompt: Callable[[int, Mapping[str, Any]], str] = field(
-        repr=False, compare=False
+    critic_prompt: Callable[[int, Mapping[str, Any]], str] | None = field(
+        default=None, repr=False, compare=False
     )
     max_rounds: int = 3
+    names: tuple[str, str] | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.max_rounds, bool) or self.max_rounds < 1:
             raise ValueError("max_rounds must be positive")
+        if isinstance(self.critic, Agent) and not callable(self.critic_prompt):
+            raise TypeError("Agent critic requires critic_prompt")
+        if isinstance(self.critic, Task) and self.critic_prompt is not None:
+            raise TypeError("Task critic does not use critic_prompt")
+        names = self.names or ("Actor", "Critic")
+        if any(not isinstance(name, str) or not name.strip() for name in names) or (
+            len(names) != 2 or names[0] == names[1]
+        ):
+            raise ValueError("ActorCritic names must be two distinct non-empty strings")
 
     def get_cache_key(self) -> str:
         context = _current_evaluation()
-        return digest_payload(
-            "eggopt.actor-critic.v1",
-            {
-                "evaluation": context["_evaluation_key"],
-                "actor": self.actor.identity,
-                "critic": self.critic.identity,
-                "actor_prompt": _callable_identity(self.actor_prompt),
-                "critic_prompt": _callable_identity(self.critic_prompt),
-                "max_rounds": self.max_rounds,
-            },
-        )
+        identity = {
+            "evaluation": context["_evaluation_key"],
+            "actor": self.actor.identity,
+            "critic": (
+                self.critic.identity
+                if isinstance(self.critic, Agent)
+                else _task_identity(self.critic)
+            ),
+            "actor_prompt": _callable_identity(self.actor_prompt),
+            "critic_prompt": (
+                _callable_identity(self.critic_prompt)
+                if self.critic_prompt is not None
+                else None
+            ),
+            "max_rounds": self.max_rounds,
+        }
+        if self.actor.system_prompt is not None:
+            identity["actor_system_prompt"] = self.actor.system_prompt
+        if isinstance(self.critic, Agent) and self.critic.system_prompt is not None:
+            identity["critic_system_prompt"] = self.critic.system_prompt
+        if self.names is not None:
+            identity["names"] = self.names
+        return digest_payload("eggopt.actor-critic.v1", identity)
 
     def run(self):
         context = _current_evaluation()
@@ -107,6 +133,7 @@ class ActorCritic(Task):
             workspace,
             self.actor,
             self.critic,
+            self.names or ("Actor", "Critic"),
         )
         feedback = ""
         answer: Any = None
@@ -128,14 +155,17 @@ class ActorCritic(Task):
                 round_number,
             )
             state = {**state, "answer": answer}
-            raw = yield _AgentTurn(
-                runtime_key,
-                critic_id,
-                self.critic,
-                self.critic_prompt(round_number, state),
-                "critic",
-                round_number,
-            )
+            if isinstance(self.critic, Agent):
+                raw = yield _AgentTurn(
+                    runtime_key,
+                    critic_id,
+                    self.critic,
+                    self.critic_prompt(round_number, state),
+                    "critic",
+                    round_number,
+                )
+            else:
+                raw = yield _TaskCritique(self.critic, round_number, state)
             decision = _critic_decision(raw)
             feedback = decision["feedback"]
             if decision["decision"] == "accept":
@@ -169,64 +199,91 @@ class _EnsurePair(Task):
     evaluation_id: str
     workspace: str
     actor: Agent = field(repr=False, compare=False)
-    critic: Agent = field(repr=False, compare=False)
+    critic: Agent | Task = field(repr=False, compare=False)
+    names: tuple[str, str]
 
     def get_cache_key(self) -> str:
-        return digest_payload(
-            "eggopt.actor-critic.ensure-pair.v1",
-            {
-                "evaluation": self.evaluation_id,
-                "actor": self.actor.identity,
-                "critic": self.critic.identity,
-            },
-        )
+        identity = {
+            "evaluation": self.evaluation_id,
+            "actor": self.actor.identity,
+            "critic": (
+                self.critic.identity
+                if isinstance(self.critic, Agent)
+                else _task_identity(self.critic)
+            ),
+            "names": self.names,
+        }
+        if self.actor.system_prompt is not None:
+            identity["actor_system_prompt"] = self.actor.system_prompt
+        return digest_payload("eggopt.actor-critic.ensure-pair.v1", identity)
 
     def run(self):
         db = _evaluation_runtime(self.runtime_key)
         persisted = _persisted_pair(db, self.evaluation_id, self.get_cache_key())
         if persisted is not None:
             return persisted
-        existing = {
-            str(row[0]): str(row[1])
-            for row in db.conn.execute(
-                "SELECT threads.name, children.child_id FROM children "
-                "JOIN threads ON threads.thread_id=children.child_id "
-                "WHERE children.parent_id=? AND threads.name IN ('Actor', 'Critic')",
-                (self.evaluation_id,),
-            ).fetchall()
-        }
-        if existing:
-            if set(existing) != {"Actor", "Critic"}:
-                raise RuntimeError("ActorCritic evaluation has an incomplete thread pair")
-            actor_id, critic_id = existing["Actor"], existing["Critic"]
+
+        actor_name, critic_name = self.names
+        critic_id = _named_child(db, self.evaluation_id, critic_name)
+        actor_id = _named_child(db, critic_id, actor_name) if critic_id else None
+        legacy_actor = _named_child(db, self.evaluation_id, actor_name)
+
+        if critic_id and actor_id:
+            pass
+        elif critic_id and legacy_actor:
+            # Replay pairs created by the former sibling topology.
+            actor_id = legacy_actor
+        elif critic_id or actor_id or legacy_actor:
+            raise RuntimeError("ActorCritic evaluation has an incomplete thread pair")
         else:
-            actor_id = create_child_thread(
-                db,
-                self.evaluation_id,
-                name="Actor",
-                initial_model_key=self.actor.model_key,
-                models_path=self.actor.models_path,
-            )
             critic_id = create_child_thread(
                 db,
                 self.evaluation_id,
-                name="Critic",
-                initial_model_key=self.critic.model_key,
-                models_path=self.critic.models_path,
+                name=critic_name,
+                initial_model_key=(
+                    self.critic.model_key if isinstance(self.critic, Agent) else None
+                ),
+                models_path=(
+                    self.critic.models_path
+                    if isinstance(self.critic, Agent)
+                    else self.actor.models_path
+                ),
             )
-        yield [
-            _ConfigureAgent(
+            if isinstance(self.critic, Agent):
+                yield _ConfigureAgent(
+                    self.runtime_key,
+                    critic_id,
+                    self.workspace,
+                    self.critic,
+                    critic_name,
+                )
+            else:
+                yield _ConfigureWorkspace(
+                    self.runtime_key, critic_id, self.workspace, critic_name
+                )
+            actor_id = create_child_thread(
+                db,
+                critic_id,
+                name=actor_name,
+                initial_model_key=self.actor.model_key,
+                models_path=self.actor.models_path,
+            )
+
+        yield _ConfigureAgent(
+            self.runtime_key, actor_id, self.workspace, self.actor, actor_name
+        )
+        if isinstance(self.critic, Agent):
+            yield _ConfigureAgent(
                 self.runtime_key,
-                thread_id,
+                critic_id,
                 self.workspace,
-                agent,
-                role,
+                self.critic,
+                critic_name,
             )
-            for thread_id, agent, role in (
-                (actor_id, self.actor, "actor"),
-                (critic_id, self.critic, "critic"),
+        else:
+            yield _ConfigureWorkspace(
+                self.runtime_key, critic_id, self.workspace, critic_name
             )
-        ]
         db.append_event(
             event_id=digest_payload(
                 "eggopt.actor-critic.pair.v1", self.get_cache_key()
@@ -242,6 +299,16 @@ class _EnsurePair(Task):
         return actor_id, critic_id
 
 
+def _named_child(db: Any, parent_id: str, name: str) -> str | None:
+    row = db.conn.execute(
+        "SELECT children.child_id FROM children JOIN threads "
+        "ON threads.thread_id=children.child_id "
+        "WHERE children.parent_id=? AND threads.name=? ORDER BY threads.created_at LIMIT 1",
+        (parent_id, name),
+    ).fetchone()
+    return str(row[0]) if row else None
+
+
 @dataclass
 class _ConfigureAgent(Task):
     runtime_key: str
@@ -252,16 +319,16 @@ class _ConfigureAgent(Task):
 
     def get_cache_key(self) -> str:
         # v2 makes the full solver-safe default part of durable configuration.
-        return digest_payload(
-            "eggopt.actor-critic.configure-agent.v2",
-            {
-                "thread": self.thread_id,
-                "agent": self.agent.identity,
-                "workspace": self.workspace,
-                "allowed_tools": sorted(self.agent.allowed_tools),
-                "role": self.role,
-            },
-        )
+        identity = {
+            "thread": self.thread_id,
+            "agent": self.agent.identity,
+            "workspace": self.workspace,
+            "allowed_tools": sorted(self.agent.allowed_tools),
+            "role": self.role,
+        }
+        if self.agent.system_prompt is not None:
+            identity["system_prompt"] = self.agent.system_prompt
+        return digest_payload("eggopt.actor-critic.configure-agent.v2", identity)
 
     def run(self) -> None:
         db = _evaluation_runtime(self.runtime_key)
@@ -299,6 +366,59 @@ class _ConfigureAgent(Task):
             user_control_enabled=False,
             reason="ActorCritic innerContext isolation",
         )
+        if self.agent.system_prompt is not None:
+            semantic_key = digest_payload(
+                "eggopt.actor-critic.system.v1",
+                {"thread": self.thread_id, "content": self.agent.system_prompt},
+            )
+            if _prompt_message_id(db, self.thread_id, semantic_key) is None:
+                append_message(
+                    db,
+                    self.thread_id,
+                    "system",
+                    self.agent.system_prompt,
+                    extra={"eggopt_actor_critic_key": semantic_key},
+                )
+
+
+@dataclass
+class _ConfigureWorkspace(Task):
+    runtime_key: str
+    thread_id: str
+    workspace: str
+    role: str
+
+    def run(self) -> None:
+        db = _evaluation_runtime(self.runtime_key)
+        Path(self.workspace).mkdir(parents=True, exist_ok=True)
+        Path(self.workspace).resolve().relative_to(Path.cwd().resolve())
+        set_thread_working_directory(
+            db, self.thread_id, self.workspace, reason=f"ActorCritic {self.role}"
+        )
+
+
+@dataclass
+class _TaskCritique(Task):
+    critic: Task = field(repr=False, compare=False)
+    round_number: int
+    state: Mapping[str, Any]
+
+    def get_cache_key(self) -> str:
+        return digest_payload(
+            "eggopt.actor-critic.task-critique.v1",
+            {
+                "critic": _task_identity(self.critic),
+                "round": self.round_number,
+                "answer": self.state["answer"],
+                "feedback": self.state["feedback"],
+                "critic_thread_id": self.state["critic_thread_id"],
+            },
+        )
+
+    def run(self):
+        state = {**self.state, "round": self.round_number}
+        critic = _bind_critic(copy.copy(self.critic), state)
+        return (yield keyed(critic, self.get_cache_key()))
 
 
 @dataclass
@@ -381,12 +501,15 @@ async def _run_until_waiting(
 
 
 def _critic_decision(value: Any) -> dict[str, str]:
-    if not isinstance(value, str):
+    if isinstance(value, Mapping):
+        decision = dict(value)
+    elif not isinstance(value, str):
         raise ValueError("Critic answer must be strict JSON text")
-    try:
-        decision = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Critic answer must be strict JSON") from exc
+    else:
+        try:
+            decision = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Critic answer must be strict JSON") from exc
     if not isinstance(decision, dict) or set(decision) != {"decision", "feedback"}:
         raise ValueError("Critic JSON must contain only decision and feedback")
     if decision["decision"] not in {"accept", "revise"}:
@@ -486,6 +609,30 @@ def _callable_identity(function: Any) -> Mapping[str, str]:
         "module": getattr(function, "__module__", ""),
         "name": getattr(function, "__qualname__", function.__class__.__qualname__),
     }
+
+
+def _task_identity(task: Task) -> Mapping[str, str]:
+    return {
+        "module": task.__class__.__module__,
+        "name": task.__class__.__qualname__,
+        "key": task.get_cache_key(),
+    }
+
+
+def _bind_critic(task: Task, state: Mapping[str, Any]) -> Task:
+    values = {
+        "actor_thread_id": state["actor_thread_id"],
+        "critic_thread_id": state["critic_thread_id"],
+        "workspace": state["workspace"],
+        "answer": state.get("answer"),
+        "feedback": state.get("feedback"),
+        "round_number": state.get("round"),
+    }
+    fields = getattr(task, "__dataclass_fields__", {})
+    for name, value in values.items():
+        if name in fields:
+            object.__setattr__(task, name, value)
+    return task
 
 
 __all__ = ["ActorCritic", "ActorCriticResult", "Agent"]

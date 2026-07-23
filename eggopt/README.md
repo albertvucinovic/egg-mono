@@ -88,8 +88,8 @@ restricted = Reflection.eggthreads(
 )
 ```
 
-Eggopt also includes the optional reusable `ActorCritic` Task. It creates one
-Actor and one Critic thread for the current case, keeps both across bounded
+Eggopt also includes the optional reusable `ActorCritic` Task. It creates a
+Critic thread with an Actor child for the current case, keeps both across bounded
 revision rounds, gives them a shared sandboxed `innerContext`, and requires only
 the Critic decision envelope `{"decision":"accept|revise","feedback":"..."}`.
 
@@ -108,6 +108,25 @@ class EvaluateCase(Task):
             max_rounds=3,
         )
         return hidden_grade(attempt.answer), {"answer": attempt.answer}
+```
+
+The Critic-parent topology lets a Critic model inspect its Actor descendant
+through Eggthreads' descendant-safe tools. The critic may also be an ordinary
+Eggflow `Task`. Before every critique,
+ActorCritic fills matching dataclass fields on a fresh copy:
+`actor_thread_id`, `critic_thread_id`, `workspace`, `answer`, `feedback`, and
+`round_number`. The Task can use its assigned critic thread for model turns or
+tools, then returns the same `{"decision","feedback"}` envelope.
+
+```python
+@dataclass
+class Check(Task):
+    actor_thread_id: str | None = None
+    critic_thread_id: str | None = None
+    answer: object = None
+
+    def run(self):
+        return {"decision": "accept", "feedback": "Valid."}
 ```
 
 Use `plan_optimization(...)` to estimate total and additional evaluator work
