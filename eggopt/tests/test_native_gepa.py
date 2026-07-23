@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -55,9 +55,9 @@ def test_agent_defaults_to_safe_tools_and_accepts_explicit_replacement():
 
     default = Agent(object(), {"role": "default"})
     assert default.allowed_tools == SOLVER_SAFE_TOOLS
-    assert {
-        item["function"]["name"] for item in default.tools.tools_spec()
-    }.issuperset(SOLVER_SAFE_TOOLS)
+    assert {item["function"]["name"] for item in default.tools.tools_spec()}.issuperset(
+        SOLVER_SAFE_TOOLS
+    )
 
     restricted = Agent(
         object(),
@@ -231,7 +231,9 @@ def test_larger_limits_continue_without_repeating_cached_work(tmp_path):
     assert continued.generated_candidates == 2
     assert continued_generator.calls == 1
     assert continued_evaluator.calls < continued.evaluator_calls
-    assert continued.evaluator_calls == first.evaluator_calls + continued_evaluator.calls
+    assert (
+        continued.evaluator_calls == first.evaluator_calls + continued_evaluator.calls
+    )
 
 
 def test_budget_never_starts_an_evaluation_that_would_exceed_it(tmp_path):
@@ -346,6 +348,7 @@ class ScriptedAgentLLM:
 def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatch):
     from eggflow import Task
     from eggopt import ActorCritic, Agent
+
     monkeypatch.chdir(tmp_path)
     run_dir = Path("run") / "actor-critic"
 
@@ -466,6 +469,138 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
         db.conn.close()
 
 
+def test_actor_critic_accepts_a_task_as_critic(tmp_path, monkeypatch):
+    from eggflow import Task
+    from eggopt import ActorCritic, Agent
+
+    monkeypatch.chdir(tmp_path)
+    run_dir = Path("run") / "task-critic"
+    actor = ScriptedAgentLLM(["bad", "bad"])
+    reviews = []
+
+    @dataclass
+    class Review(Task):
+        actor_thread_id: str | None = None
+        critic_thread_id: str | None = None
+
+        answer: str | None = None
+        round_number: int | None = None
+
+        def run(self):
+            reviews.append((self.answer, self.actor_thread_id, self.critic_thread_id))
+            db = ThreadsDB(run_dir / ".egg" / "threads.sqlite")
+            try:
+                assert (
+                    db.conn.execute(
+                        "SELECT parent_id FROM children WHERE child_id=?",
+                        (self.actor_thread_id,),
+                    ).fetchone()[0]
+                    == self.critic_thread_id
+                )
+            finally:
+                db.conn.close()
+            if self.round_number == 1:
+                return {"decision": "revise", "feedback": "Return JSON."}
+            return {"decision": "accept", "feedback": "Valid."}
+
+    class Evaluator:
+        def task(self, _candidate, _case):
+            return Evaluate()
+
+    class Evaluate(Task):
+        def run(self):
+            result = yield ActorCritic(
+                actor=Agent(actor, {"role": "prediction"}),
+                critic=Review(),
+                actor_prompt=lambda _round, state: state["feedback"] or "Predict.",
+                max_rounds=2,
+                names=("Prediction", "Execution"),
+            )
+            return 1.0, {
+                "answer": result.answer,
+                "accepted": result.accepted,
+                "rounds": result.rounds,
+            }
+
+    config = NativeGEPAConfig(
+        run_dir=run_dir,
+        max_candidates=1,
+        max_evaluator_calls=1,
+        generator=Increment(),
+        evaluator_identity={"name": "task-critic-test"},
+        case_id=lambda case: case["id"],
+    )
+    result = optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=[{"id": "one"}],
+        objective="Produce valid JSON.",
+        config=config,
+    )
+
+    assert result.feedback[0][0] == {
+        "answer": "bad",
+        "accepted": True,
+        "rounds": 2,
+    }
+    assert actor.calls == 2
+    assert len(reviews) == 2
+    assert reviews[0][1:] == reviews[1][1:]
+    assert reviews[0][1] != reviews[0][2]
+
+    db = ThreadsDB(run_dir / ".egg" / "threads.sqlite")
+    try:
+        assert [
+            name
+            for (name,) in db.conn.execute(
+                "SELECT name FROM threads WHERE name IN ('Prediction','Execution') "
+                "ORDER BY name"
+            )
+        ] == ["Execution", "Prediction"]
+        actor_id = db.conn.execute(
+            "SELECT thread_id FROM threads WHERE name='Prediction'"
+        ).fetchone()[0]
+        critic_id = db.conn.execute(
+            "SELECT thread_id FROM threads WHERE name='Execution'"
+        ).fetchone()[0]
+        assert (
+            db.conn.execute(
+                "SELECT parent_id FROM children WHERE child_id=?", (actor_id,)
+            ).fetchone()[0]
+            == critic_id
+        )
+    finally:
+        db.conn.close()
+
+    replay_actor = ScriptedAgentLLM([])
+
+    class ReplayEvaluator:
+        def task(self, _candidate, _case):
+            return Replay()
+
+    class Replay(Task):
+        def run(self):
+            result = yield ActorCritic(
+                actor=Agent(replay_actor, {"role": "prediction"}),
+                critic=Review(),
+                actor_prompt=lambda _round, state: state["feedback"] or "Predict.",
+                max_rounds=2,
+                names=("Prediction", "Execution"),
+            )
+            return 1.0, {"answer": result.answer}
+
+    replay = optimize_anything(
+        {"instruction": "0"},
+        evaluator=ReplayEvaluator(),
+        dataset=[{"id": "one"}],
+        objective="Produce valid JSON.",
+        config=config,
+    )
+    assert replay.best_score == 1.0
+    assert replay_actor.calls == 0
+    assert len(reviews) == 2
+
+
 def test_valset_is_distinct_and_default_dataset_mode_matches_it(tmp_path):
     evaluator = Evaluator()
     generator = Increment()
@@ -488,7 +623,9 @@ def test_valset_is_distinct_and_default_dataset_mode_matches_it(tmp_path):
     )
 
     assert result.case_scores[0] == (0.0,)
-    assert any(request[1][0]["cases"][0]["case"] == "train" for request in generator.requests)
+    assert any(
+        request[1][0]["cases"][0]["case"] == "train" for request in generator.requests
+    )
 
 
 def test_parent_selection_is_distinct_weighted_and_reproducible():
