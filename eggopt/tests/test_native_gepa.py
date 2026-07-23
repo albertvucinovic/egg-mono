@@ -89,6 +89,18 @@ def test_agent_defaults_to_safe_tools_and_accepts_explicit_replacement():
     assert custom.allowed_tools == {"domain_probe"}
 
 
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_agent_context_limit_must_be_a_positive_integer(limit):
+    from eggthreads import RunnerConfig
+
+    with pytest.raises(ValueError, match="context_limit"):
+        Agent(
+            object(),
+            {"role": "invalid-context-budget"},
+            runner_config=RunnerConfig(context_limit=limit),
+        )
+
+
 def config(tmp_path, evaluator, generator, **changes):
     base = NativeGEPAConfig(
         run_dir=tmp_path / "native",
@@ -348,6 +360,7 @@ class ScriptedAgentLLM:
 def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatch):
     from eggflow import Task
     from eggopt import ActorCritic, Agent
+    from eggthreads import RunnerConfig, get_context_limit
 
     monkeypatch.chdir(tmp_path)
     run_dir = Path("run") / "actor-critic"
@@ -367,8 +380,16 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
     class EvaluateWithActorCritic(Task):
         def run(self):
             result = yield ActorCritic(
-                actor=Agent(actor_llm, {"role": "actor"}),
-                critic=Agent(critic_llm, {"role": "critic"}),
+                actor=Agent(
+                    actor_llm,
+                    {"role": "actor"},
+                    runner_config=RunnerConfig(context_limit=12_000),
+                ),
+                critic=Agent(
+                    critic_llm,
+                    {"role": "critic"},
+                    runner_config=RunnerConfig(context_limit=8_000),
+                ),
                 actor_prompt=lambda round_number, state: (
                     "Predict." if round_number == 1 else state["feedback"]
                 ),
@@ -415,6 +436,10 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
                 get_thread_tools_config(db, thread_id).allowed_tools
                 == SOLVER_SAFE_TOOLS
             )
+            assert get_context_limit(db, thread_id) == {
+                "Actor": 12_000,
+                "Critic": 8_000,
+            }[name]
     finally:
         db.conn.close()
 

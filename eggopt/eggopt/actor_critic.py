@@ -15,6 +15,7 @@ from eggthreads import (
     append_message,
     create_child_thread,
     load_thread_projection,
+    set_context_limit,
     set_thread_tool_allowlist,
     set_thread_tools_enabled,
     set_thread_sandbox_config,
@@ -46,6 +47,11 @@ class Agent:
 
     def __post_init__(self) -> None:
         canonical_json(self.identity, what="agent identity")
+        limit = self.runner_config.context_limit
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
+            raise ValueError("agent context_limit must be a positive integer or None")
         tools, allowed = solver_safe_tools(
             self.tools,
             allowed_tools=self.allowed_tools,
@@ -318,13 +324,14 @@ class _ConfigureAgent(Task):
     role: str
 
     def get_cache_key(self) -> str:
-        # v2 makes the full solver-safe default part of durable configuration.
+        # v2 makes solver capabilities and execution budgets durable configuration.
         identity = {
             "thread": self.thread_id,
             "agent": self.agent.identity,
             "workspace": self.workspace,
             "allowed_tools": sorted(self.agent.allowed_tools),
             "role": self.role,
+            "context_limit": self.agent.runner_config.context_limit,
         }
         if self.agent.system_prompt is not None:
             identity["system_prompt"] = self.agent.system_prompt
@@ -345,6 +352,13 @@ class _ConfigureAgent(Task):
             self.workspace,
             reason="ActorCritic shared innerContext",
         )
+        if self.agent.runner_config.context_limit is not None:
+            set_context_limit(
+                db,
+                self.thread_id,
+                self.agent.runner_config.context_limit,
+                reason="ActorCritic agent context budget",
+            )
         set_thread_tools_enabled(db, self.thread_id, True)
         set_thread_tool_allowlist(db, self.thread_id, set(self.agent.allowed_tools))
         set_thread_sandbox_config(

@@ -90,9 +90,9 @@ restricted = Reflection.eggthreads(
 )
 ```
 
-Reflection runner steps are unbounded by default; the selected model's context
-window remains the natural bound. Applications may opt into a finite runner
-guard and an earlier hard context ceiling explicitly:
+Reflection runner steps are unbounded by default, allowing Eggthreads to use
+compaction for long-lived conversations. Applications may independently opt
+into a finite runner guard and an explicit context budget:
 
 ```python
 bounded = Reflection.eggthreads(
