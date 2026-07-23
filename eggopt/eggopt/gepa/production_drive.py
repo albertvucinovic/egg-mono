@@ -204,13 +204,6 @@ class EggthreadsReflectionDrive:
         max_correction_turns: int = 0,
         context_limit: int | None = None,
     ) -> None:
-        runner_context_limit = (runner_config or RunnerConfig()).context_limit
-        if runner_context_limit is not None:
-            if context_limit is not None and context_limit != runner_context_limit:
-                raise ValueError(
-                    "context_limit conflicts with runner_config.context_limit"
-                )
-            context_limit = runner_context_limit
         tools, allowed_tools = solver_safe_tools(
             tools,
             allowed_tools=allowed_tools,
