@@ -387,6 +387,7 @@ class ScriptedAgentLLM:
 def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatch):
     from eggflow import Task
     from eggopt import ActorCritic, Agent
+    from eggthreads import get_context_limit
 
     monkeypatch.chdir(tmp_path)
     run_dir = Path("run") / "actor-critic"
@@ -434,6 +435,7 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
             generator=Increment(),
             evaluator_identity={"name": "actor-critic-test"},
             case_id=lambda case: case["id"],
+            evaluator_context_limit=9_000,
         ),
     )
 
@@ -454,6 +456,7 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
                 get_thread_tools_config(db, thread_id).allowed_tools
                 == SOLVER_SAFE_TOOLS
             )
+            assert get_context_limit(db, thread_id) == 9_000
     finally:
         db.conn.close()
 
