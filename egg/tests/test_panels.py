@@ -1069,8 +1069,8 @@ class TestConsolePrintMessage:
         assert 'Private reasoning body' in joined_bodies
         assert 'Completed tool result body' in joined_bodies
 
-    def test_display_verbosity_medium_collapses_reasoning_and_tool_results(self, egg_app, monkeypatch):
-        """Medium panels should retain titles/ids but hide noisy bodies."""
+    def test_display_verbosity_medium_collapses_reasoning_and_shows_tool_io(self, egg_app, monkeypatch):
+        """Medium panels retain metadata and show readable bounded tool I/O."""
         printed = []
         monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
         egg_app._display_verbosity = "medium"
@@ -1104,9 +1104,90 @@ class TestConsolePrintMessage:
         joined_bodies = "\n".join(bodies)
         assert 'Answer body' in joined_bodies
         assert 'Private reasoning body' not in joined_bodies
-        assert 'Completed tool result body' not in joined_bodies
+        assert 'Completed tool result body' in joined_bodies
         assert 'call_full_1234567890' in joined_bodies
-        assert 'echo hello' in joined_bodies
+        assert 'cmd: echo hello' in joined_bodies
+
+    def test_medium_tool_panels_follow_toggle_borders(self, egg_app, monkeypatch):
+        """New medium tool renderables use the canonical static box policy."""
+        from rich import box as rich_box
+
+        egg_app._display_verbosity = "medium"
+        assistant = {
+            'role': 'assistant',
+            'content': '',
+            'msg_id': 'msg-call',
+            'tool_calls': [{
+                'id': 'call-border',
+                'function': {'name': 'bash', 'arguments': {'script': 'echo border'}},
+            }],
+        }
+        result = {
+            'role': 'tool',
+            'name': 'bash',
+            'content': 'border result',
+            'msg_id': 'msg-result',
+            'tool_call_id': 'call-border',
+        }
+
+        assert egg_app._borders_visible is False
+        without_borders = [
+            item.renderable
+            for message in (assistant, result)
+            for item in egg_app._static_transcript_message_renderables(message)
+        ]
+        assert without_borders
+        assert all(panel.box == rich_box.MINIMAL for panel in without_borders)
+
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        egg_app.handle_command("/toggleBorders")
+        assert egg_app._borders_visible is True
+        with_borders = [
+            item.renderable
+            for message in (assistant, result)
+            for item in egg_app._static_transcript_message_renderables(message)
+        ]
+        assert with_borders
+        assert all(panel.box == rich_box.SQUARE for panel in with_borders)
+
+    def test_medium_tool_panel_keeps_optimizer_raw_recovery(self, egg_app):
+        egg_app._display_verbosity = "medium"
+
+        items = egg_app._static_transcript_message_renderables({
+            'role': 'tool',
+            'name': 'bash',
+            'content': 'optimized result preview',
+            'msg_id': 'msg-optimized',
+            'tool_call_id': 'call-optimized',
+            'output_optimizer': {
+                'optimized': True,
+                'summary_with_artifact': 'Egg optimized · raw artifact rawabc123',
+                'artifact_id': 'rawabc123',
+            },
+        })
+
+        rendered = self._render_panel_text(items[0].renderable)
+        assert 'optimized result preview' in rendered
+        assert "Raw output: read_long_tool_output('rawabc123', chunk_number=1)" in rendered
+
+    def test_medium_tool_result_uses_head_and_tail_preview(self, egg_app):
+        egg_app._display_verbosity = "medium"
+        content = "\n".join(f"result-line-{index:02d}" for index in range(40))
+
+        items = egg_app._static_transcript_message_renderables({
+            'role': 'tool',
+            'name': 'bash',
+            'content': content,
+            'msg_id': 'msg-long-result',
+            'tool_call_id': 'call-long-result',
+        })
+
+        rendered = self._render_panel_text(items[0].renderable)
+        assert 'result-line-00' in rendered
+        assert 'result-line-39' in rendered
+        assert 'result-line-20' not in rendered
+        assert 'omitted 20 lines' in rendered
+        assert 'Inspect complete persisted record: /show msg-long-result' in rendered
 
     @pytest.mark.parametrize("verbosity", ["max", "medium", "min"])
     def test_answer_user_preserve_turn_note_visible_at_all_verbosities(self, egg_app, monkeypatch, verbosity):

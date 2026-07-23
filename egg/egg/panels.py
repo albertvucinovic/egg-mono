@@ -27,6 +27,14 @@ from .min_run_summary import (
     snapshot_per_message_token_stats,
     serialize_min_tool_call_tokens,
 )
+from .tool_presentation import (
+    format_medium_tool_arguments,
+    format_medium_tool_calls,
+    format_medium_tool_result,
+    format_medium_streamed_tool_result,
+    tool_call_presentation,
+    tool_result_recovery_hint,
+)
 
 
 CHILDREN_PANEL_FALLBACK_REFRESH_SEC = 1.0
@@ -1742,9 +1750,9 @@ class PanelsMixin:
                 lines = []
                 tool_call_infos = []
                 for tc in tcs:
-                    f = (tc or {}).get('function') or {}
-                    name = f.get('name') or (tc or {}).get('name') or 'function'
-                    args = f.get('arguments') or (tc or {}).get('arguments')
+                    call = tool_call_presentation(tc)
+                    name = call.name
+                    args = call.arguments
                     if isinstance(args, (dict, list)):
                         try:
                             args_str = json.dumps(args, ensure_ascii=False)
@@ -1752,20 +1760,23 @@ class PanelsMixin:
                             args_str = str(args)
                     else:
                         args_str = str(args or '')
-                    tc_id = str((tc or {}).get('id') or (tc or {}).get('tool_call_id') or '')
+                    tc_id = call.tool_call_id
                     tool_call_infos.append((name, args_str, tc_id))
                     if verbosity == 'max':
                         lines.append(f"{name}({args_str})")
-                    else:
+                    elif verbosity == 'min':
                         tc_id_text = f" [tool_call_id: {tc_id}]" if tc_id else ""
                         preview = self._panel_one_line_preview(args_str)
                         suffix = f" {preview}" if preview else ""
                         lines.append(f"{name}{tc_id_text}{suffix}")
+                if verbosity == 'medium':
+                    lines = [format_medium_tool_calls(tcs, inspect_message_id=str(msg_id or ''))]
                 # Build consistent title bar like other boxes
                 tool_call_title_style = self._tool_call_style("title")
                 tool_call_body_style = self._tool_call_style("body")
                 tool_call_border_style = self._tool_call_style("body")
-                tc_title_parts = [f'[{tool_call_title_style}]Tool Calls[/{tool_call_title_style}]']
+                tool_call_count = f" ({len(tcs)})" if verbosity == 'medium' else ""
+                tc_title_parts = [f'[{tool_call_title_style}]Tool Calls{tool_call_count}[/{tool_call_title_style}]']
                 if model_key:
                     tc_title_parts.append(f"[dim](model: {model_key})[/dim]")
                 if pm_tokens["tool_calls"]:
@@ -1824,7 +1835,12 @@ class PanelsMixin:
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
                             items.append(self._static_transcript_panel_renderable(
-                                Text('', no_wrap=False, overflow='fold', style='yellow'),
+                                Text(
+                                    format_medium_streamed_tool_result(txt, inspect_message_id=str(msg_id or '')),
+                                    no_wrap=False,
+                                    overflow='fold',
+                                    style='yellow',
+                                ),
                                 " | ".join(title_parts),
                                 'yellow',
                             ))
@@ -1860,7 +1876,10 @@ class PanelsMixin:
                                 tool_call_border_style,
                             ))
                         elif verbosity == 'medium':
-                            preview = self._panel_one_line_preview(txt)
+                            preview = format_medium_tool_arguments(
+                                txt,
+                                inspect_message_id=str(msg_id or ''),
+                            )
                             title_parts = [call_title]
                             if model_key:
                                 title_parts.append(f"[dim](model: {model_key})[/dim]")
@@ -1920,7 +1939,20 @@ class PanelsMixin:
             if verbosity == 'max':
                 panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             elif verbosity == 'medium':
-                panel(Text('', no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
+                panel(
+                    Text(
+                        format_medium_tool_result(
+                            content,
+                            inspect_message_id=str(msg_id or ''),
+                            recovery_hint=tool_result_recovery_hint(m),
+                        ),
+                        no_wrap=False,
+                        overflow='fold',
+                        style='yellow',
+                    ),
+                    title,
+                    'yellow',
+                )
             else:
                 self._record_static_hidden_detail_in_state(
                     hidden_details,

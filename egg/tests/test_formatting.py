@@ -261,8 +261,8 @@ class TestFormatMessagesText:
             f"[Tool: bash [msg_id: {tool}]]\ncompleted tool result body"
         )
 
-    def test_display_verbosity_medium_hides_detail_bodies_but_keeps_headers_and_ids(self, isolated_db):
-        """Medium should collapse reasoning and tool results while preserving ids."""
+    def test_display_verbosity_medium_shows_readable_tool_arguments_and_results(self, isolated_db):
+        """Medium keeps reasoning collapsed but makes tool I/O useful."""
         from eggthreads import append_message, create_root_thread, create_snapshot
         from egg.formatting import FormattingMixin
 
@@ -310,10 +310,11 @@ class TestFormatMessagesText:
         assert "assistant answer" in text
         assert f"[Reasoning [msg_id: {assistant}]]" in text
         assert "private reasoning body" not in text
-        assert f"[Tool Calls [msg_id: {assistant}]]" in text
-        assert "[ToolCall [tool_call_id: call_full_1234567890]] bash" in text
+        assert f"[Tool Calls (1) [msg_id: {assistant}]]" in text
+        assert "1. bash · tool_call_id: call_full_1234567890" in text
+        assert "script:\n     echo hello and then produce" in text
         assert f"[Tool: bash [msg_id: {tool}] [tool_call_id: call_full_1234567890]]" in text
-        assert "completed tool result body" not in text
+        assert "completed tool result body" in text
 
     def test_output_optimizer_metadata_is_shown_for_tool_messages_without_body_clutter(self, isolated_db):
         from eggthreads import append_message, create_root_thread, create_snapshot
@@ -359,8 +360,34 @@ class TestFormatMessagesText:
         assert f"[Tool: bash [msg_id: {optimized}] [tool_call_id: call_optimized]] [Egg optimized · 95% saved · raw artifact rawabc123]" in text
         assert f"[Tool: bash [msg_id: {default}] [tool_call_id: call_default]]" in text
         assert "raw artifact rawabc123" in text
-        assert "plain preview body" not in text
+        assert "Raw output: read_long_tool_output('rawabc123', chunk_number=1)" in text
+        assert "plain preview body" in text
         assert "plain preview body [Egg optimized" not in text
+
+    def test_display_verbosity_medium_marks_empty_tool_result(self, isolated_db):
+        from eggthreads import append_message, create_root_thread, create_snapshot
+        from egg.formatting import FormattingMixin
+
+        tid = create_root_thread(isolated_db, name="EmptyMediumResult")
+        tool = append_message(
+            isolated_db,
+            tid,
+            "tool",
+            "",
+            extra={"name": "bash", "tool_call_id": "call_empty"},
+        )
+        create_snapshot(isolated_db, tid)
+
+        class TestApp(FormattingMixin):
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+                self._display_verbosity = "medium"
+
+        text = TestApp().format_messages_text(tid)
+
+        assert f"[Tool: bash [msg_id: {tool}] [tool_call_id: call_empty]]" in text
+        assert "(no output)" in text
 
     def test_display_verbosity_min_shows_conversation_and_run_summary(self, isolated_db):
         """Min should show user/assistant bodies and summarize hidden activity runs."""

@@ -36,6 +36,14 @@ from .min_run_summary import (
     serialize_min_tool_call_tokens,
     snapshot_per_message_token_stats,
 )
+from .tool_presentation import (
+    format_medium_tool_arguments,
+    format_medium_tool_calls,
+    format_medium_tool_result,
+    format_medium_streamed_tool_result,
+    tool_call_presentation,
+    tool_result_recovery_hint,
+)
 
 
 class FormattingMixin:
@@ -463,16 +471,12 @@ class FormattingMixin:
             hidden_summary.clear()
 
         def tool_call_info(tc: Any) -> tuple[str, str, str]:
-            data = tc if isinstance(tc, dict) else {}
-            f = data.get('function') if isinstance(data.get('function'), dict) else {}
-            name = f.get('name') or data.get('name') or 'function'
-            args = f.get('arguments') if 'arguments' in f else data.get('arguments')
+            call = tool_call_presentation(tc)
             try:
-                args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, (dict, list)) else str(args or '')
+                args_str = json.dumps(call.arguments, ensure_ascii=False) if isinstance(call.arguments, (dict, list)) else str(call.arguments or '')
             except Exception:
-                args_str = str(args or '')
-            tc_id = str(data.get('id') or data.get('tool_call_id') or '')
-            return str(name or 'function'), args_str, tc_id
+                args_str = str(call.arguments or '')
+            return call.name, args_str, call.tool_call_id
 
         def min_system_message_is_visible(content: str) -> bool:
             # All system messages are visible in min verbosity.
@@ -533,15 +537,9 @@ class FormattingMixin:
                                 args_str = str(args or '')
                             lines.append(f"[ToolCall] {name} {args_str}")
                     elif verbosity == 'medium':
-                        tc_lines: List[str] = []
-                        for tc in tcs:
-                            name, args_str, tc_id = tool_call_info(tc)
-                            tc_id_text = f" [tool_call_id: {tc_id}]" if tc_id else ""
-                            preview = self._one_line_display_preview(args_str)
-                            suffix = f" {preview}" if preview else ""
-                            tc_lines.append(f"[ToolCall{tc_id_text}] {name}{suffix}")
-                        if tc_lines:
-                            lines.append(f"[Tool Calls{tps_text}{msg_id_text}]\n" + "\n".join(tc_lines))
+                        tool_calls_text = format_medium_tool_calls(tcs, inspect_message_id=msg_id)
+                        if tool_calls_text:
+                            lines.append(f"[Tool Calls ({len(tcs)}){tps_text}{msg_id_text}]\n{tool_calls_text}")
                     else:
                         tool_call_tokens = min_message_token_count(
                             per_message_tokens,
@@ -565,7 +563,8 @@ class FormattingMixin:
                             if verbosity == 'max':
                                 lines.append(f"{header}\n{txt}")
                             elif verbosity == 'medium':
-                                lines.append(header)
+                                preview = format_medium_streamed_tool_result(txt, inspect_message_id=msg_id)
+                                lines.append(f"{header}\n{preview}")
                             else:
                                 add_hidden_tool_result(name=nm, tokens=count_min_hidden_text_tokens(txt))
                 tc_stream = m.get('tool_calls_stream') or {}
@@ -576,8 +575,8 @@ class FormattingMixin:
                             if verbosity == 'max':
                                 lines.append(f"{header}\n{txt}")
                             elif verbosity == 'medium':
-                                preview = self._one_line_display_preview(txt)
-                                lines.append(f"{header} {preview}" if preview else header)
+                                preview = format_medium_tool_arguments(txt, inspect_message_id=msg_id)
+                                lines.append(f"{header}\n{preview}")
                             else:
                                 add_hidden_tool_call(
                                     tokens=count_min_hidden_text_tokens(txt),
@@ -600,7 +599,7 @@ class FormattingMixin:
                     name = m.get('name') or 'tool'
                     lower_label = 'Tool'
                 content = content_to_plain_text(m.get('content')).strip()
-                if content:
+                if content or verbosity == 'medium':
                     optimizer_summary = self._output_optimizer_summary(m, include_artifact_id=True)
                     if verbosity == 'max':
                         header = f"[Tool: {name}{tps_text}{msg_id_text}]"
@@ -614,7 +613,12 @@ class FormattingMixin:
                         if optimizer_summary:
                             header += f" [{optimizer_summary}]"
                         if verbosity == 'medium':
-                            lines.append(header)
+                            preview = format_medium_tool_result(
+                                content,
+                                inspect_message_id=msg_id,
+                                recovery_hint=tool_result_recovery_hint(m),
+                            )
+                            lines.append(f"{header}\n{preview}")
                         else:
                             add_hidden_tool_result(
                                 name=name,
