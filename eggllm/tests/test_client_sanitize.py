@@ -1,4 +1,6 @@
 from eggllm.client import LLMClient
+from eggllm.config import load_models_config
+from eggllm.catalog import AllModelsCatalog
 
 from pathlib import Path
 import json
@@ -12,12 +14,7 @@ def test_library_constructs(tmp_path: Path):
             "openai": {
                 "api_base": "https://api.openai.com/v1/chat/completions",
                 "api_key_env": "OPENAI_API_KEY",
-                "models": {
-                    "OpenAI GPT-4o": {
-                        "model_name": "gpt-4o",
-                        "max_tokens": 128000,
-                    }
-                }
+                "models": {"OpenAI GPT-4o": {"model_name": "gpt-4o"}}
             }
         }
     }
@@ -28,55 +25,6 @@ def test_library_constructs(tmp_path: Path):
 
     client = LLMClient(models_path=mpath, all_models_path=apath)
     assert client.current_model_key in client.registry.models_config
-    assert client.model_context_window_tokens() == 128000
-    assert client.model_context_window_tokens("OpenAI GPT-4o") == 128000
-
-
-def test_model_context_window_requires_configured_positive_max_tokens(tmp_path: Path):
-    models = {
-        "providers": {
-            "openai": {
-                "api_base": "https://api.openai.com/v1/chat/completions",
-                "api_key_env": "OPENAI_API_KEY",
-                "models": {"No Window": {"model_name": "no-window"}},
-            }
-        }
-    }
-    mpath = tmp_path / "models.json"
-    apath = tmp_path / "all-models.json"
-    mpath.write_text(json.dumps(models))
-    apath.write_text(json.dumps({"providers": {}}))
-    client = LLMClient(models_path=mpath, all_models_path=apath)
-
-    with pytest.raises(ValueError, match="positive max_tokens"):
-        client.model_context_window_tokens()
-    with pytest.raises(KeyError, match="Unknown model"):
-        client.model_context_window_tokens("missing")
-
-
-def test_model_context_window_accepts_alias(tmp_path: Path):
-    models = {
-        "providers": {
-            "openai": {
-                "api_base": "https://api.openai.com/v1/chat/completions",
-                "api_key_env": "OPENAI_API_KEY",
-                "models": {
-                    "Full Name": {
-                        "model_name": "full-name",
-                        "alias": ["short"],
-                        "max_tokens": 64000,
-                    }
-                },
-            }
-        }
-    }
-    mpath = tmp_path / "models.json"
-    apath = tmp_path / "all-models.json"
-    mpath.write_text(json.dumps(models))
-    apath.write_text(json.dumps({"providers": {}}))
-    client = LLMClient(models_path=mpath, all_models_path=apath)
-
-    assert client.model_context_window_tokens("short") == 64000
 
 
 class _CaptureAdapter:

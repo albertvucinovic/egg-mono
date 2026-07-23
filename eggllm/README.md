@@ -96,7 +96,6 @@ from eggllm import LLMClient
 
 llm = LLMClient(models_path="models.json", all_models_path="all-models.json")
 llm.set_model("OpenAI GPT-4o")
-print(llm.model_context_window_tokens())  # 128000 from models.json
 
 messages = [
     {"role": "system", "content": "You are helpful."},
@@ -130,7 +129,6 @@ List configured models/providers:
 ```python
 print(llm.list_models_by_provider())
 print(llm.get_providers())
-print(llm.model_context_window_tokens("OpenAI GPT-4o"))
 ```
 
 ## Provider catalogs
