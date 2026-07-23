@@ -22,6 +22,7 @@ from eggthreads import (
     thread_state,
 )
 
+from ._full_context import run_with_full_context_limit
 from ._context import _current_evaluation, _evaluation_runtime
 from ._identity import canonical_json, digest_payload
 from .gepa.production_drive import default_solver_safe_tools, solver_safe_tools
@@ -29,7 +30,7 @@ from .gepa.production_drive import default_solver_safe_tools, solver_safe_tools
 
 @dataclass(frozen=True)
 class Agent:
-    """Small Eggthreads agent configuration for ActorCritic."""
+    """Small Eggthreads agent configuration with an Eggopt full-history budget."""
 
     llm: Any = field(repr=False, compare=False)
     identity: Mapping[str, Any]
@@ -41,16 +42,22 @@ class Agent:
     runner_config: RunnerConfig = field(
         default_factory=RunnerConfig, repr=False, compare=False
     )
+    context_limit: int | None = None
     allowed_tools: frozenset[str] | None = None
     system_prompt: str | None = None
 
     def __post_init__(self) -> None:
         canonical_json(self.identity, what="agent identity")
-        limit = self.runner_config.context_limit
+        limit = self.context_limit
         if limit is not None and (
             isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
         ):
             raise ValueError("agent context_limit must be a positive integer or None")
+        if self.runner_config.context_limit is not None:
+            raise ValueError(
+                "runner_config.context_limit is an Eggthreads provider-context limit; "
+                "pass Eggopt's full-history context_limit instead"
+            )
         tools, allowed = solver_safe_tools(
             self.tools,
             allowed_tools=self.allowed_tools,
@@ -158,6 +165,7 @@ class ActorCritic(Task):
                 self.actor_prompt(round_number, state),
                 "actor",
                 round_number,
+                self.actor.context_limit,
             )
             state = {**state, "answer": answer}
             if isinstance(self.critic, Agent):
@@ -168,6 +176,7 @@ class ActorCritic(Task):
                     self.critic_prompt(round_number, state),
                     "critic",
                     round_number,
+                    self.critic.context_limit,
                 )
             else:
                 raw = yield _TaskCritique(self.critic, round_number, state)
@@ -436,6 +445,7 @@ class _AgentTurn(Task):
     prompt: str
     role: str
     round_number: int
+    context_limit: int | None = None
 
     def get_cache_key(self) -> str:
         return digest_payload(
@@ -480,7 +490,13 @@ class _AgentTurn(Task):
             models_path=self.agent.models_path,
             tools=self.agent.tools,
         )
-        await _run_until_waiting(runner, db, self.thread_id, after_seq)
+        await _run_until_waiting(
+            runner,
+            db,
+            self.thread_id,
+            after_seq,
+            self.context_limit,
+        )
         response = _latest_answer(db, self.thread_id, after_seq)
         if response is None:
             raise RuntimeError(f"{self.role} produced no final answer")
@@ -489,7 +505,11 @@ class _AgentTurn(Task):
 
 
 async def _run_until_waiting(
-    runner: ThreadRunner, db: Any, thread_id: str, after_seq: int
+    runner: ThreadRunner,
+    db: Any,
+    thread_id: str,
+    after_seq: int,
+    context_limit: int | None,
 ) -> None:
     for _ in range(256):
         state = thread_state(db, thread_id)
@@ -497,7 +517,13 @@ async def _run_until_waiting(
             if _latest_answer(db, thread_id, after_seq) is not None:
                 return
             raise RuntimeError("ActorCritic agent settled without a final answer")
-        progressed = await runner.run_once()
+        progressed = await run_with_full_context_limit(
+            runner,
+            db,
+            thread_id,
+            context_limit,
+            operation="ActorCritic agent",
+        )
         if thread_state(db, thread_id) == "waiting_tool_approval":
             raise RuntimeError("ActorCritic tool call requires approval")
         if not progressed and thread_state(db, thread_id) != "waiting_user":

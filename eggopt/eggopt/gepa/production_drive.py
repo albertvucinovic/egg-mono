@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 from collections.abc import Mapping
@@ -14,16 +13,13 @@ from eggthreads import (
     ToolRegistry,
     append_message,
     approve_tool_calls_for_thread,
-    count_text_tokens,
     create_default_tools,
     create_root_thread,
     edit_message,
     get_thread_sandbox_config,
     get_thread_tools_config,
     get_thread_working_directory,
-    interrupt_thread,
     load_thread_projection,
-    provider_context_token_stats,
     set_thread_model,
     set_thread_sandbox_config,
     set_thread_tool_allowlist,
@@ -32,6 +28,7 @@ from eggthreads import (
     thread_state,
 )
 
+from .._full_context import run_with_full_context_limit
 from ._identity import canonical_json
 from .reflection import (
     CandidateMutation,
@@ -212,6 +209,11 @@ class EggthreadsReflectionDrive:
         self.tools = tools
         self.allowed_tools = allowed_tools
         self.runner_config = runner_config or RunnerConfig()
+        if self.runner_config.context_limit is not None:
+            raise ValueError(
+                "runner_config.context_limit is an Eggthreads provider-context limit; "
+                "pass Eggopt's full-history context_limit instead"
+            )
         self.models_path = models_path
         self.all_models_path = all_models_path
         self.auto_approve_tools = bool(auto_approve_tools)
@@ -267,8 +269,8 @@ class EggthreadsReflectionDrive:
                 "max_correction_turns": max_correction_turns,
             },
             "context_limit": {
-                "policy": "eggopt.gepa.streaming-context-limit",
-                "version": "1",
+                "policy": "eggopt.gepa.full-context-limit",
+                "version": "2",
                 "max_tokens": context_limit,
             },
         }
@@ -433,46 +435,13 @@ class EggthreadsReflectionDrive:
         db: ThreadsDB,
         thread_id: str,
     ) -> bool:
-        if self.context_limit is None:
-            return await runner.run_once()
-        current = int(
-            provider_context_token_stats(db, thread_id).get("context_tokens") or 0
+        return await run_with_full_context_limit(
+            runner,
+            db,
+            thread_id,
+            self.context_limit,
+            operation="reflection",
         )
-        if current >= self.context_limit:
-            raise RuntimeError(
-                "reflection context limit reached before provider call; "
-                f"operation terminated ({current} >= {self.context_limit})"
-            )
-        task = asyncio.create_task(runner.run_once())
-        try:
-            while not task.done():
-                await asyncio.sleep(0)
-                current = int(
-                    provider_context_token_stats(db, thread_id).get("context_tokens")
-                    or 0
-                )
-                live = _open_llm_stream_tokens(db, thread_id)
-                if current + live >= self.context_limit:
-                    interrupt_thread(
-                        db,
-                        thread_id,
-                        reason=(
-                            "eggopt reflection context limit reached: "
-                            f"{current + live} >= {self.context_limit}"
-                        ),
-                    )
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                    raise RuntimeError(
-                        "reflection context limit reached; operation terminated"
-                    )
-            return await task
-        finally:
-            if not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
 
 
 def _root_thread_id(db: ThreadsDB, thread_id: str) -> str:
@@ -533,29 +502,6 @@ def _runner_error_after(db: ThreadsDB, thread_id: str, after_seq: int) -> str | 
         if message.payload.get("runner_error"):
             return str(message.payload.get("content") or "reflection runner failed")
     return None
-
-
-def _open_llm_stream_tokens(db: ThreadsDB, thread_id: str) -> int:
-    row = db.current_open(thread_id)
-    if row is None or row["purpose"] != "llm":
-        return 0
-    invoke_id = str(row["invoke_id"])
-    parts: list[str] = []
-    for event in db.events_since(thread_id, 0):
-        if event["invoke_id"] != invoke_id or event["type"] != "stream.delta":
-            continue
-        try:
-            payload = json.loads(event["payload_json"] or "{}")
-        except json.JSONDecodeError:
-            continue
-        for key in ("text", "reason", "reasoning_summary"):
-            value = payload.get(key)
-            if isinstance(value, str):
-                parts.append(value)
-        tool_call = payload.get("tool_call")
-        if isinstance(tool_call, Mapping):
-            parts.append(str(tool_call.get("arguments_delta") or ""))
-    return count_text_tokens("".join(parts))
 
 
 def _repair_reason(exc: BaseException) -> str:

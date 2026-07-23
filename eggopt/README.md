@@ -53,7 +53,9 @@ determines `best_candidate`.
 
 `NativeGEPAConfig(evaluator_context_limit=...)` applies one explicit context
 budget to every Case Evaluation thread and its descendants. It is independent
-of model capacity and becomes part of the durable evaluation identity.
+of model capacity, counts the full Eggthreads history rather than only the
+post-compaction provider prompt, and becomes part of the durable evaluation
+identity.
 
 `minibatch_acceptance="strict_improvement"` is the default: a child tied with
 the selected parents' per-case score envelope is rejected. Use
@@ -73,6 +75,8 @@ Each case owns `outerContext/innerContext/`. Evaluator Tasks may call
 `current_evaluation()` to discover those paths and create an Actor/Critic
 subtree. Rerunning the same study with larger limits replays finished Tasks and
 continues with new work.
+`max_evaluator_calls` and `max_candidates` are stopping budgets, not cache-key
+inputs, so changing them does not invalidate completed primitive work.
 
 Every GEPA-managed LLM thread receives the versioned `solver_safe` registry and
 full safe allowlist by default. Pass an explicit `allowed_tools` list to
@@ -96,7 +100,8 @@ restricted = Reflection.eggthreads(
 
 Reflection runner steps are unbounded by default, allowing Eggthreads to use
 compaction for long-lived conversations. Applications may set an explicit
-Mutation-thread context budget; `max_runner_steps` is only an optional finite
+Mutation-thread full-context budget; compaction controls provider-prompt size
+without resetting that budget. `max_runner_steps` is only an optional finite
 guard:
 
 ```python
@@ -106,6 +111,10 @@ reflection = Reflection.eggthreads(
     context_limit=240_000,
 )
 ```
+
+These are deliberately separate counters: Eggthreads decides when to compact
+from its current provider context, while Eggopt stops the experiment from the
+full thread history.
 
 Eggopt also includes the optional reusable `ActorCritic` Task. It creates a
 Critic thread with an Actor child for the current case, keeps both across bounded
@@ -120,7 +129,7 @@ from eggopt import ActorCritic, Agent
 class EvaluateCase(Task):
     def run(self):
         attempt = yield ActorCritic(
-            actor=Agent(actor_llm, {"role": "actor"}),
+            actor=Agent(actor_llm, {"role": "actor"}, context_limit=32_000),
             critic=Agent(critic_llm, {"role": "critic"}),
             actor_prompt=actor_prompt,
             critic_prompt=critic_prompt,
@@ -128,6 +137,10 @@ class EvaluateCase(Task):
         )
         return hidden_grade(attempt.answer), {"answer": attempt.answer}
 ```
+
+When configuring an `Agent` directly, pass its Eggopt budget as
+`context_limit=...`; `runner_config.context_limit` remains the distinct
+Eggthreads provider-context setting.
 
 The Critic-parent topology lets a Critic model inspect its Actor descendant
 through Eggthreads' descendant-safe tools. The critic may also be an ordinary
