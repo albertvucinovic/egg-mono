@@ -95,14 +95,14 @@ restricted = Reflection.eggthreads(
 ```
 
 Reflection runner steps are unbounded by default, allowing Eggthreads to use
-compaction for long-lived conversations. Applications may independently opt
-into a finite runner guard and an explicit context budget:
+compaction for long-lived conversations. Applications may set an explicit
+Mutation-thread context budget; `max_runner_steps` is only an optional finite
+guard:
 
 ```python
-bounded = Reflection.eggthreads(
+reflection = Reflection.eggthreads(
     llm=reflection_lm,
     identity={"model": "reflection-model-v1"},
-    max_runner_steps=128,
     context_limit=240_000,
 )
 ```
