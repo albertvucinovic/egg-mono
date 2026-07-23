@@ -316,7 +316,7 @@ def test_context_ceiling_rejects_before_provider_call(tmp_path, monkeypatch):
         MustNotRunLLM(),
         _registry([], []),
         {"model": "preflight-ceiling", "profile": profile},
-        context_ceiling_tokens=1,
+        context_limit=1,
     )
 
     with pytest.raises(Exception, match="context ceiling reached before provider call"):
@@ -344,7 +344,7 @@ def test_streaming_context_ceiling_interrupts_only_reflection_operation(
         llm,
         _registry([], []),
         {"model": "ceiling-test", "profile": profile},
-        context_ceiling_tokens=180,
+        context_limit=180,
     )
     from eggthreads import provider_context_token_stats
 
@@ -385,9 +385,7 @@ def test_production_drive_validates_repair_and_ceiling_options():
         ({"max_runner_steps": 1.5}, "max_runner_steps"),
         ({"max_correction_turns": -1}, "max_correction_turns"),
         ({"max_correction_turns": True}, "max_correction_turns"),
-        ({"context_ceiling_tokens": 0}, "context_limit"),
-        ({"context_ceiling_tokens": True}, "context_limit"),
-        ({"context_limit": 0}, "context_limit"),
+                        ({"context_limit": 0}, "context_limit"),
         ({"context_limit": True}, "context_limit"),
     ]:
         with pytest.raises(ValueError, match=message):
@@ -404,15 +402,6 @@ def test_production_drive_validates_repair_and_ceiling_options():
             tools=registry,
             allowed_tools={"python_exec"},
             drive_identity={"mutation_repair": "caller override"},
-        )
-    with pytest.raises(ValueError, match="deprecated alias"):
-        EggthreadsReflectionDrive(
-            llm=MustNotRunLLM(),
-            tools=registry,
-            allowed_tools={"python_exec"},
-            drive_identity={"model": "duplicate-context-limit"},
-            context_limit=100,
-            context_ceiling_tokens=100,
         )
     with pytest.raises(ValueError, match="reserved"):
         EggthreadsReflectionDrive(

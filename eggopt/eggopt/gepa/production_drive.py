@@ -203,14 +203,7 @@ class EggthreadsReflectionDrive:
         max_runner_steps: int | float = math.inf,
         max_correction_turns: int = 0,
         context_limit: int | None = None,
-        context_ceiling_tokens: int | None = None,
     ) -> None:
-        if context_limit is not None and context_ceiling_tokens is not None:
-            raise ValueError(
-                "use context_limit; context_ceiling_tokens is a deprecated alias"
-            )
-        if context_limit is None:
-            context_limit = context_ceiling_tokens
         runner_context_limit = (runner_config or RunnerConfig()).context_limit
         if runner_context_limit is not None:
             if context_limit is not None and context_limit != runner_context_limit:
@@ -258,7 +251,7 @@ class EggthreadsReflectionDrive:
             )
         self.max_correction_turns = max_correction_turns
         self.context_limit = context_limit
-        self.context_ceiling_tokens = context_limit
+        self.context_limit = context_limit
         identity = json.loads(canonical_json(drive_identity, what="drive_identity"))
         reserved = {"tool_policy", "mutation_repair", "context_ceiling"}.intersection(
             identity
@@ -448,15 +441,15 @@ class EggthreadsReflectionDrive:
         db: ThreadsDB,
         thread_id: str,
     ) -> bool:
-        if self.context_ceiling_tokens is None:
+        if self.context_limit is None:
             return await runner.run_once()
         current = int(
             provider_context_token_stats(db, thread_id).get("context_tokens") or 0
         )
-        if current >= self.context_ceiling_tokens:
+        if current >= self.context_limit:
             raise RuntimeError(
                 "reflection context ceiling reached before provider call; "
-                f"operation terminated ({current} >= {self.context_ceiling_tokens})"
+                f"operation terminated ({current} >= {self.context_limit})"
             )
         task = asyncio.create_task(runner.run_once())
         try:
@@ -467,13 +460,13 @@ class EggthreadsReflectionDrive:
                     or 0
                 )
                 live = _open_llm_stream_tokens(db, thread_id)
-                if current + live >= self.context_ceiling_tokens:
+                if current + live >= self.context_limit:
                     interrupt_thread(
                         db,
                         thread_id,
                         reason=(
                             "eggopt reflection context ceiling reached: "
-                            f"{current + live} >= {self.context_ceiling_tokens}"
+                            f"{current + live} >= {self.context_limit}"
                         ),
                     )
                     try:

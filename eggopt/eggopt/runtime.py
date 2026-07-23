@@ -65,7 +65,6 @@ class Reflection:
         max_runner_steps: int | float = math.inf,
         max_correction_turns: int = 0,
         context_limit: int | None = None,
-        context_ceiling_tokens: int | None = None,
     ) -> Reflection:
         if tools is None:
             tools = default_solver_safe_tools()
@@ -81,7 +80,6 @@ class Reflection:
                 max_runner_steps=max_runner_steps,
                 max_correction_turns=max_correction_turns,
                 context_limit=context_limit,
-                context_ceiling_tokens=context_ceiling_tokens,
             ),
             identity=identity,
             instruction=instruction,
