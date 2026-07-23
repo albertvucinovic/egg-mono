@@ -14,9 +14,7 @@ from eggthreads import (
     ToolRegistry,
     append_message,
     create_child_thread,
-    get_context_limit,
     load_thread_projection,
-    set_context_limit,
     set_thread_tool_allowlist,
     set_thread_tools_enabled,
     set_thread_sandbox_config,
@@ -325,14 +323,13 @@ class _ConfigureAgent(Task):
     role: str
 
     def get_cache_key(self) -> str:
-        # v2 makes solver capabilities and execution budgets durable configuration.
+        # v2 makes the full solver-safe default part of durable configuration.
         identity = {
             "thread": self.thread_id,
             "agent": self.agent.identity,
             "workspace": self.workspace,
             "allowed_tools": sorted(self.agent.allowed_tools),
             "role": self.role,
-            "context_limit": self.agent.runner_config.context_limit,
         }
         if self.agent.system_prompt is not None:
             identity["system_prompt"] = self.agent.system_prompt
@@ -353,17 +350,6 @@ class _ConfigureAgent(Task):
             self.workspace,
             reason="ActorCritic shared innerContext",
         )
-        if (
-            self.agent.runner_config.context_limit is not None
-            and get_context_limit(db, self.thread_id)
-            != self.agent.runner_config.context_limit
-        ):
-            set_context_limit(
-                db,
-                self.thread_id,
-                self.agent.runner_config.context_limit,
-                reason="ActorCritic agent context budget",
-            )
         set_thread_tools_enabled(db, self.thread_id, True)
         set_thread_tool_allowlist(db, self.thread_id, set(self.agent.allowed_tools))
         set_thread_sandbox_config(
