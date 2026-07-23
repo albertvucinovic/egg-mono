@@ -385,7 +385,7 @@ def test_production_drive_validates_repair_and_ceiling_options():
         ({"max_runner_steps": 1.5}, "max_runner_steps"),
         ({"max_correction_turns": -1}, "max_correction_turns"),
         ({"max_correction_turns": True}, "max_correction_turns"),
-                        ({"context_limit": 0}, "context_limit"),
+        ({"context_limit": 0}, "context_limit"),
         ({"context_limit": True}, "context_limit"),
     ]:
         with pytest.raises(ValueError, match=message):
@@ -570,7 +570,7 @@ def test_runtime_persists_default_and_explicit_gepa_allowlists(tmp_path, monkeyp
         tools=_registry([], []),
         allowed_tools={"python_exec"},
         identity={"model": "restricted-tools"},
-        runner_config=RunnerConfig(context_limit=24_000),
+        context_limit=24_000,
     )
     with Runtime.open(tmp_path / "restricted-run", restricted) as runtime:
         assert get_thread_tools_config(
