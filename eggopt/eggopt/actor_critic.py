@@ -23,7 +23,11 @@ from eggthreads import (
 )
 
 from ._full_context import run_with_full_context_limit
-from ._context import _current_evaluation, _evaluation_runtime
+from ._context import (
+    _current_evaluation,
+    _current_evaluation_context_limit,
+    _evaluation_runtime,
+)
 from ._identity import canonical_json, digest_payload
 from .gepa.production_drive import default_solver_safe_tools, solver_safe_tools
 
@@ -139,6 +143,7 @@ class ActorCritic(Task):
         runtime_key = str(context["_runtime_key"])
         evaluation_id = str(context["evaluation_thread_id"])
         workspace = str(context["inner_context"])
+        context_limit = _current_evaluation_context_limit()
         actor_id, critic_id = yield _EnsurePair(
             runtime_key,
             evaluation_id,
@@ -165,7 +170,7 @@ class ActorCritic(Task):
                 self.actor_prompt(round_number, state),
                 "actor",
                 round_number,
-                self.actor.context_limit,
+                self.actor.context_limit or context_limit,
             )
             state = {**state, "answer": answer}
             if isinstance(self.critic, Agent):
@@ -176,7 +181,7 @@ class ActorCritic(Task):
                     self.critic_prompt(round_number, state),
                     "critic",
                     round_number,
-                    self.critic.context_limit,
+                    self.critic.context_limit or context_limit,
                 )
             else:
                 raw = yield _TaskCritique(self.critic, round_number, state)

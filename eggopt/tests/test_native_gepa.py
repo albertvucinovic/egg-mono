@@ -547,22 +547,14 @@ def test_actor_critic_context_limit_uses_full_history_not_provider_context(
     run_dir = Path("run") / "actor-critic-full-context"
     actor_llm = ScriptedAgentLLM([])
 
-    @dataclass
-    class Accept(Task):
-        def run(self):
-            return {"decision": "accept", "feedback": "Valid."}
-
     class EvaluateWithActorCritic(Task):
         def run(self):
             return (
                 yield ActorCritic(
-                    actor=Agent(
-                        actor_llm,
-                        {"role": "actor-full-context"},
-                        context_limit=100,
-                    ),
-                    critic=Accept(),
+                    actor=Agent(actor_llm, {"role": "actor-full-context"}),
+                    critic=Agent(object(), {"role": "unused-critic"}),
                     actor_prompt=lambda _round, _state: "Predict.",
+                    critic_prompt=lambda _round, _state: "Validate.",
                     max_rounds=1,
                 )
             )
