@@ -13,6 +13,7 @@ from eggthreads import (
     ThreadRunner,
     ToolRegistry,
     append_message,
+    approve_tool_calls_for_thread,
     create_child_thread,
     load_thread_projection,
     set_thread_tool_allowlist,
@@ -23,7 +24,11 @@ from eggthreads import (
 )
 
 from ._full_context import run_with_full_context_limit
-from ._context import _current_evaluation, _evaluation_runtime
+from ._context import (
+    _current_evaluation,
+    _current_evaluation_context_limit,
+    _evaluation_runtime,
+)
 from ._identity import canonical_json, digest_payload
 from .gepa.production_drive import default_solver_safe_tools, solver_safe_tools
 
@@ -43,6 +48,7 @@ class Agent:
         default_factory=RunnerConfig, repr=False, compare=False
     )
     context_limit: int | None = None
+    auto_approve_tools: bool = False
     allowed_tools: frozenset[str] | None = None
     system_prompt: str | None = None
 
@@ -139,6 +145,7 @@ class ActorCritic(Task):
         runtime_key = str(context["_runtime_key"])
         evaluation_id = str(context["evaluation_thread_id"])
         workspace = str(context["inner_context"])
+        context_limit = _current_evaluation_context_limit()
         actor_id, critic_id = yield _EnsurePair(
             runtime_key,
             evaluation_id,
@@ -165,7 +172,7 @@ class ActorCritic(Task):
                 self.actor_prompt(round_number, state),
                 "actor",
                 round_number,
-                self.actor.context_limit,
+                self.actor.context_limit or context_limit,
             )
             state = {**state, "answer": answer}
             if isinstance(self.critic, Agent):
@@ -176,7 +183,7 @@ class ActorCritic(Task):
                     self.critic_prompt(round_number, state),
                     "critic",
                     round_number,
-                    self.critic.context_limit,
+                    self.critic.context_limit or context_limit,
                 )
             else:
                 raw = yield _TaskCritique(self.critic, round_number, state)
@@ -482,6 +489,13 @@ class _AgentTurn(Task):
                 _record_answer(db, self.thread_id, semantic_key, persisted_answer)
                 return persisted_answer
         after_seq = _prompt_event_seq(db, self.thread_id, semantic_key)
+        if self.agent.auto_approve_tools:
+            approve_tool_calls_for_thread(
+                db,
+                self.thread_id,
+                decision="global_approval",
+                reason="Application opted into auto-approval for this agent",
+            )
         runner = ThreadRunner(
             db,
             self.thread_id,

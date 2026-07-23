@@ -120,6 +120,16 @@ def test_agent_separates_full_context_budget_from_eggthreads_runner_config():
         )
 
 
+def test_agent_can_opt_into_tool_auto_approval():
+    agent = Agent(
+        object(),
+        {"role": "auto-approved-tools"},
+        auto_approve_tools=True,
+    )
+
+    assert agent.auto_approve_tools is True
+
+
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
 def test_native_gepa_evaluator_context_limit_must_be_positive(limit):
     with pytest.raises(ValueError, match="evaluator_context_limit"):
@@ -413,7 +423,7 @@ class ScriptedAgentLLM:
 def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatch):
     from eggflow import Task
     from eggopt import ActorCritic, Agent
-    from eggthreads import get_context_limit
+    from eggthreads import get_context_limit, get_thread_auto_approval_status
 
     monkeypatch.chdir(tmp_path)
     run_dir = Path("run") / "actor-critic"
@@ -433,7 +443,11 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
     class EvaluateWithActorCritic(Task):
         def run(self):
             result = yield ActorCritic(
-                actor=Agent(actor_llm, {"role": "actor"}),
+                actor=Agent(
+                    actor_llm,
+                    {"role": "actor"},
+                    auto_approve_tools=True,
+                ),
                 critic=Agent(critic_llm, {"role": "critic"}),
                 actor_prompt=lambda round_number, state: (
                     "Predict." if round_number == 1 else state["feedback"]
@@ -483,6 +497,8 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
                 == SOLVER_SAFE_TOOLS
             )
             assert get_context_limit(db, thread_id) == 9_000
+            if name == "Actor":
+                assert get_thread_auto_approval_status(db, thread_id) is True
     finally:
         db.conn.close()
 
@@ -547,22 +563,14 @@ def test_actor_critic_context_limit_uses_full_history_not_provider_context(
     run_dir = Path("run") / "actor-critic-full-context"
     actor_llm = ScriptedAgentLLM([])
 
-    @dataclass
-    class Accept(Task):
-        def run(self):
-            return {"decision": "accept", "feedback": "Valid."}
-
     class EvaluateWithActorCritic(Task):
         def run(self):
             return (
                 yield ActorCritic(
-                    actor=Agent(
-                        actor_llm,
-                        {"role": "actor-full-context"},
-                        context_limit=100,
-                    ),
-                    critic=Accept(),
+                    actor=Agent(actor_llm, {"role": "actor-full-context"}),
+                    critic=Agent(object(), {"role": "unused-critic"}),
                     actor_prompt=lambda _round, _state: "Predict.",
+                    critic_prompt=lambda _round, _state: "Validate.",
                     max_rounds=1,
                 )
             )

@@ -19,6 +19,11 @@ def current_evaluation() -> Mapping[str, Any]:
     return {name: value for name, value in context.items() if not name.startswith("_")}
 
 
+def _current_evaluation_context_limit() -> int | None:
+    value = _current_evaluation().get("_context_limit")
+    return int(value) if value is not None else None
+
+
 def _current_evaluation() -> Mapping[str, Any]:
     context = _CURRENT_EVALUATION.get()
     if context is None:

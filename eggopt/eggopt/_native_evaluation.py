@@ -163,6 +163,7 @@ class _EvaluateCase(Task):
     evaluator_identity: Any
     case_identity: Any
     node: tuple[str, str, str]
+    context_limit: int | None = None
 
     def get_cache_key(self) -> str:
         return digest_payload(
@@ -183,6 +184,7 @@ class _EvaluateCase(Task):
             "inner_context": str(Path(self.node[1]) / "innerContext"),
             "_runtime_key": self.node[2],
             "_evaluation_key": self.get_cache_key(),
+            "_context_limit": self.context_limit,
         }
         with _evaluation_scope(context):
             factory = getattr(self.evaluator, "task", None)
@@ -384,6 +386,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                 self.evaluator_identity,
                 identity,
                 node,
+                self.context_limit,
             )
             for case, identity, node in zip(
                 self.cases, self.case_identities, case_nodes, strict=True
