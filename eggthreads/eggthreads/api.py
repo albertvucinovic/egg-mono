@@ -5771,6 +5771,36 @@ def enqueue_user_tool_call(
     return tc_id
 
 
+def _synthetic_user_tool_call_parts(
+    name: str,
+    *,
+    origin: str,
+    extra: Optional[Dict[str, Any]] = None,
+    tool_call_id: Optional[str] = None,
+) -> tuple[str, str, str, Dict[str, Any]]:
+    """Normalize the shared declaration for queued and recorded requests."""
+
+    tool_name = (name or "").strip()
+    if not tool_name:
+        raise ValueError("tool name is required")
+    synthetic_origin = (origin or "").strip()
+    if not synthetic_origin:
+        raise ValueError("synthetic tool request origin is required")
+    tc_id = tool_call_id or _ulid_like()
+    metadata: Dict[str, Any] = {
+        "synthetic_user_tool_request": True,
+        "synthetic_user_tool_request_version": "1",
+    }
+    if extra:
+        metadata.update(dict(extra))
+    return (
+        tool_name,
+        synthetic_origin,
+        tc_id,
+        metadata,
+    )
+
+
 def enqueue_synthetic_user_tool_call(
     db: ThreadsDB,
     thread_id: str,
@@ -5783,19 +5813,12 @@ def enqueue_synthetic_user_tool_call(
     tool_call_id: Optional[str] = None,
 ) -> str:
     """Enqueue one generated, auto-approved, provider-hidden RA3 request."""
-    tool_name = (name or "").strip()
-    if not tool_name:
-        raise ValueError("tool name is required")
-    synthetic_origin = (origin or "").strip()
-    if not synthetic_origin:
-        raise ValueError("synthetic tool request origin is required")
-    tc_id = tool_call_id or _ulid_like()
-    metadata = {
-        "synthetic_user_tool_request": True,
-        "synthetic_user_tool_request_version": "1",
-    }
-    if extra:
-        metadata.update(dict(extra))
+    tool_name, synthetic_origin, tc_id, metadata = _synthetic_user_tool_call_parts(
+        name,
+        origin=origin,
+        extra=extra,
+        tool_call_id=tool_call_id,
+    )
     return enqueue_user_tool_call(
         db,
         thread_id,
@@ -5812,6 +5835,123 @@ def enqueue_synthetic_user_tool_call(
         extra=metadata,
         tool_call_id=tc_id,
     )
+
+
+def record_synthetic_user_tool_call(
+    db: ThreadsDB,
+    thread_id: str,
+    name: str,
+    arguments: Any,
+    result: str,
+    *,
+    origin: str,
+    extra: Optional[Dict[str, Any]] = None,
+    tool_call_id: Optional[str] = None,
+) -> str:
+    """Record one generated tool request that has already been executed.
+
+    This is the completed/audit counterpart to
+    :func:`enqueue_synthetic_user_tool_call`.  It uses the same canonical
+    request rendering and metadata, but writes the complete TC6 lifecycle in
+    one transaction instead of leaving runnable RA3 work for a scheduler.
+    """
+
+    tool_name, synthetic_origin, tc_id, metadata = _synthetic_user_tool_call_parts(
+        name,
+        origin=origin,
+        extra=extra,
+        tool_call_id=tool_call_id,
+    )
+
+    args_json = (
+        arguments
+        if isinstance(arguments, str)
+        else json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)
+    )
+    request_content = _synthetic_user_tool_request_content(
+        tool_name,
+        arguments,
+        tool_call_id=tc_id,
+        origin=synthetic_origin,
+    )
+    request_extra = {
+        **metadata,
+        "tool_calls": [
+            {
+                "id": tc_id,
+                "type": "function",
+                "function": {"name": tool_name, "arguments": args_json},
+            }
+        ],
+        "keep_user_turn": True,
+        "origin": synthetic_origin,
+        "no_api": True,
+    }
+    output = str(result)
+    result_extra = {
+        **metadata,
+        "tool_call_id": tc_id,
+        "name": tool_name,
+        "user_tool_call": True,
+        "keep_user_turn": True,
+        "origin": synthetic_origin,
+        "no_api": True,
+    }
+
+    savepoint = f"record_synthetic_tool_{_ulid_like()}"
+    db.conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        append_message(db, thread_id, "user", request_content, extra=request_extra)
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_="tool_call.approval",
+            payload={
+                "tool_call_id": tc_id,
+                "decision": "granted",
+                "reason": f"Recorded completed generated {synthetic_origin} tool call",
+            },
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_="tool_call.execution_started",
+            payload={"tool_call_id": tc_id},
+        )
+        finished_seq = db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_="tool_call.finished",
+            payload={
+                "tool_call_id": tc_id,
+                "reason": "success",
+                "output": output,
+                "original_char_count": len(output),
+            },
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_="tool_call.output_approval",
+            payload={
+                "tool_call_id": tc_id,
+                "decision": "whole",
+                "reason": "Recorded output from an already-executed synthetic request",
+                "preview": output,
+                "artifact_path": "",
+                "channels": {},
+                "decision_source": "automatic_synthetic",
+                "expected_state": "TC4",
+                "expected_event_seq": finished_seq,
+            },
+        )
+        append_message(db, thread_id, "tool", output, extra=result_extra)
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    return tc_id
 
 
 def _synthetic_user_tool_request_content(

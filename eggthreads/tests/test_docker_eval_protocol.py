@@ -141,10 +141,16 @@ def test_repl_tool_context_cancel_signal_reaches_public_session_api(monkeypatch)
     seen: dict = {}
     monkeypatch.setattr(plugin, "_context_db", lambda _ctx: object())
     monkeypatch.setattr("eggthreads.session.execute_python_repl", lambda *_a, **kwargs: seen.update(kwargs) or "ok")
-    ctx = ToolContext(thread_id="thread", cancel_check=cancelled.is_set, timeout_sec=9)
+    ctx = ToolContext(
+        thread_id="thread",
+        tool_call_id="caller-tool-call",
+        cancel_check=cancelled.is_set,
+        timeout_sec=9,
+    )
     assert plugin.execute_python_repl_tool({"code": "pass"}, ctx) == "ok"
     assert seen["cancel_check"] is cancelled.is_set or seen["cancel_check"]() is False
     assert seen["timeout_sec"] == 9
+    assert seen["caller_tool_call_id"] == "caller-tool-call"
 
 
 def test_host_interrupt_records_terminal_reason_in_lifecycle(monkeypatch, tmp_path):

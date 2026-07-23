@@ -4213,42 +4213,47 @@ def _hydrate_python_repl_thread_context(globs: Dict[str, Any], eval_token: Optio
         globs["_egg_thread_context_error"] = f"{type(e).__name__}: {e}"
 
 
-def _append_runtime_repl_message(
+def _record_runtime_repl_evaluation(
     db: ThreadsDB,
     runtime_thread_id: str,
-    role: str,
-    content: str,
+    code: str,
+    result: str,
     *,
     language: str,
     repl_name: str,
     repl_channel: str,
     session_id: Optional[str],
     caller_thread_id: str,
+    caller_tool_call_id: Optional[str] = None,
 ) -> None:
-    """Append a hidden/audit message to a runtime thread for REPL evals."""
+    """Record one completed REPL evaluation on its existing runtime child."""
 
     try:
-        from .api import append_message
+        from .api import record_synthetic_user_tool_call
 
-        append_message(
+        arguments: Dict[str, Any] = {
+            "code" if language == "python" else "script": code,
+            "repl_name": repl_name,
+        }
+        record_synthetic_user_tool_call(
             db,
             runtime_thread_id,
-            role,
-            content,
+            f"{language}_repl",
+            arguments,
+            result,
+            origin="repl_eval",
             extra={
-                "no_api": True,
-                "keep_user_turn": True,
-                "origin": "repl_eval",
                 "runtime": True,
                 "language": language,
                 "repl_name": repl_name,
                 "repl_channel": repl_channel,
                 "session_id": session_id,
                 "caller_thread_id": caller_thread_id,
+                "caller_tool_call_id": caller_tool_call_id,
             },
         )
     except Exception:
-        # Runtime audit messages should never make REPL execution fail.
+        # Runtime audit records should never make REPL execution fail.
         pass
 
 
@@ -5026,6 +5031,7 @@ def execute_python_repl(
     timeout_sec: Optional[float] = 30.0,
     drive_runtime_tools: bool = False,
     cancel_check: Any = None,
+    caller_tool_call_id: Optional[str] = None,
 ) -> str:
     """Execute Python code in the caller's persistent runtime session.
 
@@ -5094,18 +5100,6 @@ def execute_python_repl(
             "share_repl": cfg.share_repl,
         },
     )
-    _append_runtime_repl_message(
-        db,
-        runtime_thread_id,
-        "user",
-        code,
-        language="python",
-        repl_name=repl_name,
-        repl_channel=channel,
-        session_id=cfg.session_id,
-        caller_thread_id=caller_thread_id,
-    )
-
     provider = get_session_provider(cfg.provider)
     if provider is None:
         return f"Error: unknown session provider: {cfg.provider}"
@@ -5134,16 +5128,17 @@ def execute_python_repl(
         )
     finally:
         dispose_eval_context(ctx.token)
-    _append_runtime_repl_message(
+    _record_runtime_repl_evaluation(
         db,
         runtime_thread_id,
-        "tool",
+        code,
         out,
         language="python",
         repl_name=repl_name,
         repl_channel=channel,
         session_id=cfg.session_id,
         caller_thread_id=caller_thread_id,
+        caller_tool_call_id=caller_tool_call_id,
     )
     return out
 
@@ -5158,6 +5153,7 @@ def execute_bash_repl(
     timeout_sec: Optional[float] = 30.0,
     drive_runtime_tools: bool = False,
     cancel_check: Any = None,
+    caller_tool_call_id: Optional[str] = None,
 ) -> str:
     """Execute Bash in the caller's persistent runtime session."""
 
@@ -5214,18 +5210,6 @@ def execute_bash_repl(
             "share_repl": cfg.share_repl,
         },
     )
-    _append_runtime_repl_message(
-        db,
-        runtime_thread_id,
-        "user",
-        script,
-        language="bash",
-        repl_name=repl_name,
-        repl_channel=channel,
-        session_id=cfg.session_id,
-        caller_thread_id=caller_thread_id,
-    )
-
     from .repl_bridge import create_eval_context, dispose_eval_context
 
     ctx = create_eval_context(
@@ -5251,16 +5235,17 @@ def execute_bash_repl(
             timeout_sec=effective_timeout_sec,
             cancel_check=cancel_check,
         )
-        _append_runtime_repl_message(
+        _record_runtime_repl_evaluation(
             db,
             runtime_thread_id,
-            "tool",
+            script,
             out,
             language="bash",
             repl_name=repl_name,
             repl_channel=channel,
             session_id=cfg.session_id,
             caller_thread_id=caller_thread_id,
+            caller_tool_call_id=caller_tool_call_id,
         )
         return out
     finally:

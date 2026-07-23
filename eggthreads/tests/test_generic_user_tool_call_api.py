@@ -88,6 +88,41 @@ def test_synthetic_user_tool_call_is_full_approved_and_no_api(tmp_path):
     assert ts.build_tool_call_states(db, tid)[tcid].approval_decision == "granted"
 
 
+def test_record_synthetic_user_tool_call_is_complete_and_not_runnable(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+
+    tcid = ts.record_synthetic_user_tool_call(
+        db,
+        tid,
+        "python_repl",
+        {"code": "print('once')", "repl_name": "default"},
+        "once\n",
+        origin="repl_eval",
+        extra={"runtime": True},
+    )
+
+    state = ts.build_tool_call_states(db, tid)[tcid]
+    assert state.state == "TC6"
+    assert state.finished_output == "once\n"
+    assert state.output_decision == "whole"
+    assert ts.discover_runner_actionable(db, tid) is None
+    assert ts.get_user_command_result(db, tid, tcid) == "once\n"
+
+    messages = [
+        json.loads(row[0])
+        for row in db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq",
+            (tid,),
+        )
+    ]
+    assert [message["role"] for message in messages] == ["user", "tool"]
+    assert messages[0]["synthetic_user_tool_request"] is True
+    assert messages[0]["runtime"] is True
+    assert messages[1]["tool_call_id"] == tcid
+    assert messages[1]["content"] == "once\n"
+
+
 def test_synthetic_user_tool_call_renders_generic_arguments_as_pretty_json(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")

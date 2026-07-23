@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import eggthreads as ts
@@ -25,6 +26,46 @@ def test_execute_bash_repl_memory_provider_persists_environment(tmp_path):
     runtime = ts.find_runtime_thread(db, parent, language="bash")
     assert runtime is not None
     assert runtime.runtime_thread_id in ts.list_children_ids(db, parent)
+
+
+def test_bash_repl_records_completed_canonical_request_on_runtime(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.enable_thread_session(db, parent, provider="memory")
+
+    out = ts.execute_bash_repl(
+        db,
+        parent,
+        "printf once",
+        caller_tool_call_id="caller-bash-repl",
+    )
+
+    runtime = ts.find_runtime_thread(db, parent, language="bash")
+    assert runtime is not None
+    assert ts.list_children_ids(db, parent) == [runtime.runtime_thread_id]
+    states = ts.build_tool_call_states(db, runtime.runtime_thread_id)
+    assert len(states) == 1
+    state = next(iter(states.values()))
+    assert state.state == "TC6"
+    assert state.name == "bash_repl"
+    assert ts.discover_runner_actionable(db, runtime.runtime_thread_id) is None
+
+    payloads = [
+        json.loads(row[0])
+        for row in db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq",
+            (runtime.runtime_thread_id,),
+        )
+    ]
+    request = next(payload for payload in payloads if payload["role"] == "user")
+    result = next(payload for payload in payloads if payload["role"] == "tool")
+    assert "```bash\nprintf once\n```" in request["content"]
+    assert request["caller_tool_call_id"] == "caller-bash-repl"
+    assert request["no_api"] is True
+    assert result["tool_call_id"] == state.tool_call_id
+    assert result["content"] == out
+    assert result["no_api"] is True
+    assert out.count("once") == 1
 
 
 def test_execute_bash_repl_auto_creates_session_from_env(tmp_path, monkeypatch):

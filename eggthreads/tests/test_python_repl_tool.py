@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import eggthreads as ts
@@ -25,6 +26,52 @@ def test_execute_python_repl_memory_provider_persists_state(tmp_path):
     runtime = ts.find_runtime_thread(db, parent, language="python")
     assert runtime is not None
     assert runtime.runtime_thread_id in ts.list_children_ids(db, parent)
+
+
+def test_python_repl_records_completed_canonical_request_on_runtime(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.enable_thread_session(db, parent, provider="memory")
+    children_before = set(ts.list_children_ids(db, parent))
+
+    out = ts.execute_python_repl(
+        db,
+        parent,
+        "print('once')",
+        caller_tool_call_id="caller-python-repl",
+    )
+
+    runtime = ts.find_runtime_thread(db, parent, language="python")
+    assert runtime is not None
+    assert set(ts.list_children_ids(db, parent)) == children_before | {runtime.runtime_thread_id}
+    states = ts.build_tool_call_states(db, runtime.runtime_thread_id)
+    assert len(states) == 1
+    state = next(iter(states.values()))
+    assert state.state == "TC6"
+    assert state.name == "python_repl"
+    assert ts.discover_runner_actionable(db, runtime.runtime_thread_id) is None
+    assert ts.get_user_command_result(db, runtime.runtime_thread_id, state.tool_call_id) == out
+
+    payloads = [
+        json.loads(row[0])
+        for row in db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq",
+            (runtime.runtime_thread_id,),
+        )
+    ]
+    request = next(payload for payload in payloads if payload["role"] == "user")
+    result = next(payload for payload in payloads if payload["role"] == "tool")
+    assert request["content"].startswith(
+        "Generated auto-approved user tool request as a synthetic message:"
+    )
+    assert "```python\nprint('once')\n```" in request["content"]
+    assert request["synthetic_user_tool_request"] is True
+    assert request["caller_tool_call_id"] == "caller-python-repl"
+    assert request["no_api"] is True
+    assert result["tool_call_id"] == state.tool_call_id
+    assert result["content"] == out
+    assert result["no_api"] is True
+    assert out.count("once") == 1
 
 
 def test_execute_python_repl_auto_creates_session_from_env(tmp_path, monkeypatch):

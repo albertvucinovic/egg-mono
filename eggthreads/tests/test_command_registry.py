@@ -112,6 +112,46 @@ def test_default_command_registry_contains_existing_ui_commands() -> None:
     assert "/sessionStatus" in command_completion_names(registry)
 
 
+@pytest.mark.parametrize(
+    ("command", "tool_name", "argument_name", "argument"),
+    [
+        ("pythonRepl", "python_repl", "code", "print('caller')"),
+        ("bashRepl", "bash_repl", "script", "printf caller"),
+    ],
+)
+def test_repl_commands_keep_literal_request_on_caller_thread(
+    tmp_path, command, tool_name, argument_name, argument
+) -> None:
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, name="root")
+    started: list[str] = []
+
+    result = create_default_command_registry().execute(
+        command,
+        CommandContext(db=db, current_thread=thread_id, start_scheduler=started.append),
+        argument,
+    )
+
+    payload = json.loads(
+        db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create'",
+            (thread_id,),
+        ).fetchone()[0]
+    )
+    assert payload["content"] == f"/{command} {argument}"
+    assert payload["origin"] == f"ui_{tool_name}"
+    assert payload["no_api"] is True
+    assert "synthetic_user_tool_request" not in payload
+    call = payload["tool_calls"][0]
+    assert call["function"]["name"] == tool_name
+    assert json.loads(call["function"]["arguments"]) == {argument_name: argument}
+    assert result.start_schedulers == (thread_id,)
+    assert started == [thread_id]
+
+
 def test_show_command_is_registered_from_shared_inspection_plugin() -> None:
     from eggthreads.builtin_plugins import inspection
 

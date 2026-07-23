@@ -65,6 +65,7 @@ def execute_python_repl_tool(args: Dict[str, Any], ctx: Any = None) -> str:
             runtime_name=runtime_name,
             timeout_sec=timeout_sec,
             cancel_check=getattr(ctx, "cancel_check", None),
+            caller_tool_call_id=getattr(ctx, "tool_call_id", None),
         )
     except Exception as e:
         return f"Error: python_repl failed: {e}"
@@ -89,6 +90,7 @@ def execute_bash_repl_tool(args: Dict[str, Any], ctx: Any = None) -> str:
             runtime_name=runtime_name,
             timeout_sec=timeout_sec,
             cancel_check=getattr(ctx, "cancel_check", None),
+            caller_tool_call_id=getattr(ctx, "tool_call_id", None),
         )
     except Exception as e:
         return f"Error: bash_repl failed: {e}"
