@@ -16,7 +16,8 @@ Payload schema (all keys optional)::
       "disable": ["tool_name", ...],
       "enable":  ["tool_name", ...],
       "allow_only": ["tool_name", ...] | null,
-      "allow_raw_tool_output": true | false
+      "allow_raw_tool_output": true | false,
+      "inherit_tools_config": true | false
     }
 
 Semantics:
@@ -33,11 +34,14 @@ Semantics:
     allowlist entries.
   - ``allow_raw_tool_output`` defaults to False; it must be True at every
     level of a thread's ancestry before unmasked output reaches a provider.
+  - ``inherit_tools_config=False`` starts a new policy root. Only trusted
+    programmatic child creation exposes this escape hatch; ordinary children
+    inherit and remain bounded by their effective parent policy.
 
-Effective policy is the intersection of the thread and all ancestors. Any
-policy DB/decode failure is distinguishable and fails closed. Callers should
-use the helpers in this module rather than emitting
-``tools.config`` events directly.
+Effective policy is the intersection from the nearest programmatic policy root
+through the thread. Any policy DB/decode failure in that scope is
+distinguishable and fails closed. Callers should use the helpers in this module
+rather than emitting ``tools.config`` events directly.
 """
 
 from dataclasses import dataclass, field
@@ -82,6 +86,7 @@ class ToolsConfig:
     has_explicit_config: bool = False
     allow_raw_tool_output: bool = False
     allowed_tools: Optional[Set[str]] = None
+    inherit_tools_config: bool = True
     policy_error: Optional[str] = None
     policy_error_kind: Optional[str] = None
     policy_error_source_thread_id: Optional[str] = None
@@ -176,6 +181,15 @@ def _read_local_tools_config(
             if not isinstance(payload["allow_raw_tool_output"], bool):
                 raise ToolPolicyReadError("invalid_payload", thread_id, "allow_raw_tool_output must be boolean")
             cfg.allow_raw_tool_output = payload["allow_raw_tool_output"]
+            recognized = True
+        if "inherit_tools_config" in payload:
+            if not isinstance(payload["inherit_tools_config"], bool):
+                raise ToolPolicyReadError(
+                    "invalid_payload",
+                    thread_id,
+                    "inherit_tools_config must be boolean",
+                )
+            cfg.inherit_tools_config = payload["inherit_tools_config"]
             recognized = True
         if "allow_only" in payload:
             allow_only = payload["allow_only"]
@@ -290,7 +304,7 @@ def get_thread_tools_config(
     *,
     through_event_seq: Optional[int] = None,
 ) -> ToolsConfig:
-    """Return fail-closed effective policy intersected across all ancestors.
+    """Return fail-closed policy through the nearest programmatic policy root.
 
     A missing ``tools.config`` event is not an error and retains usable defaults.
     Any ancestry, database, or payload failure returns a distinguishable
@@ -299,13 +313,19 @@ def get_thread_tools_config(
 
     try:
         ancestry = _thread_ancestry(db, thread_id)
-        # Intersection identities. Each thread's local no-policy default still
-        # has allow_raw_tool_output=False, so a policy-free root stays masked.
-        effective = ToolsConfig(allow_raw_tool_output=True)
-        for source_thread_id in ancestry:
+        local_configs: List[ToolsConfig] = []
+        for source_thread_id in reversed(ancestry):
             local = _read_local_tools_config(
                 db, source_thread_id, through_event_seq=through_event_seq
             )
+            local_configs.append(local)
+            if not local.inherit_tools_config:
+                break
+        # Intersection identities. Each thread's local no-policy default still
+        # has allow_raw_tool_output=False, so a policy-free root stays masked.
+        effective = ToolsConfig(allow_raw_tool_output=True)
+        effective.inherit_tools_config = local_configs[0].inherit_tools_config
+        for local in reversed(local_configs):
             effective.llm_tools_enabled = effective.llm_tools_enabled and local.llm_tools_enabled
             effective.allow_raw_tool_output = effective.allow_raw_tool_output and local.allow_raw_tool_output
             # A local "enable" only edits that local reducer. Unioning each

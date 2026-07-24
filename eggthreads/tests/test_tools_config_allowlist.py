@@ -160,6 +160,49 @@ def test_child_cannot_widen_beyond_parent_after_creation(tmp_path):
     assert not cfg.is_tool_allowed("bash")
 
 
+def test_programmatic_child_can_start_a_new_tool_policy_root(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.set_thread_tool_allowlist(db, parent, ["web_search"])
+
+    child = ts.create_child_thread(
+        db, parent, name="owned runtime", inherit_tools_config=False
+    )
+    ts.set_thread_tool_allowlist(db, child, ["bash"])
+    grandchild = ts.create_child_thread(db, child, name="ordinary child")
+    ts.set_thread_tool_allowlist(db, parent, [])
+
+    assert ts.get_thread_tools_config(db, child).is_tool_allowed("bash")
+    assert ts.get_thread_tools_config(db, grandchild).is_tool_allowed("bash")
+    assert not ts.get_thread_tools_config(db, grandchild).is_tool_allowed(
+        "web_search"
+    )
+
+
+def test_programmatic_policy_root_flag_must_be_boolean(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+
+    with pytest.raises(TypeError, match="inherit_tools_config"):
+        ts.create_child_thread(db, parent, inherit_tools_config=0)
+
+
+def test_programmatic_policy_root_still_fails_closed_on_its_own_corruption(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    _insert_corrupt_tools_config(db, parent, "{broken")
+
+    child = ts.create_child_thread(
+        db, parent, name="owned runtime", inherit_tools_config=False
+    )
+    assert ts.get_thread_tools_config(db, child).is_tool_allowed("bash")
+
+    _insert_corrupt_tools_config(db, child, "{broken")
+    cfg = ts.get_thread_tools_config(db, child)
+    assert cfg.policy_error_kind == "payload_decode"
+    assert not cfg.is_tool_allowed("bash")
+
+
 def test_later_parent_restriction_applies_to_existing_descendant(tmp_path):
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")

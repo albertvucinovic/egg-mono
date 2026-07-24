@@ -345,7 +345,8 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
 
 
 def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = None, initial_model_key: Optional[str] = None,
-                        models_path: str = "models.json", all_models_path: str | None = None) -> str:
+                        models_path: str = "models.json", all_models_path: str | None = None,
+                        inherit_tools_config: bool = True) -> str:
     """Create a child thread branching from a parent thread.
 
     Child threads inherit the parent's model configuration by default
@@ -360,9 +361,12 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
             inherits from the parent thread's current model.
         models_path: Path to models.json configuration file.
         all_models_path: Path to all-models.json catalog file (optional).
+        inherit_tools_config: Ordinary children inherit the effective parent
+            policy. Trusted programmatic callers may pass False to make this
+            child a new tool-policy root.
 
-    Tool policy is always initialized transactionally from the parent's
-    effective policy and remains bounded dynamically by every ancestor.
+    Tool policy is initialized transactionally. The safe default inherits the
+    effective parent policy; the explicit programmatic escape hatch does not.
 
     Returns:
         The new child thread's unique ID (ULID format).
@@ -370,25 +374,30 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
     parent = db.get_thread(parent_id)
     if not parent:
         raise ValueError(f"Parent thread not found: {parent_id}")
+    if not isinstance(inherit_tools_config, bool):
+        raise TypeError("inherit_tools_config must be boolean")
 
     depth = parent.depth + 1
     tid = _ulid_like()
     from .tools_config import ToolPolicyReadError, inherited_tools_config_payload
 
-    # Resolve policy before any child row exists, then commit the child, link,
-    # and mandatory initial policy event under one DB savepoint.
-    initial_tools_policy = inherited_tools_config_payload(db, parent_id)
-    # Re-check inside the savepoint so a parent policy event cannot change
-    # between authorization and child initialization on this connection.
-    def _validated_initial_tools_policy() -> dict[str, Any]:
-        current = inherited_tools_config_payload(db, parent_id)
-        if current != initial_tools_policy:
-            raise ToolPolicyReadError(
-                "policy_changed",
-                parent_id,
-                "effective parent policy changed during child creation",
-            )
-        return current
+    if inherit_tools_config:
+        # Resolve policy before any child row exists, then re-check inside the
+        # creation savepoint so authorization and initialization are atomic.
+        initial_tools_policy = inherited_tools_config_payload(db, parent_id)
+
+        def _initial_tools_policy() -> dict[str, Any]:
+            current = inherited_tools_config_payload(db, parent_id)
+            if current != initial_tools_policy:
+                raise ToolPolicyReadError(
+                    "policy_changed",
+                    parent_id,
+                    "effective parent policy changed during child creation",
+                )
+            return current
+    else:
+        def _initial_tools_policy() -> dict[str, Any]:
+            return {"inherit_tools_config": False}
 
     db.create_thread(
         thread_id=tid,
@@ -396,7 +405,7 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
         parent_id=parent_id,
         initial_model_key=initial_model_key,
         depth=depth,
-        initial_events=(("tools.config", _validated_initial_tools_policy),),
+        initial_events=(("tools.config", _initial_tools_policy),),
     )
 
     # Model inheritance: if initial_model_key is explicitly provided, use it.
