@@ -1,24 +1,28 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
-from uuid import uuid4
 
-from eggflow import FlowExecutor, TaskStore
+from eggflow import FlowExecutor, Task, TaskStore
 from eggthreads import (
     RunnerConfig,
     ThreadsDB,
     ToolRegistry,
     create_root_thread,
     get_context_limit,
+    list_root_threads,
     set_context_limit,
 )
 
 from .evaluation import Evaluation
+from ._identity import digest_payload
 from .gepa.production_drive import (
+    DEFAULT_MUTATION_SYSTEM_PROMPT,
     EggthreadsReflectionDrive,
     create_solver_safe_study,
     default_solver_safe_tools,
@@ -65,6 +69,7 @@ class Reflection:
         max_runner_steps: int | float = math.inf,
         max_correction_turns: int = 0,
         context_limit: int | None = None,
+        system_prompt: str = DEFAULT_MUTATION_SYSTEM_PROMPT,
     ) -> Reflection:
         if tools is None:
             tools = default_solver_safe_tools()
@@ -80,6 +85,7 @@ class Reflection:
                 max_runner_steps=max_runner_steps,
                 max_correction_turns=max_correction_turns,
                 context_limit=context_limit,
+                system_prompt=system_prompt,
             ),
             identity=identity,
             instruction=instruction,
@@ -112,43 +118,42 @@ class Runtime(Generic[ExampleT, OutputT]):
         egg = root / ".egg"
         egg.mkdir(exist_ok=True)
         store = TaskStore(str(root / "flow.db"))
+        flow = FlowExecutor(store)
         threads = ThreadsDB(egg / "threads.sqlite")
         threads.init_schema()
-        study_id = _study_id(threads)
-        if study_id is None:
-            workspace = Path(
-                reflection.workspace
-                or default_workspace
-                or root / "workspaces" / "mutation"
-            )
-            name = study_name or reflection.study_name
-            if getattr(reflection.drive, "requires_study_thread", False):
-                study_id, _ = create_solver_safe_study(
+        legacy_id = _legacy_study_id(threads)
+        roots = list_root_threads(threads)
+        if legacy_id is None and len(roots) > 1:
+            raise RuntimeError("Eggopt run directory contains multiple root threads")
+        study_id = _sync(
+            flow.run(
+                _CreateStudy(
                     threads,
-                    workspace=workspace,
-                    model_key=reflection.model_key,
-                    models_path=reflection.models_path,
-                    name=name,
-                    allowed_tools=reflection.allowed_tools,
+                    reflection,
+                    Path(
+                        reflection.workspace
+                        or default_workspace
+                        or root / "workspaces" / "mutation"
+                    ),
+                    study_name or reflection.study_name,
+                    legacy_id or (roots[0] if roots else None),
                 )
-            else:
-                study_id = create_root_thread(threads, name=name)
-            threads.append_event(
-                event_id=uuid4().hex,
-                thread_id=study_id,
-                type_="eggopt.study",
-                payload={"study_id": study_id},
             )
-            threads.conn.commit()
+        )
+        ensure_system_prompt = getattr(reflection.drive, "ensure_system_prompt", None)
+        if callable(ensure_system_prompt):
+            ensure_system_prompt(threads, study_id)
         context_limit = getattr(reflection.drive, "context_limit", None)
-        if context_limit is not None and get_context_limit(threads, study_id) != context_limit:
+        if (
+            context_limit is not None
+            and get_context_limit(threads, study_id) != context_limit
+        ):
             set_context_limit(
                 threads,
                 study_id,
                 context_limit,
                 reason="Eggopt reflection context budget",
             )
-        flow = FlowExecutor(store)
         reflector = EggthreadsReflectionLM(
             flow,
             threads,
@@ -172,9 +177,48 @@ class Runtime(Generic[ExampleT, OutputT]):
         self.close()
 
 
-def _study_id(threads: ThreadsDB) -> str | None:
+@dataclass
+class _CreateStudy(Task):
+    threads: ThreadsDB
+    reflection: Reflection
+    workspace: Path
+    name: str
+    legacy_id: str | None = None
+
+    def get_cache_key(self) -> str:
+        return digest_payload("eggopt.runtime.create-study.v1", {})
+
+    def run(self) -> str:
+        if self.legacy_id is not None:
+            return self.legacy_id
+        if getattr(self.reflection.drive, "requires_study_thread", False):
+            thread_id, _profile = create_solver_safe_study(
+                self.threads,
+                workspace=self.workspace,
+                model_key=self.reflection.model_key,
+                models_path=self.reflection.models_path,
+                name=self.name,
+                allowed_tools=self.reflection.allowed_tools,
+            )
+            return thread_id
+        return create_root_thread(self.threads, name=self.name)
+
+
+def _legacy_study_id(threads: ThreadsDB) -> str | None:
+    """Read compatibility for studies created before the cached setup Task."""
+
     row = threads.conn.execute(
         "SELECT json_extract(payload_json, '$.study_id') "
         "FROM events WHERE type='eggopt.study' ORDER BY event_seq LIMIT 1"
     ).fetchone()
     return str(row[0]) if row and row[0] else None
+
+
+def _sync(awaitable: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+    if inspect.iscoroutine(awaitable):
+        awaitable.close()
+    raise RuntimeError("Runtime.open() cannot run inside an active asyncio loop")

@@ -13,6 +13,7 @@ from .evaluation import (
     semantic_workspace_path,
 )
 from .production_drive import (
+    DEFAULT_MUTATION_SYSTEM_PROMPT,
     SOLVER_SAFE_PROFILE_NAME,
     SOLVER_SAFE_PROFILE_VERSION,
     SOLVER_SAFE_TOOLS,
@@ -33,6 +34,7 @@ from .reflection import (
 )
 
 __all__ = [
+    "DEFAULT_MUTATION_SYSTEM_PROMPT",
     "SOLVER_SAFE_PROFILE_NAME",
     "SOLVER_SAFE_PROFILE_VERSION",
     "SOLVER_SAFE_TOOLS",

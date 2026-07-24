@@ -124,7 +124,7 @@ Args:
 Returns:
     The new thread's unique ID (ULID format).
 
-### `create_child_thread(db: 'ThreadsDB', parent_id: 'str', name: 'Optional[str]' = None, initial_model_key: 'Optional[str]' = None, models_path: 'str' = 'models.json') -> 'str'`
+### `create_child_thread(db: 'ThreadsDB', parent_id: 'str', name: 'Optional[str]' = None, initial_model_key: 'Optional[str]' = None, models_path: 'str' = 'models.json', all_models_path: 'str | None' = None, inherit_tools_config: 'bool' = True) -> 'str'`
 
 Create a child thread branching from a parent thread.
 
@@ -139,6 +139,9 @@ Args:
     initial_model_key: Model key to use for this thread. If None,
         inherits from the parent thread's current model.
     models_path: Path to models.json configuration file.
+    inherit_tools_config: Ordinary children inherit the effective parent
+        policy. Trusted programmatic callers may pass False to make the child
+        a new tool-policy root.
 
 Returns:
     The new child thread's unique ID (ULID format).
@@ -647,6 +650,7 @@ Attributes:
 - `has_explicit_config`: `bool` = `False`
 - `allow_raw_tool_output`: `bool` = `False`
 - `allowed_tools`: `Optional[Set[str]]` = `None`
+- `inherit_tools_config`: `bool` = `True`
 - `policy_error`: `Optional[str]` = `None`
 - `policy_error_kind`: `Optional[str]` = `None`
 - `policy_error_source_thread_id`: `Optional[str]` = `None`
@@ -657,18 +661,18 @@ Return the effective ToolsConfig for a thread. Internal fixed-watermark
 consumers may pass ``through_event_seq=...`` so provider/duplication policy is
 resolved at the same boundary as message projection.
 
-This validates ``tools.config`` events and intersects policy across the
-complete live ancestry. Missing policy uses safe usable defaults; DB/decode
-failures return a distinguishable fail-closed config and diagnostic.
+This validates ``tools.config`` events and intersects policy from the nearest
+trusted programmatic policy root through the target thread. Missing policy uses
+safe usable defaults; DB/decode failures in that scope return a distinguishable
+fail-closed config and diagnostic.
 
 ### `inherit_tools_config_for_child(db: 'ThreadsDB', parent_thread_id: 'str', child_thread_id: 'str') -> 'None'`
 
 Copy the parent's effective tools config onto a newly-created child.
 
-The child receives an initial effective policy in the same transaction as
-its thread/link creation. Runtime reads also intersect every live ancestor
-policy, so children cannot widen above ancestors or escape later parent
-restrictions.
+An ordinary child receives an initial effective policy in the same transaction
+as its thread/link creation. Runtime reads remain bounded by live ancestors up
+to the nearest explicit programmatic policy root.
 
 ### `set_thread_tools_enabled(db: 'ThreadsDB', thread_id: 'str', enabled: 'bool') -> 'None'`
 

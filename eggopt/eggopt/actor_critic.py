@@ -15,6 +15,7 @@ from eggthreads import (
     append_message,
     approve_tool_calls_for_thread,
     create_child_thread,
+    list_children_with_meta,
     load_thread_projection,
     set_thread_tool_allowlist,
     set_thread_tools_enabled,
@@ -214,8 +215,6 @@ class ActorCritic(Task):
 
 @dataclass
 class _EnsurePair(Task):
-    cacheable = False
-
     runtime_key: str
     evaluation_id: str
     workspace: str
@@ -240,18 +239,14 @@ class _EnsurePair(Task):
 
     def run(self):
         db = _evaluation_runtime(self.runtime_key)
-        persisted = _persisted_pair(db, self.evaluation_id, self.get_cache_key())
-        if persisted is not None:
-            return persisted
-
         actor_name, critic_name = self.names
         critic_id = _named_child(db, self.evaluation_id, critic_name)
         actor_id = _named_child(db, critic_id, actor_name) if critic_id else None
         legacy_actor = _named_child(db, self.evaluation_id, actor_name)
 
-        if critic_id and actor_id:
+        if critic_id and actor_id and not legacy_actor:
             pass
-        elif critic_id and legacy_actor:
+        elif critic_id and legacy_actor and not actor_id:
             # Replay pairs created by the former sibling topology.
             actor_id = legacy_actor
         elif critic_id or actor_id or legacy_actor:
@@ -305,29 +300,18 @@ class _EnsurePair(Task):
             yield _ConfigureWorkspace(
                 self.runtime_key, critic_id, self.workspace, critic_name
             )
-        db.append_event(
-            event_id=digest_payload(
-                "eggopt.actor-critic.pair.v1", self.get_cache_key()
-            ),
-            thread_id=self.evaluation_id,
-            type_="eggopt.actor-critic.pair.v1",
-            payload={
-                "semantic_key": self.get_cache_key(),
-                "actor_thread_id": actor_id,
-                "critic_thread_id": critic_id,
-            },
-        )
         return actor_id, critic_id
 
 
 def _named_child(db: Any, parent_id: str, name: str) -> str | None:
-    row = db.conn.execute(
-        "SELECT children.child_id FROM children JOIN threads "
-        "ON threads.thread_id=children.child_id "
-        "WHERE children.parent_id=? AND threads.name=? ORDER BY threads.created_at LIMIT 1",
-        (parent_id, name),
-    ).fetchone()
-    return str(row[0]) if row else None
+    return next(
+        (
+            thread_id
+            for thread_id, child_name, *_rest in list_children_with_meta(db, parent_id)
+            if child_name == name
+        ),
+        None,
+    )
 
 
 @dataclass
@@ -469,9 +453,6 @@ class _AgentTurn(Task):
     async def run(self) -> Any:
         db = _evaluation_runtime(self.runtime_key)
         semantic_key = self.get_cache_key()
-        response = _persisted_response(db, self.thread_id, semantic_key)
-        if response is not None:
-            return response
         prompt_id = _prompt_message_id(db, self.thread_id, semantic_key)
         if prompt_id is None:
             append_message(
@@ -486,7 +467,6 @@ class _AgentTurn(Task):
                 db, self.thread_id, _message_event_seq(db, prompt_id)
             )
             if persisted_answer is not None:
-                _record_answer(db, self.thread_id, semantic_key, persisted_answer)
                 return persisted_answer
         after_seq = _prompt_event_seq(db, self.thread_id, semantic_key)
         if self.agent.auto_approve_tools:
@@ -514,7 +494,6 @@ class _AgentTurn(Task):
         response = _latest_answer(db, self.thread_id, after_seq)
         if response is None:
             raise RuntimeError(f"{self.role} produced no final answer")
-        _record_answer(db, self.thread_id, semantic_key, response)
         return response
 
 
@@ -567,30 +546,6 @@ def _critic_decision(value: Any) -> dict[str, str]:
     }
 
 
-def _persisted_response(db: Any, thread_id: str, semantic_key: str) -> Any | None:
-    row = db.conn.execute(
-        "SELECT json_extract(payload_json, '$.answer') FROM events WHERE thread_id=? "
-        "AND type='eggopt.actor-critic.answer.v1' "
-        "AND json_extract(payload_json, '$.semantic_key')=? ORDER BY event_seq DESC LIMIT 1",
-        (thread_id, semantic_key),
-    ).fetchone()
-    return json.loads(row[0]) if row and row[0] is not None else None
-
-
-def _persisted_pair(
-    db: Any, evaluation_id: str, semantic_key: str
-) -> tuple[str, str] | None:
-    row = db.conn.execute(
-        "SELECT json_extract(payload_json, '$.actor_thread_id'), "
-        "json_extract(payload_json, '$.critic_thread_id') FROM events "
-        "WHERE thread_id=? AND type='eggopt.actor-critic.pair.v1' "
-        "AND json_extract(payload_json, '$.semantic_key')=? "
-        "ORDER BY event_seq DESC LIMIT 1",
-        (evaluation_id, semantic_key),
-    ).fetchone()
-    return (str(row[0]), str(row[1])) if row and row[0] and row[1] else None
-
-
 def _prompt_message_id(db: Any, thread_id: str, semantic_key: str) -> str | None:
     row = db.conn.execute(
         "SELECT msg_id FROM events WHERE thread_id=? AND type='msg.create' "
@@ -626,15 +581,6 @@ def _message_event_seq(db: Any, message_id: str) -> int:
 
 def _answer_after_message(db: Any, thread_id: str, after_seq: int) -> Any | None:
     return _latest_answer(db, thread_id, after_seq)
-
-
-def _record_answer(db: Any, thread_id: str, semantic_key: str, answer: Any) -> None:
-    db.append_event(
-        event_id=digest_payload("eggopt.actor-critic.answer.v1", semantic_key),
-        thread_id=thread_id,
-        type_="eggopt.actor-critic.answer.v1",
-        payload={"semantic_key": semantic_key, "answer": answer},
-    )
 
 
 def _latest_answer(db: Any, thread_id: str, after_seq: int) -> Any | None:
