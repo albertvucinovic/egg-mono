@@ -90,6 +90,25 @@ authorizes this supervisory action; a descendant's own narrowed allowlist still
 limits its self-invocation but does not block its
 authorized ancestor. Ancestors, siblings, and unrelated threads remain hidden.
 
+Mutation's solver-safe profile omits `send_message_to_child`. Candidate
+evaluation subtrees are trusted Eggopt-owned runtimes and begin independent
+tool-policy scopes, so a Critic may guide its Actor without granting Mutation
+that capability.
+NativeGEPA also adds a stable mutation-agent system prompt before the first
+model turn. Candidate, generation, and evaluation summaries are durable typed
+events, not conversation messages, so they remain inspectable without ever
+entering provider context.
+
+Pass `NativeGEPAConfig(progress=callback)` for synchronous, occurrence-level
+evaluation updates. The callback is observability only: it is excluded from
+semantic cache identities. Each distinct candidate/case-set/stage occurrence is
+reported once per durable study, so reruns do not reprint completed progress.
+
+Domains may replace both prompt layers independently:
+`Reflection.eggthreads(system_prompt=...)` sets the persistent mutation role,
+while `instruction=...` is the task-specific user request included in each
+reflection cache identity.
+
 ```python
 restricted = Reflection.eggthreads(
     llm=reflection_lm,

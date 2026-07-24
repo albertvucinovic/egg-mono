@@ -19,6 +19,7 @@ from eggthreads import (
 
 from .evaluation import Evaluation
 from .gepa.production_drive import (
+    DEFAULT_MUTATION_SYSTEM_PROMPT,
     EggthreadsReflectionDrive,
     create_solver_safe_study,
     default_solver_safe_tools,
@@ -65,6 +66,7 @@ class Reflection:
         max_runner_steps: int | float = math.inf,
         max_correction_turns: int = 0,
         context_limit: int | None = None,
+        system_prompt: str = DEFAULT_MUTATION_SYSTEM_PROMPT,
     ) -> Reflection:
         if tools is None:
             tools = default_solver_safe_tools()
@@ -80,6 +82,7 @@ class Reflection:
                 max_runner_steps=max_runner_steps,
                 max_correction_turns=max_correction_turns,
                 context_limit=context_limit,
+                system_prompt=system_prompt,
             ),
             identity=identity,
             instruction=instruction,
@@ -140,6 +143,9 @@ class Runtime(Generic[ExampleT, OutputT]):
                 payload={"study_id": study_id},
             )
             threads.conn.commit()
+        ensure_system_prompt = getattr(reflection.drive, "ensure_system_prompt", None)
+        if callable(ensure_system_prompt):
+            ensure_system_prompt(threads, study_id)
         context_limit = getattr(reflection.drive, "context_limit", None)
         if context_limit is not None and get_context_limit(threads, study_id) != context_limit:
             set_context_limit(

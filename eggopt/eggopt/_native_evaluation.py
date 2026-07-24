@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import fmean
@@ -12,7 +12,6 @@ from typing import Any, Generic, TypeVar
 from eggflow import FlowExecutor, Task
 from eggthreads import (
     ThreadsDB,
-    append_message,
     create_child_thread,
     get_context_limit,
     set_context_limit,
@@ -80,6 +79,7 @@ class _EnsureCandidateEvaluation(Task):
             self.threads,
             self.study_id,
             name=f"Candidate {number} Evaluation",
+            inherit_tools_config=False,
         )
         _record_structure(
             self.threads,
@@ -221,21 +221,6 @@ class _RecordCaseEvaluation(Task):
         )
 
     def run(self) -> None:
-        summary = {
-            "score": self.evaluation.score,
-            "feedback": _feedback(self.evaluation),
-        }
-        if not _has_message(self.threads, self.thread_id, self.get_cache_key()):
-            append_message(
-                self.threads,
-                self.thread_id,
-                "system",
-                json.dumps(summary, ensure_ascii=False, sort_keys=True),
-                extra={
-                    "eggopt_kind": "eggopt.native-gepa.case-result.v1",
-                    "semantic_key": self.get_cache_key(),
-                },
-            )
         self.threads.append_event(
             event_id=digest_payload(
                 "eggopt.native-gepa.case-result.v1", self.evaluation_key
@@ -287,17 +272,6 @@ class _RecordCandidateEvaluation(Task):
                 )
             ],
         }
-        if not _has_message(self.threads, self.thread_id, self.get_cache_key()):
-            append_message(
-                self.threads,
-                self.thread_id,
-                "system",
-                json.dumps(summary, ensure_ascii=False, sort_keys=True),
-                extra={
-                    "eggopt_kind": "eggopt.native-gepa.candidate-result.v1",
-                    "semantic_key": self.get_cache_key(),
-                },
-            )
         self.threads.append_event(
             event_id=digest_payload(
                 "eggopt.native-gepa.candidate-result.v1", self.get_cache_key()
@@ -329,6 +303,8 @@ class _CandidateEvaluation(Generic[OutputT]):
 
 @dataclass
 class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
+    cacheable = False
+
     flow: FlowExecutor = field(repr=False, compare=False)
     threads: ThreadsDB = field(repr=False, compare=False)
     study_id: str
@@ -340,6 +316,10 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
     evaluator_identity: Any
     max_concurrency: int | None
     context_limit: int | None
+    progress: Callable[[Mapping[str, Any]], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+    stage: str = "evaluation"
 
     def get_cache_key(self) -> str:
         return digest_payload(
@@ -408,6 +388,45 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
             self.case_identities,
             evaluations,
         )
+        progress_key = digest_payload(
+            "eggopt.native-gepa.progress.v1",
+            {
+                "candidate": canonical_candidate(self.candidate),
+                "cases": self.case_identities,
+                "stage": self.stage,
+            },
+        )
+        if not _progress_seen(self.threads, self.study_id, progress_key):
+            if self.progress is not None:
+                self.progress(
+                    {
+                        "kind": "candidate_evaluation",
+                        "stage": self.stage,
+                        "candidate_thread_id": candidate_thread_id,
+                        "candidate": dict(self.candidate),
+                        "aggregate_score": fmean(item.score for item in evaluations),
+                        "cases": [
+                            {
+                                "case": identity,
+                                "score": evaluation.score,
+                                "feedback": _feedback(evaluation),
+                                "evaluation_thread_id": node[0],
+                            }
+                            for identity, evaluation, node in zip(
+                                self.case_identities,
+                                evaluations,
+                                case_nodes,
+                                strict=True,
+                            )
+                        ],
+                    }
+                )
+            self.threads.append_event(
+                event_id=progress_key,
+                thread_id=self.study_id,
+                type_="eggopt.native-gepa.progress.v1",
+                payload={"progress_key": progress_key},
+            )
         return _CandidateEvaluation(
             evaluations,
             candidate_thread_id,
@@ -511,15 +530,6 @@ def _child_count(db: ThreadsDB, parent_id: str, kind: str) -> int:
     )
 
 
-def _has_message(db: ThreadsDB, thread_id: str, semantic_key: str) -> bool:
-    return (
-        db.conn.execute(
-            "SELECT 1 FROM events WHERE thread_id=? AND type='msg.create' "
-            "AND json_extract(payload_json, '$.semantic_key')=? LIMIT 1",
-            (thread_id, semantic_key),
-        ).fetchone()
-        is not None
-    )
 
 def _new_call_count(flow, candidate, cases, case_ids, evaluator, evaluator_identity):
     count = 0
@@ -536,6 +546,18 @@ def _new_call_count(flow, candidate, cases, case_ids, evaluator, evaluator_ident
         if row is None or row["status"] != "COMPLETED":
             count += 1
     return count
+
+
+def _progress_seen(db: ThreadsDB, study_id: str, progress_key: str) -> bool:
+    return (
+        db.conn.execute(
+            "SELECT 1 FROM events WHERE thread_id=? "
+            "AND type='eggopt.native-gepa.progress.v1' "
+            "AND json_extract(payload_json, '$.progress_key')=? LIMIT 1",
+            (study_id, progress_key),
+        ).fetchone()
+        is not None
+    )
 
 
 def _completed_evaluator_calls(flow: FlowExecutor) -> int:

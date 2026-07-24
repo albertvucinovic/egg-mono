@@ -149,6 +149,7 @@ def _reflector(
         drive_identity=identity,
         runner_config=RunnerConfig(tool_timeout_sec=30),
         auto_approve_tools=True,
+        system_prompt=drive_options.pop("system_prompt", "Test mutation agent."),
         **drive_options,
     )
     return EggthreadsReflectionLM(
@@ -194,6 +195,34 @@ class StreamingCeilingLLM:
                 await asyncio.sleep(0)
         finally:
             self.cancelled = True
+
+
+def test_mutation_system_prompt_precedes_request_and_is_stable(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _db(tmp_path)
+    study_id, _profile = create_solver_safe_study(
+        db, workspace=tmp_path / "workspace", allowed_tools={"python_exec"}
+    )
+    llm = RepairingLLM([json.dumps({"mutations": [{"instruction": "child"}]})])
+    reflector = _reflector(
+        tmp_path,
+        db,
+        study_id,
+        llm,
+        _registry([], []),
+        {"model": "system-prompt-test"},
+    )
+    reflector.drive.ensure_system_prompt(db, study_id)
+
+    reflector.reflect(
+        {"instruction": "seed"},
+        {"instruction": [{"Feedback": "improve"}]},
+        ["instruction"],
+    )
+
+    assert [message["role"] for message in llm.messages[0]] == ["user", "system"]
+    assert llm.messages[0][1]["content"] == "Test mutation agent."
+    assert sum(message["role"] == "system" for message in llm.messages[0]) == 1
 
 
 def test_malformed_envelope_repairs_in_same_mutation_thread(tmp_path, monkeypatch):
@@ -418,6 +447,7 @@ def test_production_drive_validates_repair_and_ceiling_options():
         ({"max_correction_turns": True}, "max_correction_turns"),
         ({"context_limit": 0}, "context_limit"),
         ({"context_limit": True}, "context_limit"),
+        ({"system_prompt": ""}, "system_prompt"),
     ]:
         with pytest.raises(ValueError, match=message):
             EggthreadsReflectionDrive(
@@ -529,6 +559,7 @@ def test_production_drive_defaults_to_all_safe_tools_and_can_replace():
     )
     assert default.allowed_tools == SOLVER_SAFE_TOOLS
     assert {"python_repl", "skill"}.issubset(default.allowed_tools)
+    assert "send_message_to_child" not in default.allowed_tools
     assert default.semantic_identity["tool_policy"] == {
         "default_profile": SOLVER_SAFE_PROFILE_NAME,
         "version": SOLVER_SAFE_PROFILE_VERSION,
@@ -579,6 +610,17 @@ def test_reflection_factory_defaults_to_all_safe_tools_and_can_replace():
         identity={"model": "default-tools"},
     )
     assert default.allowed_tools == SOLVER_SAFE_TOOLS
+    assert "send_message_to_child" not in default.allowed_tools
+
+    custom_prompt = Reflection.eggthreads(
+        llm=MustNotRunLLM(),
+        identity={"model": "custom-system-prompt"},
+        system_prompt="Review the domain evidence.",
+    )
+    assert custom_prompt.drive.system_prompt == "Review the domain evidence."
+    assert custom_prompt.drive.semantic_identity["system_prompt"] == (
+        "Review the domain evidence."
+    )
 
     restricted = Reflection.eggthreads(
         llm=MustNotRunLLM(),
@@ -634,9 +676,13 @@ def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypa
     assert identity["sandbox"]["network"]["allowedDomains"] == []
     root_tools = get_thread_tools_config(db, study_id)
     assert root_tools.allowed_tools == SOLVER_SAFE_TOOLS
+    assert not root_tools.is_tool_allowed("send_message_to_child")
 
     child = create_child_thread(db, study_id, name="Mutation")
     assert get_thread_tools_config(db, child).allowed_tools == SOLVER_SAFE_TOOLS
+    assert not get_thread_tools_config(db, child).is_tool_allowed(
+        "send_message_to_child"
+    )
     set_thread_tool_allowlist(db, study_id, {"python_exec", "bash"})
     set_thread_tool_allowlist(db, child, set(SOLVER_SAFE_TOOLS))
     assert get_thread_tools_config(db, child).allowed_tools == {"python_exec", "bash"}

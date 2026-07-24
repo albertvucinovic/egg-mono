@@ -5,11 +5,17 @@ from pathlib import Path
 
 import pytest
 
-from eggthreads import ThreadsDB, get_thread_tools_config, list_children_with_meta
+from eggthreads import (
+    ThreadsDB,
+    get_thread_tools_config,
+    list_children_with_meta,
+    load_thread_projection,
+)
 
 from eggopt import (
     Agent,
     NativeGEPAConfig,
+    Reflection,
     current_evaluation,
     optimize_anything,
     plan_optimization,
@@ -136,6 +142,11 @@ def test_native_gepa_evaluator_context_limit_must_be_positive(limit):
         NativeGEPAConfig(evaluator_context_limit=limit)
 
 
+def test_native_gepa_progress_must_be_callable():
+    with pytest.raises(TypeError, match="progress"):
+        NativeGEPAConfig(progress="verbose")
+
+
 def config(tmp_path, evaluator, generator, **changes):
     base = NativeGEPAConfig(
         run_dir=tmp_path / "native",
@@ -243,6 +254,121 @@ def test_minibatch_acceptance_rejects_unknown_policy():
         NativeGEPAConfig(minibatch_acceptance="unknown")
 
 
+def test_progress_callback_reports_cached_candidate_evaluations(tmp_path):
+    events = []
+    evaluator = Evaluator()
+    generator = Increment()
+    options = config(
+        tmp_path,
+        evaluator,
+        generator,
+        max_candidates=1,
+        parents_per_candidate=1,
+        progress=events.append,
+    )
+
+    optimize_anything(
+        {"instruction": "0"},
+        evaluator=evaluator,
+        dataset=[{"id": "easy", "target": 1}],
+        objective="Reach the target.",
+        config=options,
+    )
+
+    replay_events = []
+    replay = optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=[{"id": "easy", "target": 1}],
+        objective="Reach the target.",
+        config=replace(options, progress=replay_events.append),
+    )
+
+    assert events
+    assert replay_events == []
+    assert events[-1]["kind"] == "candidate_evaluation"
+    assert events[-1]["stage"] == "full"
+    assert events[-1]["cases"][0]["case"] == "easy"
+    assert replay.best_candidate == {"instruction": "1"}
+
+
+def test_progress_is_not_backfilled_when_first_run_has_no_callback(tmp_path):
+    evaluator = Evaluator()
+    generator = Increment()
+    options = config(
+        tmp_path,
+        evaluator,
+        generator,
+        max_candidates=1,
+        parents_per_candidate=1,
+    )
+    arguments = {
+        "evaluator": evaluator,
+        "dataset": [{"id": "easy", "target": 1}],
+        "objective": "Reach the target.",
+    }
+
+    optimize_anything({"instruction": "0"}, config=options, **arguments)
+    replay_events = []
+    optimize_anything(
+        {"instruction": "0"},
+        config=replace(options, progress=replay_events.append),
+        **arguments,
+    )
+
+    assert replay_events == []
+
+
+def test_native_gepa_audit_summaries_are_typed_events_not_messages(tmp_path):
+    optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=[{"id": "easy", "target": 1}],
+        objective="Reach the target.",
+        config=config(
+            tmp_path,
+            Evaluator(),
+            Increment(),
+            max_candidates=1,
+            parents_per_candidate=1,
+        ),
+    )
+
+    db = ThreadsDB(tmp_path / "native" / ".egg" / "threads.sqlite")
+    try:
+        study = db.conn.execute(
+            "SELECT thread_id FROM events WHERE type='eggopt.study'"
+        ).fetchone()[0]
+        candidate = db.conn.execute(
+            "SELECT thread_id FROM events WHERE type='eggopt.native-gepa.structure.v1' "
+            "AND json_extract(payload_json, '$.kind')='candidate' ORDER BY event_seq LIMIT 1"
+        ).fetchone()[0]
+        event_types = {
+            row[0]
+            for row in db.conn.execute(
+                "SELECT DISTINCT type FROM events WHERE type IN "
+                "('eggopt.native-gepa.generation-result.v1', "
+                "'eggopt.native-gepa.case-result.v1', "
+                "'eggopt.native-gepa.candidate-result.v1')"
+            )
+        }
+        assert event_types == {
+            "eggopt.native-gepa.generation-result.v1",
+            "eggopt.native-gepa.case-result.v1",
+            "eggopt.native-gepa.candidate-result.v1",
+        }
+        for thread_id in (study, candidate):
+            projection = load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
+            assert all(
+                not str(message.payload.get("eggopt_kind", "")).startswith(
+                    "eggopt.native-gepa."
+                )
+                for message in projection.messages
+            )
+    finally:
+        db.conn.close()
+
+
 def test_async_custom_generator_uses_shared_await_task(tmp_path):
     async def generate(_parents, _evidence, _objective):
         return {"instruction": "1"}
@@ -337,16 +463,25 @@ def test_budget_never_starts_an_evaluation_that_would_exceed_it(tmp_path):
     assert evaluator.calls <= 3
 
 
-def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(tmp_path):
+def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
     evaluator = ContextEvaluator()
     generator = Increment()
     dataset = [{"id": "easy", "target": 1}]
+    reflection = Reflection.eggthreads(
+        llm=object(),
+        identity={"model": "unused"},
+        allowed_tools={"python_exec"},
+    )
     cfg = config(
         tmp_path,
         evaluator,
         generator,
         max_candidates=1,
         parents_per_candidate=1,
+        reflection=reflection,
     )
 
     optimize_anything(
@@ -368,8 +503,14 @@ def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(tmp_path):
             "SELECT thread_id FROM events WHERE type='eggopt.study'"
         ).fetchone()[0]
         assert db.get_thread(mutation).name == "Mutation"
+        assert not get_thread_tools_config(db, mutation).is_tool_allowed(
+            "send_message_to_child"
+        )
         candidates = list_children_with_meta(db, mutation)
         assert candidates[0][1] == "Candidate 1 Evaluation"
+        assert get_thread_tools_config(db, candidates[0][0]).is_tool_allowed(
+            "send_message_to_child"
+        )
         cases = list_children_with_meta(db, candidates[0][0])
         assert cases[0][1] == "easy Evaluation"
     finally:

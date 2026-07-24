@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import random
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -13,7 +12,7 @@ from statistics import fmean
 from typing import Any, Generic, Literal, TypeVar
 
 from eggflow import FlowExecutor, Task
-from eggthreads import ThreadsDB, append_message
+from eggthreads import ThreadsDB
 
 from ._identity import canonical_candidate, canonical_json, digest_payload
 from ._native_evaluation import (
@@ -21,7 +20,6 @@ from ._native_evaluation import (
     _EvaluateCandidate,
     _completed_evaluator_calls,
     _feedback,
-    _has_message,
     _json_value,
     _new_call_count,
 )
@@ -32,6 +30,7 @@ CaseT = TypeVar("CaseT")
 OutputT = TypeVar("OutputT")
 Candidate = dict[str, str]
 MinibatchAcceptance = Literal["strict_improvement", "improvement_or_equal"]
+ProgressCallback = Callable[[Mapping[str, Any]], None]
 
 _GENERATION = "eggopt.native-gepa.generate.v1"
 _MINIBATCH_ACCEPTANCE = {
@@ -57,6 +56,7 @@ class NativeGEPAConfig:
     case_id: Callable[[Any], Any] | None = field(default=None, repr=False, compare=False)
     max_concurrent_evaluations: int | None = 1
     evaluator_context_limit: int | None = None
+    progress: ProgressCallback | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         for name in (
@@ -91,6 +91,8 @@ class NativeGEPAConfig:
             callable(self.generator) or isinstance(self.generator, Task)
         ):
             raise TypeError("generator must be callable, an Eggflow Task, or None")
+        if self.progress is not None and not callable(self.progress):
+            raise TypeError("progress must be callable or None")
 
 
 @dataclass(frozen=True)
@@ -344,7 +346,9 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             raise ValueError(
                 "max_evaluator_calls must cover the seed's full valset evaluation"
             )
-        first = yield self._evaluate(seed, self.valset, self.valset_ids)
+        first = yield self._evaluate(
+            seed, self.valset, self.valset_ids, stage="full"
+        )
         candidates = [seed]
         case_scores = [first.scores]
         outputs = [first.outputs]
@@ -384,7 +388,9 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                     return _result(
                         candidates, case_scores, parents, outputs, feedback, calls, generated
                     )
-                evaluated = yield self._evaluate(candidates[parent_id], batch, batch_ids)
+                evaluated = yield self._evaluate(
+                    candidates[parent_id], batch, batch_ids, stage="minibatch"
+                )
                 calls = _completed_evaluator_calls(self.flow)
                 parent_evaluations.append(evaluated)
 
@@ -429,7 +435,9 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 return _result(
                     candidates, case_scores, parents, outputs, feedback, calls, generated
                 )
-            child_batch = yield self._evaluate(child, batch, batch_ids)
+            child_batch = yield self._evaluate(
+                child, batch, batch_ids, stage="minibatch"
+            )
             calls = _completed_evaluator_calls(self.flow)
             # Multiple selected parents may specialize on different cases;
             # compare the child with the strongest per-case parent envelope.
@@ -450,7 +458,9 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             )
             if calls + full_needed > self.config.max_evaluator_calls:
                 continue
-            full = yield self._evaluate(child, self.valset, self.valset_ids)
+            full = yield self._evaluate(
+                child, self.valset, self.valset_ids, stage="full"
+            )
             calls = _completed_evaluator_calls(self.flow)
             candidates.append(child)
             case_scores.append(full.scores)
@@ -460,7 +470,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
 
         return _result(candidates, case_scores, parents, outputs, feedback, calls, generated)
 
-    def _evaluate(self, candidate, cases, case_ids):
+    def _evaluate(self, candidate, cases, case_ids, *, stage):
         return _EvaluateCandidate(
             self.flow,
             self.threads,
@@ -473,6 +483,8 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             self.evaluator_identity,
             self.config.max_concurrent_evaluations,
             self.config.evaluator_context_limit,
+            self.config.progress,
+            stage,
         )
 
 
@@ -691,22 +703,25 @@ def _record_generation(
     candidate: Candidate,
     generation: int,
 ) -> None:
-    if _has_message(db, study_id, semantic_key):
+    if db.conn.execute(
+        "SELECT 1 FROM events WHERE thread_id=? "
+        "AND type='eggopt.native-gepa.generation-result.v1' "
+        "AND json_extract(payload_json, '$.semantic_key')=? LIMIT 1",
+        (study_id, semantic_key),
+    ).fetchone():
         return
     payload = {
         "generation": generation,
         "selected_parents": [dict(parent) for parent in parents],
         "candidate": candidate,
     }
-    append_message(
-        db,
-        study_id,
-        "system",
-        json.dumps(payload, ensure_ascii=False, sort_keys=True),
-        extra={
-            "eggopt_kind": "eggopt.native-gepa.generation-result.v1",
-            "semantic_key": semantic_key,
-        },
+    db.append_event(
+        event_id=digest_payload(
+            "eggopt.native-gepa.generation-result.v1", semantic_key
+        ),
+        thread_id=study_id,
+        type_="eggopt.native-gepa.generation-result.v1",
+        payload={"semantic_key": semantic_key, **payload},
     )
 
 

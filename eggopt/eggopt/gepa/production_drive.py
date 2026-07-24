@@ -37,9 +37,13 @@ from .reflection import (
 )
 
 SOLVER_SAFE_PROFILE_NAME = "solver_safe"
-SOLVER_SAFE_PROFILE_VERSION = "4"
+SOLVER_SAFE_PROFILE_VERSION = "5"
 _MUTATION_REPAIR_POLICY = "eggopt.gepa.strict-mutation-repair"
 _MUTATION_REPAIR_VERSION = "1"
+DEFAULT_MUTATION_SYSTEM_PROMPT = (
+    "You are the mutation agent in an optimization study. Follow each user "
+    "request, analyze its evidence, and return the requested candidate mutation."
+)
 SOLVER_SAFE_TOOLS = frozenset(
     {
         "python_exec",
@@ -200,6 +204,7 @@ class EggthreadsReflectionDrive:
         max_runner_steps: int | float = math.inf,
         max_correction_turns: int = 0,
         context_limit: int | None = None,
+        system_prompt: str = DEFAULT_MUTATION_SYSTEM_PROMPT,
     ) -> None:
         tools, allowed_tools = solver_safe_tools(
             tools,
@@ -246,6 +251,9 @@ class EggthreadsReflectionDrive:
             )
         self.max_correction_turns = max_correction_turns
         self.context_limit = context_limit
+        if not isinstance(system_prompt, str) or not system_prompt.strip():
+            raise ValueError("system_prompt must be a non-empty string")
+        self.system_prompt = system_prompt.strip()
         identity = json.loads(canonical_json(drive_identity, what="drive_identity"))
         reserved = {"tool_policy", "mutation_repair", "context_limit"}.intersection(
             identity
@@ -273,6 +281,7 @@ class EggthreadsReflectionDrive:
                 "version": "2",
                 "max_tokens": context_limit,
             },
+            "system_prompt": self.system_prompt,
         }
 
     def validate_study(self, db: ThreadsDB, study_thread_id: str) -> None:
@@ -317,6 +326,7 @@ class EggthreadsReflectionDrive:
         request: Mapping[str, Any],
     ) -> CandidateMutation | CandidateMutations:
         self.validate_study(conversation.db, conversation.thread_id)
+        self.ensure_system_prompt(conversation.db, conversation.thread_id)
         return await self._drive_async(conversation, request)
 
     async def resume(
@@ -325,7 +335,11 @@ class EggthreadsReflectionDrive:
         request: Mapping[str, Any],
     ) -> CandidateMutation | CandidateMutations:
         self.validate_study(conversation.db, conversation.thread_id)
+        self.ensure_system_prompt(conversation.db, conversation.thread_id)
         return await self._drive_async(conversation, request)
+
+    def ensure_system_prompt(self, db: ThreadsDB, thread_id: str) -> None:
+        _ensure_mutation_system_prompt(db, thread_id, self.system_prompt)
 
     async def _drive_async(
         self,
@@ -456,6 +470,24 @@ def _root_thread_id(db: ThreadsDB, thread_id: str) -> str:
             return current
         current = str(row[0])
     raise ValueError("cycle in reflection thread ancestry")
+
+
+def _ensure_mutation_system_prompt(
+    db: ThreadsDB, thread_id: str, system_prompt: str
+) -> None:
+    projection = load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
+    if any(
+        message.payload.get("eggopt_kind") == "eggopt.gepa.mutation-system.v1"
+        for message in projection.messages
+    ):
+        return
+    append_message(
+        db,
+        thread_id,
+        "system",
+        system_prompt,
+        extra={"eggopt_kind": "eggopt.gepa.mutation-system.v1"},
+    )
 
 
 def _validate_safe_sandbox(config: Any) -> None:
