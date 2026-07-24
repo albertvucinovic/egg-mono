@@ -95,14 +95,14 @@ evaluation subtrees are trusted Eggopt-owned runtimes and begin independent
 tool-policy scopes, so a Critic may guide its Actor without granting Mutation
 that capability.
 NativeGEPA also adds a stable mutation-agent system prompt before the first
-model turn. Candidate, generation, and evaluation summaries are durable typed
-events, not conversation messages, so they remain inspectable without ever
-entering provider context.
+model turn. Eggflow Task results are the only durable source for generated
+candidates and evaluation values; Eggthreads remains the source for model
+conversation transcripts. NativeGEPA writes no duplicate result messages or
+events.
 
-Pass `NativeGEPAConfig(progress=callback)` for synchronous, occurrence-level
-evaluation updates. The callback is observability only: it is excluded from
-semantic cache identities. Each distinct candidate/case-set/stage occurrence is
-reported once per durable study, so reruns do not reprint completed progress.
+Pass `NativeGEPAConfig(progress=callback)` for synchronous case and candidate
+updates. The callback is an ephemeral projection of cached or fresh Eggflow
+results and is excluded from semantic cache identities.
 
 Domains may replace both prompt layers independently:
 `Reflection.eggthreads(system_prompt=...)` sets the persistent mutation role,

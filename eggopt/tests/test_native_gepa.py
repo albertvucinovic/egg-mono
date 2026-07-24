@@ -9,7 +9,8 @@ from eggthreads import (
     ThreadsDB,
     get_thread_tools_config,
     list_children_with_meta,
-    load_thread_projection,
+    list_root_threads,
+    list_threads,
 )
 
 from eggopt import (
@@ -199,11 +200,11 @@ def test_optimize_anything_is_case_wise_pareto_search(tmp_path):
     db = ThreadsDB(tmp_path / "native" / ".egg" / "threads.sqlite")
     try:
         case_ids = [
-            row[0]
-            for row in db.conn.execute(
-                "SELECT thread_id FROM events WHERE type='eggopt.native-gepa.structure.v1' "
-                "AND json_extract(payload_json, '$.kind')='case'"
-            )
+            thread.thread_id
+            for thread in list_threads(db)
+            if thread.name
+            and thread.name.endswith(" Evaluation")
+            and not thread.name.startswith("Candidate ")
         ]
         assert case_ids
         assert all(get_context_limit(db, thread_id) == 9_000 for thread_id in case_ids)
@@ -254,7 +255,7 @@ def test_minibatch_acceptance_rejects_unknown_policy():
         NativeGEPAConfig(minibatch_acceptance="unknown")
 
 
-def test_progress_callback_reports_cached_candidate_evaluations(tmp_path):
+def test_progress_callback_reports_each_case_and_candidate(tmp_path):
     events = []
     evaluator = Evaluator()
     generator = Increment()
@@ -284,15 +285,26 @@ def test_progress_callback_reports_cached_candidate_evaluations(tmp_path):
         config=replace(options, progress=replay_events.append),
     )
 
-    assert events
-    assert replay_events == []
+    assert [event["kind"] for event in events] == [
+        item
+        for _ in range(4)
+        for item in (
+            "candidate_evaluation_started",
+            "case_evaluation",
+            "candidate_evaluation",
+        )
+    ]
+    assert replay_events == events
+    assert events[0]["case_count"] == 1
+    assert events[1]["case"] == "easy"
+    assert events[1]["case_number"] == 1
+    assert events[1]["case_count"] == 1
     assert events[-1]["kind"] == "candidate_evaluation"
     assert events[-1]["stage"] == "full"
-    assert events[-1]["cases"][0]["case"] == "easy"
     assert replay.best_candidate == {"instruction": "1"}
 
 
-def test_progress_is_not_backfilled_when_first_run_has_no_callback(tmp_path):
+def test_progress_projects_cached_results_on_resume(tmp_path):
     evaluator = Evaluator()
     generator = Increment()
     options = config(
@@ -316,10 +328,18 @@ def test_progress_is_not_backfilled_when_first_run_has_no_callback(tmp_path):
         **arguments,
     )
 
-    assert replay_events == []
+    assert [event["kind"] for event in replay_events] == [
+        item
+        for _ in range(4)
+        for item in (
+            "candidate_evaluation_started",
+            "case_evaluation",
+            "candidate_evaluation",
+        )
+    ]
 
 
-def test_native_gepa_audit_summaries_are_typed_events_not_messages(tmp_path):
+def test_native_gepa_results_live_only_in_eggflow(tmp_path):
     optimize_anything(
         {"instruction": "0"},
         evaluator=Evaluator(),
@@ -336,35 +356,52 @@ def test_native_gepa_audit_summaries_are_typed_events_not_messages(tmp_path):
 
     db = ThreadsDB(tmp_path / "native" / ".egg" / "threads.sqlite")
     try:
-        study = db.conn.execute(
-            "SELECT thread_id FROM events WHERE type='eggopt.study'"
-        ).fetchone()[0]
-        candidate = db.conn.execute(
-            "SELECT thread_id FROM events WHERE type='eggopt.native-gepa.structure.v1' "
-            "AND json_extract(payload_json, '$.kind')='candidate' ORDER BY event_seq LIMIT 1"
-        ).fetchone()[0]
-        event_types = {
-            row[0]
-            for row in db.conn.execute(
-                "SELECT DISTINCT type FROM events WHERE type IN "
-                "('eggopt.native-gepa.generation-result.v1', "
-                "'eggopt.native-gepa.case-result.v1', "
-                "'eggopt.native-gepa.candidate-result.v1')"
-            )
-        }
-        assert event_types == {
-            "eggopt.native-gepa.generation-result.v1",
-            "eggopt.native-gepa.case-result.v1",
-            "eggopt.native-gepa.candidate-result.v1",
-        }
-        for thread_id in (study, candidate):
-            projection = load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
-            assert all(
-                not str(message.payload.get("eggopt_kind", "")).startswith(
-                    "eggopt.native-gepa."
-                )
-                for message in projection.messages
-            )
+        assert (
+            db.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE type LIKE 'eggopt.native-gepa.%-result.v1' "
+                "OR type='eggopt.native-gepa.progress.v1'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            db.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE type='msg.create' "
+                "AND json_extract(payload_json, '$.eggopt_kind') LIKE 'eggopt.native-gepa.%'"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        db.conn.close()
+
+
+def test_study_identity_is_cached_without_an_eggthreads_marker(tmp_path):
+    options = config(
+        tmp_path,
+        Evaluator(),
+        Increment(),
+        max_candidates=1,
+        parents_per_candidate=1,
+    )
+    arguments = {
+        "seed_candidate": {"instruction": "0"},
+        "evaluator": Evaluator(),
+        "dataset": [{"id": "easy", "target": 1}],
+        "objective": "Reach the target.",
+        "config": options,
+    }
+
+    optimize_anything(**arguments)
+    optimize_anything(**arguments)
+
+    db = ThreadsDB(tmp_path / "native" / ".egg" / "threads.sqlite")
+    try:
+        assert len(list_root_threads(db)) == 1
+        assert (
+            db.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE type='eggopt.study'"
+            ).fetchone()[0]
+            == 0
+        )
     finally:
         db.conn.close()
 
@@ -499,9 +536,7 @@ def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(
 
     db = ThreadsDB(tmp_path / "native" / ".egg" / "threads.sqlite")
     try:
-        mutation = db.conn.execute(
-            "SELECT thread_id FROM events WHERE type='eggopt.study'"
-        ).fetchone()[0]
+        mutation = list_root_threads(db)[0]
         assert db.get_thread(mutation).name == "Mutation"
         assert not get_thread_tools_config(db, mutation).is_tool_allowed(
             "send_message_to_child"
@@ -725,7 +760,9 @@ def test_actor_critic_context_limit_uses_full_history_not_provider_context(
         lambda _db, _thread: {"context_tokens": 10, "full_thread_tokens": 100},
     )
 
-    with pytest.raises(Exception, match="full context limit reached before provider call"):
+    with pytest.raises(
+        Exception, match="full context limit reached before provider call"
+    ):
         optimize_anything(
             {"instruction": "0"},
             evaluator=Evaluator(),

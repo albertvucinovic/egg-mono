@@ -53,7 +53,9 @@ class NativeGEPAConfig:
     reflection: Reflection | None = None
     generator: Any | None = None
     evaluator_identity: Any | None = None
-    case_id: Callable[[Any], Any] | None = field(default=None, repr=False, compare=False)
+    case_id: Callable[[Any], Any] | None = field(
+        default=None, repr=False, compare=False
+    )
     max_concurrent_evaluations: int | None = 1
     evaluator_context_limit: int | None = None
     progress: ProgressCallback | None = field(default=None, repr=False, compare=False)
@@ -164,7 +166,11 @@ def plan_optimization(
             qualifier = "positive" if minimum else "non-negative"
             raise ValueError(f"{name} must be a {qualifier} integer")
     validation = dataset_size if valset_size is None else valset_size
-    if isinstance(validation, bool) or not isinstance(validation, int) or validation < 1:
+    if (
+        isinstance(validation, bool)
+        or not isinstance(validation, int)
+        or validation < 1
+    ):
         raise ValueError("valset_size must be a positive integer")
     batch = min(reflection_minibatch_size, dataset_size)
 
@@ -174,7 +180,9 @@ def plan_optimization(
         max_candidates,
         max(0, (max_evaluator_calls - validation) // max(1, batch + validation)),
     )
-    total_calls = min(max_evaluator_calls, validation + generated * (batch + validation))
+    total_calls = min(
+        max_evaluator_calls, validation + generated * (batch + validation)
+    )
     return OptimizationPlan(
         max_candidates=max_candidates,
         max_evaluator_calls=max_evaluator_calls,
@@ -227,8 +235,6 @@ class GenerateCandidate(Task):
     """Replaceable boundary: selected parents in, exactly one candidate out."""
 
     reflector: Any = field(repr=False, compare=False)
-    threads: ThreadsDB = field(repr=False, compare=False)
-    study_id: str
     parents: tuple[Candidate, ...]
     evidence: tuple[Mapping[str, Any], ...]
     objective: str
@@ -259,23 +265,12 @@ class GenerateCandidate(Task):
         mutation = await self.reflector.reflect_in_study_async(
             lead, dataset, list(lead)
         )
-        candidate = _apply_mutation(lead, mutation.updates)
-        _record_generation(
-            self.threads,
-            self.study_id,
-            self.get_cache_key(),
-            self.parents,
-            candidate,
-            self.generation,
-        )
-        return candidate
+        return _apply_mutation(lead, mutation.updates)
 
 
 @dataclass
 class _CustomGenerateCandidate(Task):
     generator: Any = field(repr=False, compare=False)
-    threads: ThreadsDB = field(repr=False, compare=False)
-    study_id: str
     parents: tuple[Candidate, ...]
     evidence: tuple[Mapping[str, Any], ...]
     objective: str
@@ -302,16 +297,7 @@ class _CustomGenerateCandidate(Task):
             value = yield value
         elif inspect.isawaitable(value):
             value = yield _Await(value)
-        candidate = _candidate(value)
-        _record_generation(
-            self.threads,
-            self.study_id,
-            self.get_cache_key(),
-            self.parents,
-            candidate,
-            self.generation,
-        )
-        return candidate
+        return _candidate(value)
 
 
 @dataclass
@@ -342,13 +328,14 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             self.evaluator,
             self.evaluator_identity,
         )
-        if _completed_evaluator_calls(self.flow) + seed_needed > self.config.max_evaluator_calls:
+        if (
+            _completed_evaluator_calls(self.flow) + seed_needed
+            > self.config.max_evaluator_calls
+        ):
             raise ValueError(
                 "max_evaluator_calls must cover the seed's full valset evaluation"
             )
-        first = yield self._evaluate(
-            seed, self.valset, self.valset_ids, stage="full"
-        )
+        first = yield self._evaluate(seed, self.valset, self.valset_ids, stage="full")
         candidates = [seed]
         case_scores = [first.scores]
         outputs = [first.outputs]
@@ -386,25 +373,34 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 )
                 if calls + needed > self.config.max_evaluator_calls:
                     return _result(
-                        candidates, case_scores, parents, outputs, feedback, calls, generated
+                        candidates,
+                        case_scores,
+                        parents,
+                        outputs,
+                        feedback,
+                        calls,
+                        generated,
                     )
                 evaluated = yield self._evaluate(
-                    candidates[parent_id], batch, batch_ids, stage="minibatch"
+                    candidates[parent_id],
+                    batch,
+                    batch_ids,
+                    stage="minibatch",
                 )
                 calls = _completed_evaluator_calls(self.flow)
                 parent_evaluations.append(evaluated)
 
             evidence = tuple(
                 _generation_evidence(parent_id, result, batch_ids)
-                for parent_id, result in zip(parent_ids, parent_evaluations, strict=True)
+                for parent_id, result in zip(
+                    parent_ids, parent_evaluations, strict=True
+                )
             )
             selected = tuple(candidates[index] for index in parent_ids)
             generation_task: Task
             if self.config.generator is None:
                 generation_task = GenerateCandidate(
                     self.reflector,
-                    self.threads,
-                    self.study_id,
                     selected,
                     evidence,
                     self.objective,
@@ -413,8 +409,6 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             else:
                 generation_task = _CustomGenerateCandidate(
                     self.config.generator,
-                    self.threads,
-                    self.study_id,
                     selected,
                     evidence,
                     self.objective,
@@ -433,10 +427,19 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             )
             if calls + child_needed > self.config.max_evaluator_calls:
                 return _result(
-                    candidates, case_scores, parents, outputs, feedback, calls, generated
+                    candidates,
+                    case_scores,
+                    parents,
+                    outputs,
+                    feedback,
+                    calls,
+                    generated,
                 )
             child_batch = yield self._evaluate(
-                child, batch, batch_ids, stage="minibatch"
+                child,
+                batch,
+                batch_ids,
+                stage="minibatch",
             )
             calls = _completed_evaluator_calls(self.flow)
             # Multiple selected parents may specialize on different cases;
@@ -459,7 +462,10 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             if calls + full_needed > self.config.max_evaluator_calls:
                 continue
             full = yield self._evaluate(
-                child, self.valset, self.valset_ids, stage="full"
+                child,
+                self.valset,
+                self.valset_ids,
+                stage="full",
             )
             calls = _completed_evaluator_calls(self.flow)
             candidates.append(child)
@@ -468,7 +474,9 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             feedback.append(full.feedback)
             parents.append(parent_ids)
 
-        return _result(candidates, case_scores, parents, outputs, feedback, calls, generated)
+        return _result(
+            candidates, case_scores, parents, outputs, feedback, calls, generated
+        )
 
     def _evaluate(self, candidate, cases, case_ids, *, stage):
         return _EvaluateCandidate(
@@ -512,9 +520,7 @@ class NativeGEPA(Generic[CaseT, OutputT]):
                 reflection=legacy.pop("reflection", None),
                 evaluator_identity=legacy.pop("metric_identity", None),
                 case_id=legacy.pop("example_id", None),
-                max_concurrent_evaluations=legacy.pop(
-                    "max_concurrent_evaluations", 1
-                ),
+                max_concurrent_evaluations=legacy.pop("max_concurrent_evaluations", 1),
             )
         if legacy:
             raise TypeError(f"unknown NativeGEPA options: {sorted(legacy)}")
@@ -585,6 +591,7 @@ def optimize_anything(
                 )
             )
         )
+
 
 def _minibatch_indices(size: int, batch_size: int, seed: int, generation: int):
     order = list(range(size))
@@ -661,7 +668,9 @@ def _generation_evidence(parent_id, evaluation, case_ids):
 def _apply_mutation(parent: Candidate, updates: Mapping[str, str]) -> Candidate:
     unknown = set(updates) - set(parent)
     if unknown:
-        raise ValueError(f"generator added unknown candidate components: {sorted(unknown)}")
+        raise ValueError(
+            f"generator added unknown candidate components: {sorted(unknown)}"
+        )
     return dict(canonical_candidate({**parent, **updates}))
 
 
@@ -693,36 +702,6 @@ def _case_identity(case: Any) -> Any:
         if hasattr(case, "__dict__"):
             return vars(case)
         raise TypeError("provide config.case_id for non-JSON cases") from None
-
-
-def _record_generation(
-    db: ThreadsDB,
-    study_id: str,
-    semantic_key: str,
-    parents: tuple[Candidate, ...],
-    candidate: Candidate,
-    generation: int,
-) -> None:
-    if db.conn.execute(
-        "SELECT 1 FROM events WHERE thread_id=? "
-        "AND type='eggopt.native-gepa.generation-result.v1' "
-        "AND json_extract(payload_json, '$.semantic_key')=? LIMIT 1",
-        (study_id, semantic_key),
-    ).fetchone():
-        return
-    payload = {
-        "generation": generation,
-        "selected_parents": [dict(parent) for parent in parents],
-        "candidate": candidate,
-    }
-    db.append_event(
-        event_id=digest_payload(
-            "eggopt.native-gepa.generation-result.v1", semantic_key
-        ),
-        thread_id=study_id,
-        type_="eggopt.native-gepa.generation-result.v1",
-        payload={"semantic_key": semantic_key, **payload},
-    )
 
 
 class _NoReflectionDrive:
