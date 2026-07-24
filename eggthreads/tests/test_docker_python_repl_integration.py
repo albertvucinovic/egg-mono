@@ -79,6 +79,74 @@ def test_docker_python_repl_persists_state_and_eggtools(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.environ.get("EGG_SKIP_DOCKER_REPL_TESTS") == "1", reason="Docker REPL tests disabled")
+def test_docker_python_repl_cannot_access_private_egg_by_alias(tmp_path, monkeypatch):
+    if not _docker_available():
+        pytest.skip("Docker is not available")
+    monkeypatch.chdir(tmp_path)
+    image = os.environ.get("EGG_RLM_TEST_IMAGE", "python:3.12-slim")
+    private = tmp_path / ".egg"
+    private.mkdir()
+    (private / "secret").write_text("PRIVATE", encoding="utf-8")
+    (tmp_path / "egg-link").symlink_to(private, target_is_directory=True)
+
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    ts.set_thread_sandbox_config(
+        db,
+        parent,
+        enabled=True,
+        settings={
+            "provider": "docker",
+            "network": {"allowedDomains": []},
+            "filesystem": {
+                "allowWrite": ["."],
+                "denyRead": [".egg"],
+                "denyWrite": [".egg"],
+            },
+        },
+        reason="test private metadata boundary",
+    )
+    ts.enable_thread_session(db, parent, provider="docker", image=image)
+
+    runtime = None
+    try:
+        probes = [
+            ".egg/secret",
+            "/workspace/host/.egg/secret",
+            "../host/.egg/secret",
+            "egg-link/secret",
+        ]
+        code = (
+            "from pathlib import Path\n"
+            f"probes = {probes!r}\n"
+            "for value in probes:\n"
+            "    try:\n"
+            "        print(value, Path(value).read_text())\n"
+            "    except OSError:\n"
+            "        print(value, 'HIDDEN')\n"
+            "try:\n"
+            "    Path('.egg/new').write_text('x')\n"
+            "    print('WRITE_VISIBLE')\n"
+            "except OSError:\n"
+            "    print('WRITE_BLOCKED')\n"
+        )
+        output = ts.execute_python_repl(db, parent, code, timeout_sec=30)
+        assert "PRIVATE" not in output
+        assert output.count("HIDDEN") == len(probes)
+        assert "WRITE_BLOCKED" in output
+        assert not (private / "new").exists()
+        assert sorted(tmp_path.rglob(".egg")) == [private]
+    finally:
+        runtime = ts.find_runtime_thread(db, parent, language="python")
+        if runtime is not None:
+            status = ts.get_thread_session_status(db, runtime.runtime_thread_id)
+            if status.container_name:
+                import subprocess
+                subprocess.run(["docker", "rm", "-f", status.container_name], capture_output=True, timeout=10)
+
+
+@pytest.mark.skipif(os.environ.get("EGG_SKIP_DOCKER_REPL_TESTS") == "1", reason="Docker REPL tests disabled")
 def test_docker_repl_cancellation_resets_only_affected_channels(tmp_path, monkeypatch):
     if not _docker_available():
         pytest.skip("Docker is not available")

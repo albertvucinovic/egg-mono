@@ -161,7 +161,7 @@ class SessionProvider(Protocol):
         ...
 
 
-_DOCKER_MOUNT_POLICY = "thread-workdir-mask-egg-sandbox-v2"
+_DOCKER_MOUNT_POLICY = "thread-workdir-private-parent-v3"
 _CHANNEL_REAPER_RUNTIME_VERSION = 2
 _SESSION_STORAGE_METADATA = "session_owner.json"
 _SESSION_STORAGE_METADATA_VERSION = 1
@@ -618,7 +618,6 @@ def _docker_repl_mount_args_from_sandbox(
     mount_dir: Path,
     workspace: str,
     sandbox_settings: Dict[str, Any],
-    skip_denied_paths: Optional[List[Path]] = None,
 ) -> List[str]:
     """Translate filesystem sandbox policy into Docker REPL mount flags.
 
@@ -635,7 +634,8 @@ def _docker_repl_mount_args_from_sandbox(
     fs = sandbox_settings.get("filesystem") if isinstance(sandbox_settings, dict) else None
     explicit_allow_write = isinstance(fs, dict) and "allowWrite" in fs
 
-    args: List[str] = ["-v", f"{mount_dir}:{workspace}:ro"]
+    host_workspace = f"{workspace.rstrip('/')}/host"
+    args: List[str] = ["--tmpfs", f"{workspace}:rw", "-v", f"{mount_dir}:{host_workspace}:ro"]
 
     allow_paths: List[Path] = []
     if not explicit_allow_write:
@@ -651,7 +651,7 @@ def _docker_repl_mount_args_from_sandbox(
     # rely on deny masks below for protected paths.
     root_rw = any(p.resolve() == mount_dir for p in allow_paths)
     if root_rw:
-        args = ["-v", f"{mount_dir}:{workspace}"]
+        args = ["--tmpfs", f"{workspace}:rw", "-v", f"{mount_dir}:{host_workspace}"]
     else:
         for p in sorted({p.resolve() for p in allow_paths}, key=lambda item: len(item.parts)):
             # Docker creates missing bind sources as root-owned directories, so
@@ -660,21 +660,18 @@ def _docker_repl_mount_args_from_sandbox(
                 p.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
-            container_path = _container_workspace_path(p, mount_dir, workspace)
+            container_path = _container_workspace_path(p, mount_dir, host_workspace)
             if container_path:
                 args.extend(["-v", f"{p}:{container_path}"])
 
-    skip_roots = [p.resolve() for p in (skip_denied_paths or [])]
-    denied: List[Path] = []
+    from .sandbox import _existing_private_egg_dir
+
+    private_egg = _existing_private_egg_dir(mount_dir, provider="docker")
+    denied: List[Path] = [private_egg] if private_egg is not None else []
     for key in ("denyRead", "denyWrite"):
         for raw in _sandbox_path_values(sandbox_settings, key):
             p = _resolve_sandbox_path(raw, mount_dir)
             if p is None or not _is_mount_equal_or_under(p, mount_dir):
-                continue
-            if any(_is_mount_equal_or_under(p, skip) for skip in skip_roots):
-                # These paths are already masked by fixed REPL safety mounts
-                # (notably .egg). Avoid duplicate/nested Docker
-                # bind mounts, which can fail on some Docker versions.
                 continue
             if any(_is_mount_equal_or_under(p, existing) for existing in denied):
                 # A broader denied ancestor already hides this path.
@@ -690,21 +687,13 @@ def _docker_repl_mount_args_from_sandbox(
                 denied.append(p)
 
     for p in sorted({p.resolve() for p in denied}, key=lambda item: len(item.parts)):
-        container_path = _container_workspace_path(p, mount_dir, workspace)
+        container_path = _container_workspace_path(p, mount_dir, host_workspace)
         if not container_path:
             continue
         mask = _session_mask_dir("sandbox", hashlib.sha256(str(p).encode("utf-8")).hexdigest()[:16])
         args.extend(["-v", f"{mask}:{container_path}:ro"])
 
     return args
-
-
-def _docker_repl_mandatory_mask_args(*, mount_dir: Path, workspace: str, session_id: str) -> List[str]:
-    """Return final non-overridable masks for Egg-private workspace paths."""
-
-    workspace = workspace or "/workspace"
-    mask_dir = _session_mask_dir(session_id, "egg")
-    return ["-v", f"{mask_dir}:{workspace.rstrip('/')}/.egg:ro"]
 
 
 def _docker_existing_mount_policy(container_name: str) -> Optional[str]:
@@ -2372,12 +2361,8 @@ def _start_docker_container(
     workspace = cfg.workspace or "/workspace"
     network = cfg.network or "none"
     mount_dir = docker_session_mount_dir(db, runtime_thread_id, cfg)
-    mandatory_mask_args = _docker_repl_mandatory_mask_args(
-        mount_dir=mount_dir,
-        workspace=workspace,
-        session_id=cfg.session_id or container_name,
-    )
-    sandbox_mount_args = ["-v", f"{mount_dir}:{workspace}"]
+    host_workspace = f"{workspace.rstrip('/')}/host"
+    sandbox_mount_args = ["--tmpfs", f"{workspace}:rw", "-v", f"{mount_dir}:{host_workspace}"]
     sandbox_effective = False
     try:
         from .sandbox import get_thread_sandbox_config, normalize_provider_settings
@@ -2398,10 +2383,15 @@ def _start_docker_container(
                 mount_dir=mount_dir,
                 workspace=workspace,
                 sandbox_settings=settings,
-                skip_denied_paths=[mount_dir / ".egg"],
             )
-    except Exception:
-        sandbox_effective = False
+    except Exception as e:
+        from .sandbox import SandboxSetupError, sandbox_unavailable_message
+
+        if isinstance(e, SandboxSetupError):
+            raise
+        raise SandboxSetupError(
+            sandbox_unavailable_message("docker", "Persistent REPL sandbox setup failed.")
+        ) from e
 
     resource_limit_args: List[str] = []
     if limits.memory_bytes is not None:
@@ -2436,9 +2426,8 @@ def _start_docker_container(
         "-v", f"{bridge_dir}:/egg-bridge",
         "-v", f"{runtime_dir}:/egg-runtime:ro",
         *sandbox_mount_args,
-        *mandatory_mask_args,
         "--cap-drop", "ALL",
-        "-w", workspace,
+        "-w", host_workspace,
         cfg.image,
         "python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime",
     ]

@@ -528,21 +528,27 @@ def test_augment_with_protections_adds_egg_protection(eggthreads):
 
 
 def test_docker_provider_masks_egg_dir(eggthreads, tmp_path, monkeypatch):
-    """Docker hides .egg without creating a host-workspace mountpoint."""
+    """Docker masks .egg at both conventional and host-bind paths."""
     sandbox = eggthreads.sandbox
     provider = sandbox._PROVIDERS["docker"]
     monkeypatch.chdir(tmp_path)
     
     with patch.object(provider, "is_available", return_value=True):
         argv = ["ls"]
-        settings = {}
+        settings = {
+            "filesystem": {
+                "allowWrite": ["."],
+                "denyRead": [".egg"],
+                "denyWrite": [".egg"],
+            }
+        }
         # When working dir is same as CWD, .egg is inside
         wrapped = provider.wrap_argv(argv, settings, working_dir=tmp_path)
         mounts = [wrapped[i + 1] for i, arg in enumerate(wrapped[:-1]) if arg == "--mount"]
         assert "type=tmpfs,dst=/workspace/.egg,readonly" in mounts
-        assert not (tmp_path / ".egg").exists()
-        vol_indices = [i for i, arg in enumerate(wrapped) if arg == "-v"]
-        assert not any(".egg_outputs" in wrapped[idx + 1] for idx in vol_indices)
+        volumes = [wrapped[i + 1] for i, arg in enumerate(wrapped[:-1]) if arg == "-v"]
+        assert any(volume.endswith(":/workspace/host/.egg:ro") for volume in volumes)
+        assert not any(".egg_outputs" in volume for volume in volumes)
 
 
 def test_docker_provider_rejects_extra_mounts_targeting_egg(eggthreads, tmp_path, monkeypatch):
@@ -1003,3 +1009,108 @@ def test_docker_provider_mounts_correct_directory(eggthreads, tmp_path):
         # Check -w uses custom workspace
         w_idx = wrapped3.index("-w")
         assert wrapped3[w_idx + 1] == "/app/host"
+
+@pytest.mark.skipif(os.environ.get("EGG_SKIP_DOCKER_SANDBOX_TESTS") == "1", reason="Docker sandbox tests disabled")
+def test_docker_subprocess_cannot_access_private_egg_by_alias(tmp_path):
+    sandbox = _eggthreads_mod.sandbox
+    provider = sandbox._PROVIDERS["docker"]
+    if not provider.is_available():
+        pytest.skip("Docker is not available")
+
+    private = tmp_path / ".egg"
+    private.mkdir()
+    (private / "secret").write_text("PRIVATE", encoding="utf-8")
+    (tmp_path / "visible").write_text("PUBLIC", encoding="utf-8")
+    (tmp_path / "egg-link").symlink_to(private, target_is_directory=True)
+    settings = {
+        "image": os.environ.get("EGG_SANDBOX_TEST_IMAGE", "python:3.12-slim"),
+        "network": "none",
+        "filesystem": {
+            "allowWrite": ["."],
+            "denyRead": [".egg"],
+            "denyWrite": [".egg"],
+        },
+    }
+    probes = [
+        ".egg/secret",
+        "/workspace/host/.egg/secret",
+        "../host/.egg/secret",
+        "egg-link/secret",
+    ]
+    code = (
+        "from pathlib import Path\n"
+        f"probes = {probes!r}\n"
+        "print(Path('visible').read_text())\n"
+        "for value in probes:\n"
+        "    try:\n"
+        "        print(value, Path(value).read_text())\n"
+        "    except OSError:\n"
+        "        print(value, 'HIDDEN')\n"
+        "try:\n"
+        "    Path('.egg/new').write_text('x')\n"
+        "    print('WRITE_VISIBLE')\n"
+        "except OSError:\n"
+        "    print('WRITE_BLOCKED')\n"
+    )
+
+    completed = subprocess.run(
+        provider.wrap_argv(["python3", "-c", code], settings, working_dir=tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+
+    assert "PUBLIC" in completed.stdout
+    assert "PRIVATE" not in completed.stdout
+    assert completed.stdout.count("HIDDEN") == len(probes)
+    assert "WRITE_BLOCKED" in completed.stdout
+
+
+def test_docker_provider_fails_closed_for_unsafe_private_egg_mountpoint(eggthreads, tmp_path):
+    sandbox = eggthreads.sandbox
+    provider = sandbox._PROVIDERS["docker"]
+    (tmp_path / "real-egg").mkdir()
+    (tmp_path / ".egg").symlink_to(tmp_path / "real-egg", target_is_directory=True)
+
+    with patch.object(provider, "is_available", return_value=True):
+        with pytest.raises(sandbox.SandboxSetupError, match="real directory mountpoint"):
+            provider.wrap_argv(["true"], {}, working_dir=tmp_path)
+
+@pytest.mark.skipif(os.environ.get("EGG_SKIP_DOCKER_SANDBOX_TESTS") == "1", reason="Docker sandbox tests disabled")
+def test_bash_tool_cannot_access_thread_private_egg(tmp_path, monkeypatch):
+    sandbox = _eggthreads_mod.sandbox
+    if not sandbox._PROVIDERS["docker"].is_available():
+        pytest.skip("Docker is not available")
+    monkeypatch.chdir(tmp_path)
+    db = _eggthreads_mod.ThreadsDB()
+    db.init_schema()
+    thread_id = _eggthreads_mod.create_root_thread(db, name="sandboxed bash")
+    _eggthreads_mod.set_thread_working_directory(db, thread_id, str(tmp_path))
+    _eggthreads_mod.set_thread_sandbox_config(
+        db,
+        thread_id,
+        enabled=True,
+        settings={
+            "provider": "docker",
+            "image": os.environ.get("EGG_SANDBOX_TEST_IMAGE", "python:3.12-slim"),
+            "network": "none",
+            "filesystem": {
+                "allowWrite": ["."],
+                "denyRead": [".egg"],
+                "denyWrite": [".egg"],
+            },
+        },
+        reason="test private metadata boundary",
+    )
+    (tmp_path / ".egg" / "secret").write_text("PRIVATE", encoding="utf-8")
+
+    output = _eggthreads_mod.create_default_tools().execute(
+        "bash",
+        {"script": "cat .egg/secret 2>/dev/null || echo HIDDEN"},
+        db=db,
+        thread_id=thread_id,
+    )
+
+    assert "PRIVATE" not in output
+    assert "HIDDEN" in output

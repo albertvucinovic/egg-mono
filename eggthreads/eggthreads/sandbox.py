@@ -72,6 +72,7 @@ import copy
 import json
 import os
 import hashlib
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING, runtime_checkable
 
@@ -144,6 +145,25 @@ def _mandatory_protected_paths_for_working_dir(working_dir: Optional[Path] = Non
             continue
         out.append(p)
     return out
+
+
+def _existing_private_egg_dir(working_dir: Path, *, provider: str) -> Optional[Path]:
+    """Return a safe existing `.egg` mountpoint, or fail closed.
+
+    Missing metadata needs no bind mask. Skipping it avoids Docker creating
+    root-owned `.egg` directories in ordinary thread workspaces.
+    """
+
+    path = working_dir.resolve() / ".egg"
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        _raise_sandbox_setup(provider, f"Could not inspect mandatory .egg protection: {e}")
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        _raise_sandbox_setup(provider, "Mandatory .egg protection requires a real directory mountpoint.")
+    return path
 
 
 def _is_relative_to_path(child: Path, parent: Path) -> bool:
@@ -289,7 +309,6 @@ def _docker_mount_args_from_filesystem_policy(
     working_dir: Path,
     workspace: str,
     settings: Dict[str, Any],
-    skip_denied_paths: Optional[List[Path]] = None,
 ) -> List[str]:
     """Translate Egg filesystem policy into Docker ``-v`` flags.
 
@@ -319,12 +338,10 @@ def _docker_mount_args_from_filesystem_policy(
             if container_path:
                 args.extend(["-v", f"{p}:{container_path}"])
 
-    skip_roots = [p.resolve() for p in (skip_denied_paths or [])]
-    denied = []
-    for p in _sandbox_denied_roots(settings, wd):
-        if any(p == skip or _is_relative_to_path(p, skip) for skip in skip_roots):
-            continue
-        denied.append(p)
+    private_egg = _existing_private_egg_dir(wd, provider="docker")
+    denied = _sandbox_denied_roots(settings, wd)
+    if private_egg is not None:
+        denied.append(private_egg)
     for p in _keep_broad_roots(denied):
         container_path = _container_path_for_host_path(p, wd, host_workspace)
         if not container_path:
@@ -910,7 +927,6 @@ class DockerProvider:
             working_dir=wd,
             workspace=str(workspace or "/workspace"),
             settings=settings,
-            skip_denied_paths=[wd / ".egg"],
         ))
         for mount in extra_mounts:
             if isinstance(mount, dict) and mount.get("src") and mount.get("dst"):
@@ -925,7 +941,8 @@ class DockerProvider:
         for arg in extra_args:
             if isinstance(arg, str):
                 cmd.append(arg)
-        # `.egg` lives on the private parent tmpfs, never under the host bind.
+        # Keep the conventional path private too. The host bind's real .egg is
+        # independently masked at `<workspace>/host/.egg` by the policy above.
         cmd.extend(["--mount", f"type=tmpfs,dst={Path(workspace) / '.egg'},readonly"])
         # Set working directory inside container
         cmd.extend(["-w", f"{str(workspace).rstrip('/')}/host"])
