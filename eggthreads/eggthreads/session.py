@@ -161,7 +161,7 @@ class SessionProvider(Protocol):
         ...
 
 
-_DOCKER_MOUNT_POLICY = "thread-workdir-private-parent-v3"
+_DOCKER_MOUNT_POLICY = "thread-workdir-direct-mask-egg-v4"
 _CHANNEL_REAPER_RUNTIME_VERSION = 2
 _SESSION_STORAGE_METADATA = "session_owner.json"
 _SESSION_STORAGE_METADATA_VERSION = 1
@@ -524,14 +524,6 @@ def _session_runtime_dir(session_id: str) -> Path:
     return path
 
 
-def _session_mask_dir(session_id: str, name: str) -> Path:
-    safe_session = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in session_id)
-    safe_name = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in name)
-    path = _bridge_root() / safe_session / "masks" / safe_name
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _is_relative_to(child: Path, parent: Path) -> bool:
     try:
         child.resolve().relative_to(parent.resolve())
@@ -618,6 +610,7 @@ def _docker_repl_mount_args_from_sandbox(
     mount_dir: Path,
     workspace: str,
     sandbox_settings: Dict[str, Any],
+    private_egg: Optional[Path] = None,
 ) -> List[str]:
     """Translate filesystem sandbox policy into Docker REPL mount flags.
 
@@ -634,8 +627,7 @@ def _docker_repl_mount_args_from_sandbox(
     fs = sandbox_settings.get("filesystem") if isinstance(sandbox_settings, dict) else None
     explicit_allow_write = isinstance(fs, dict) and "allowWrite" in fs
 
-    host_workspace = f"{workspace.rstrip('/')}/host"
-    args: List[str] = ["--tmpfs", f"{workspace}:rw", "-v", f"{mount_dir}:{host_workspace}:ro"]
+    args: List[str] = ["-v", f"{mount_dir}:{workspace}:ro"]
 
     allow_paths: List[Path] = []
     if not explicit_allow_write:
@@ -651,7 +643,7 @@ def _docker_repl_mount_args_from_sandbox(
     # rely on deny masks below for protected paths.
     root_rw = any(p.resolve() == mount_dir for p in allow_paths)
     if root_rw:
-        args = ["--tmpfs", f"{workspace}:rw", "-v", f"{mount_dir}:{host_workspace}"]
+        args = ["-v", f"{mount_dir}:{workspace}"]
     else:
         for p in sorted({p.resolve() for p in allow_paths}, key=lambda item: len(item.parts)):
             # Docker creates missing bind sources as root-owned directories, so
@@ -660,14 +652,15 @@ def _docker_repl_mount_args_from_sandbox(
                 p.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
-            container_path = _container_workspace_path(p, mount_dir, host_workspace)
+            container_path = _container_workspace_path(p, mount_dir, workspace)
             if container_path:
                 args.extend(["-v", f"{p}:{container_path}"])
 
-    from .sandbox import _existing_private_egg_dir
+    from .sandbox import _empty_sandbox_mask_dir, _private_egg_mountpoint
 
-    private_egg = _existing_private_egg_dir(mount_dir, provider="docker")
-    denied: List[Path] = [private_egg] if private_egg is not None else []
+    workspace_egg = _private_egg_mountpoint(mount_dir, provider="docker")
+    mask_egg = Path(private_egg).resolve() if private_egg is not None else workspace_egg
+    denied: List[Path] = [workspace_egg]
     for key in ("denyRead", "denyWrite"):
         for raw in _sandbox_path_values(sandbox_settings, key):
             p = _resolve_sandbox_path(raw, mount_dir)
@@ -687,10 +680,10 @@ def _docker_repl_mount_args_from_sandbox(
                 denied.append(p)
 
     for p in sorted({p.resolve() for p in denied}, key=lambda item: len(item.parts)):
-        container_path = _container_workspace_path(p, mount_dir, host_workspace)
+        container_path = _container_workspace_path(p, mount_dir, workspace)
         if not container_path:
             continue
-        mask = _session_mask_dir("sandbox", hashlib.sha256(str(p).encode("utf-8")).hexdigest()[:16])
+        mask = _empty_sandbox_mask_dir(mask_egg)
         args.extend(["-v", f"{mask}:{container_path}:ro"])
 
     return args
@@ -2361,8 +2354,12 @@ def _start_docker_container(
     workspace = cfg.workspace or "/workspace"
     network = cfg.network or "none"
     mount_dir = docker_session_mount_dir(db, runtime_thread_id, cfg)
-    host_workspace = f"{workspace.rstrip('/')}/host"
-    sandbox_mount_args = ["--tmpfs", f"{workspace}:rw", "-v", f"{mount_dir}:{host_workspace}"]
+    sandbox_mount_args = _docker_repl_mount_args_from_sandbox(
+        mount_dir=mount_dir,
+        workspace=workspace,
+        sandbox_settings={},
+        private_egg=Path(db.path).resolve().parent,
+    )
     sandbox_effective = False
     try:
         from .sandbox import get_thread_sandbox_config, normalize_provider_settings
@@ -2383,6 +2380,7 @@ def _start_docker_container(
                 mount_dir=mount_dir,
                 workspace=workspace,
                 sandbox_settings=settings,
+                private_egg=Path(db.path).resolve().parent,
             )
     except Exception as e:
         from .sandbox import SandboxSetupError, sandbox_unavailable_message
@@ -2427,7 +2425,7 @@ def _start_docker_container(
         "-v", f"{runtime_dir}:/egg-runtime:ro",
         *sandbox_mount_args,
         "--cap-drop", "ALL",
-        "-w", host_workspace,
+        "-w", workspace,
         cfg.image,
         "python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime",
     ]

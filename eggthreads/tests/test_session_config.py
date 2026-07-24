@@ -452,16 +452,16 @@ def test_start_docker_container_masks_egg_without_outputs(monkeypatch, tmp_path)
 
     argv = calls[-1]
     joined = "\n".join(argv)
-    assert f"{tmp_path.resolve()}:/workspace/host" in joined
+    assert f"{tmp_path.resolve()}:/workspace" in joined
     mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-v"]
-    egg_mounts = [spec for spec in mounts if spec.endswith(":/workspace/host/.egg:ro")]
+    egg_mounts = [spec for spec in mounts if spec.endswith(":/workspace/.egg:ro")]
     assert len(egg_mounts) == 1
-    assert not egg_mounts[0].startswith(str(tmp_path.resolve() / ".egg") + ":")
-    assert ".egg/rlm_sessions" in egg_mounts[0]
+    assert egg_mounts[0].startswith(
+        str(Path(db.path).resolve().parent / "sandbox" / "masks" / "empty") + ":"
+    )
     assert not any(".egg_outputs" in spec for spec in mounts)
     assert not any(".egg/egg_outputs" in spec for spec in mounts)
-    assert "--tmpfs" in argv
-    assert argv[argv.index("-w") + 1] == "/workspace/host"
+    assert argv[argv.index("-w") + 1] == "/workspace"
     assert "--user" in argv
     assert f"egg.db_hash={ts.docker_session_db_hash(db)}" in joined
     assert sid
@@ -546,10 +546,10 @@ def test_start_docker_container_applies_sandbox_mount_policy(monkeypatch, tmp_pa
     argv = calls[-1]
     joined = "\n".join(argv)
     assert "--network\nnone" in joined
-    assert f"{tmp_path.resolve()}:/workspace/host:ro" in joined
-    assert f"{(tmp_path / 'writes').resolve()}:/workspace/host/writes" in joined
-    assert ":/workspace/host/secret:ro" in joined
-    assert ":/workspace/host/readonly:ro" in joined
+    assert f"{tmp_path.resolve()}:/workspace:ro" in joined
+    assert f"{(tmp_path / 'writes').resolve()}:/workspace/writes" in joined
+    assert ":/workspace/secret:ro" in joined
+    assert ":/workspace/readonly:ro" in joined
     assert "--cap-drop\nALL" in joined
 
 
@@ -591,9 +591,9 @@ def test_start_docker_container_mounts_workspace_rw_when_allowwrite_omitted(monk
     ts.eggthreads.session._start_docker_container(db, tid, cfg, "egg-test", bridge, runtime)
 
     joined = "\n".join(calls[-1])
-    assert f"{tmp_path.resolve()}:/workspace/host" in joined
-    assert f"{tmp_path.resolve()}:/workspace/host:ro" not in joined
-    assert ":/workspace/host/secret:ro" in joined
+    assert f"{tmp_path.resolve()}:/workspace" in joined
+    assert f"{tmp_path.resolve()}:/workspace:ro" not in joined
+    assert ":/workspace/secret:ro" in joined
 
 
 def test_tool_output_stash_is_thread_scoped(tmp_path, monkeypatch):
@@ -709,3 +709,38 @@ def test_start_docker_container_fails_closed_for_unsafe_private_egg(monkeypatch,
         ts.eggthreads.session._start_docker_container(
             db, tid, cfg, "egg-test", bridge, runtime
         )
+
+
+def test_start_docker_container_masks_egg_when_sandbox_is_disabled(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.set_thread_sandbox_config(db, tid, enabled=False, settings={}, reason="test")
+    ts.enable_thread_session(db, tid, provider="docker", image="python:3.12-slim")
+    cfg = ts.get_thread_session_config(db, tid)
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+    calls = []
+    monkeypatch.setattr(ts.eggthreads.session, "_docker_inspect_running", lambda name: None)
+    monkeypatch.setattr(
+        ts.eggthreads.session.subprocess,
+        "run",
+        lambda argv, **kwargs: calls.append(argv) or type(
+            "P", (), {"returncode": 0, "stdout": "", "stderr": ""}
+        )(),
+    )
+
+    ts.eggthreads.session._start_docker_container(
+        db, tid, cfg, "egg-test", bridge, runtime
+    )
+
+    mounts = [
+        calls[-1][index + 1]
+        for index, arg in enumerate(calls[-1][:-1])
+        if arg == "-v"
+    ]
+    assert len(
+        [spec for spec in mounts if spec.endswith(":/workspace/.egg:ro")]
+    ) == 1

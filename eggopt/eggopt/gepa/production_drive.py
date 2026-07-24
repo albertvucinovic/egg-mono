@@ -37,7 +37,7 @@ from .reflection import (
 )
 
 SOLVER_SAFE_PROFILE_NAME = "solver_safe"
-SOLVER_SAFE_PROFILE_VERSION = "5"
+SOLVER_SAFE_PROFILE_VERSION = "7"
 _MUTATION_REPAIR_POLICY = "eggopt.gepa.strict-mutation-repair"
 _MUTATION_REPAIR_VERSION = "1"
 DEFAULT_MUTATION_SYSTEM_PROMPT = (

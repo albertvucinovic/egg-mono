@@ -64,12 +64,22 @@ the selected parents' per-case score envelope is rejected. Use
 Every study is durable:
 
 ```text
+run/
+├── .egg/
+│   ├── threads.sqlite
+│   └── flow.db
+└── workspaces/
+
 Mutation
 ├── Candidate 1 Evaluation
 │   ├── Case 1 Evaluation
 │   └── Case 2 Evaluation
 └── Candidate 2 Evaluation
 ```
+
+The run-level `.egg` is Egg-private metadata. Sandboxed LLM threads cannot
+read or write it through subprocess or persistent-REPL tools; transcripts are
+inspected only through authorized Eggthreads APIs.
 
 Each case owns `outerContext/innerContext/`. Evaluator Tasks may call
 `current_evaluation()` to discover those paths and create an Actor/Critic

@@ -58,7 +58,8 @@ def test_upstream_gepa_hides_the_runtime(tmp_path):
     )
 
     assert result.best_candidate == {"instruction": "1"}
-    assert (tmp_path / "upstream" / "flow.db").is_file()
+    assert (tmp_path / "upstream" / ".egg" / "flow.db").is_file()
+    assert not (tmp_path / "upstream" / "flow.db").exists()
     assert (tmp_path / "upstream" / ".egg" / "threads.sqlite").is_file()
 
 

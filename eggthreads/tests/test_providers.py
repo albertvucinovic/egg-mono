@@ -92,8 +92,8 @@ def test_stock_read_only_and_allow_internet_provider_translation(eggthreads, tmp
         settings=read_only,
     )
     volumes = [mount_args[index + 1] for index, arg in enumerate(mount_args[:-1]) if arg == "-v"]
-    assert f"{tmp_path}:/workspace/host:ro" in volumes
-    assert f"{tmp_path}:/workspace/host" not in volumes
+    assert f"{tmp_path}:/workspace:ro" in volumes
+    assert f"{tmp_path}:/workspace" not in volumes
     allowed, reason = sandbox.sandbox_write_policy_decision(
         enabled=True,
         provider="docker",
@@ -223,7 +223,7 @@ def test_srt_provider_wrap_argv(eggthreads):
             provider.wrap_argv(argv, {})
 
 
-def test_docker_provider_wrap_argv(eggthreads):
+def test_docker_provider_wrap_argv(eggthreads, tmp_path):
     """Test Docker provider argv wrapping."""
     sandbox = eggthreads.sandbox
     provider = sandbox._PROVIDERS["docker"]
@@ -254,6 +254,8 @@ def test_docker_provider_wrap_argv(eggthreads):
     
     # Test with custom settings
     with patch.object(provider, "is_available", return_value=True):
+        project = tmp_path / "project"
+        project.mkdir()
         argv = ["python", "-c", "print(\'test\')"]
         settings = {
             "image": "alpine:latest",
@@ -264,7 +266,7 @@ def test_docker_provider_wrap_argv(eggthreads):
                 {"src": "/tmp/data", "dst": "/data"}
             ]
         }
-        wrapped = provider.wrap_argv(argv, settings, working_dir=Path("/home/user/project"))
+        wrapped = provider.wrap_argv(argv, settings, working_dir=project)
         
         assert "docker" == wrapped[0]
         assert "run" == wrapped[1]
@@ -274,13 +276,13 @@ def test_docker_provider_wrap_argv(eggthreads):
         assert "-v" in wrapped
         # Find the volume mount for working dir
         vol_idx = wrapped.index("-v")
-        assert wrapped[vol_idx + 1] == "/home/user/project:/app/host"
+        assert wrapped[vol_idx + 1] == f"{project}:/app"
         # Check for extra mount
         assert "-v" in wrapped[vol_idx + 2:]  # Another -v after the first
         assert "--cap-drop" in wrapped
         assert "ALL" in wrapped
         assert "-w" in wrapped
-        assert wrapped[wrapped.index("-w") + 1] == "/app/host"
+        assert wrapped[wrapped.index("-w") + 1] == "/app"
         assert "alpine:latest" in wrapped
         assert wrapped[-3:] == ["python", "-c", "print(\'test\')"]
     
@@ -455,28 +457,30 @@ def test_set_thread_sandbox_config_provider_inference(eggthreads, tmp_path):
     config2 = sandbox.get_thread_sandbox_config(db, thread_id)
     assert config2.provider == "docker"
 
-def test_working_dir_handling(eggthreads):
+def test_working_dir_handling(eggthreads, tmp_path):
     """Test that working directory is properly handled by providers."""
     sandbox = eggthreads.sandbox
     
     # Test Docker provider working_dir
     provider = sandbox._PROVIDERS["docker"]
+    custom_dir = tmp_path / "custom" / "dir"
+    custom_dir.mkdir(parents=True)
     
     with patch.object(provider, "is_available", return_value=True):
         argv = ["ls"]
         settings = {}
         
-        wrapped = provider.wrap_argv(argv, settings, working_dir=Path("/custom/dir"))
+        wrapped = provider.wrap_argv(argv, settings, working_dir=custom_dir)
         
         # Check that /custom/dir is mounted
         assert "-v" in wrapped
         vol_index = wrapped.index("-v")
-        assert wrapped[vol_index + 1] == "/custom/dir:/workspace/host"
+        assert wrapped[vol_index + 1] == f"{custom_dir}:/workspace"
         
         # Check working directory is set
         assert "-w" in wrapped
         w_index = wrapped.index("-w")
-        assert wrapped[w_index + 1] == "/workspace/host"
+        assert wrapped[w_index + 1] == "/workspace"
     
     # Test Bwrap provider working_dir
     provider = sandbox._PROVIDERS["bwrap"]
@@ -527,11 +531,12 @@ def test_augment_with_protections_adds_egg_protection(eggthreads):
     assert str(sandbox_dir / "default.json") in deny_read
 
 
-def test_docker_provider_masks_egg_dir(eggthreads, tmp_path, monkeypatch):
-    """Docker masks .egg at both conventional and host-bind paths."""
+def test_docker_provider_masks_existing_egg_dir(eggthreads, tmp_path, monkeypatch):
+    """Docker masks an existing private directory at `/workspace/.egg`."""
     sandbox = eggthreads.sandbox
     provider = sandbox._PROVIDERS["docker"]
     monkeypatch.chdir(tmp_path)
+    (tmp_path / ".egg").mkdir()
     
     with patch.object(provider, "is_available", return_value=True):
         argv = ["ls"]
@@ -544,10 +549,12 @@ def test_docker_provider_masks_egg_dir(eggthreads, tmp_path, monkeypatch):
         }
         # When working dir is same as CWD, .egg is inside
         wrapped = provider.wrap_argv(argv, settings, working_dir=tmp_path)
-        mounts = [wrapped[i + 1] for i, arg in enumerate(wrapped[:-1]) if arg == "--mount"]
-        assert "type=tmpfs,dst=/workspace/.egg,readonly" in mounts
         volumes = [wrapped[i + 1] for i, arg in enumerate(wrapped[:-1]) if arg == "-v"]
-        assert any(volume.endswith(":/workspace/host/.egg:ro") for volume in volumes)
+        egg_masks = [volume for volume in volumes if volume.endswith(":/workspace/.egg:ro")]
+        assert len(egg_masks) == 1
+        assert egg_masks[0].startswith(
+            str(tmp_path / ".egg" / "sandbox" / "masks" / "empty") + ":"
+        )
         assert not any(".egg_outputs" in volume for volume in volumes)
 
 
@@ -562,6 +569,12 @@ def test_docker_provider_rejects_extra_mounts_targeting_egg(eggthreads, tmp_path
             provider.wrap_argv(
                 ["true"],
                 {"extra_mounts": [{"src": str(tmp_path / ".egg"), "dst": "/data"}]},
+                working_dir=tmp_path,
+            )
+        with pytest.raises(sandbox.SandboxSetupError, match="Egg-private"):
+            provider.wrap_argv(
+                ["true"],
+                {"extra_mounts": [{"src": str(tmp_path), "dst": "/data"}]},
                 working_dir=tmp_path,
             )
         with pytest.raises(sandbox.SandboxSetupError, match="Egg-private"):
@@ -600,7 +613,7 @@ def test_bwrap_provider_masks_egg_dir(eggthreads, tmp_path, monkeypatch):
                     found = src
         assert found, f"Expected --ro-bind mask for .egg in {wrapped}"
         assert found != str(egg_dir)
-        assert ".egg/sandbox/masks/bwrap/-egg" in found
+        assert ".egg/sandbox/masks/empty" in found
 
 
 def test_srt_provider_protects_egg_dir(eggthreads):
@@ -992,23 +1005,23 @@ def test_docker_provider_mounts_correct_directory(eggthreads, tmp_path):
         # Check mount
         assert "-v" in wrapped
         vol_idx = wrapped.index("-v")
-        assert wrapped[vol_idx + 1] == f"{tmp_path}:/workspace/host"
+        assert wrapped[vol_idx + 1] == f"{tmp_path}:/workspace"
         
         # Test with subdirectory
         subdir = tmp_path / "sub" / "deep"
         subdir.mkdir(parents=True)
         wrapped2 = provider.wrap_argv(argv, settings, working_dir=subdir)
         vol_idx2 = wrapped2.index("-v")
-        assert wrapped2[vol_idx2 + 1] == f"{subdir}:/workspace/host"
+        assert wrapped2[vol_idx2 + 1] == f"{subdir}:/workspace"
         
         # Test with custom workspace in settings
         settings_custom = {"workspace": "/app"}
         wrapped3 = provider.wrap_argv(argv, settings_custom, working_dir=tmp_path)
         vol_idx3 = wrapped3.index("-v")
-        assert wrapped3[vol_idx3 + 1] == f"{tmp_path}:/app/host"
+        assert wrapped3[vol_idx3 + 1] == f"{tmp_path}:/app"
         # Check -w uses custom workspace
         w_idx = wrapped3.index("-w")
-        assert wrapped3[w_idx + 1] == "/app/host"
+        assert wrapped3[w_idx + 1] == "/app"
 
 @pytest.mark.skipif(os.environ.get("EGG_SKIP_DOCKER_SANDBOX_TESTS") == "1", reason="Docker sandbox tests disabled")
 def test_docker_subprocess_cannot_access_private_egg_by_alias(tmp_path):
@@ -1033,8 +1046,8 @@ def test_docker_subprocess_cannot_access_private_egg_by_alias(tmp_path):
     }
     probes = [
         ".egg/secret",
-        "/workspace/host/.egg/secret",
-        "../host/.egg/secret",
+        "/workspace/.egg/secret",
+        "/workspace/../workspace/.egg/secret",
         "egg-link/secret",
     ]
     code = (
@@ -1114,3 +1127,74 @@ def test_bash_tool_cannot_access_thread_private_egg(tmp_path, monkeypatch):
 
     assert "PRIVATE" not in output
     assert "HIDDEN" in output
+
+
+def test_docker_provider_creates_and_masks_missing_private_egg(eggthreads, tmp_path):
+    sandbox = eggthreads.sandbox
+    provider = sandbox._PROVIDERS["docker"]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    settings = {
+        "filesystem": {
+            "allowWrite": ["."],
+            "denyRead": [".egg"],
+            "denyWrite": [".egg"],
+        }
+    }
+
+    with patch.object(provider, "is_available", return_value=True):
+        wrapped = provider.wrap_argv(["true"], settings, working_dir=workspace)
+
+    volumes = [
+        wrapped[index + 1]
+        for index, arg in enumerate(wrapped[:-1])
+        if arg == "-v"
+    ]
+    egg_masks = [spec for spec in volumes if spec.endswith(":/workspace/.egg:ro")]
+    assert len(egg_masks) == 1
+    assert egg_masks[0].startswith(
+        str(workspace / ".egg" / "sandbox" / "masks" / "empty") + ":"
+    )
+    assert (workspace / ".egg").is_dir()
+    assert (workspace / ".egg").stat().st_uid == os.getuid()
+
+
+def test_sandbox_uses_one_verified_empty_mask_directory(eggthreads, tmp_path, monkeypatch):
+    sandbox = eggthreads.sandbox
+    monkeypatch.chdir(tmp_path)
+
+    private = tmp_path / ".egg"
+    private.mkdir()
+    first = sandbox._empty_sandbox_mask_dir(private)
+    second = sandbox._empty_sandbox_mask_dir(private)
+
+    assert first == second == tmp_path / ".egg" / "sandbox" / "masks" / "empty"
+    assert list(first.iterdir()) == []
+    (first / "unexpected").write_text("x", encoding="utf-8")
+    with pytest.raises(sandbox.SandboxSetupError, match="owned empty directory"):
+        sandbox._empty_sandbox_mask_dir(private)
+
+
+def test_docker_mask_source_uses_authoritative_db_egg(eggthreads, tmp_path):
+    sandbox = eggthreads.sandbox
+    provider = sandbox._PROVIDERS["docker"]
+    workspace = tmp_path / "workspace"
+    private = tmp_path / "run" / ".egg"
+    workspace.mkdir()
+    private.mkdir(parents=True)
+    settings = {
+        "_egg_thread_context": {"db_path": str(private / "threads.sqlite")},
+        "filesystem": {"allowWrite": ["."], "denyRead": [".egg"]},
+    }
+
+    with patch.object(provider, "is_available", return_value=True):
+        wrapped = provider.wrap_argv(["true"], settings, working_dir=workspace)
+
+    volumes = [
+        wrapped[index + 1]
+        for index, arg in enumerate(wrapped[:-1])
+        if arg == "-v"
+    ]
+    assert (
+        f"{private}/sandbox/masks/empty:/workspace/.egg:ro" in volumes
+    )

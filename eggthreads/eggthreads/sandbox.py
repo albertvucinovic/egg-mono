@@ -147,23 +147,35 @@ def _mandatory_protected_paths_for_working_dir(working_dir: Optional[Path] = Non
     return out
 
 
-def _existing_private_egg_dir(working_dir: Path, *, provider: str) -> Optional[Path]:
-    """Return a safe existing `.egg` mountpoint, or fail closed.
-
-    Missing metadata needs no bind mask. Skipping it avoids Docker creating
-    root-owned `.egg` directories in ordinary thread workspaces.
-    """
+def _private_egg_mountpoint(working_dir: Path, *, provider: str) -> Path:
+    """Return a safe `.egg` mountpoint, creating it as the host user if absent."""
 
     path = working_dir.resolve() / ".egg"
     try:
         mode = path.lstat().st_mode
     except FileNotFoundError:
-        return None
+        try:
+            path.mkdir()
+            mode = path.lstat().st_mode
+        except Exception as e:
+            _raise_sandbox_setup(
+                provider, f"Could not create mandatory .egg protection: {e}"
+            )
     except Exception as e:
         _raise_sandbox_setup(provider, f"Could not inspect mandatory .egg protection: {e}")
     if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
         _raise_sandbox_setup(provider, "Mandatory .egg protection requires a real directory mountpoint.")
     return path
+
+
+def _authoritative_egg_dir(settings: Dict[str, Any], working_dir: Path) -> Path:
+    """Resolve the runtime's private metadata root for sandbox-owned masks."""
+
+    context = settings.get("_egg_thread_context") if isinstance(settings, dict) else None
+    db_path = context.get("db_path") if isinstance(context, dict) else None
+    if isinstance(db_path, str) and db_path.strip() and db_path != ":memory:":
+        return Path(db_path).expanduser().resolve().parent
+    return (working_dir.resolve() / ".egg").resolve()
 
 
 def _is_relative_to_path(child: Path, parent: Path) -> bool:
@@ -320,33 +332,27 @@ def _docker_mount_args_from_filesystem_policy(
     wd = working_dir.resolve()
     workspace = str(workspace or "/workspace")
     allow_roots = _sandbox_allow_write_roots(settings, wd)
-    host_workspace = f"{workspace.rstrip('/')}/host"
-    # Mount a private parent filesystem, then expose the host workspace at a
-    # child path. This keeps `/workspace/.egg` outside the host bind entirely;
-    # mounting anything directly over `<bind>/.egg` makes Docker create that
-    # destination in the host source before container start.
-    args: List[str] = ["--tmpfs", f"{workspace}:rw", "-v", f"{wd}:{host_workspace}:ro"]
+    args: List[str] = ["-v", f"{wd}:{workspace}:ro"]
     if any(p == wd for p in allow_roots):
-        args = ["--tmpfs", f"{workspace}:rw", "-v", f"{wd}:{host_workspace}"]
+        args = ["-v", f"{wd}:{workspace}"]
     else:
         for p in allow_roots:
             try:
                 p.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
-            container_path = _container_path_for_host_path(p, wd, host_workspace)
+            container_path = _container_path_for_host_path(p, wd, workspace)
             if container_path:
                 args.extend(["-v", f"{p}:{container_path}"])
 
-    private_egg = _existing_private_egg_dir(wd, provider="docker")
-    denied = _sandbox_denied_roots(settings, wd)
-    if private_egg is not None:
-        denied.append(private_egg)
+    private_egg = _private_egg_mountpoint(wd, provider="docker")
+    authoritative_egg = _authoritative_egg_dir(settings, wd)
+    denied = [*_sandbox_denied_roots(settings, wd), private_egg]
     for p in _keep_broad_roots(denied):
-        container_path = _container_path_for_host_path(p, wd, host_workspace)
+        container_path = _container_path_for_host_path(p, wd, workspace)
         if not container_path:
             continue
-        mask = _sandbox_mask_dir("docker", hashlib.sha256(str(p).encode("utf-8")).hexdigest()[:16])
+        mask = _empty_sandbox_mask_dir(authoritative_egg)
         args.extend(["-v", f"{mask}:{container_path}:ro"])
     return args
 
@@ -365,7 +371,11 @@ def _docker_host_mount_source_is_protected(src: str, working_dir: Path) -> bool:
     if path is None:
         return False
     for protected in _mandatory_protected_paths_for_working_dir(working_dir):
-        if path == protected or _is_relative_to_path(path, protected):
+        if (
+            path == protected
+            or _is_relative_to_path(path, protected)
+            or _is_relative_to_path(protected, path)
+        ):
             return True
     return False
 
@@ -473,7 +483,7 @@ def _bwrap_args_from_filesystem_policy(
     for p in _sandbox_denied_roots(settings, wd):
         if not (p == wd or _is_relative_to_path(p, wd)):
             continue
-        mask = _sandbox_mask_dir("bwrap", hashlib.sha256(str(p).encode("utf-8")).hexdigest()[:16])
+        mask = _empty_sandbox_mask_dir()
         args.extend(["--ro-bind", str(mask), str(p)])
     return args
 
@@ -698,15 +708,30 @@ def authorize_thread_path_write(db: "ThreadsDB", thread_id: str, target_path: st
     return resolved
 
 
-def _sandbox_mask_dir(*parts: str) -> Path:
-    """Return an empty host directory usable as a read-only bind mask."""
+def _empty_sandbox_mask_dir(private_egg: Optional[Path] = None) -> Path:
+    """Return the authoritative Egg-private empty directory for bind masks."""
 
-    safe_parts = []
-    for part in parts:
-        safe = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in str(part or 'mask'))
-        safe_parts.append(safe or 'mask')
-    path = _ensure_sandbox_dir() / "masks" / Path(*safe_parts)
-    path.mkdir(parents=True, exist_ok=True)
+    egg = (
+        Path(private_egg).resolve()
+        if private_egg is not None
+        else _ensure_sandbox_dir().parent
+    )
+    path = egg / "sandbox" / "masks" / "empty"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            _raise_sandbox_setup(
+                "filesystem", "Sandbox mask directory is not a real empty directory."
+            )
+        if path.stat().st_uid != os.getuid() or next(path.iterdir(), None) is not None:
+            _raise_sandbox_setup(
+                "filesystem", "Sandbox mask directory is not an owned empty directory."
+            )
+    except SandboxSetupError:
+        raise
+    except Exception as e:
+        _raise_sandbox_setup("filesystem", f"Could not prepare the sandbox mask directory: {e}")
     return path
 
 
@@ -941,11 +966,8 @@ class DockerProvider:
         for arg in extra_args:
             if isinstance(arg, str):
                 cmd.append(arg)
-        # Keep the conventional path private too. The host bind's real .egg is
-        # independently masked at `<workspace>/host/.egg` by the policy above.
-        cmd.extend(["--mount", f"type=tmpfs,dst={Path(workspace) / '.egg'},readonly"])
         # Set working directory inside container
-        cmd.extend(["-w", f"{str(workspace).rstrip('/')}/host"])
+        cmd.extend(["-w", str(workspace)])
         # Image
         cmd.append(image)
         # The command to run inside container (argv)
@@ -1018,7 +1040,7 @@ class BwrapProvider:
                 continue
             if not prot_path.exists() and prot_path.name != ".egg":
                 continue
-            mask_dir = _sandbox_mask_dir("bwrap", prot_path.name)
+            mask_dir = _empty_sandbox_mask_dir()
             cmd.extend(["--ro-bind", str(mask_dir), str(prot_path)])
         cmd.extend(argv)
         return cmd

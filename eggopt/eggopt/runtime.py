@@ -117,7 +117,7 @@ class Runtime(Generic[ExampleT, OutputT]):
         root.mkdir(parents=True, exist_ok=True)
         egg = root / ".egg"
         egg.mkdir(exist_ok=True)
-        store = TaskStore(str(root / "flow.db"))
+        store = TaskStore(str(egg / "flow.db"))
         flow = FlowExecutor(store)
         threads = ThreadsDB(egg / "threads.sqlite")
         threads.init_schema()

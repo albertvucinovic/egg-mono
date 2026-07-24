@@ -163,6 +163,22 @@ def config(tmp_path, evaluator, generator, **changes):
     return replace(base, **changes)
 
 
+def test_generation_cache_identity_includes_private_runtime_policy(monkeypatch):
+    import eggopt.native_gepa as native
+
+    task = native.GenerateCandidate(
+        object(),
+        ({"instruction": "seed"},),
+        ({"case": "one"},),
+        "Improve it.",
+        0,
+    )
+
+    safe_key = task.get_cache_key()
+    monkeypatch.setattr(native, "_MUTATION_RUNTIME_POLICY", "unsafe-legacy")
+    assert task.get_cache_key() != safe_key
+
+
 def test_optimize_anything_is_case_wise_pareto_search(tmp_path):
     evaluator = Evaluator()
     generator = Increment()

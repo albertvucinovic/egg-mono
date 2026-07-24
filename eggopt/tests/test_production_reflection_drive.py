@@ -646,6 +646,8 @@ def test_runtime_persists_default_and_explicit_gepa_allowlists(tmp_path, monkeyp
             get_thread_tools_config(runtime.threads, runtime.study_id).allowed_tools
             == SOLVER_SAFE_TOOLS
         )
+        assert (tmp_path / "default-run" / ".egg" / "flow.db").is_file()
+        assert not (tmp_path / "default-run" / "flow.db").exists()
 
     restricted = Reflection.eggthreads(
         llm=MustNotRunLLM(),

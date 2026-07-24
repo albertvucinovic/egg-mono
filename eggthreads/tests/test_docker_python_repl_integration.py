@@ -113,8 +113,8 @@ def test_docker_python_repl_cannot_access_private_egg_by_alias(tmp_path, monkeyp
     try:
         probes = [
             ".egg/secret",
-            "/workspace/host/.egg/secret",
-            "../host/.egg/secret",
+            "/workspace/.egg/secret",
+            "/workspace/../workspace/.egg/secret",
             "egg-link/secret",
         ]
         code = (
@@ -190,3 +190,68 @@ def test_docker_repl_cancellation_resets_only_affected_channels(tmp_path, monkey
             if status.container_name:
                 import subprocess
                 subprocess.run(["docker", "rm", "-f", status.container_name], capture_output=True, timeout=10)
+
+
+@pytest.mark.skipif(os.environ.get("EGG_SKIP_DOCKER_REPL_TESTS") == "1", reason="Docker REPL tests disabled")
+def test_docker_python_repl_keeps_later_host_egg_metadata_masked(tmp_path, monkeypatch):
+    if not _docker_available():
+        pytest.skip("Docker is not available")
+    monkeypatch.chdir(tmp_path)
+    image = os.environ.get("EGG_RLM_TEST_IMAGE", "python:3.12-slim")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    ts.set_thread_working_directory(db, parent, str(workspace))
+    ts.set_thread_sandbox_config(
+        db,
+        parent,
+        enabled=True,
+        settings={
+            "provider": "docker",
+            "network": {"allowedDomains": []},
+            "filesystem": {
+                "allowWrite": ["."],
+                "denyRead": [".egg"],
+                "denyWrite": [".egg"],
+            },
+        },
+        reason="test missing private metadata",
+    )
+    ts.enable_thread_session(db, parent, provider="docker", image=image)
+
+    runtime = None
+    try:
+        output = ts.execute_python_repl(
+            db,
+            parent,
+            "from pathlib import Path; print(Path.cwd()); print(list(Path('.egg').iterdir()))",
+            timeout_sec=30,
+        )
+        assert "/workspace" in output
+        assert "[]" in output
+        private = workspace / ".egg"
+        assert private.is_dir()
+        (private / "threads.sqlite").write_text("PRIVATE", encoding="utf-8")
+        later = ts.execute_python_repl(
+            db,
+            parent,
+            "from pathlib import Path; print(list(Path('.egg').iterdir())); "
+            "print(Path('.egg/threads.sqlite').exists())",
+            timeout_sec=30,
+        )
+        assert "threads.sqlite" not in later
+        assert "False" in later
+        assert (private / "threads.sqlite").read_text(encoding="utf-8") == "PRIVATE"
+    finally:
+        runtime = ts.find_runtime_thread(db, parent, language="python")
+        if runtime is not None:
+            status = ts.get_thread_session_status(db, runtime.runtime_thread_id)
+            if status.container_name:
+                import subprocess
+                subprocess.run(
+                    ["docker", "rm", "-f", status.container_name],
+                    capture_output=True,
+                    timeout=10,
+                )

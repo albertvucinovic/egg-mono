@@ -33,6 +33,7 @@ MinibatchAcceptance = Literal["strict_improvement", "improvement_or_equal"]
 ProgressCallback = Callable[[Mapping[str, Any]], None]
 
 _GENERATION = "eggopt.native-gepa.generate.v1"
+_MUTATION_RUNTIME_POLICY = "direct-workspace-private-egg-v2"
 _MINIBATCH_ACCEPTANCE = {
     "strict_improvement": gt,
     "improvement_or_equal": ge,
@@ -244,6 +245,7 @@ class GenerateCandidate(Task):
         return digest_payload(
             _GENERATION,
             {
+                "runtime_policy": _MUTATION_RUNTIME_POLICY,
                 "parents": [canonical_candidate(parent) for parent in self.parents],
                 "evidence": _json_value(self.evidence, "generation evidence"),
                 "objective": self.objective,

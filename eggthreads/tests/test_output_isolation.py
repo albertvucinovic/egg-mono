@@ -250,11 +250,9 @@ def test_docker_sandbox_masks_egg_without_output_mounts(tmp_path, monkeypatch):
         argv = provider.wrap_argv(["bash", "-lc", "true"], settings, working_dir=tmp_path)
 
     mounts = _docker_mount_specs(argv)
-    tmpfs_mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--mount"]
-    assert "type=tmpfs,dst=/workspace/.egg,readonly" in tmpfs_mounts
     # The project root already has the real Egg database. It must be covered by
-    # an empty read-only mask at the actual host-bind destination.
-    egg_masks = [spec for spec in mounts if spec.endswith(":/workspace/host/.egg:ro")]
+    # an empty read-only mask at the workspace destination.
+    egg_masks = [spec for spec in mounts if spec.endswith(":/workspace/.egg:ro")]
     assert len(egg_masks) == 1
     assert not egg_masks[0].startswith(str(tmp_path / ".egg") + ":")
     assert not any(".egg_outputs" in spec for spec in mounts)
