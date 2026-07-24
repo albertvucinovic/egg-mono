@@ -38,13 +38,14 @@ function safeThemeName(themeName: string): string {
   return `eggw-edit-answer-${themeName.replace(/[^a-z0-9_-]/gi, "-")}`;
 }
 
-function modelPath(sourceMsgId: string): string {
+function modelPath(sourceMsgId: string, filePath?: string): string {
+  if (filePath) return `file://${encodeURI(filePath.startsWith("/") ? filePath : `/${filePath}`)}`;
   const suffix = sourceMsgId ? sourceMsgId.replace(/[^a-zA-Z0-9_-]/g, "-") : "draft";
   return `inmemory://eggw/edit-answer-${suffix}.md`;
 }
 
 export function MonacoDraftEditor(props: MonacoDraftEditorProps) {
-  const { value, onChange, sourceMsgId, canSubmitShortcut, onSubmitShortcut } = props;
+  const { value, onChange, sourceMsgId, canSubmitShortcut, onSubmitShortcut, filePath } = props;
   const theme = useAppStore((state) => state.theme);
   const monaco = useMonaco();
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
@@ -140,14 +141,16 @@ export function MonacoDraftEditor(props: MonacoDraftEditorProps) {
       className="eggw-monaco-editor"
       data-testid="edit-answer-draft"
       data-editor="monaco"
-      aria-label="Quoted assistant markdown draft"
+      aria-label="Editor draft"
     >
       <Editor
+        key={modelPath(sourceMsgId, filePath)}
         height="45vh"
         width="100%"
-        language="markdown"
-        path={modelPath(sourceMsgId)}
+        language={filePath ? undefined : "markdown"}
+        path={modelPath(sourceMsgId, filePath)}
         value={value}
+        keepCurrentModel={false}
         theme={monacoThemeName}
         beforeMount={beforeMount}
         onMount={handleMount}

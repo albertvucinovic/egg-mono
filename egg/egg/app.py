@@ -503,7 +503,13 @@ class EggDisplayApp(
         except asyncio.TimeoutError:
             pass
 
-    async def run_external_terminal_command(self, argv: List[str]) -> int:
+    async def run_external_terminal_command(
+        self,
+        argv: List[str],
+        *,
+        cwd: str | Path | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> int:
         """Run an interactive subprocess while temporarily releasing Egg's TUI.
 
         The asyncio event loop remains alive while the foreground program is
@@ -559,7 +565,11 @@ class EggDisplayApp(
             pass
 
         try:
-            proc = await asyncio.create_subprocess_exec(*argv)
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(cwd) if cwd is not None else None,
+                env=dict(env) if env is not None else None,
+            )
             return int(await proc.wait())
         finally:
             try:
@@ -759,6 +769,10 @@ class EggDisplayApp(
         Process user-submitted text.
         Returns True if the input panel should be cleared, False otherwise.
         """
+        prefix_registry = getattr(self, 'input_prefix_registry', None)
+        if prefix_registry is not None and getattr(prefix_registry, 'is_async', lambda _text: False)(text):
+            self._schedule_input_prefix(text)
+            return True
         prefix_result = self.handle_input_prefix(text)
         if prefix_result is not None:
             return prefix_result.clear_input
@@ -791,6 +805,40 @@ class EggDisplayApp(
         self.ensure_scheduler_for(self.current_thread)
         self.log_system("User message queued; scheduler will stream the response.")
         return True
+
+    async def handle_input_prefix_async(self, text: str):
+        """Dispatch an awaitable non-slash input prefix."""
+
+        registry = getattr(self, 'input_prefix_registry', None)
+        if registry is None:
+            return None
+        result = await registry.execute_async(text, self._command_context())
+        if result is not None:
+            self._present_input_prefix_result(result)
+        return result
+
+    def _schedule_input_prefix(self, text: str) -> bool:
+        async def run_prefix() -> None:
+            self._begin_user_command_stream("$$$")
+            try:
+                await self.handle_input_prefix_async(text)
+            finally:
+                self._end_user_command_stream()
+
+        return self._schedule_user_command_task(run_prefix())
+
+    def _present_input_prefix_result(self, result: Any) -> None:
+        """Show local feedback for an asynchronous non-slash command."""
+
+        message = getattr(result, 'message', None)
+        if not isinstance(message, str) or not message.strip():
+            return
+        text = message.strip()
+        self.log_system(text)
+        try:
+            self.console_print_block("$$$", text, border_style='blue')
+        except Exception:
+            pass
 
     def _command_context(self) -> CommandContext:
         return CommandContext(
@@ -887,7 +935,19 @@ class EggDisplayApp(
         """Apply frontend presentation actions returned by shared commands."""
 
         data = getattr(result, 'data', None)
-        if not isinstance(data, Mapping) or data.get('action') != 'show_record':
+        if not isinstance(data, Mapping):
+            return
+        if data.get('action') == 'request_completion':
+            text = str(data.get('input') or '')
+            if text:
+                set_input_panel_text(self, text)
+                editor = self.input_panel.editor.editor
+                try:
+                    editor._request_completion(mode='refresh')
+                except Exception:
+                    pass
+            return
+        if data.get('action') != 'show_record':
             return
         target = data.get('target')
         if isinstance(target, dict) and target.get('thread_id') == self.current_thread:

@@ -70,10 +70,12 @@ async def lifespan(app: FastAPI):
     # For per-thread scheduling, we'll start schedulers on-demand when messages are sent.
     # Global scheduler initialization is skipped for now.
 
-    yield
+    try:
+        yield
+    finally:
+        from .editor_files import clear_registered_editor_files
 
-    # Cleanup
-    pass
+        clear_registered_editor_files()
 
 
 security_config = SecurityConfig.from_env()
@@ -109,6 +111,7 @@ from .routes import (
     events_router,
     commands_router,
     edit_answer_router,
+    editor_files_router,
     health_router,
     auth_router,
 )
@@ -123,6 +126,7 @@ app.include_router(stats_router)
 app.include_router(events_router)
 app.include_router(commands_router)
 app.include_router(edit_answer_router)
+app.include_router(editor_files_router)
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(autocomplete_router)

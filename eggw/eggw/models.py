@@ -152,7 +152,7 @@ class EditAnswerDraftRequest(BaseModel):
 class EditAnswerDraftResponse(BaseModel):
     """Prepared edit-answer draft metadata for the browser editor modal."""
 
-    action: Literal["open_edit_answer_modal"] = "open_edit_answer_modal"
+    action: Literal["open_edit_answer_modal", "request_completion"] = "open_edit_answer_modal"
     draft: str
     source_msg_id: str
     source_kind: Literal["assistant_answer", "assistant_note", "input_message", "message"]
@@ -160,6 +160,22 @@ class EditAnswerDraftResponse(BaseModel):
     source_label: str = ""
     suppress_transcript: bool = True
     message: Optional[str] = None
+    editor_mode: Optional[Literal["draft", "file"]] = None
+    file_path: Optional[str] = None
+    file_handle: Optional[str] = None
+
+
+class EditorFileSaveRequest(BaseModel):
+    """Opaque-capability save request for the human browser editor."""
+
+    model_config = {"extra": "forbid"}
+
+    handle: str
+    content: str
+
+
+class EditorFileSaveResponse(BaseModel):
+    path: str
 
 
 class CreateThreadRequest(BaseModel):

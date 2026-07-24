@@ -667,3 +667,40 @@ def test_thread_selector_completion_uses_lightweight_list_rows(isolated_db, monk
     )
 
     assert {item["insert"] for item in items} >= {current, other}
+
+
+def test_global_completion_offers_record_and_thread_ids_in_plain_text(isolated_db):
+    from eggthreads import append_message, create_root_thread, create_snapshot
+
+    current = create_root_thread(isolated_db, name="current")
+    other = create_root_thread(isolated_db, name="other")
+    msg_id = append_message(isolated_db, current, "assistant", "body")
+    create_snapshot(isolated_db, current)
+
+    record_items = get_autocomplete_items(
+        f"ask {msg_id[-5:]}", len(f"ask {msg_id[-5:]}") , isolated_db, lambda: current, None
+    )
+    thread_items = get_autocomplete_items(
+        f"ask {other[-5:]}", len(f"ask {other[-5:]}") , isolated_db, lambda: current, None
+    )
+
+    assert any(item["insert"] == msg_id for item in record_items)
+    assert any(item["insert"] == other for item in thread_items)
+
+
+def test_global_filesystem_completion_works_under_editor_at_and_literal_separator(isolated_db, tmp_path, monkeypatch):
+    from eggthreads import create_root_thread
+
+    monkeypatch.chdir(tmp_path)
+    thread = create_root_thread(isolated_db, name="editor completion")
+    (tmp_path / "my file.md").write_text("x", encoding="utf-8")
+
+    at_items = get_autocomplete_items(
+        "/editor @my", len("/editor @my"), isolated_db, lambda: thread, None
+    )
+    literal_items = get_autocomplete_items(
+        "/editor -- my", len("/editor -- my"), isolated_db, lambda: thread, None
+    )
+
+    assert any(item["insert"] == "@'./my file.md'" for item in at_items)
+    assert any(item["insert"] == "'./my file.md'" for item in literal_items)

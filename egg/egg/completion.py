@@ -36,6 +36,7 @@ from eggthreads.command_catalog import (  # type: ignore
     CommandContext,
     SESSION_ON_COMPLETIONS,
     SESSION_TARGET_COMPLETIONS,
+    FRONTEND_EDITOR_COMMAND_COMPLETIONS,
     create_default_command_registry,
     command_completion_names,
 )
@@ -47,6 +48,11 @@ from eggthreads.artifact_completion import (
     is_provider_artifact_export_path_position,
     is_provider_artifact_id_position,
     provider_artifact_completion_items,
+)
+from eggthreads.completion_catalog import (
+    global_completion_items,
+    merge_completion_items,
+    thread_completion_items,
 )
 
 
@@ -294,7 +300,16 @@ class EggCompleter(Completer):
 
     # ---- Helpers --------------------------------------------------------
     def _get_filesystem_suggestions(self, prefix: str):
-        return [item["insert"] for item in filesystem_completion_items(prefix, limit=50)]
+        try:
+            from eggthreads import get_thread_working_directory
+
+            working_dir = get_thread_working_directory(self.db, self.get_current_thread())
+        except Exception:
+            working_dir = None
+        return [
+            item["insert"]
+            for item in filesystem_completion_items(prefix, limit=50, working_dir=working_dir)
+        ]
 
     def _recent_words(self, tid: str, limit_msgs: int = 200):
         # Extract recent words from snapshot messages for this thread
@@ -692,6 +707,23 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
     except Exception:
         prefix = line
     command_registry = command_registry or create_default_command_registry()
+    try:
+        current_tid = get_current_thread()
+    except Exception:
+        current_tid = None
+
+    def _finish(items: List[Dict[str, str]], *, include_filesystem: bool = True) -> List[Dict[str, str]]:
+        return merge_completion_items(
+            items,
+            global_completion_items(
+                db,
+                current_tid,
+                prefix,
+                include_filesystem=include_filesystem,
+                limit=50,
+            ),
+            limit=50,
+        )
 
     def _last_token(s: str) -> str:
         # Strip trailing whitespace to find the last token even if cursor is after a space
@@ -727,8 +759,14 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             items.append(it)
         return items[:50]
 
-    def _fs_suggestions(token: str) -> List[str]:
-        return [item["insert"] for item in filesystem_completion_items(token, limit=50)]
+    def _fs_items(token: str) -> List[Dict[str, str]]:
+        try:
+            from eggthreads import get_thread_working_directory
+
+            working_dir = get_thread_working_directory(db, current_tid) if current_tid else None
+        except Exception:
+            working_dir = None
+        return filesystem_completion_items(token, limit=50, working_dir=working_dir)
 
     def _conversation_suggestions(tid: str, fragment: str) -> List[str]:
         if not fragment:
@@ -776,62 +814,31 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         sp = prefix.find(' ')
         if sp == -1:
             # Complete command name
-            return _mk_items([c for c in command_completion_names(command_registry) if c.startswith(prefix)], prefix)
+            return _finish(
+                _mk_items([
+                    c
+                    for c in [*command_completion_names(command_registry), *FRONTEND_EDITOR_COMMAND_COMPLETIONS]
+                    if c.startswith(prefix)
+                ], prefix),
+                include_filesystem=False,
+            )
 
         cmd = prefix[:sp]
         sub = prefix[sp+1:]  # raw arg text
         arg_tok = _last_token(sub)
 
         def _thread_arg_items(arg_tok: str) -> List[Dict[str, str]]:
-            """Return rich thread suggestions for commands that take a thread selector.
+            """Return shared rich thread suggestions with selector-name search."""
 
-            Shared by /thread, /delete, and /wait so that the selector
-            semantics are consistent across commands.
-            """
-            try:
-                rows = list_threads(db) if list_threads else []
-            except Exception:
-                rows = []
-            atok = (arg_tok or '').lower()
-            try:
-                rows.sort(key=lambda r: getattr(r, 'created_at', ''), reverse=True)
-            except Exception:
-                pass
-            tid_cur = None
-            try:
-                tid_cur = get_current_thread()
-            except Exception:
-                tid_cur = None
-            out_items: List[Dict[str, str]] = []
-            for r in rows:
-                tid = getattr(r, 'thread_id', '')
-                name = getattr(r, 'name', '') or ''
-                recap = getattr(r, 'short_recap', '') or ''
-                if atok:
-                    hay = f"{tid} {name} {recap}".lower()
-                    if atok not in hay:
-                        continue
-                # Minimal display similar to /threads
-                try:
-                    streaming = bool(db.current_open(tid))
-                except Exception:
-                    streaming = False
-                id_short = tid[-8:]
-                cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid_cur and tid == tid_cur else ''
-                sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
-                status = getattr(r, 'status', None) or 'unknown'
-                if status == 'active':
-                    status_tag = f"[bold green]{status}[/]"
-                elif status == 'paused':
-                    status_tag = f"[bold red]{status}[/]"
-                else:
-                    status_tag = f"[bold]{status}[/]"
-                disp = f"{cur_tag}{sflag}[dim]{id_short}[/dim] {status_tag} - {recap}" + (f"  [dim]{name}[/dim]" if name else '')
-                rep = len(arg_tok or '')
-                out_items.append({"display": disp, "insert": tid, "replace": str(rep)})
-                if len(out_items) >= 50:
-                    break
-            return out_items
+            return thread_completion_items(
+                db,
+                arg_tok,
+                current_thread=current_tid,
+                match_metadata=True,
+                include_empty=True,
+                include_streaming=True,
+                limit=50,
+            )
         # /model
         if cmd == '/model':
             # Use existing ModelCompleter for parity
@@ -861,7 +868,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 items = [s for s in items if all(w in s.lower() for w in words)]
             # Replace the ENTIRE argument after /model, not just the last token
             # This ensures "gemini flash" is fully replaced, not just "flash"
-            return _mk_items(items, sub_stripped)
+            return _finish(_mk_items(items, sub_stripped))
 
         # /updateAllModels providers
         if cmd == '/updateAllModels':
@@ -879,32 +886,32 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 if rep:
                     it["replace"] = str(rep)
                 out_items.append(it)
-            return out_items
+            return _finish(out_items)
 
         # /thread and /delete: rich suggestions id/name/recap
         if cmd in ('/thread', '/deleteThread'):
-            return _thread_arg_items(arg_tok)
+            return _finish(_thread_arg_items(arg_tok))
 
         # /wait: thread selectors, same suggestions as /thread
         if cmd == '/waitForThreads':
-            return _thread_arg_items(arg_tok)
+            return _finish(_thread_arg_items(arg_tok))
 
         # /spawnChildThread and /spawnAutoApprovedChildThread -> filesystem suggestions for arg
         if cmd in ('/spawnChildThread', '/spawnAutoApprovedChildThread'):
-            return _mk_items(_fs_suggestions(arg_tok), arg_tok)
+            return _finish(_fs_items(arg_tok))
 
         if cmd in ('/attachOutput', '/saveProviderArtifact', '/saveProviderOutput'):
             if is_provider_artifact_id_position(cmd, sub):
-                return provider_artifact_completion_items(
+                return _finish(provider_artifact_completion_items(
                     artifact_workspace_from_db(db),
                     db,
                     get_current_thread(),
                     arg_tok,
-                )
+                ), include_filesystem=False)
             if is_provider_artifact_export_path_position(cmd, sub):
                 path_tok = '' if sub.endswith((' ', '\t')) else arg_tok
-                return _mk_items(_fs_suggestions(path_tok), path_tok)
-            return []
+                return _finish(_fs_items(path_tok))
+            return _finish([])
 
         # /disabletool, /enabletool, /toolInfo: suggest known tool names from
         # the default ToolRegistry. We keep this best-effort and
@@ -925,16 +932,16 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                         continue
             except Exception:
                 names = []
-            return _mk_items(names, arg_tok)
+            return _finish(_mk_items(names, arg_tok))
 
         if cmd == '/sessionOn':
-            return _mk_items(SESSION_ON_COMPLETIONS, arg_tok)
+            return _finish(_mk_items(SESSION_ON_COMPLETIONS, arg_tok))
 
         if cmd in ('/sessionStop', '/sessionReset'):
-            return _mk_items(SESSION_TARGET_COMPLETIONS, arg_tok)
+            return _finish(_mk_items(SESSION_TARGET_COMPLETIONS, arg_tok))
 
         if cmd == '/sessionCleanup':
-            return _mk_items(['dry-run', 'apply', 'older_than=1h', 'older_than=1d'], arg_tok)
+            return _finish(_mk_items(['dry-run', 'apply', 'older_than=1h', 'older_than=1d'], arg_tok))
 
         if cmd == '/skill':
             try:
@@ -942,7 +949,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 names = [skill.name for skill in list_skills()]
             except Exception:
                 names = []
-            return _mk_items(names, arg_tok)
+            return _finish(_mk_items(names, arg_tok))
 
         if cmd == '/togglePanel':
             opts = ['chat', 'children', 'system']
@@ -951,7 +958,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 pref = [o for o in opts if o.startswith(atok)]
                 cont = [o for o in opts if atok in o and o not in pref]
                 opts = pref + cont
-            return _mk_items(opts, arg_tok)
+            return _finish(_mk_items(opts, arg_tok))
 
         if cmd == '/displayMode':
             opts = ['full-screen', 'inline']
@@ -960,7 +967,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 pref = [o for o in opts if o.startswith(atok)]
                 cont = [o for o in opts if atok in o and o not in pref]
                 opts = pref + cont
-            return _mk_items(opts, arg_tok)
+            return _finish(_mk_items(opts, arg_tok))
 
         try:
             ctx = CommandContext(db=db, current_thread=get_current_thread(), llm_client=llm)
@@ -978,7 +985,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                     string_items.append(item)
                 elif isinstance(item, Mapping):
                     out_items.append(dict(item))
-            return out_items + _mk_items(string_items, arg_tok)
+            return _finish(out_items + _mk_items(string_items, arg_tok))
 
         # /setThreadPriority: suggest parameter names and thread IDs
         if cmd == '/setThreadPriority':
@@ -988,7 +995,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 if m:
                     # Complete thread ID after thread=
                     search_term = m.group(1)
-                    return _thread_arg_items(search_term)
+                    return _finish(_thread_arg_items(search_term))
 
             # Otherwise suggest parameter names
             params = ['priority=', 'threshold=', 'apiTimeout=', 'thread=']
@@ -1001,7 +1008,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                     if rep:
                         it["replace"] = str(rep)
                     out_items.append(it)
-            return out_items
+            return _finish(out_items)
 
         # /continue: suggest message IDs from current thread
         if cmd == '/continue':
@@ -1047,10 +1054,10 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                             out_items.append(it)
                             if len(out_items) >= 30:
                                 break
-                        return out_items
+                        return _finish(out_items)
                 except Exception:
                     pass
-            return []
+            return _finish([])
 
         # /duplicateThread: suggest message IDs when in msg_id position
         if cmd == '/duplicateThread':
@@ -1101,19 +1108,20 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                                 out_items.append(it)
                                 if len(out_items) >= 30:
                                     break
-                            return out_items
+                            return _finish(out_items)
                     except Exception:
                         pass
-            return []
+            return _finish([])
 
         # Other commands: no specific suggestions
-        return []
+        return _finish([])
 
-    # Non-command: prefer filesystem then conversation words
+    # Non-command: compose filesystem/IDs first, then conversation words only
+    # when no structural candidate exists.
     tok = _last_token(prefix)
-    fs = _fs_suggestions(tok)
-    if fs:
-        return _mk_items(fs, tok)
+    structural = global_completion_items(db, current_tid, prefix, limit=50)
+    if structural:
+        return structural
     try:
         tid = get_current_thread()
     except Exception:
@@ -1121,5 +1129,5 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
     if tid and tok:
         conv = _conversation_suggestions(tid, tok)
         if conv:
-            return _mk_items(conv, tok)
-    return []
+            return _finish(_mk_items(conv, tok))
+    return _finish([])

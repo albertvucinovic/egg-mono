@@ -6,7 +6,7 @@ from .. import core
 from ..edit_answer import (
     edit_answer_draft_response_data,
     prepare_edit_answer_draft_response,
-    prepare_empty_editor_draft_response,
+    prepare_editor_response,
 )
 from ..models import CommandResponse
 
@@ -38,14 +38,27 @@ async def cmd_edit_answer(thread_id: str, selector: str) -> CommandResponse:
 
 
 async def cmd_editor(thread_id: str, arg: str) -> CommandResponse:
-    """Prepare an empty draft for the browser editor modal."""
+    """Prepare a browser draft or host-file editor response."""
 
     if not core.db:
         return CommandResponse(success=False, message="/editor failed: database not initialized")
     if not core.db.get_thread(thread_id):
         return CommandResponse(success=False, message="/editor failed: thread not found")
 
-    response = prepare_empty_editor_draft_response((arg or "").strip())
+    try:
+        response = prepare_editor_response(core.db, thread_id, arg)
+    except (OSError, ValueError) as e:
+        return CommandResponse(success=False, message=f"/editor failed: {e}")
+    if response.action == "request_completion":
+        return CommandResponse(
+            success=True,
+            message=response.message,
+            data={
+                "action": "request_completion",
+                "input": f"/editor {(arg or '').strip()}",
+                "suppress_transcript": True,
+            },
+        )
     return CommandResponse(
         success=True,
         message=response.message or "Prepared empty input message draft.",

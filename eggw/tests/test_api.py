@@ -4029,6 +4029,29 @@ class TestAutocomplete:
         displays = {suggestion["display"] for suggestion in response.json()["suggestions"]}
         assert displays == {"chat", "threads", "system"}
 
+    def test_global_autocomplete_offers_record_thread_and_editor_at_file(self, client, tmp_path, monkeypatch):
+        from eggthreads import append_message, set_thread_working_directory
+
+        monkeypatch.chdir(tmp_path)
+        current = client.post("/api/threads", json={"name": "Completion Current"}).json()["id"]
+        other = client.post("/api/threads", json={"name": "Completion Other"}).json()["id"]
+        set_thread_working_directory(core_state.db, current, str(tmp_path))
+        msg_id = append_message(core_state.db, current, "assistant", "global record body")
+        (tmp_path / "my file.md").write_text("x", encoding="utf-8")
+
+        for line, expected in (
+            (f"ask {msg_id[-5:]}", msg_id),
+            (f"ask {other[-5:]}", other),
+            ("/editor @my", "@'./my file.md'"),
+            ("/editor -- my", "'./my file.md'"),
+        ):
+            response = client.get(
+                "/api/autocomplete",
+                params={"line": line, "cursor": len(line), "thread_id": current},
+            )
+            assert response.status_code == 200
+            assert expected in {item["insert"] for item in response.json()["suggestions"]}
+
     def test_sandbox_configuration_autocomplete_includes_stock_suggestions(
         self, client, tmp_path, monkeypatch
     ):

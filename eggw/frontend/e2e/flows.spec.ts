@@ -1339,6 +1339,66 @@ test.describe('Edit Answer Modal', () => {
     await expect(page.getByTestId('chat-panel-content')).toContainText("Error: /editAnswer failed: Selector 'SAME' matched multiple messages; use a longer msg_id.");
     await expect(input).toHaveValue('/editAnswer SAME');
   });
+
+  test('file-mode /editor saves through its opaque file handle without changing the composer', async ({ page }) => {
+    const threadId = 'editor-file-thread';
+    let saveRequest: Record<string, unknown> | undefined;
+    await mockThreadShell(page, threadId);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'Opened /tmp/example.py in the browser editor.',
+          command_id: 'cmd-editor-file',
+          command_name: 'editor',
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          elapsed_sec: 0.01,
+          data: {
+            action: 'open_edit_answer_modal',
+            draft: 'print("before")',
+            source_msg_id: '',
+            source_kind: 'message',
+            source_suffix: 'example.py',
+            source_label: 'file',
+            suppress_transcript: true,
+            editor_mode: 'file',
+            file_path: '/tmp/example.py',
+            file_handle: 'opaque-file-handle',
+          },
+        },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/editor-file`, async (route, request) => {
+      saveRequest = request.postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { path: '/tmp/example.py', existed: true },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible({ timeout: 5000 });
+    await input.fill('/editor example.py');
+    await input.press('Enter');
+
+    const modal = page.getByTestId('edit-answer-modal');
+    await expect(modal).toBeVisible({ timeout: 5000 });
+    await expect(modal).toContainText('File: /tmp/example.py');
+    await replaceMonacoDraft(page, 'print("after")');
+    await page.getByTestId('editor-file-save').click();
+
+    await expect.poll(() => saveRequest).toEqual({
+      handle: 'opaque-file-handle',
+      content: 'print("after")',
+    });
+    await expect(modal).not.toBeVisible({ timeout: 5000 });
+    await expect(input).toHaveValue('');
+  });
 });
 
 

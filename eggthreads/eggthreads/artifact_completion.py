@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """Shared completion helpers for user commands that reference artifacts."""
 
+import os
+import re
 import shlex
 from pathlib import Path
 from typing import Any, Mapping
@@ -143,24 +145,72 @@ def provider_artifact_completion_items(
     return out
 
 
-def filesystem_completion_items(token: str, *, limit: int = 50) -> list[dict[str, str]]:
-    """Return simple filesystem completion items for the current process cwd.
+def current_completion_token(text: str) -> str:
+    """Return the shell-like token at the cursor, retaining quotes and ``@``."""
 
-    This is intentionally UI-neutral and mirrors the common Egg/EggW behavior:
-    complete the current path token, append ``/`` for directories, and replace
-    only the typed token.
+    value = str(text or "")
+    start = 0
+    quote = ""
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char.isspace():
+            start = index + 1
+    return value[start:]
+
+
+def _completion_path_token(raw_token: str) -> tuple[str, str]:
+    marker = "@" if raw_token.startswith("@") else ""
+    token = raw_token[len(marker):]
+    if token[:1] in {"'", '"'}:
+        quote = token[0]
+        token = token[1:]
+        if token.endswith(quote):
+            token = token[:-1]
+    token = re.sub(r"\\([\\\s'\"])", r"\1", token)
+    return marker, token
+
+
+def _quote_completion_path(path: str) -> str:
+    return shlex.quote(path) if any(char.isspace() or char in "'\"\\" for char in path) else path
+
+
+def filesystem_completion_items(
+    token: str,
+    *,
+    limit: int = 50,
+    working_dir: str | Path | None = None,
+) -> list[dict[str, str]]:
+    """Return filesystem completion items relative to ``working_dir``.
+
+    This is intentionally UI-neutral and shared by Egg/EggW. Relative inserts
+    are explicit (``./``), whitespace is shell-quoted, a leading ``@`` is
+    preserved, directories end in ``/``, and only the typed token is replaced.
     """
 
-    import os
-
-    expanded = os.path.expanduser(str(token or ""))
-    base_dir = expanded
+    raw_token = str(token or "")
+    marker, path_token = _completion_path_token(raw_token)
+    expanded = os.path.expanduser(path_token)
+    root = Path.cwd() if working_dir is None else Path(working_dir).expanduser()
+    lookup = Path(expanded) if os.path.isabs(expanded) else root / expanded
+    base_dir = lookup
     needle = ""
-    if not os.path.isdir(expanded):
-        base_dir = os.path.dirname(expanded) or "."
-        needle = os.path.basename(expanded)
+    if not base_dir.is_dir():
+        needle = base_dir.name
+        base_dir = base_dir.parent
     try:
-        if not os.path.isdir(base_dir):
+        if not base_dir.is_dir():
             return []
         entries = os.listdir(base_dir)
     except Exception:
@@ -170,14 +220,24 @@ def filesystem_completion_items(token: str, *, limit: int = 50) -> list[dict[str
     for name in sorted(entries):
         if needle and not name.startswith(needle):
             continue
-        path = os.path.join(base_dir, name)
-        suffix = "/" if os.path.isdir(path) else ""
+        path = base_dir / name
+        suffix = "/" if path.is_dir() else ""
+        typed_parent = os.path.dirname(path_token)
+        if typed_parent:
+            inserted_path = os.path.join(typed_parent, name) + suffix
+        elif os.path.isabs(expanded):
+            inserted_path = str(path) + suffix
+        else:
+            inserted_path = "./" + name + suffix
+        if path_token.startswith("./") and not inserted_path.startswith("./"):
+            inserted_path = "./" + inserted_path
         item: dict[str, str] = {
             "display": name + suffix,
-            "insert": path + suffix,
+            "insert": marker + _quote_completion_path(inserted_path),
         }
-        if token:
-            item["replace"] = str(len(str(token)))
+        if raw_token:
+            item["replace"] = str(len(raw_token))
+        item["meta"] = "directory" if path.is_dir() else "file"
         items.append(item)
         if len(items) >= limit:
             break
@@ -187,6 +247,7 @@ def filesystem_completion_items(token: str, *, limit: int = 50) -> list[dict[str
 __all__ = [
     "PROVIDER_ARTIFACT_COMMANDS",
     "artifact_workspace_from_db",
+    "current_completion_token",
     "filesystem_completion_items",
     "format_artifact_size",
     "format_provider_artifact_completion_display",

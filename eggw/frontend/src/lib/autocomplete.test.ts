@@ -8,9 +8,12 @@ function deferred<T>() {
 }
 
 describe("autocomplete request ownership", () => {
-  it("rejects ordinary prose but permits command, shell, and explicit path contexts", () => {
-    expect(isAutocompleteEligible("ordinary prose", 14)).toBe(false);
-    expect(isAutocompleteEligible("mention transcript words", 24)).toBe(false);
+  it("permits global three-character ID/path tokens plus command and shell contexts", () => {
+    expect(isAutocompleteEligible("ordinary pr", 11)).toBe(false);
+    expect(isAutocompleteEligible("mention abc", 11)).toBe(true);
+    expect(isAutocompleteEligible("open ./", 7)).toBe(true);
+    expect(isAutocompleteEligible("copy @x", 7)).toBe(true);
+    expect(isAutocompleteEligible("mention a__", 11)).toBe(false);
     expect(isAutocompleteEligible("/model op", 9)).toBe(true);
     expect(isAutocompleteEligible("$ echo", 6)).toBe(true);
     expect(isAutocompleteEligible("open ./src/li", 13)).toBe(true);

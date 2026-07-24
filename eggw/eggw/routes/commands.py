@@ -16,6 +16,8 @@ router = APIRouter(prefix="/api/threads", tags=["commands"])
 
 def _command_name(command: str) -> str:
     text = str(command or "").strip()
+    if text.startswith("$$$") and (len(text) == 3 or text[3].isspace()):
+        return "$$$"
     if text.startswith("$$"):
         return "$$"
     if text.startswith("$"):

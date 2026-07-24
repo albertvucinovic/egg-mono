@@ -308,7 +308,17 @@ class FormattingMixin:
         descendant_count = int(row[0] or 0) if row else 0
 
         if descendant_count <= CHILDREN_PANEL_MAXIMAL_LIMIT:
-            descendant_tree = self.format_tree(root_tid, include_root=False)
+            if descendant_count:
+                descendant_tree = self.format_tree(root_tid, include_root=False)
+            else:
+                # Keep the formatter/cache boundary for an empty subtree
+                # without asking the tree service to reload the known root.
+                tree_formatter = getattr(self, 'format_tree')
+                is_default_formatter = (
+                    getattr(tree_formatter, '__func__', None)
+                    is FormattingMixin.format_tree
+                )
+                descendant_tree = '' if is_default_formatter else tree_formatter('', include_root=False)
             return f"{identity}\n{descendant_tree}" if descendant_tree else identity
 
         direct_count = int(row[1] or 0)

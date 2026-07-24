@@ -1094,3 +1094,56 @@ def test_default_help_groups_threads_agents_and_subagents() -> None:
         "/schedulers",
     ]:
         assert command in section
+
+
+def test_foreground_bash_prefix_is_longest_and_async(monkeypatch) -> None:
+    import asyncio
+    from pathlib import Path
+
+    registry = create_default_input_prefix_registry()
+    seen = {}
+
+    class App:
+        async def run_external_terminal_command(self, argv, *, cwd=None, env=None):
+            seen["argv"] = argv
+            seen["cwd"] = cwd
+            seen["has_control_token"] = "EGGW_API_TOKEN" in (env or {})
+            return 7
+
+    context = CommandContext(db=None, current_thread="thread", app=App())
+    monkeypatch.setattr("eggthreads.api.get_thread_working_directory", lambda _db, _tid: Path("/tmp/work"))
+
+    matched = registry.match("$$$ vim -R <(git diff)")
+    assert registry.is_async("$$$ vim -R <(git diff)") is True
+    result = asyncio.run(registry.execute_async("$$$ vim -R <(git diff)", context))
+
+    assert matched is not None and matched[0].prefix == "$$$"
+    assert seen == {
+        "argv": ["/bin/bash", "-lc", "vim -R <(git diff)"],
+        "cwd": Path("/tmp/work"),
+        "has_control_token": False,
+    }
+    assert result is not None and result.message == "Foreground command exited with status 7."
+
+
+def test_foreground_bash_prefix_rejects_empty_command() -> None:
+    registry = create_default_input_prefix_registry()
+
+    result = asyncio.run(registry.execute_async("$$$   ", CommandContext(app=object())))
+
+    assert result is not None
+    assert result.clear_input is False
+    assert result.message == "Empty foreground command, skipping."
+
+
+def test_input_prefix_detects_async_callable_objects() -> None:
+    class AsyncHandler:
+        async def __call__(self, _context, _arg):
+            return CommandResult(message="done")
+
+    registry = InputPrefixRegistry()
+    registry.register(InputPrefixSpec("@@", AsyncHandler()))
+
+    assert registry.is_async("@@ work") is True
+    result = asyncio.run(registry.execute_async("@@ work", CommandContext()))
+    assert result is not None and result.message == "done"

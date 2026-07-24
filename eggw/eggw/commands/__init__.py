@@ -209,6 +209,11 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
     cmd = command.strip()
 
     # Handle shell commands: $$ (hidden) or $ (visible)
+    if cmd.startswith('$$$') and (len(cmd) == 3 or cmd[3].isspace()):
+        return CommandResponse(
+            success=False,
+            message="$$$ foreground terminal takeover is available only in terminal Egg; EggW browser terminal support is postponed.",
+        )
     if cmd.startswith('$$') and len(cmd) > 2:
         return await execute_bash_command_handler(thread_id, cmd[2:].strip(), hidden=True)
     elif cmd.startswith('$') and len(cmd) > 1:
@@ -348,6 +353,11 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
             return cmd_toggle_borders()
         elif command_name == "displayVerbosity":
             return cmd_display_verbosity(command_arg)
+        elif command_name == "syntaxHighlighting":
+            return CommandResponse(
+                success=False,
+                message="/syntaxHighlighting is terminal-only; EggW manages browser syntax presentation separately.",
+            )
         elif command_name == "theme":
             return cmd_theme(command_arg)
         elif command_name == "quit":

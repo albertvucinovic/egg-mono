@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Optional, List
 
@@ -17,12 +16,18 @@ from eggthreads.artifact_completion import (
     provider_artifact_completion_items,
 )
 from eggthreads.content_parts import content_to_plain_text
-from eggthreads.command_catalog import CommandContext, EGGW_COMMAND_COMPLETIONS, SESSION_ON_COMPLETIONS, SESSION_TARGET_COMPLETIONS, create_default_command_registry
+from eggthreads.command_catalog import (
+    CommandContext,
+    EGGW_COMMAND_COMPLETIONS,
+    SESSION_ON_COMPLETIONS,
+    SESSION_TARGET_COMPLETIONS,
+    create_default_command_registry,
+)
+from eggthreads.completion_catalog import global_completion_items, merge_completion_items, thread_completion_items
 from eggthreads.image_generation import complete_image_generate_args
 from eggthreads.skills import list_skills
 
 from .. import core
-from ..core.scheduler import scheduler_running
 from ..theme_registry import THEMES
 
 
@@ -35,8 +40,14 @@ def get_tool_names() -> List[str]:
         return []
 
 
-def _filesystem_suggestions(token: str, *, limit: int = 20) -> List[dict]:
-    return filesystem_completion_items(token, limit=limit)
+def _filesystem_suggestions(token: str, *, limit: int = 20, thread_id: str | None = None) -> List[dict]:
+    try:
+        from eggthreads import get_thread_working_directory
+
+        working_dir = get_thread_working_directory(core.db, thread_id) if core.db and thread_id else None
+    except Exception:
+        working_dir = None
+    return filesystem_completion_items(token, limit=limit, working_dir=working_dir)
 
 router = APIRouter(tags=["autocomplete"])
 
@@ -117,7 +128,8 @@ async def get_autocomplete(
                     }
                     for item in registry_items
                 )
-                return {"suggestions": suggestions[:20]}
+                generic = global_completion_items(core.db, thread_id, prefix, limit=20)
+                return {"suggestions": merge_completion_items(suggestions, generic, limit=20)}
 
             if cmd == '/model':
                 # Model name suggestions - replace entire argument (supports multi-word search)
@@ -152,63 +164,35 @@ async def get_autocomplete(
                         })
 
             elif cmd in ('/thread', '/deleteThread', '/waitForThreads'):
-                # Thread ID suggestions with rich info like egg.py
-                arg_lower = arg_tok.lower()
-                threads = list_threads(core.db)
-                # Sort by created_at descending
+                streaming_roots = set()
                 try:
-                    threads.sort(key=lambda t: t.created_at or '', reverse=True)
-                except:
+                    from eggthreads.runner import scheduler_task_is_live
+
+                    streaming_roots = {
+                        root_id
+                        for root_id, entry in core.active_schedulers.items()
+                        if isinstance(entry, dict) and scheduler_task_is_live(entry.get("task"))
+                    }
+                except Exception:
                     pass
-
-                # Get current thread ID for [CUR] indicator
-                cur_thread_id = thread_id
-
-                # Check which roots have live schedulers in this process.
-                streaming_threads = {
-                    root_id for root_id in core.active_schedulers.keys()
-                    if scheduler_running(root_id)
-                }
-
-                # Filter ALL threads first, then limit results
-                matched_count = 0
-                for t in threads:
-                    tid = t.thread_id
-                    name = t.name or ''
-                    recap = t.short_recap or ''
-                    status = t.status or 'unknown'
-                    hay = f"{tid} {name} {recap}".lower()
-                    if arg_lower and arg_lower not in hay:
+                streaming_threads = set()
+                for candidate in list_threads(core.db):
+                    try:
+                        root_id = core.get_thread_root_id(candidate.thread_id)
+                    except Exception:
                         continue
-
-                    # Build display like egg.py
-                    parts = []
-                    if tid == cur_thread_id:
-                        parts.append("[CUR]")
-                    if tid in streaming_threads:
-                        parts.append("[STREAM]")
-                    parts.append(tid[-8:])
-
-                    # Status indicator
-                    if status == 'active':
-                        parts.append(f"<{status}>")
-                    elif status not in ('waiting_user', 'unknown'):
-                        parts.append(f"<{status}>")
-
-                    if recap:
-                        parts.append(f"- {recap[:30]}")
-                    if name:
-                        parts.append(f"({name})")
-
-                    display = " ".join(parts)
-                    suggestions.append({
-                        "display": display,
-                        "insert": tid,
-                        "replace": len(arg_tok),
-                    })
-                    matched_count += 1
-                    if matched_count >= 50:  # Limit results after filtering
-                        break
+                    if root_id in streaming_roots:
+                        streaming_threads.add(candidate.thread_id)
+                suggestions.extend(thread_completion_items(
+                    core.db,
+                    arg_tok,
+                    current_thread=thread_id,
+                    match_metadata=True,
+                    include_empty=True,
+                    include_streaming=True,
+                    streaming_thread_ids=streaming_threads,
+                    limit=50,
+                ))
 
             elif cmd == '/skill':
                 arg_lower = arg_tok.lower()
@@ -225,10 +209,10 @@ async def get_autocomplete(
 
             elif cmd in ('/spawnChildThread', '/spawnAutoApprovedChildThread'):
                 # Filesystem path suggestions
-                suggestions.extend(_filesystem_suggestions(arg_tok, limit=20))
+                suggestions.extend(_filesystem_suggestions(arg_tok, limit=20, thread_id=thread_id))
 
             elif cmd == '/attach':
-                suggestions.extend(_filesystem_suggestions(arg_tok, limit=20))
+                suggestions.extend(_filesystem_suggestions(arg_tok, limit=20, thread_id=thread_id))
 
             elif cmd in ('/attachOutput', '/saveProviderArtifact', '/saveProviderOutput'):
                 if is_provider_artifact_id_position(cmd, arg):
@@ -243,7 +227,7 @@ async def get_autocomplete(
                     )
                 elif is_provider_artifact_export_path_position(cmd, arg):
                     path_tok = '' if arg.endswith((' ', '\t')) else arg_tok
-                    suggestions.extend(_filesystem_suggestions(path_tok, limit=20))
+                    suggestions.extend(_filesystem_suggestions(path_tok, limit=20, thread_id=thread_id))
 
             elif cmd == '/imageGenerate':
                 current = last_token(arg) if not arg.endswith((' ', '\t')) else ''
@@ -381,7 +365,7 @@ async def get_autocomplete(
                         threads = list_threads(core.db)
                         try:
                             threads.sort(key=lambda t: t.created_at or '', reverse=True)
-                        except:
+                        except Exception:
                             pass
                         for t in threads[:50]:
                             tid = t.thread_id
@@ -530,38 +514,11 @@ async def get_autocomplete(
     # Regular text - filesystem paths and conversation words
     elif prefix:
         tok = last_token(prefix)
-        fs_suggestions = []
-
-        # Try filesystem completion first (like egg.py)
-        if tok:
-            expanded = os.path.expanduser(tok)
-            base_dir = expanded
-            needle = ''
-            if not os.path.isdir(expanded):
-                base_dir = os.path.dirname(expanded) or '.'
-                needle = os.path.basename(expanded)
-            try:
-                if os.path.isdir(base_dir):
-                    entries = os.listdir(base_dir)
-                    for name in sorted(entries):
-                        if needle and not name.lower().startswith(needle.lower()):
-                            continue
-                        path = os.path.join(base_dir, name)
-                        suffix = '/' if os.path.isdir(path) else ''
-                        full_path = path + suffix
-                        fs_suggestions.append({
-                            "display": name + suffix,
-                            "insert": full_path,
-                            "replace": len(tok),
-                        })
-                        if len(fs_suggestions) >= 20:
-                            break
-            except:
-                pass
+        generic = global_completion_items(core.db, thread_id, prefix, limit=20)
 
         # If filesystem found matches, use those
-        if fs_suggestions:
-            suggestions.extend(fs_suggestions)
+        if generic:
+            suggestions.extend(generic)
         # Otherwise, fall back to conversation word completion
         elif thread_id and tok and len(tok) >= 2:
             t = core.db.get_thread(thread_id)
@@ -583,7 +540,8 @@ async def get_autocomplete(
                             "insert": word,
                             "replace": len(tok),
                         })
-                except:
+                except Exception:
                     pass
 
-    return {"suggestions": suggestions[:20]}  # Limit total
+    generic = global_completion_items(core.db, thread_id, prefix, limit=20)
+    return {"suggestions": merge_completion_items(suggestions, generic, limit=20)}

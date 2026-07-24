@@ -212,6 +212,9 @@ export interface EditAnswerModalState {
   sourceLabel: string;
   origin: EditAnswerOrigin;
   replaceCommandText?: string;
+  editorMode?: "draft" | "file";
+  filePath?: string;
+  fileHandle?: string;
 }
 
 export type OpenEditAnswerModalPayload = Omit<EditAnswerModalState, "isOpen">;

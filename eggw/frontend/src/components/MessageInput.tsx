@@ -29,6 +29,7 @@ function formatElapsed(startedAtMs: number | null | undefined): string | null {
 
 function commandNameFromText(command: string): string {
   const text = command.trim();
+  if (text.startsWith("$$$")) return "$$$";
   if (text.startsWith("$$")) return "$$";
   if (text.startsWith("$")) return "$";
   if (text.startsWith("/")) return text.slice(1).split(/\s+/, 1)[0] || "/";
@@ -375,6 +376,9 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
             sourceLabel: typeof response.data?.source_label === "string" ? response.data.source_label : "",
             origin: "command",
             replaceCommandText: variables.command,
+            editorMode: response.data?.editor_mode === "file" ? "file" : "draft",
+            filePath: typeof response.data?.file_path === "string" ? response.data.file_path : undefined,
+            fileHandle: typeof response.data?.file_handle === "string" ? response.data.file_handle : undefined,
           });
         }
 
@@ -406,6 +410,19 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         }
         if (isEditAnswerModalAction || isShowRecordAction) {
           addSystemLog(response.message || "Command completed", "success");
+          return;
+        }
+        if (response.data?.action === "request_completion" && variables.threadId === currentThreadId) {
+          const restored = typeof response.data?.input === "string" ? response.data.input : variables.command;
+          setComposerDraft(variables.threadId, restored);
+          setInput(restored);
+          window.setTimeout(() => {
+            const textarea = textareaRef.current;
+            if (!textarea) return;
+            textarea.setSelectionRange(restored.length, restored.length);
+            textarea.focus();
+          }, 0);
+          addSystemLog(response.message || "Choose a more specific record ID", "info");
           return;
         }
 
@@ -600,19 +617,8 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
 
     if (replaceCount > 0) {
       // Use replace value to determine how far back to go
-      // This handles multi-word replacements like "/model gemini flash"
+      // This handles both single tokens and command-owned multi-word values.
       tokenStart = Math.max(0, contentEnd - replaceCount);
-
-      // Extend backwards to include any additional characters typed after suggestions fetch
-      // But stop at '=' to preserve named argument prefixes like "msg_id="
-      while (tokenStart > 0 && !/[\s=]/.test(input[tokenStart - 1])) {
-        tokenStart--;
-      }
-
-      // For commands, include the / if present (but not after =)
-      if (tokenStart > 0 && input[tokenStart - 1] === '/') {
-        tokenStart--;
-      }
 
       tokenEnd = cursorPos; // Delete up to original cursor position
     } else {

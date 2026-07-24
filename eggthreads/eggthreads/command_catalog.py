@@ -2,12 +2,12 @@ from __future__ import annotations
 
 """Shared UI command/autocomplete catalog for Egg frontends."""
 
-import os
 import asyncio
+import os
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
 from inspect import isawaitable, iscoroutinefunction
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, List, Mapping
 
 
@@ -66,7 +66,13 @@ class CommandContext:
 
 CommandHandler = Callable[[CommandContext, str], CommandResult | None | Awaitable[CommandResult | None]]
 CommandCompleter = Callable[[CommandContext, str], Iterable[str | Mapping[str, Any]]]
-InputPrefixHandler = Callable[[CommandContext, str], CommandResult | None]
+InputPrefixHandler = Callable[[CommandContext, str], CommandResult | None | Awaitable[CommandResult | None]]
+
+
+def _handler_is_async(handler: Callable[..., Any]) -> bool:
+    """Detect coroutine callables, including async ``__call__`` objects."""
+
+    return iscoroutinefunction(handler) or iscoroutinefunction(getattr(handler, "__call__", None))
 
 
 @dataclass(frozen=True)
@@ -193,7 +199,7 @@ class CommandRegistry:
     def is_async(self, name: str) -> bool:
         """Return True when the command handler is declared async."""
 
-        return iscoroutinefunction(self.get(name).handler)
+        return _handler_is_async(self.get(name).handler)
 
     def complete(self, name: str, context: CommandContext, arg: str = "") -> list[str | Mapping[str, Any]]:
         completer = self.get(name).complete
@@ -236,12 +242,37 @@ class InputPrefixRegistry:
                 return spec, text[len(spec.prefix):]
         return None
 
+    def is_async(self, text: str) -> bool:
+        """Return whether the longest matching prefix owns an async handler."""
+
+        matched = self.match(text)
+        return bool(matched and _handler_is_async(matched[0].handler))
+
     def execute(self, text: str, context: CommandContext) -> CommandResult | None:
         matched = self.match(text)
         if matched is None:
             return None
         spec, rest = matched
         result = spec.handler(context, rest)
+        if isawaitable(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            raise RuntimeError("Async input prefix requires execute_async().")
+        if isinstance(result, CommandResult):
+            return result
+        return CommandResult(clear_input=spec.clear_input)
+
+    async def execute_async(self, text: str, context: CommandContext) -> CommandResult | None:
+        """Execute an input-prefix handler while supporting terminal handoffs."""
+
+        matched = self.match(text)
+        if matched is None:
+            return None
+        spec, rest = matched
+        result = spec.handler(context, rest)
+        if isawaitable(result):
+            result = await result
         if isinstance(result, CommandResult):
             return result
         return CommandResult(clear_input=spec.clear_input)
@@ -409,11 +440,40 @@ def command_completion_names(registry: CommandRegistry | None = None) -> list[st
 def create_default_input_prefix_registry() -> InputPrefixRegistry:
     """Create built-in non-slash input-prefix handlers.
 
-    Handlers are initially thin adapters to the existing UI methods. The
-    execution plugin can migrate `$`/`$$` onto shared services in a later step.
+    ``$``/``$$`` enqueue durable Bash tool calls through the existing UI
+    adapter. ``$$$`` is deliberately different: it gives a foreground host
+    process the operator's terminal and therefore uses an awaitable handoff.
     """
 
     registry = InputPrefixRegistry()
+
+    async def run_foreground_bash(context: CommandContext, arg: str) -> CommandResult:
+        app = context.app
+        if app is None:
+            return CommandResult(clear_input=False, message="$$$ is available only in terminal Egg.")
+        script = str(arg or "").strip()
+        if not script:
+            return CommandResult(clear_input=False, message="Empty foreground command, skipping.")
+        try:
+            from .api import get_thread_working_directory
+
+            cwd = get_thread_working_directory(context.db, str(context.current_thread or ""))
+            command_env = os.environ.copy()
+            command_env.pop("EGGW_API_TOKEN", None)
+            returncode = await app.run_external_terminal_command(
+                ["/bin/bash", "-lc", script], cwd=cwd, env=command_env
+            )
+        except Exception as exc:
+            return CommandResult(clear_input=False, message=f"Foreground command failed: {exc}")
+        return CommandResult(clear_input=True, message=f"Foreground command exited with status {int(returncode or 0)}.")
+
+    registry.register(
+        InputPrefixSpec(
+            prefix="$$$",
+            handler=run_foreground_bash,
+            description="Run a foreground host command with terminal ownership; output is not captured.",
+        )
+    )
 
     def enqueue_bash(context: CommandContext, arg: str, *, hidden: bool) -> CommandResult:
         app = context.app
@@ -473,6 +533,13 @@ OUTPUT_OPTIMIZER_MODE_COMPLETIONS: List[str] = ['conservative', 'balanced', 'agg
 
 EGG_COMMAND_COMPLETIONS: List[str] = command_completion_names()
 
+# These human-editor adapters require a concrete terminal/browser frontend, so
+# their handlers are registered by that frontend rather than the core catalog.
+FRONTEND_EDITOR_COMMAND_COMPLETIONS: List[str] = [
+    '/editAnswer',
+    '/editor',
+]
+
 EGGW_COMMAND_COMPLETIONS: List[str] = [
     *EGG_COMMAND_COMPLETIONS,
     '/attach',
@@ -482,8 +549,7 @@ EGGW_COMMAND_COMPLETIONS: List[str] = [
     '/saveProviderOutput',
     '/clearAttachments',
     '/imageGenerate',
-    '/editAnswer',
-    '/editor',
+    *FRONTEND_EDITOR_COMMAND_COMPLETIONS,
     # Web-only options.
     '/rename',
     '/theme',
@@ -510,5 +576,6 @@ __all__ = [
     'OUTPUT_OPTIMIZER_COMMAND_COMPLETIONS',
     'OUTPUT_OPTIMIZER_MODE_COMPLETIONS',
     'EGG_COMMAND_COMPLETIONS',
+    'FRONTEND_EDITOR_COMMAND_COMPLETIONS',
     'EGGW_COMMAND_COMPLETIONS',
 ]

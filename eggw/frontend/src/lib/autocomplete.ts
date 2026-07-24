@@ -2,9 +2,10 @@ import type { AutocompleteSuggestion } from "./api";
 
 export function isAutocompleteEligible(line: string, cursor: number): boolean {
   const prefix = line.slice(0, Math.max(0, cursor));
-  if (prefix.startsWith("/") || prefix.startsWith("$")) return true;
+  if (prefix.trimStart().startsWith("/") || prefix.trimStart().startsWith("$")) return true;
   const token = prefix.match(/\S+$/)?.[0] || "";
-  return token.startsWith("./") || token.startsWith("../") || token.startsWith("~/");
+  const matchingCharacters = (token.match(/[A-Za-z0-9]/g) || []).length;
+  return matchingCharacters >= 3 || /^(?:@|\.\.?\/|~\/|\/)/.test(token);
 }
 
 type AutocompleteFetcher = (

@@ -447,7 +447,7 @@ EggW-only commands:
 
 Edit answer:
     /editAnswer [msg_id|suffix|text] — Edit a message by id/suffix, or open text in an editable browser draft.
-    /editor [text] — Open a browser editor draft for the next input message.
+    /editor [id_hint|path|@path|-- text] — Edit a record/draft, edit a host file, or copy a file into the composer.
 
 Attachments:
     /attach <path> — Stage a server-side local file path for the next message.
@@ -465,7 +465,8 @@ EggW behavior notes:
 
 Shell:
     $ <command> — Run visible bash command.
-    $$ <command> — Run hidden bash command."""
+    $$ <command> — Run hidden bash command.
+    $$$ <command> — Foreground terminal takeover is currently terminal-Egg only."""
 
     return CommandResponse(
         success=True,

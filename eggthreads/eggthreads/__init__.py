@@ -53,6 +53,17 @@ from .inspection import (
     show_record_completion_items,
     show_record_target,
 )
+from .editor_sources import (
+    EditorSource,
+    read_editor_draft_file,
+    resolve_editor_source,
+)
+from .completion_catalog import (
+    global_completion_items,
+    merge_completion_items,
+    record_id_completion_items,
+    thread_completion_items,
+)
 from .api import (
     validate_model_handle,
     create_root_thread,
@@ -387,6 +398,7 @@ from .command_catalog import (
     OUTPUT_OPTIMIZER_COMMAND_COMPLETIONS,
     OUTPUT_OPTIMIZER_MODE_COMPLETIONS,
     EGG_COMMAND_COMPLETIONS,
+    FRONTEND_EDITOR_COMMAND_COMPLETIONS,
     EGGW_COMMAND_COMPLETIONS,
     command_completion_names,
     create_default_command_registry,
@@ -532,9 +544,11 @@ __all__ = [
     'normalize_output_optimizer_mode', 'output_optimizer_enabled', 'output_optimizer_min_confidence_for_mode',
     'set_thread_output_optimizer_enabled', 'set_thread_output_optimizer_mode',
     'InputPrefixRegistry', 'InputPrefixSpec',
+    'EditorSource', 'read_editor_draft_file', 'resolve_editor_source',
+    'global_completion_items', 'merge_completion_items', 'record_id_completion_items', 'thread_completion_items',
     'SESSION_COMMAND_COMPLETIONS', 'SESSION_ON_COMPLETIONS', 'SESSION_TARGET_COMPLETIONS',
     'OUTPUT_OPTIMIZER_COMMAND_COMPLETIONS', 'OUTPUT_OPTIMIZER_MODE_COMPLETIONS',
-    'EGG_COMMAND_COMPLETIONS', 'EGGW_COMMAND_COMPLETIONS',
+    'EGG_COMMAND_COMPLETIONS', 'FRONTEND_EDITOR_COMMAND_COMPLETIONS', 'EGGW_COMMAND_COMPLETIONS',
     'command_completion_names', 'create_default_command_registry', 'create_default_input_prefix_registry',
     'render_command_registry_help',
     'build_message_content_with_attachments', 'format_staged_attachments',

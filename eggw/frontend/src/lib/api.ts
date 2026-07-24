@@ -272,7 +272,7 @@ export interface CommandResponse {
 }
 
 export interface EditAnswerDraftResponse {
-  action: "open_edit_answer_modal";
+  action: "open_edit_answer_modal" | "request_completion";
   draft: string;
   source_msg_id: string;
   source_kind: "assistant_answer" | "assistant_note" | "input_message" | "message";
@@ -280,6 +280,29 @@ export interface EditAnswerDraftResponse {
   source_label?: string;
   suppress_transcript?: boolean;
   message?: string;
+  editor_mode?: "draft" | "file";
+  file_path?: string;
+  file_handle?: string;
+}
+
+export async function saveEditorFile(
+  threadId: string,
+  request: { handle: string; content: string },
+): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}/editor-file`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to save editor file"));
+}
+
+export async function discardEditorFile(threadId: string, handle: string): Promise<void> {
+  const res = await apiFetch(
+    `${API_BASE}/api/threads/${encodeURIComponent(threadId)}/editor-file/${encodeURIComponent(handle)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to discard editor file session"));
 }
 
 export async function createEditAnswerDraft(

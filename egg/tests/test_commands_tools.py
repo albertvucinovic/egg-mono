@@ -299,3 +299,25 @@ class TestEnqueueBashTool:
 
         assert any("Empty" in msg or "empty" in msg.lower() or "skipping" in msg.lower()
                    for msg in egg_app._system_log)
+
+
+def test_on_submit_schedules_foreground_prefix_without_creating_tool_call(egg_app, monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(egg_app, "_schedule_input_prefix", lambda text: scheduled.append(text) or True)
+    monkeypatch.setattr(egg_app, "enqueue_bash_tool", lambda *_args, **_kwargs: pytest.fail("$$$ must not enqueue a tool"))
+
+    assert egg_app.on_submit("$$$ htop") is True
+    assert scheduled == ["$$$ htop"]
+
+
+def test_scheduled_foreground_prefix_uses_user_command_busy_state(egg_app, monkeypatch):
+    import asyncio
+
+    transitions = []
+    monkeypatch.setattr(egg_app, "_begin_user_command_stream", lambda name: transitions.append(("begin", name)))
+    monkeypatch.setattr(egg_app, "_end_user_command_stream", lambda: transitions.append(("end", None)))
+    monkeypatch.setattr(egg_app, "handle_input_prefix_async", lambda text: asyncio.sleep(0))
+    monkeypatch.setattr(egg_app, "_schedule_user_command_task", lambda awaitable: asyncio.run(awaitable) or True)
+
+    assert egg_app._schedule_input_prefix("$$$ htop") is True
+    assert transitions == [("begin", "$$$"), ("end", None)]

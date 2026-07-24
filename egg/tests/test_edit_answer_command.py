@@ -146,7 +146,7 @@ def test_edit_answer_command_opens_quoted_raw_markdown_and_loads_edited_input(eg
 
     seen_initial = {}
 
-    async def fake_external(argv):
+    async def fake_external(argv, **_kwargs):
         path = Path(argv[-1])
         seen_initial["text"] = path.read_text(encoding="utf-8")
         path.write_text(path.read_text(encoding="utf-8") + "\nUser note\n", encoding="utf-8")
@@ -168,7 +168,7 @@ def test_edit_answer_command_opens_quoted_raw_markdown_and_loads_edited_input(eg
 def test_editor_command_opens_empty_external_editor_for_input_prompt(egg_app, monkeypatch):
     seen_initial = {}
 
-    async def fake_external(argv):
+    async def fake_external(argv, **_kwargs):
         path = Path(argv[-1])
         seen_initial["text"] = path.read_text(encoding="utf-8")
         path.write_text("Draft prompt from editor\n", encoding="utf-8")
@@ -186,7 +186,7 @@ def test_editor_command_opens_empty_external_editor_for_input_prompt(egg_app, mo
 def test_editor_command_opens_argument_text_in_external_editor(egg_app, monkeypatch):
     seen_initial = {}
 
-    async def fake_external(argv):
+    async def fake_external(argv, **_kwargs):
         path = Path(argv[-1])
         seen_initial["text"] = path.read_text(encoding="utf-8")
         path.write_text(path.read_text(encoding="utf-8") + "edited\n", encoding="utf-8")
@@ -203,7 +203,7 @@ def test_editor_command_opens_argument_text_in_external_editor(egg_app, monkeypa
 def test_edit_answer_command_falls_back_to_empty_editor_without_answer(egg_app, monkeypatch):
     seen_initial = {}
 
-    async def fake_external(argv):
+    async def fake_external(argv, **_kwargs):
         path = Path(argv[-1])
         seen_initial["text"] = path.read_text(encoding="utf-8")
         path.write_text("Prompt when no assistant exists\n", encoding="utf-8")
@@ -225,7 +225,7 @@ def test_edit_answer_command_opens_unmatched_argument_text(egg_app, monkeypatch)
     create_snapshot(egg_app.db, egg_app.current_thread)
     seen_initial = {}
 
-    async def fake_external(argv):
+    async def fake_external(argv, **_kwargs):
         path = Path(argv[-1])
         seen_initial["text"] = path.read_text(encoding="utf-8")
         path.write_text(path.read_text(encoding="utf-8") + "edited\n", encoding="utf-8")
@@ -247,7 +247,7 @@ def test_edit_answer_command_can_edit_user_message_by_selector(egg_app, monkeypa
     create_snapshot(egg_app.db, egg_app.current_thread)
     seen_initial = {}
 
-    async def fake_external(argv):
+    async def fake_external(argv, **_kwargs):
         path = Path(argv[-1])
         seen_initial["text"] = path.read_text(encoding="utf-8")
         path.write_text("Edited user prompt\n", encoding="utf-8")
@@ -270,7 +270,7 @@ def test_edit_answer_command_refuses_to_overwrite_existing_input(egg_app, monkey
 
     called = False
 
-    async def fake_external(argv):
+    async def fake_external(argv, **_kwargs):
         nonlocal called
         called = True
         return 0
@@ -297,7 +297,7 @@ def test_edit_answer_in_get_answer_mode_edits_waiting_assistant_note(egg_app, mo
 
     seen_initial = {}
 
-    async def fake_external(argv):
+    async def fake_external(argv, **_kwargs):
         path = Path(argv[-1])
         seen_initial["text"] = path.read_text(encoding="utf-8")
         return 0
@@ -337,3 +337,105 @@ def test_edit_answer_command_is_registered_and_completable(egg_app):
         egg_app.command_registry,
     )
     assert any(item["display"] == "/editor" for item in editor_items)
+
+
+def test_editor_command_edits_existing_file_in_place_without_touching_input(egg_app, monkeypatch, tmp_path):
+    from eggthreads import set_thread_working_directory
+
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "editable.txt"
+    path.write_text("before\n", encoding="utf-8")
+    set_thread_working_directory(egg_app.db, egg_app.current_thread, str(tmp_path))
+    egg_app.input_panel.editor.editor.set_text("preserved input")
+
+    async def fake_external(argv, **kwargs):
+        assert Path(argv[-1]) == path
+        path.write_text("after\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(egg_app, "run_external_terminal_command", fake_external)
+    egg_app.handle_command("/editor editable.txt")
+
+    assert path.read_text(encoding="utf-8") == "after\n"
+    assert egg_app.input_panel.editor.editor.get_text() == "preserved input"
+
+
+def test_editor_command_at_file_loads_copy_without_modifying_source(egg_app, monkeypatch, tmp_path):
+    from eggthreads import set_thread_working_directory
+
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "source.py"
+    path.write_text("print('source')\n", encoding="utf-8")
+    set_thread_working_directory(egg_app.db, egg_app.current_thread, str(tmp_path))
+
+    async def fake_external(argv, **kwargs):
+        draft = Path(argv[-1])
+        assert draft.suffix == ".py"
+        assert draft.read_text(encoding="utf-8") == "print('source')\n"
+        draft.write_text("print('draft')\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(egg_app, "run_external_terminal_command", fake_external)
+    egg_app.handle_command("/editor @source.py")
+
+    assert path.read_text(encoding="utf-8") == "print('source')\n"
+    assert egg_app.input_panel.editor.editor.get_text() == "print('draft')"
+
+
+def test_editor_command_ambiguous_id_requests_existing_completion_popup(egg_app, monkeypatch):
+    from eggthreads import create_snapshot
+
+    for prefix in ("alpha", "beta"):
+        egg_app.db.append_event(
+            event_id=f"event-{prefix}-editor",
+            thread_id=egg_app.current_thread,
+            type_="msg.create",
+            msg_id=f"{prefix}-editor-shared",
+            payload={"role": "assistant", "content": prefix},
+        )
+    create_snapshot(egg_app.db, egg_app.current_thread)
+    requested = []
+    monkeypatch.setattr(
+        egg_app.input_panel.editor.editor,
+        "_request_completion",
+        lambda **kwargs: requested.append(kwargs) or True,
+    )
+
+    egg_app.handle_command("/editor editor-shared")
+
+    assert egg_app.input_panel.editor.editor.get_text() == "/editor editor-shared"
+    assert requested == [{"mode": "refresh"}]
+
+
+def test_editor_command_selects_show_tool_declaration_as_pretty_json(egg_app, monkeypatch):
+    import json
+    from eggthreads import append_message, create_snapshot
+
+    call_id = "call-terminal-editor-json"
+    append_message(
+        egg_app.db,
+        egg_app.current_thread,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [{
+                "id": call_id,
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"script":"echo hi"}'},
+            }],
+        },
+    )
+    create_snapshot(egg_app.db, egg_app.current_thread)
+    seen = {}
+
+    async def fake_external(argv, **_kwargs):
+        draft = Path(argv[-1])
+        seen["draft"] = draft.read_text(encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(egg_app, "run_external_terminal_command", fake_external)
+    egg_app.handle_command(f"/editor {call_id[-10:]}")
+
+    parsed = json.loads(seen["draft"])
+    assert parsed["id"] == call_id
+    assert parsed["function"]["name"] == "bash"

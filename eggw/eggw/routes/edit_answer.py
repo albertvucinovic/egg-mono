@@ -12,7 +12,11 @@ from ..models import EditAnswerDraftRequest, EditAnswerDraftResponse
 router = APIRouter(prefix="/api/threads", tags=["edit-answer"])
 
 
-@router.post("/{thread_id}/edit-answer-draft", response_model=EditAnswerDraftResponse)
+@router.post(
+    "/{thread_id}/edit-answer-draft",
+    response_model=EditAnswerDraftResponse,
+    response_model_exclude_none=True,
+)
 async def create_edit_answer_draft(thread_id: str, request: EditAnswerDraftRequest | None = None):
     """Prepare a quoted assistant-answer draft without sending it."""
 
