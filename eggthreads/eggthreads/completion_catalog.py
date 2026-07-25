@@ -11,7 +11,7 @@ from typing import Any, Iterable, Mapping
 
 from .api import get_thread_statuses_bulk, get_thread_working_directory, list_threads
 from .artifact_completion import current_completion_token, filesystem_completion_items
-from .inspection import list_show_record_candidates
+from .inspection import list_show_record_candidates, _record_id_hint_rank
 
 GLOBAL_ID_MIN_CHARS = 3
 _COMPLETION_CACHE_LIMIT = 8
@@ -125,15 +125,13 @@ def record_id_completion_items(
     wanted, matched_length = _identity_fragment(fragment)
     if _match_count(wanted) < GLOBAL_ID_MIN_CHARS:
         return []
-    exact = []
-    matches = []
+    ranked = []
     for item in _record_catalog(db, thread_id):
-        record_id = item["record_id"]
-        if record_id == wanted:
-            exact.append(item)
-        elif record_id.startswith(wanted) or record_id.endswith(wanted):
-            matches.append(item)
-    selected = exact or matches
+        rank = _record_id_hint_rank(item["record_id"], wanted)
+        if rank is not None:
+            ranked.append((rank, item))
+    best_rank = min((rank for rank, _item in ranked), default=None)
+    selected = [item for rank, item in ranked if rank == best_rank]
     replace_count = matched_length if replace is None else max(0, int(replace))
     return [
         {

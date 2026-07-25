@@ -62,7 +62,7 @@ def register_inspection_commands(registry: Any) -> None:
             usage="/show <id_hint>",
             description=(
                 "Inspect one current-thread message, Assistant Note, assistant tool declaration, "
-                "or durable tool result by full ID or unique case-sensitive prefix/suffix."
+                "or durable tool result by full ID or unique case-insensitive prefix/suffix."
             ),
             complete=show_completions,
         )

@@ -23,7 +23,7 @@ def _append_with_id(db: ts.ThreadsDB, thread_id: str, msg_id: str, role: str, co
     )
 
 
-def test_show_resolves_exact_then_unique_case_sensitive_prefix_or_suffix(tmp_path: Path) -> None:
+def test_show_resolves_exact_then_unique_case_insensitive_prefix_or_suffix(tmp_path: Path) -> None:
     db = _db(tmp_path)
     thread_id = ts.create_root_thread(db, name="show")
     _append_with_id(db, thread_id, "MsgAlphaTAIL", "assistant", "alpha")
@@ -39,8 +39,7 @@ def test_show_resolves_exact_then_unique_case_sensitive_prefix_or_suffix(tmp_pat
     assert prefix.selected is not None and prefix.selected.record_id == "MsgGammaUNIQUE"
     assert suffix.selected is not None and suffix.selected.record_id == "MsgGammaUNIQUE"
 
-    # Matching is deliberately case-sensitive; IDs are not human text.
-    assert ts.resolve_show_record(db, thread_id, "unique").status == "missing"
+    assert ts.resolve_show_record(db, thread_id, "unique").selected.record_id == "MsgGammaUNIQUE"
 
 
 def test_show_does_not_publish_projection_internal_ids_for_identityless_messages(
@@ -65,7 +64,7 @@ def test_show_exact_identity_wins_even_when_it_is_another_id_prefix(tmp_path: Pa
     _append_with_id(db, thread_id, "ExactId", "assistant", "exact")
     _append_with_id(db, thread_id, "ExactIdLonger", "assistant", "prefix collision")
 
-    resolution = ts.resolve_show_record(db, thread_id, "ExactId")
+    resolution = ts.resolve_show_record(db, thread_id, "exactid")
 
     assert resolution.status == "selected"
     assert resolution.selected is not None
@@ -129,7 +128,7 @@ def test_show_candidates_cover_notes_assistant_declarations_and_exact_tool_resul
     result = by_id_kind[("tool-message", "tool_result")]
     assert declaration.paired_message_ids == ("tool-message",)
     assert result.paired_message_ids == ("assistant-message",)
-    assert ts.resolve_show_record(db, thread_id, "callexactcase").status == "missing"
+    assert ts.resolve_show_record(db, thread_id, "callexactcase").selected.record_id == "CallExactCase"
 
 
 def test_show_does_not_leak_deleted_skipped_sibling_or_descendant_records(tmp_path: Path) -> None:
@@ -166,11 +165,11 @@ def test_show_command_and_completion_share_authoritative_result_shape(tmp_path: 
     registry = create_default_command_registry()
     context = CommandContext(db=db, current_thread=thread_id)
 
-    completion = registry.complete("show", context, "345678")
+    completion = registry.complete("show", context, "MESSAGE-FOR-SHOW-12345678")
     assert completion == [{
         "display": "[12345678] Assistant · full body",
         "insert": "message-for-show-12345678",
-        "replace": 6,
+        "replace": 25,
         "meta": "message · message-for-show-12345678",
     }]
 

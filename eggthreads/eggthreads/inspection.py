@@ -56,7 +56,7 @@ class ShowRecordCandidate:
 
 @dataclass(frozen=True)
 class ShowRecordResolution:
-    """Deterministic result of resolving one case-sensitive ID hint."""
+    """Deterministic result of resolving one case-insensitive ID hint."""
 
     status: ShowResolutionStatus
     thread_id: str
@@ -218,8 +218,31 @@ def list_show_record_candidates(db: Any, thread_id: str) -> list[ShowRecordCandi
     return candidates
 
 
-def _matches_hint(candidate: ShowRecordCandidate, hint: str) -> bool:
-    return candidate.record_id.startswith(hint) or candidate.record_id.endswith(hint)
+def _record_id_hint_rank(record_id: str, hint: str) -> int | None:
+    """Rank a case-insensitive ID hint while preserving exact-ID precedence."""
+
+    if record_id == hint:
+        return 0
+    folded_id = str(record_id or "").casefold()
+    folded_hint = str(hint or "").casefold()
+    if folded_id == folded_hint:
+        return 1
+    if folded_id.startswith(folded_hint) or folded_id.endswith(folded_hint):
+        return 2
+    return None
+
+
+def _matching_candidates(
+    candidates: Sequence[ShowRecordCandidate],
+    hint: str,
+) -> list[ShowRecordCandidate]:
+    ranked = [
+        (rank, candidate)
+        for candidate in candidates
+        if (rank := _record_id_hint_rank(candidate.record_id, hint)) is not None
+    ]
+    best_rank = min((rank for rank, _candidate in ranked), default=None)
+    return [candidate for rank, candidate in ranked if rank == best_rank]
 
 
 def _candidate_line(candidate: ShowRecordCandidate) -> str:
@@ -229,12 +252,13 @@ def _candidate_line(candidate: ShowRecordCandidate) -> str:
 
 
 def resolve_show_record(db: Any, thread_id: str, hint: str) -> ShowRecordResolution:
-    """Resolve an exact ID, then a unique case-sensitive prefix/suffix hint.
+    """Resolve an exact ID, then a unique case-insensitive prefix/suffix hint.
 
     Resolution is deliberately current-thread only.  Exact full identity wins
-    over every fuzzy match.  Deleted and continue-skipped messages are absent
-    from the effective projection and therefore fail with the same non-leaking
-    missing result as every other inaccessible identity.
+    over every fuzzy match; exact spelling breaks ties if stored IDs differ only
+    by case.  Deleted and continue-skipped messages are absent from the effective
+    projection and therefore fail with the same non-leaking missing result as
+    every other inaccessible identity.
     """
 
     normalized_thread = str(thread_id or "").strip()
@@ -249,8 +273,7 @@ def resolve_show_record(db: Any, thread_id: str, hint: str) -> ShowRecordResolut
             message="Usage: /show <id_hint>",
         )
 
-    exact = [candidate for candidate in candidates if candidate.record_id == wanted]
-    matches = exact if exact else [candidate for candidate in candidates if _matches_hint(candidate, wanted)]
+    matches = _matching_candidates(candidates, wanted)
     if len(matches) == 1:
         selected = matches[0]
         return ShowRecordResolution(
@@ -376,8 +399,7 @@ def show_record_completion_items(
     fragment = text.split()[-1] if text.split() else ""
     candidates, _watermark = _effective_candidates(db, thread_id)
     if fragment:
-        exact = [candidate for candidate in candidates if candidate.record_id == fragment]
-        candidates = exact or [candidate for candidate in candidates if _matches_hint(candidate, fragment)]
+        candidates = _matching_candidates(candidates, fragment)
     items: list[dict[str, Any]] = []
     for candidate in candidates[: max(0, int(limit))]:
         short_id = candidate.record_id[-8:] if len(candidate.record_id) > 8 else candidate.record_id

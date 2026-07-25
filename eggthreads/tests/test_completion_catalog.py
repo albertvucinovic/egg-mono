@@ -58,11 +58,11 @@ def test_global_id_minimum_counts_alphanumeric_characters(tmp_path: Path) -> Non
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()
     thread = ts.create_root_thread(db, "current")
-    ts.append_message(db, thread, "assistant", "", extra={"tool_calls": [{"id": "a__bc", "function": {"name": "bash", "arguments": "{}"}}]})
+    ts.append_message(db, thread, "assistant", "", extra={"tool_calls": [{"id": "A__bC", "function": {"name": "bash", "arguments": "{}"}}]})
     ts.create_snapshot(db, thread)
 
     assert record_id_completion_items(db, thread, "a__") == []
-    assert record_id_completion_items(db, thread, "a__bc")
+    assert record_id_completion_items(db, thread, "a__bc")[0]["insert"] == "A__bC"
 
 
 def test_shared_thread_completion_can_search_name_metadata(tmp_path: Path) -> None:
