@@ -16,6 +16,7 @@ from eggthreads import (
 from eggopt import (
     Agent,
     GEPAConfig,
+    ThreadTool,
     current_evaluation,
     optimize_anything,
     plan_optimization,
@@ -134,6 +135,153 @@ def test_agent_can_opt_into_tool_auto_approval():
     )
 
     assert agent.auto_approve_tools is True
+
+
+def test_thread_tool_reuses_public_synthetic_tool_lifecycle(tmp_path, monkeypatch):
+    import json
+
+    from eggflow import Task
+    from eggthreads import ToolRegistry, list_tool_calls_for_thread
+
+    monkeypatch.chdir(tmp_path)
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "echo",
+        "Echo",
+        {"type": "object", "properties": {"value": {"type": "string"}}},
+        lambda arguments: calls.append(arguments["value"]) or arguments["value"],
+    )
+
+    class Evaluator:
+        def task(self, _candidate, _case):
+            return UseTool()
+
+    class UseTool(Task):
+        def run(self):
+            context = current_evaluation()
+            value = yield ThreadTool(
+                registry,
+                context["evaluation_thread_id"],
+                "echo",
+                {"value": "ok"},
+            )
+            return 1.0, {"value": value}
+
+    config = GEPAConfig(
+        run_dir=tmp_path / "thread-tool",
+        max_candidates=1,
+        max_evaluator_calls=1,
+        generator=Increment(),
+        evaluator_identity={"name": "thread-tool-test"},
+        case_id=lambda case: case["id"],
+    )
+    first = optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=[{"id": "one"}],
+        objective="Echo.",
+        config=config,
+    )
+    second = optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=[{"id": "one"}],
+        objective="Echo.",
+        config=config,
+    )
+
+    assert first.feedback == second.feedback == (({"value": "ok"},),)
+    assert calls == ["ok"]
+    db = ThreadsDB(tmp_path / "thread-tool" / ".egg" / "threads.sqlite")
+    try:
+        thread_id = next(
+            thread.thread_id
+            for thread in list_threads(db)
+            if thread.name == "one Evaluation"
+        )
+        tool_calls = list_tool_calls_for_thread(db, thread_id)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "echo"
+        assert json.loads(tool_calls[0].arguments) == {"value": "ok"}
+        assert tool_calls[0].published is True
+    finally:
+        db.conn.close()
+
+
+def test_thread_tool_recovers_existing_recorded_call(tmp_path, monkeypatch):
+    from eggflow import Task
+    from eggthreads import ToolRegistry, list_tool_calls_for_thread
+
+    monkeypatch.chdir(tmp_path)
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "echo",
+        "Echo",
+        {"type": "object", "properties": {"value": {"type": "string"}}},
+        lambda arguments: calls.append(arguments["value"]) or arguments["value"],
+    )
+
+    class Evaluator:
+        def task(self, _candidate, _case):
+            return UseTool()
+
+    class UseTool(Task):
+        def run(self):
+            context = current_evaluation()
+            task = ThreadTool(
+                registry,
+                context["evaluation_thread_id"],
+                "echo",
+                {"value": "resume"},
+            )
+            from eggthreads import record_synthetic_user_tool_call
+
+            db = ThreadsDB(
+                tmp_path / "thread-tool-recovery" / ".egg" / "threads.sqlite"
+            )
+            try:
+                record_synthetic_user_tool_call(
+                    db,
+                    context["evaluation_thread_id"],
+                    "echo",
+                    {"value": "resume"},
+                    "resume",
+                    origin="eggopt",
+                    tool_call_id=task.get_cache_key().rsplit(":", 1)[-1],
+                )
+            finally:
+                db.conn.close()
+            return 1.0, {"value": (yield task)}
+
+    result = optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=[{"id": "one"}],
+        objective="Echo.",
+        config=GEPAConfig(
+            run_dir=tmp_path / "thread-tool-recovery",
+            max_candidates=1,
+            max_evaluator_calls=1,
+            generator=Increment(),
+            evaluator_identity={"name": "thread-tool-recovery-test"},
+            case_id=lambda case: case["id"],
+        ),
+    )
+
+    assert result.feedback == (({"value": "resume"},),)
+    assert calls == []
+    db = ThreadsDB(tmp_path / "thread-tool-recovery" / ".egg" / "threads.sqlite")
+    try:
+        thread_id = next(
+            thread.thread_id
+            for thread in list_threads(db)
+            if thread.name == "one Evaluation"
+        )
+        assert len(list_tool_calls_for_thread(db, thread_id)) == 1
+    finally:
+        db.conn.close()
 
 
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
@@ -720,56 +868,27 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
         db.conn.close()
 
 
-def test_actor_critic_context_limit_uses_full_history_not_provider_context(
-    tmp_path, monkeypatch
-):
-    from eggflow import Task
-    from eggopt import ActorCritic, Agent
+def test_actor_critic_context_limit_is_typed_from_full_history(monkeypatch):
+    import asyncio
 
-    monkeypatch.chdir(tmp_path)
-    run_dir = Path("run") / "actor-critic-full-context"
-    actor_llm = ScriptedAgentLLM([])
+    from eggflow import ContextLimitExceededError
+    from eggopt.context_limit import run_with_full_context_limit
 
-    class EvaluateWithActorCritic(Task):
-        def run(self):
-            return (
-                yield ActorCritic(
-                    actor=Agent(actor_llm, {"role": "actor-full-context"}),
-                    critic=Agent(object(), {"role": "unused-critic"}),
-                    actor_prompt=lambda _round, _state: "Predict.",
-                    critic_prompt=lambda _round, _state: "Validate.",
-                    max_rounds=1,
-                )
-            )
-
-    class Evaluator:
-        def task(self, _candidate, _case):
-            return EvaluateWithActorCritic()
+    class Runner:
+        async def run_once(self):
+            raise AssertionError("provider must not be called")
 
     monkeypatch.setattr(
         "eggopt.context_limit.thread_token_stats",
         lambda _db, _thread: {"context_tokens": 10, "full_thread_tokens": 100},
     )
 
-    with pytest.raises(
-        Exception, match="full context limit reached before provider call"
-    ):
-        optimize_anything(
-            {"instruction": "0"},
-            evaluator=Evaluator(),
-            dataset=[{"id": "one"}],
-            objective="Produce valid JSON.",
-            config=GEPAConfig(
-                run_dir=run_dir,
-                max_candidates=1,
-                max_evaluator_calls=1,
-                generator=Increment(),
-                evaluator_identity={"name": "actor-full-context-test"},
-                case_id=lambda case: case["id"],
-                evaluator_context_limit=100,
-            ),
+    with pytest.raises(ContextLimitExceededError, match="100 >= 100"):
+        asyncio.run(
+            run_with_full_context_limit(
+                Runner(), object(), "actor", 100, operation="ActorCritic agent"
+            )
         )
-    assert actor_llm.calls == 0
 
 
 def test_actor_critic_accepts_a_task_as_critic(tmp_path, monkeypatch):

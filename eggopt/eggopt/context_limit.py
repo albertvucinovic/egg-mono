@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from eggflow import ContextLimitExceededError
 from eggthreads import ThreadsDB, interrupt_thread, thread_token_stats
 
 
@@ -27,7 +28,7 @@ async def run_with_full_context_limit(
         return await runner.run_once()
     current = full_context_tokens(db, thread_id)
     if current >= limit:
-        raise RuntimeError(
+        raise ContextLimitExceededError(
             f"{operation} full context limit reached before provider call; "
             f"operation terminated ({current} >= {limit})"
         )
@@ -48,7 +49,7 @@ async def run_with_full_context_limit(
                     await task
                 except asyncio.CancelledError:
                     pass
-                raise RuntimeError(
+                raise ContextLimitExceededError(
                     f"{operation} full context limit reached; operation terminated"
                 )
         return bool(await task)

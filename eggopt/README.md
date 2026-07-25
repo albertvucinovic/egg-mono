@@ -38,6 +38,8 @@ use(result.best_candidate)
 
 - Eggflow owns task caching, retry, and restart recovery.
 - `ActorCritic` is the reusable checked-generation loop.
+- `ThreadTool` is the reusable Eggflow task for durable synthetic tool calls on
+  assigned Eggthreads threads; domain code never queries Eggthreads storage.
 - GEPA mutation uses `ActorCritic(actor=Mutation Agent, critic=ValidateMutation Task)`.
 - The deterministic Critic returns `revise` with a precise schema error; ActorCritic
   continues the same Mutation thread with that feedback.
