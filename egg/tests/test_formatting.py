@@ -36,7 +36,28 @@ class TestMinHiddenActivitySummary:
             tool_call_id="call_alpha_A12345678",
         )
 
-        assert "Tools: bash(A12345678) · READ" in format_min_hidden_activity_summary(summary)
+        assert "Tools: bash(A12345678) r" in format_min_hidden_activity_summary(summary)
+
+    def test_min_tool_entries_use_compact_effect_suffixes(self):
+        from egg.min_run_summary import MinHiddenActivitySummary, format_min_hidden_activity_summary
+
+        summary = MinHiddenActivitySummary()
+        summary.add_tool_execution(
+            name="bash", arguments={"script": "rg needle"}, tool_call_id="call_read_12345678"
+        )
+        summary.add_tool_execution(
+            name="bash", arguments={"script": "touch result"}, tool_call_id="call_write_87654321"
+        )
+        summary.add_tool_execution(
+            name="python_repl", arguments={"code": "print(1)"}, tool_call_id="call_unknown_abcdefgh"
+        )
+
+        rendered = format_min_hidden_activity_summary(summary)
+
+        assert "bash(12345678) r" in rendered
+        assert "bash(87654321) w" in rendered
+        assert "python_repl(abcdefgh)" in rendered
+        assert "UNKNOWN" not in rendered
 
 
 class TestFormatThreadLine:
@@ -323,11 +344,13 @@ class TestFormatMessagesText:
         assert "assistant answer" in text
         assert f"[Reasoning [msg_id: {assistant}]]" in text
         assert "private reasoning body" not in text
-        assert f"[Tool Calls (1) [msg_id: {assistant}]]" in text
+        assert "[Tool Calls (1)]" in text
+        assert f"msg: {assistant}" in text
         assert "1. READ  bash(34567890)" in text
         assert "      script:\n        echo hello and then produce" in text
-        assert f"[READ Tool: bash(34567890) [msg_id: {tool}]]" in text
-        assert "  completed tool result body" in text
+        assert "[      READ Tool: bash(34567890)]" in text
+        assert f"msg: {tool}" in text
+        assert "            completed tool result body" in text
 
     def test_output_optimizer_metadata_is_shown_for_tool_messages_without_body_clutter(self, isolated_db):
         from eggthreads import append_message, create_root_thread, create_snapshot
@@ -370,8 +393,10 @@ class TestFormatMessagesText:
 
         text = TestApp().format_messages_text(tid)
 
-        assert f"[UNKNOWN Tool: bash(ptimized) [msg_id: {optimized}]] [Egg optimized · 95% saved · raw artifact rawabc123]" in text
-        assert f"[UNKNOWN Tool: bash(_default) [msg_id: {default}]]" in text
+        assert "[      UNKNOWN Tool: bash(ptimized)]" in text
+        assert f"msg: {optimized}" in text
+        assert "[      UNKNOWN Tool: bash(_default)]" in text
+        assert f"msg: {default}" in text
         assert "raw artifact rawabc123" in text
         assert "Raw output: read_long_tool_output('rawabc123', chunk_number=1)" in text
         assert "plain preview body" in text
@@ -399,7 +424,8 @@ class TestFormatMessagesText:
 
         text = TestApp().format_messages_text(tid)
 
-        assert f"[UNKNOWN Tool: bash(ll_empty) [msg_id: {tool}]]" in text
+        assert "[      UNKNOWN Tool: bash(ll_empty)]" in text
+        assert f"msg: {tool}" in text
         assert "(no output)" in text
 
     def test_display_verbosity_min_shows_conversation_and_run_summary(self, isolated_db):
@@ -457,7 +483,7 @@ class TestFormatMessagesText:
         assert "1 reasoning block" in text
         assert "Executed 1 tool, got 1 tool result" in text
         assert "total tokens" in text
-        assert "Tools: bash(34567890) · READ" in text
+        assert "Tools: bash(34567890) r" in text
         assert f"[Reasoning [msg_id: {assistant}]]" not in text
         assert "[ToolCall [tool_call_id: call_full_1234567890]] bash" not in text
         assert f"[Tool: bash [msg_id: {tool}] [tool_call_id: call_full_1234567890]]" not in text
@@ -521,7 +547,7 @@ class TestFormatMessagesText:
         text = TestApp().format_messages_text(tid)
 
         assert "Executed 2 tools, got 2 tool results, 1 reasoning block" in text
-        assert "Tools: bash(h_1234567890) · READ, python_repl(n_1234567890) · UNKNOWN" in text
+        assert "Tools: bash(h_1234567890) r, python_repl(n_1234567890)" in text
         assert text.count("Executed 2 tools, got 2 tool results, 1 reasoning block") == 1
         assert "Hidden details:" not in text
         assert "bash result body" not in text

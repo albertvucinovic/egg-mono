@@ -1097,11 +1097,12 @@ class TestConsolePrintMessage:
 
         titles = self._collect_panel_titles(printed)
         bodies = self._collect_panel_bodies(printed)
+        joined_bodies = "\n".join(bodies)
 
         assert any('Reasoning' in title and 'msg_id: msg_assistant_medium' in title and '4.2 tps' in title for title in titles)
-        assert any('Tool Calls' in title and 'msg_id: msg_assistant_medium' in title and '4.2 tps' in title for title in titles)
-        assert any('READ' in title and 'bash' in title and 'msg_id: msg_tool_medium' in title and '34567890' in title for title in titles)
-        joined_bodies = "\n".join(bodies)
+        assert any('Tool Calls' in title for title in titles)
+        assert 'msg: msg_assistant_medium' in joined_bodies
+        assert any('READ' in title and 'bash' in title and '34567890' in title for title in titles)
         assert 'Answer body' in joined_bodies
         assert 'Private reasoning body' not in joined_bodies
         assert 'Completed tool result body' in joined_bodies
@@ -1234,13 +1235,13 @@ class TestConsolePrintMessage:
         call_text = call_items[0].renderable.renderable
         result_text = result_items[0].renderable.renderable
         assert call_text.plain.find('[red]literal[/red]') >= 0
-        assert result_text.plain == '  OUTPUT\n    [red]literal result[/red]'
+        assert result_text.plain == '        msg: msg-semantic-result\n        OUTPUT\n            [red]literal result[/red]'
         assert any(str(span.style) == 'egg.accent' for span in call_text.spans)
         assert any(str(span.style) == 'egg.tool_call_title' for span in call_text.spans)
         assert any(str(span.style) == 'egg.muted' for span in call_text.spans)
         assert any(str(span.style) == 'egg.foreground' for span in result_text.spans)
-        assert str(call_items[0].renderable.border_style) == 'egg.accent'
-        assert str(result_items[0].renderable.border_style) == 'egg.muted'
+        assert str(call_items[0].renderable.border_style) == 'egg.tool_read'
+        assert str(result_items[0].renderable.border_style) == 'egg.tool_unknown'
 
     def test_medium_semantic_coloring_still_honors_toggle_borders(self, egg_app, monkeypatch):
         from rich import box as rich_box
@@ -1293,7 +1294,7 @@ class TestConsolePrintMessage:
         result_text = egg_app._static_transcript_message_renderables(result)[0].renderable.renderable
 
         assert call_text.plain.endswith('script:\n        cat example.py')
-        assert result_text.plain == '  STDOUT\n    def answer():\n        return 42'
+        assert result_text.plain == '        STDOUT\n            def answer():\n                return 42'
         assert any(call_text.plain[span.start:span.end] == 'cat' for span in call_text.spans)
         assert any(result_text.plain[span.start:span.end] == 'def' for span in result_text.spans)
 
@@ -1398,7 +1399,11 @@ class TestConsolePrintMessage:
             assert 'Executed 1 tool' in joined_bodies
             assert 'answer_user_while_preserving_llm_turn' in joined_bodies
         else:
-            assert any('Tool Calls' in title and 'msg_id: msg_answer_note' in title for title in titles)
+            assert any('Tool Calls' in title for title in titles)
+            if verbosity == 'medium':
+                assert 'msg: msg_answer_note' in joined_bodies
+            else:
+                assert any('msg_id: msg_answer_note' in title for title in titles)
             assert 'answer_user_while_preserving_llm_turn' in joined_bodies
         assert not any('Assistant]' in title for title in titles)
 
@@ -1455,7 +1460,7 @@ class TestConsolePrintMessage:
         assert '1 reasoning block' in joined_bodies
         assert 'Executed 1 tool, got 1 tool result' in joined_bodies
         assert 'total tokens' in joined_bodies
-        assert 'Tools: bash(34567890) · READ' in joined_bodies
+        assert 'Tools: bash(34567890) r' in joined_bodies
         assert f'msg_id: {tool}' not in joined_bodies
         assert 'tool_call_id: call_full_1234567890' not in joined_bodies
 
@@ -1515,7 +1520,7 @@ class TestConsolePrintMessage:
         assert 'Hidden details:' not in joined_bodies
         assert 'Executed 2 tools, got 2 tool results, 1 reasoning block' in joined_bodies
         assert joined_bodies.count('Executed 2 tools, got 2 tool results, 1 reasoning block') == 1
-        assert 'Tools: bash(h_1234567890) · READ, python_repl(n_1234567890) · UNKNOWN' in joined_bodies
+        assert 'Tools: bash(h_1234567890) r, python_repl(n_1234567890)' in joined_bodies
         assert 'private reasoning body' not in joined_bodies
         assert 'bash result body' not in joined_bodies
         assert 'python result body' not in joined_bodies
@@ -2039,7 +2044,7 @@ class TestFullScreenScrollbackWiring:
                     bodies.append(str(getattr(renderable, "plain", renderable)))
         assert bodies[-1].count("Executed") == 1
         assert "Executed 2 tools, got 2 tool results, 2 reasoning blocks" in bodies[-1]
-        assert "Tools: bash(l_bash_1) · READ, python_repl(python_1) · UNKNOWN" in bodies[-1]
+        assert "Tools: bash(l_bash_1) r, python_repl(python_1)" in bodies[-1]
 
     def test_full_screen_min_visible_message_finalizes_and_resets_summary_update(self, egg_app):
         """Visible messages bound a full-screen min summary run."""
@@ -2335,7 +2340,7 @@ class TestTranscriptScrollbackSource:
         assert "Executed 1 tool" in text
         assert "got 1 tool result" in text
         assert "1 reasoning block" in text
-        assert "Tools: bash(azy_bash) · READ" in text
+        assert "Tools: bash(azy_bash) r" in text
 
         # No legacy Hidden Details panels
         assert "Hidden Details" not in text

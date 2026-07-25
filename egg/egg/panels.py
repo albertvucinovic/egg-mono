@@ -23,8 +23,10 @@ from eggthreads.tool_effects import ToolEffect
 from .utils import snapshot_messages, looks_markdown
 from .min_run_summary import (
     MinHiddenActivitySummary,
+    MinToolStyles,
     count_min_hidden_text_tokens,
     format_min_hidden_activity_summary,
+    min_hidden_activity_summary_text,
     snapshot_per_message_token_stats,
     serialize_min_tool_call_tokens,
 )
@@ -34,6 +36,7 @@ from .tool_presentation import (
     medium_tool_arguments_text,
     medium_tool_calls_text,
     medium_tool_result_text,
+    medium_metadata_lines,
     tool_call_presentation,
     tool_result_recovery_hint,
 )
@@ -1423,9 +1426,20 @@ class PanelsMixin:
         if not body:
             return None
         try:
+            themed = getattr(self, '_rich_theme', None) is not None
+            body_text = min_hidden_activity_summary_text(
+                summary,
+                styles=MinToolStyles(
+                    summary="egg.tool" if themed else "yellow",
+                    separator="egg.muted" if themed else "dim",
+                    read="egg.tool_read" if themed else "bold green",
+                    may_write="egg.tool_write" if themed else "bold yellow",
+                    unknown="egg.tool_unknown" if themed else "bold magenta",
+                ),
+            )
             renderable = Panel(
-                Text(body, no_wrap=False, overflow='fold', style='yellow'),
-                border_style='yellow',
+                body_text,
+                border_style="egg.tool" if themed else "yellow",
                 box=self._get_static_box(),
             )
         except Exception:
@@ -1538,6 +1552,7 @@ class PanelsMixin:
         border: str,
         *,
         fallback: Optional[str] = None,
+        title_align: str = "center",
     ) -> _StaticTranscriptRenderable:
         """Build a static transcript Panel renderable with a plain fallback."""
         if fallback is None:
@@ -1550,6 +1565,7 @@ class PanelsMixin:
             panel_renderable = Panel(
                 renderable,
                 title=panel_title,
+                title_align=title_align,
                 border_style=border,
                 box=self._get_static_box(),
             )
@@ -1589,9 +1605,9 @@ class PanelsMixin:
                 result="egg.foreground",
                 muted="egg.muted",
                 command="egg.accent",
-                read="bold cyan",
-                may_write="bold yellow",
-                unknown="egg.muted",
+                read="egg.tool_read",
+                may_write="egg.tool_write",
+                unknown="egg.tool_unknown",
             )
         return MediumToolStyles(
             call="bold cyan",
@@ -1601,19 +1617,19 @@ class PanelsMixin:
             result="white",
             muted="dim",
             command="bold cyan",
-            read="bold cyan",
+            read="bold green",
             may_write="bold yellow",
-            unknown="dim",
+            unknown="bold magenta",
         )
 
     def _tool_effect_border_style(self, effect: ToolEffect) -> str:
         """Return an advisory effect color while honoring the panel box policy."""
 
         if effect is ToolEffect.READ:
-            return "egg.accent" if getattr(self, '_rich_theme', None) is not None else "cyan"
+            return "egg.tool_read" if getattr(self, '_rich_theme', None) is not None else "green"
         if effect is ToolEffect.MAY_WRITE:
-            return "egg.tool_call" if getattr(self, '_rich_theme', None) is not None else "yellow"
-        return "egg.muted" if getattr(self, '_rich_theme', None) is not None else "dim"
+            return "egg.tool_write" if getattr(self, '_rich_theme', None) is not None else "yellow"
+        return "egg.tool_unknown" if getattr(self, '_rich_theme', None) is not None else "magenta"
 
     def _tool_effect_style(self, effect: ToolEffect) -> str:
         styles = self._medium_tool_styles()
@@ -1940,6 +1956,15 @@ class PanelsMixin:
                             tool_call_id=tc_id,
                         )
                 else:
+                    call_token_text = ""
+                    if pm_tokens["tool_calls"]:
+                        call_token_text = self._fmt_header_metric(pm_tokens['tool_calls'], 'tok')
+                    call_metadata = medium_metadata_lines(
+                        primary=(f"model: {model_key}" if model_key else "", call_token_text, msg_tps),
+                        identity=(ts_str, f"msg: {msg_id}" if msg_id else ""),
+                    ) if verbosity == 'medium' else ()
+                    if verbosity == 'medium':
+                        tc_title = f'[{tool_call_title_style}]Tool Calls{tool_call_count}[/{tool_call_title_style}]'
                     tool_calls_renderable = (
                         medium_tool_calls_text(
                             tcs,
@@ -1953,6 +1978,7 @@ class PanelsMixin:
                                 if self._syntax_highlighting_enabled()
                                 else None
                             ),
+                            metadata_lines=call_metadata,
                         )
                         if verbosity == 'medium'
                         else Text("\n".join(lines), no_wrap=False, overflow='fold', style=tool_call_body_style)
@@ -1971,6 +1997,7 @@ class PanelsMixin:
                         self._tool_effect_border_style(group_effect)
                         if verbosity == 'medium'
                         else tool_call_border_style,
+                        title_align="left" if verbosity == 'medium' else "center",
                     ))
             # Streamed-only metadata if present in snapshot (optional)
             tstream = m.get('tool_stream') or {}
@@ -2013,9 +2040,14 @@ class PanelsMixin:
                                         if self._syntax_highlighting_enabled()
                                         else None
                                     ),
+                                    metadata_lines=medium_metadata_lines(
+                                        primary=(f"model: {model_key}" if model_key else "", msg_tps),
+                                        identity=(ts_str, f"msg: {msg_id}" if msg_id else ""),
+                                    ),
                                 ),
-                                " | ".join(title_parts),
+                                out_title,
                                 streamed_result_border,
+                                title_align="left",
                             ))
                         else:
                             title_parts = [out_title]
@@ -2048,6 +2080,7 @@ class PanelsMixin:
                                 Text(txt, no_wrap=False, overflow='fold', style=tool_call_body_style),
                                 call_title,
                                 tool_call_border_style,
+                                title_align="left",
                             ))
                         elif verbosity == 'medium':
                             title_parts = [call_title]
@@ -2070,8 +2103,12 @@ class PanelsMixin:
                                         if self._syntax_highlighting_enabled()
                                         else None
                                     ),
+                                    metadata_lines=medium_metadata_lines(
+                                        primary=(f"model: {model_key}" if model_key else "", msg_tps),
+                                        identity=(ts_str, f"msg: {msg_id}" if msg_id else ""),
+                                    ),
                                 ),
-                                " | ".join(title_parts),
+                                call_title,
                                 tool_call_border_style,
                             ))
                         else:
@@ -2126,8 +2163,32 @@ class PanelsMixin:
                 result_call = self._tool_result_call_presentation(m)
                 result_effect = result_call.effect if result_call is not None else ToolEffect.UNKNOWN
                 effect_markup = self._tool_effect_style(result_effect)
-                title = f"[{effect_markup}]{result_effect.label}[/{effect_markup}]  {title}"
-                panel(
+                identity_name = result_call.name if result_call is not None else str(name)
+                identity_hint = shortest_unique_record_id_suffix(
+                    tool_call_id,
+                    list((getattr(self, '_show_record_ids', None) or {}).keys()) or [tool_call_id],
+                )
+                identity = rich_escape(identity_name)
+                if identity_hint:
+                    identity += f"({rich_escape(identity_hint)})"
+                title = f"[{effect_markup}]{' ' * 6}{result_effect.label}  {identity}[/{effect_markup}]"
+                metadata = m.get('output_optimizer') if isinstance(m.get('output_optimizer'), dict) else {}
+                optimizer_fields = []
+                raw_artifact = str(metadata.get('artifact_id') or '').strip()
+                for field in optimizer_summary.split(" · ") if optimizer_summary else ():
+                    if field.startswith("raw artifact "):
+                        raw_artifact = field.removeprefix("raw artifact ").strip()
+                    elif field and field != "raw available":
+                        optimizer_fields.append(field)
+                result_token_text = ""
+                if pm_tokens["content"]:
+                    result_token_text = self._fmt_header_metric(pm_tokens['content'], 'tok')
+                result_metadata = medium_metadata_lines(
+                    primary=(f"model: {model_key}" if model_key else "", result_token_text, msg_tps),
+                    detail=optimizer_fields,
+                    identity=(ts_str, f"msg: {msg_id}" if msg_id else "", f"raw: {raw_artifact}" if raw_artifact else ""),
+                )
+                items.append(self._static_transcript_panel_renderable(
                     medium_tool_result_text(
                         content,
                         styles=self._medium_tool_styles(),
@@ -2140,10 +2201,12 @@ class PanelsMixin:
                             if self._syntax_highlighting_enabled()
                             else None
                         ),
+                        metadata_lines=result_metadata,
                     ),
                     title,
                     self._tool_effect_border_style(result_effect),
-                )
+                    title_align="left",
+                ))
             else:
                 self._record_static_hidden_detail_in_state(
                     hidden_details,

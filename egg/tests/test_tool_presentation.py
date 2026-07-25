@@ -229,13 +229,26 @@ def test_medium_tool_result_styles_only_metadata_not_literal_output():
         styles=SEMANTIC_STYLES,
     )
 
-    assert rendered.plain == "  OUTPUT\n    [red]literal result[/red]"
+    assert rendered.plain == "        OUTPUT\n            [red]literal result[/red]"
     assert any(
-        rendered.plain[span.start:span.end] == "    [red]literal result[/red]"
+        rendered.plain[span.start:span.end] == "            [red]literal result[/red]"
         and str(span.style) == "white"
         for span in rendered.spans
     )
 
+
+def test_medium_metadata_is_grouped_into_semantic_lines():
+    from egg.tool_presentation import medium_metadata_lines
+
+    assert medium_metadata_lines(
+        primary=("model: Pro", "2.08k tok", "88 tps"),
+        detail=("Egg optimized", "62.8% saved"),
+        identity=("2026-07-25 18:55:41", "msg: abc", "raw: xyz"),
+    ) == (
+        "model: Pro · 2.08k tok · 88 tps",
+        "Egg optimized · 62.8% saved",
+        "2026-07-25 18:55:41 · msg: abc · raw: xyz",
+    )
 
 def test_medium_multiline_argument_does_not_reclassify_value_colons_as_keys():
     rendered = medium_tool_calls_text([
@@ -297,10 +310,10 @@ def test_medium_bash_result_highlights_sections_without_styling_metadata_as_code
         syntax_theme=SYNTAX_THEME,
     )
 
-    assert rendered.plain == '  STDOUT\n    {"ok": true}\n  STDERR\n    plain diagnostic'
+    assert rendered.plain == '        STDOUT\n            {"ok": true}\n        STDERR\n            plain diagnostic'
     styled = [(rendered.plain[span.start:span.end], str(span.style)) for span in rendered.spans]
-    assert ("  STDOUT", "dim") in styled
-    assert ("  STDERR", "dim") in styled
+    assert ("        STDOUT", "dim") in styled
+    assert ("        STDERR", "dim") in styled
     assert any('"ok"' in value and "yellow" in style for value, style in styled)
     assert any("plain diagnostic" in value and style == "white" for value, style in styled)
 
@@ -335,7 +348,7 @@ def test_medium_result_has_indented_channels_and_metadata():
         styles=SEMANTIC_STYLES,
     )
 
-    assert rendered.plain == "  STDOUT\n    one\n  STDERR\n    two"
+    assert rendered.plain == "        STDOUT\n            one\n        STDERR\n            two"
 
 
 def test_medium_tool_id_hint_expands_against_other_thread_records():

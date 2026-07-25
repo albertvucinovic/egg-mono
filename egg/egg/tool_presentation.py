@@ -118,6 +118,22 @@ def _effect_style(effect: ToolEffect, styles: MediumToolStyles) -> str:
     }[effect]
 
 
+def medium_metadata_lines(
+    *,
+    primary: Iterable[Any] = (),
+    detail: Iterable[Any] = (),
+    identity: Iterable[Any] = (),
+) -> tuple[str, ...]:
+    """Group tool metadata into semantic lines before terminal wrapping."""
+
+    lines: list[str] = []
+    for fields in (primary, detail, identity):
+        values = [str(value).strip() for value in fields if str(value or "").strip()]
+        if values:
+            lines.append(" · ".join(values))
+    return tuple(lines)
+
+
 def _json_scalar(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False)
@@ -328,6 +344,7 @@ def format_medium_tool_calls(
     *,
     inspect_message_id: str = "",
     record_ids: Iterable[Any] = (),
+    metadata_lines: Iterable[str] = (),
 ) -> str:
     """Format one assistant tool-call group with stable exact identities."""
 
@@ -344,7 +361,11 @@ def format_medium_tool_calls(
             f"  {index}. {call.effect.label}  {call.name}{identity}\n"
             f"{_indented(arguments, 6)}"
         )
-    rendered = "\n\n".join(blocks)
+    metadata = [f"  {line}" for line in metadata_lines if str(line or "").strip()]
+    rendered = "\n".join(metadata)
+    if rendered and blocks:
+        rendered += "\n\n"
+    rendered += "\n\n".join(blocks)
     message_id = str(inspect_message_id or "").strip()
     if message_id and any("… omitted " in block for block in blocks):
         rendered += f"\n\nInspect complete persisted record: /show {message_id}"
@@ -545,6 +566,7 @@ def medium_tool_calls_text(
     inspect_message_id: str = "",
     record_ids: Iterable[Any] = (),
     syntax_theme: Any = None,
+    metadata_lines: Iterable[str] = (),
 ) -> Text:
     """Return theme-aware Rich text for a grouped medium tool declaration."""
 
@@ -552,6 +574,13 @@ def medium_tool_calls_text(
     known_record_ids = [*record_ids, *(call.tool_call_id for call in calls if call.tool_call_id)]
     text = Text()
     any_bounded = False
+    for line in metadata_lines:
+        line = str(line or "").strip()
+        if not line:
+            continue
+        if text:
+            text.append("\n")
+        text.append(f"  {line}", style=styles.muted)
     for index, call in enumerate(calls, start=1):
         if text:
             text.append("\n\n")
@@ -590,14 +619,26 @@ def medium_tool_arguments_text(
     inspect_message_id: str = "",
     tool_name: str = "",
     syntax_theme: Any = None,
+    metadata_lines: Iterable[str] = (),
 ) -> Text:
-    return _tool_argument_text(
+    arguments = _tool_argument_text(
         arguments,
         styles,
         tool_name=tool_name,
         syntax_theme=syntax_theme,
         inspect_message_id=inspect_message_id,
     )
+    metadata = Text()
+    for line in metadata_lines:
+        line = str(line or "").strip()
+        if not line:
+            continue
+        _append_line(metadata, f"  {line}", styles.muted)
+    if not metadata:
+        return arguments
+    metadata.append("\n\n")
+    metadata.append_text(_prepend_text_margin(arguments, 4))
+    return _with_logical_margins(metadata, 6, 4, 2)
 
 
 def medium_tool_result_text(
@@ -610,6 +651,7 @@ def medium_tool_result_text(
     tool_name: str = "",
     tool_arguments: Any = None,
     syntax_theme: Any = None,
+    metadata_lines: Iterable[str] = (),
 ) -> Text:
     """Return a logically indented result with styled channel metadata."""
 
@@ -631,8 +673,16 @@ def medium_tool_result_text(
     metadata_break_pending = False
     has_explicit_channel = any(line in {"--- STDOUT ---", "--- STDERR ---"} for line in lines)
 
+    for line in metadata_lines:
+        line = str(line or "").strip()
+        if not line:
+            continue
+        _append_line(text, f"        {line}", styles.muted)
+    if text:
+        text.append("\n")
+
     if not has_explicit_channel:
-        text.append("  OUTPUT", style=styles.muted)
+        text.append("        OUTPUT", style=styles.muted)
 
     def flush_section() -> None:
         nonlocal section
@@ -646,13 +696,13 @@ def medium_tool_result_text(
         )
         if hint is None:
             for line in section:
-                _append_line(text, f"    {line}" if line else "", styles.result)
+                _append_line(text, f"            {line}" if line else "", styles.result)
         else:
             highlighted = syntax_highlight_text(body, hint.lexer, syntax_theme)
             for line in highlighted.split("\n"):
                 if text:
                     text.append("\n")
-                text.append("    ")
+                text.append("            ")
                 text.append_text(line)
         section = []
 
@@ -665,18 +715,18 @@ def medium_tool_result_text(
         if raw_line in {"--- STDOUT ---", "--- STDERR ---"}:
             flush_section()
             channel = "stdout" if raw_line == "--- STDOUT ---" else "stderr"
-            _append_line(text, f"  {channel.upper()}", styles.muted)
+            _append_line(text, f"        {channel.upper()}", styles.muted)
             continue
         if raw_line.startswith("… omitted "):
             flush_section()
-            _append_line(text, f"    {raw_line}", styles.muted)
+            _append_line(text, f"            {raw_line}", styles.muted)
             channel = ""
         elif raw_line.startswith("Inspect complete persisted record:"):
             flush_section()
             prefix, _separator, command = raw_line.partition(":")
             if text:
                 text.append("\n")
-            text.append(f"  {'Inspect' if prefix.startswith('Inspect') else prefix}:", style=styles.muted)
+            text.append(f"        {'Inspect' if prefix.startswith('Inspect') else prefix}:", style=styles.muted)
             text.append(command, style=styles.command)
             metadata_break_pending = True
             channel = ""
@@ -685,17 +735,17 @@ def medium_tool_result_text(
             command = raw_line[len("Raw output:"):]
             if text:
                 text.append("\n")
-            text.append("  Raw:", style=styles.muted)
+            text.append("        Raw:", style=styles.muted)
             text.append(command, style=styles.command)
             metadata_break_pending = True
             channel = ""
         elif raw_line in {"(no output)", "(no streamed output)"}:
             flush_section()
-            _append_line(text, f"    {raw_line}", styles.muted)
+            _append_line(text, f"            {raw_line}", styles.muted)
         else:
             section.append(raw_line)
     flush_section()
-    return text
+    return _with_logical_margins(text, 12, 8)
 
 
 __all__ = [
@@ -713,6 +763,7 @@ __all__ = [
     "format_tool_arguments",
     "medium_tool_arguments_text",
     "medium_tool_calls_text",
+    "medium_metadata_lines",
     "medium_tool_result_text",
     "tool_call_presentation",
     "tool_result_recovery_hint",

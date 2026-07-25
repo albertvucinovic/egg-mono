@@ -43,6 +43,7 @@ from .tool_presentation import (
     format_medium_tool_calls,
     format_medium_tool_result,
     format_medium_streamed_tool_result,
+    medium_metadata_lines,
     tool_call_presentation,
     tool_result_recovery_hint,
 )
@@ -584,13 +585,21 @@ class FormattingMixin:
                                 args_str = str(args or '')
                             lines.append(f"[ToolCall] {name} {args_str}")
                     elif verbosity == 'medium':
+                        metadata = medium_metadata_lines(
+                            primary=(
+                                f"model: {m.get('model_key')}" if m.get('model_key') else "",
+                                tps_text.strip(" ()"),
+                            ),
+                            identity=(f"msg: {msg_id}" if msg_id else "",),
+                        )
                         tool_calls_text = format_medium_tool_calls(
                             tcs,
                             inspect_message_id=msg_id,
                             record_ids=inspectable_record_ids,
+                            metadata_lines=metadata,
                         )
                         if tool_calls_text:
-                            lines.append(f"[Tool Calls ({len(tcs)}){tps_text}{msg_id_text}]\n{tool_calls_text}")
+                            lines.append(f"[Tool Calls ({len(tcs)})]\n{tool_calls_text}")
                     else:
                         tool_call_tokens = min_message_token_count(
                             per_message_tokens,
@@ -682,10 +691,21 @@ class FormattingMixin:
                                 recovery_hint=tool_result_recovery_hint(m),
                             )
                             lines.append(
-                                f"[{effect_label} {lower_label}: {name}({hint}){tps_text}{msg_id_text}]"
-                                + (f" [{optimizer_summary}]" if optimizer_summary else "")
+                                f"[      {effect_label} {lower_label}: {name}({hint})]"
                                 + "\n"
-                                + "\n".join(f"  {line}" for line in preview.splitlines())
+                                + "\n".join(
+                                    f"        {line}"
+                                    for line in medium_metadata_lines(
+                                        primary=(
+                                            f"model: {m.get('model_key')}" if m.get('model_key') else "",
+                                            tps_text.strip(" ()"),
+                                        ),
+                                        detail=(optimizer_summary,),
+                                        identity=(f"msg: {msg_id}" if msg_id else "",),
+                                    )
+                                )
+                                + "\n\n"
+                                + "\n".join(f"            {line}" for line in preview.splitlines())
                             )
                         else:
                             add_hidden_tool_result(

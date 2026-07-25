@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 import json
 from typing import Any, Dict, List, Optional, Set
 
+from rich.text import Text
+
 from eggthreads.inspection import shortest_unique_record_id_suffix
 from eggthreads.tool_effects import ToolEffect, classify_tool_effect
 
@@ -50,6 +52,17 @@ class MinToolCallSummary:
     name: str
     tool_call_id: str
     effect: ToolEffect = ToolEffect.UNKNOWN
+
+
+@dataclass(frozen=True)
+class MinToolStyles:
+    """Theme-resolved styles for compact tool identities."""
+
+    summary: str
+    separator: str
+    read: str
+    may_write: str
+    unknown: str
 
 
 @dataclass
@@ -162,6 +175,16 @@ def _plural(count: int, singular: str, plural: Optional[str] = None) -> str:
     return f"{count} {label}"
 
 
+def _min_tool_entry(call: MinToolCallSummary, record_ids: List[str]) -> str:
+    hint = shortest_unique_record_id_suffix(call.tool_call_id, record_ids)
+    suffix = {
+        ToolEffect.READ: " r",
+        ToolEffect.MAY_WRITE: " w",
+        ToolEffect.UNKNOWN: "",
+    }[call.effect]
+    return f"{call.name}({hint}){suffix}"
+
+
 def format_min_hidden_activity_summary(summary: MinHiddenActivitySummary) -> str:
     """Format one min-verbosity hidden activity summary item."""
     if not summary.has_activity():
@@ -182,13 +205,39 @@ def format_min_hidden_activity_summary(summary: MinHiddenActivitySummary) -> str
         record_ids = [*summary.record_ids, *(call.tool_call_id for call in summary.tool_calls)]
         calls: List[str] = []
         for call in summary.tool_calls:
-            hint = shortest_unique_record_id_suffix(call.tool_call_id, record_ids)
-            calls.append(f"{call.name}({hint}) · {call.effect.label}")
+            calls.append(_min_tool_entry(call, record_ids))
         text += "\nTools: " + ", ".join(calls)
     else:
         tool_names = summary.tool_names or summary._result_tool_names
         if tool_names:
             text += "\nTools: " + ", ".join(tool_names)
+    return text
+
+
+def min_hidden_activity_summary_text(
+    summary: MinHiddenActivitySummary,
+    *,
+    styles: MinToolStyles,
+) -> Text:
+    """Render a min summary with each complete tool identity color-coded."""
+
+    plain = format_min_hidden_activity_summary(summary)
+    if not plain or not summary.tool_calls:
+        return Text(plain, style=styles.summary)
+
+    counts, _separator, _tools = plain.partition("\nTools: ")
+    text = Text(counts, style=styles.summary)
+    text.append("\nTools: ", style=styles.summary)
+    record_ids = [*summary.record_ids, *(call.tool_call_id for call in summary.tool_calls)]
+    effect_styles = {
+        ToolEffect.READ: styles.read,
+        ToolEffect.MAY_WRITE: styles.may_write,
+        ToolEffect.UNKNOWN: styles.unknown,
+    }
+    for index, call in enumerate(summary.tool_calls):
+        if index:
+            text.append(", ", style=styles.separator)
+        text.append(_min_tool_entry(call, record_ids), style=effect_styles[call.effect])
     return text
 
 
