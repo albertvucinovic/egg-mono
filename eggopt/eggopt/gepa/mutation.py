@@ -83,10 +83,9 @@ class Mutator:
     @property
     def identity(self) -> Mapping[str, Any]:
         return {
-            "agent": self.agent.identity,
+            "agent": self.agent.task_identity,
             "instruction": self.instruction,
             "max_correction_turns": self.max_correction_turns,
-            "system_prompt": self.agent.system_prompt,
         }
 
 

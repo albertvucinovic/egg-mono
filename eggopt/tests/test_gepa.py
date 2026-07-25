@@ -983,6 +983,7 @@ class ScriptedMutationLLM:
     def __init__(self, replies):
         self.replies = iter(replies)
         self.calls = 0
+        self.models = []
 
     def set_model(self, key):
         self.current_model_key = key
@@ -992,6 +993,7 @@ class ScriptedMutationLLM:
 
     async def astream_chat(self, *_args, **_kwargs):
         self.calls += 1
+        self.models.append(self.current_model_key)
         yield {
             "type": "message",
             "role": "assistant",
@@ -1014,6 +1016,7 @@ def test_mutation_uses_actor_critic_with_deterministic_validation(
             json.dumps({"mutations": [{"instruction": "1"}]}),
         ]
     )
+    llm.current_model_key = "prediction-model"
     evaluator = Evaluator()
     result = optimize_anything(
         {"instruction": "0"},
@@ -1031,6 +1034,7 @@ def test_mutation_uses_actor_critic_with_deterministic_validation(
                 llm=llm,
                 identity={"model": "scripted-mutation"},
                 instruction="Improve the instruction.",
+                model_key="mutation-model",
                 allowed_tools=set(),
                 max_correction_turns=1,
             ),
@@ -1041,8 +1045,11 @@ def test_mutation_uses_actor_critic_with_deterministic_validation(
 
     assert result.best_candidate == {"instruction": "1"}
     assert llm.calls == 2
+    assert llm.models == ["mutation-model", "mutation-model"]
     db = ThreadsDB(tmp_path / "mutation" / ".egg" / "threads.sqlite")
     try:
+        from eggthreads import current_thread_model
+
         validation = db.conn.execute(
             "SELECT thread_id FROM threads WHERE name='Validation'"
         ).fetchone()
@@ -1050,6 +1057,7 @@ def test_mutation_uses_actor_critic_with_deterministic_validation(
             "SELECT thread_id FROM threads WHERE name='Mutation'"
         ).fetchone()
         assert validation and mutation
+        assert current_thread_model(db, mutation[0]) == "mutation-model"
         parent = db.conn.execute(
             "SELECT parent_id FROM children WHERE child_id=?", (mutation[0],)
         ).fetchone()
