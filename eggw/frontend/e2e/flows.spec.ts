@@ -134,6 +134,9 @@ async function mockThreadShell(
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
     await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
   });
+  await page.route(new RegExp(`/api/threads/${threadId}/input-history(?:\\?.*)?$`), async (route) => {
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: { items: [] } });
+  });
   await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
     await route.fulfill({ status: 200, headers: mockApiHeaders, json: { items: options.messages || [], snapshot_cursor: 0, next_before: null } });
   });
@@ -965,6 +968,126 @@ test.describe('Command Transcript Ordering', () => {
 });
 
 test.describe('Composer draft and autocomplete ownership', () => {
+  test('recalls input history only at multiline boundaries and restores the draft', async ({ page }) => {
+    const threadId = 'composer-history-thread';
+    const otherThreadId = 'composer-history-other';
+    for (const id of [threadId, otherThreadId]) await mockThreadShell(page, id);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/children`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [{ id: otherThreadId, name: otherThreadId, parent_id: threadId, has_children: false }],
+    }));
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { id: threadId, name: threadId, has_children: true },
+    }));
+    await page.unroute(`${TEST_API_BASE}/api/threads`);
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [
+        { id: threadId, name: threadId, has_children: true },
+        { id: otherThreadId, name: otherThreadId, parent_id: threadId, has_children: false },
+      ],
+    }));
+    let historyRequests = 0;
+    let recordedCommandRequest: Record<string, unknown> | undefined;
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/input-history**`, (route) => {
+      historyRequests += 1;
+      return route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { items: ['older input', 'newest\ninput'] },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, (route) => {
+      recordedCommandRequest = route.request().postDataJSON() as Record<string, unknown>;
+      return route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'ok',
+          command_id: 'history-command',
+          command_name: 'help',
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          elapsed_sec: 0,
+          input_recorded: true,
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible();
+    await input.fill('unsent\ndraft');
+    await expect.poll(() => historyRequests).toBeGreaterThan(0);
+
+    // Inside a multiline draft, arrows retain native cursor movement.
+    await input.evaluate((element) => (element as HTMLTextAreaElement).setSelectionRange(8, 8));
+    await input.press('ArrowUp');
+    await expect(input).toHaveValue('unsent\ndraft');
+
+    // First-line Up enters history; while traversing, Up/Down continue even
+    // when a recalled input itself has multiple lines.
+    await input.evaluate((element) => (element as HTMLTextAreaElement).setSelectionRange(2, 2));
+    await input.press('ArrowUp');
+    await expect(input).toHaveValue('newest\ninput');
+    await input.evaluate((element) => (element as HTMLTextAreaElement).setSelectionRange(0, 0));
+    await input.press('ArrowUp');
+    await expect(input).toHaveValue('older input');
+    await input.evaluate((element) => {
+      const textarea = element as HTMLTextAreaElement;
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    });
+    await input.press('ArrowDown');
+    await expect(input).toHaveValue('newest\ninput');
+    await input.evaluate((element) => {
+      const textarea = element as HTMLTextAreaElement;
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    });
+    await input.press('ArrowDown');
+    await expect(input).toHaveValue('unsent\ndraft');
+    await page.getByRole('treeitem', { name: new RegExp(otherThreadId) }).click();
+    await expect(page).toHaveURL(new RegExp(`/${otherThreadId}$`));
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`/${threadId}$`));
+    await expect(page.getByTestId('message-input')).toHaveValue('unsent\ndraft');
+
+    // Editing recalled text exits traversal; Down then remains a normal arrow.
+    const currentInput = page.getByTestId('message-input');
+    await currentInput.evaluate((element) => (element as HTMLTextAreaElement).setSelectionRange(2, 2));
+    await currentInput.press('ArrowUp');
+    await currentInput.fill('edited recalled input');
+    await currentInput.press('ArrowDown');
+    await expect(currentInput).toHaveValue('edited recalled input');
+
+    // Autocomplete remains the first owner of arrows while its popup is open.
+    await page.route(`${TEST_API_BASE}/api/autocomplete**`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { suggestions: [
+        { display: '/help', insert: '/help' },
+        { display: '/history', insert: '/history' },
+      ] },
+    }));
+    await currentInput.fill('/h');
+    await expect(page.getByText('/help', { exact: true })).toBeVisible();
+    await currentInput.evaluate((element) => (element as HTMLTextAreaElement).setSelectionRange(0, 0));
+    await currentInput.press('ArrowDown');
+    await expect(currentInput).toHaveValue('/h');
+    await expect(page.getByRole('option', { name: '/history' })).toHaveAttribute('aria-selected', 'true');
+
+    await currentInput.fill('/help');
+    await currentInput.press('Enter');
+    await expect.poll(() => recordedCommandRequest).toMatchObject({
+      command: '/help',
+      record_input: true,
+    });
+  });
+
   test('keeps rapid edits local, persists navigation drafts, and restores an async failed send', async ({ page }) => {
     const threadA = 'composer-thread-a';
     const threadB = 'composer-thread-b';

@@ -919,6 +919,87 @@ class TestMessageOperations:
         assert data["status"] == "sent"
         assert "message_id" in data
 
+        history = client.get(f"/api/threads/{thread_id}/input-history")
+        assert history.status_code == 200
+        assert history.json() == {"items": ["Hello, world!"]}
+
+    def test_input_history_recalls_text_but_not_old_attachments(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Input History"})
+        thread_id = create_resp.json()["id"]
+        upload = client.post(
+            f"/api/threads/{thread_id}/attachments",
+            files={"file": ("note.txt", b"hello", "text/plain")},
+        ).json()
+
+        response = client.post(
+            f"/api/threads/{thread_id}/messages",
+            json={"content": [{"type": "text", "text": "reuse text"}, upload["content_part"]]},
+        )
+        assert response.status_code == 200
+        assert client.get(f"/api/threads/{thread_id}/input-history").json() == {
+            "items": ["reuse text"]
+        }
+
+    def test_command_history_requires_composer_record_input_flag(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Command History"})
+        thread_id = create_resp.json()["id"]
+
+        toolbar = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/attachments"},
+        )
+        composer = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/help", "record_input": True},
+        )
+
+        assert toolbar.status_code == 200
+        assert composer.status_code == 200
+        assert composer.json()["input_recorded"] is True
+        assert client.get(f"/api/threads/{thread_id}/input-history").json() == {
+            "items": ["/help"]
+        }
+
+    def test_command_is_not_dispatched_when_history_persistence_fails(self, client, monkeypatch):
+        create_resp = client.post("/api/threads", json={"name": "Atomic Command History"})
+        thread_id = create_resp.json()["id"]
+        dispatched = []
+
+        monkeypatch.setattr(
+            "eggw.routes.commands.record_submitted_command",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        async def unexpected_dispatch(*_args, **_kwargs):
+            dispatched.append(True)
+            raise AssertionError("command dispatch must not run")
+
+        monkeypatch.setattr("eggw.routes.commands.dispatch_command", unexpected_dispatch)
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/help", "record_input": True},
+        )
+
+        assert response.status_code == 500
+        assert dispatched == []
+        event_types = [
+            row[0]
+            for row in core_state.db.conn.execute(
+                "SELECT type FROM events WHERE thread_id=? ORDER BY event_seq",
+                (thread_id,),
+            )
+        ]
+        assert "user_command.started" not in event_types
+
+    def test_input_history_validates_bounds_and_thread(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Bounded History"})
+        thread_id = create_resp.json()["id"]
+
+        assert client.get(f"/api/threads/{thread_id}/input-history?limit=0").status_code == 422
+        assert client.get(f"/api/threads/{thread_id}/input-history?limit=1001").status_code == 422
+        assert client.get("/api/threads/missing/input-history").status_code == 404
+
     def test_websocket_send_message_restarts_scheduler(self, client, monkeypatch):
         create_resp = client.post("/api/threads", json={"name": "WebSocket Thread"})
         thread_id = create_resp.json()["id"]
@@ -1332,6 +1413,7 @@ class TestMessageOperations:
         assert payload["command_name"] == "attachments"
         assert payload["command_id"]
         assert payload["elapsed_sec"] >= 0
+        assert payload["input_recorded"] is False
 
         rows = core_state.db.conn.execute(
             "SELECT type, payload_json FROM events WHERE thread_id=? AND type IN ('user_command.started', 'user_command.finished') ORDER BY event_seq ASC",
@@ -1342,6 +1424,7 @@ class TestMessageOperations:
         finished = json.loads(rows[1]["payload_json"])
         assert started["command_id"] == payload["command_id"]
         assert started["command_name"] == "attachments"
+        assert started["input_submission"] is False
         assert finished["command_id"] == payload["command_id"]
         assert finished["success"] is True
         assert finished["elapsed_sec"] >= 0

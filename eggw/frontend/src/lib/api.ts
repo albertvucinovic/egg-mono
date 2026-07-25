@@ -161,6 +161,17 @@ export async function sendMessage(threadId: string, content: EggMessageContent) 
   return res.json();
 }
 
+export async function fetchInputHistory(threadId: string, limit = 200): Promise<string[]> {
+  const params = new URLSearchParams({ limit: String(Math.trunc(limit)) });
+  const res = await apiFetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}/input-history?${params.toString()}`);
+  if (!res.ok) throw new Error("Failed to fetch input history");
+  const payload = await res.json();
+  if (!payload || !Array.isArray(payload.items) || payload.items.some((item: unknown) => typeof item !== "string")) {
+    throw new Error("Invalid input history response");
+  }
+  return payload.items;
+}
+
 export async function uploadAttachment(threadId: string, file: File): Promise<AttachmentUploadResponse> {
   const formData = new FormData();
   formData.append("file", file);
@@ -269,6 +280,7 @@ export interface CommandResponse {
   started_at?: string;
   finished_at?: string;
   elapsed_sec?: number;
+  input_recorded?: boolean;
 }
 
 export interface EditAnswerDraftResponse {
@@ -323,12 +335,13 @@ export async function createEditAnswerDraft(
 export async function executeCommand(
   threadId: string,
   command: string,
-  stagedAttachments: ContentPart[] = [],
+  options: { stagedAttachments?: ContentPart[]; recordInput?: boolean } = {},
 ): Promise<CommandResponse> {
+  const { stagedAttachments = [], recordInput = false } = options;
   const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/command`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command, staged_attachments: stagedAttachments }),
+    body: JSON.stringify({ command, staged_attachments: stagedAttachments, record_input: recordInput }),
   });
   if (!res.ok) throw new Error("Failed to execute command");
   return res.json();

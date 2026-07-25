@@ -34,7 +34,7 @@ from eggthreads import (  # type: ignore
     create_root_thread,
     create_child_thread,
     append_message,
-    append_normal_user_message,
+    append_submitted_user_message,
     delete_thread,
     interrupt_thread,
     list_threads,
@@ -183,6 +183,9 @@ class EggDisplayApp(
         self.command_registry = create_default_command_registry()
         register_theme_command(self.command_registry, self)
         self._staged_attachments_by_thread: Dict[str, List[Dict[str, Any]]] = {}
+        # The durable history itself lives in input.submitted events. This cache
+        # contains only per-thread traversal state/draft while Egg is running.
+        self._input_history_navigators: Dict[str, Any] = {}
         register_attachment_commands(self.command_registry, self)
         register_image_generation_command(self.command_registry, self)
         register_edit_answer_command(self.command_registry, self)
@@ -764,11 +767,20 @@ class EggDisplayApp(
         return current_thread_model(self.db, tid)
 
     # ---------------- Input and commands ----------------
+    def _set_current_thread(self, thread_id: str) -> None:
+        """Switch command context and leave input-history traversal behind."""
+
+        self.current_thread = thread_id
+        self._reset_input_history_navigation()
+
     def on_submit(self, text: str) -> bool:
         """
         Process user-submitted text.
         Returns True if the input panel should be cleared, False otherwise.
         """
+        if text.startswith(('/', '$')):
+            if not self._record_submitted_command(text):
+                return False
         prefix_registry = getattr(self, 'input_prefix_registry', None)
         if prefix_registry is not None and getattr(prefix_registry, 'is_async', lambda _text: False)(text):
             self._schedule_input_prefix(text)
@@ -798,7 +810,13 @@ class EggDisplayApp(
             content = build_message_content_with_attachments(text, staged)
         else:
             content = text
-        append_normal_user_message(self.db, self.current_thread, content)
+        append_submitted_user_message(
+            self.db,
+            self.current_thread,
+            content,
+            input_text=text,
+            source="egg",
+        )
         if staged:
             clear_staged_attachments_for_thread(self, self.current_thread)
         create_snapshot(self.db, self.current_thread)
@@ -844,7 +862,7 @@ class EggDisplayApp(
         return CommandContext(
             db=self.db,
             current_thread=self.current_thread,
-            set_current_thread=lambda tid: setattr(self, 'current_thread', tid),
+            set_current_thread=self._set_current_thread,
             log_system=self.log_system,
             console_print_block=self.console_print_block,
             start_scheduler=self.ensure_scheduler_for,

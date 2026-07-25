@@ -106,7 +106,10 @@ class TestCommandRegistryDispatch:
 
         egg_app.input_prefix_registry = PrefixRegistry()
         appended = []
-        monkeypatch.setattr("egg.app.append_normal_user_message", lambda db, tid, content: appended.append(("user", content)))
+        monkeypatch.setattr(
+            "egg.app.append_submitted_user_message",
+            lambda db, tid, content, **kwargs: appended.append(("user", content)),
+        )
         monkeypatch.setattr("egg.app.create_snapshot", lambda db, tid: None)
         monkeypatch.setattr(egg_app, "ensure_scheduler_for", lambda tid: None)
 

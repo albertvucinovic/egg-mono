@@ -45,6 +45,16 @@ from .projection import (
     ThreadProjectionError,
     load_thread_projection,
 )
+from .input_history import (
+    DEFAULT_INPUT_HISTORY_LIMIT,
+    INPUT_SUBMITTED_EVENT_TYPE,
+    MAX_INPUT_HISTORY_LIMIT,
+    InputHistoryNavigator,
+    append_submitted_user_message,
+    input_text_from_message_content,
+    list_input_history,
+    record_submitted_command,
+)
 from .inspection import (
     ShowRecordCandidate,
     ShowRecordResolution,
@@ -532,6 +542,10 @@ __all__ = [
     'create_eval_context', 'resolve_eval_context', 'dispose_eval_context',
     'repl_bridge_call_tool',
     'CommandContext', 'CommandRegistry', 'CommandResult', 'CommandSpec',
+    'DEFAULT_INPUT_HISTORY_LIMIT', 'INPUT_SUBMITTED_EVENT_TYPE', 'MAX_INPUT_HISTORY_LIMIT',
+    'InputHistoryNavigator', 'append_submitted_user_message',
+    'input_text_from_message_content', 'list_input_history',
+    'record_submitted_command',
     'attachment_part_from_input_metadata',
     'ApprovalPolicyRegistry', 'ApprovalRequest', 'ApprovalVerdict',
     'aggregate_approval_verdicts', 'create_approval_policy_registry', 'evaluate_approval_policies',

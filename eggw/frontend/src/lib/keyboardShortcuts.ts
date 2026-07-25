@@ -39,6 +39,7 @@ export const EGGW_SHORTCUT_GROUPS: readonly ShortcutHelpGroup[] = [
       { label: "Insert a newline in send mode", keys: "Shift+Enter" },
       { label: "Send in newline mode", keys: "Ctrl/Cmd+Enter" },
       { label: "Select an autocomplete item", keys: "Up/Down" },
+      { label: "Recall older/newer input at the first/last line", keys: "Up/Down" },
       { label: "Accept the selected autocomplete item", keys: "Tab" },
       { label: "Dismiss autocomplete", keys: "Esc" },
     ],

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .db import ThreadsDB
+from .input_history import INPUT_SUBMITTED_EVENT_TYPE
 
 
 PROJECTION_SNAPSHOT_VERSION = 2
@@ -23,6 +24,7 @@ _PROJECTION_METADATA_KEY = "_thread_projection"
 _SNAPSHOT_NOOP_EVENT_TYPES = frozenset({
     "control.pause",
     "control.resume",
+    INPUT_SUBMITTED_EVENT_TYPE,
     "model.switch",
     "provider_request.started",
     "runtime.config",

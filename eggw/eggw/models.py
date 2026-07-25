@@ -120,6 +120,10 @@ class CommandRequest(BaseModel):
     """Request to execute a command."""
     command: str  # The full command string (e.g., "/model GPT 5" or "$ ls -la")
     staged_attachments: Optional[List[Dict[str, Any]]] = None
+    record_input: bool = Field(
+        default=False,
+        description="Record this as reusable composer history; browser composer submissions only.",
+    )
 
 
 class CommandResponse(BaseModel):
@@ -140,6 +144,7 @@ class CommandLifecycleResponse(BaseModel):
     started_at: datetime
     finished_at: datetime
     elapsed_sec: float
+    input_recorded: bool = False
 
 
 class EditAnswerDraftRequest(BaseModel):

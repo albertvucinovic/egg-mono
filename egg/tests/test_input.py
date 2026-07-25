@@ -40,6 +40,23 @@ class TestHandleKeyCtrlD:
 
         assert egg_app.input_panel.get_text() == ""
 
+    def test_ctrl_d_failure_does_not_adopt_unpersisted_input_as_history(self, egg_app, monkeypatch):
+        from eggthreads import record_submitted_command
+
+        record_submitted_command(egg_app.db, egg_app.current_thread, "older", source="test")
+        egg_app.input_panel.editor.editor.set_text("failed prompt")
+        monkeypatch.setattr(
+            egg_app,
+            "on_submit",
+            lambda _text: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        monkeypatch.setattr(egg_app, "handle_pending_approval_answer", lambda *_args, **_kwargs: False)
+
+        assert egg_app.handle_key("\x04") is True
+        assert egg_app.input_panel.get_text() == ""
+        assert egg_app.handle_key("\x1b[A") is True
+        assert egg_app.input_panel.get_text() == "older"
+
     def test_ctrl_d_with_pending_approval_handles_approval_first(self, egg_app, monkeypatch):
         """Ctrl+D should process approval answer before normal send."""
         egg_app.input_panel.editor.editor.set_text("y")
@@ -453,6 +470,171 @@ class TestHandleKeyDelegation:
         assert result is True
         assert renderer.scrolled_to_bottom is False
         assert egg_app.input_panel.editor.editor.cursor.col == len("hello")
+
+    def test_boundary_arrows_recall_thread_history_and_restore_multiline_draft(self, egg_app):
+        from eggthreads import append_submitted_user_message, record_submitted_command
+
+        append_submitted_user_message(egg_app.db, egg_app.current_thread, "older\nmessage", source="test")
+        record_submitted_command(egg_app.db, egg_app.current_thread, "/newest", source="test")
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("unsent\ndraft")
+        editor.cursor.row = 0
+        editor.cursor.col = 3
+
+        assert egg_app.handle_key('\x1b[A') is True
+        assert editor.get_text() == "/newest"
+        assert (editor.cursor.row, editor.cursor.col) == (0, 0)
+        assert egg_app.handle_key('\x1b[A') is True
+        assert editor.get_text() == "older\nmessage"
+        editor.cursor.row = 1
+        editor.cursor.col = len("message")
+        assert egg_app.handle_key('\x1b[B') is True
+        assert editor.get_text() == "/newest"
+        assert egg_app.handle_key('\x1b[B') is True
+        assert editor.get_text() == "unsent\ndraft"
+        assert (editor.cursor.row, editor.cursor.col) == (1, len("draft"))
+
+    def test_arrows_inside_multiline_draft_keep_normal_cursor_movement(self, egg_app):
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("first\nmiddle\nlast")
+        editor.cursor.row = 1
+        editor.cursor.col = 2
+
+        assert egg_app.handle_key('\x1b[A') is True
+        assert editor.get_text() == "first\nmiddle\nlast"
+        assert editor.cursor.row == 0
+        editor.cursor.row = 1
+        assert egg_app.handle_key('\x1b[B') is True
+        assert editor.cursor.row == 2
+
+    def test_autocomplete_keeps_arrow_priority_over_input_history(self, egg_app):
+        from eggthreads import record_submitted_command
+
+        record_submitted_command(egg_app.db, egg_app.current_thread, "/history", source="test")
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("/h")
+        editor._completion_active = True
+        editor._completion_items = [
+            {"display": "/help", "insert": "/help"},
+            {"display": "/history", "insert": "/history"},
+        ]
+        editor._completion_index = 0
+
+        assert egg_app.handle_key('\x1b[B') is True
+        assert editor.get_text() == "/h"
+        assert editor._completion_index == 1
+
+    def test_editing_recalled_input_starts_a_fresh_history_traversal(self, egg_app):
+        from eggthreads import record_submitted_command
+
+        record_submitted_command(egg_app.db, egg_app.current_thread, "old", source="test")
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("draft")
+        editor.cursor.row = 0
+
+        assert egg_app.handle_key('\x1b[A') is True
+        assert editor.get_text() == "old"
+        assert egg_app.handle_key('!') is True
+        assert egg_app._input_history_navigator().active is False
+
+    def test_external_draft_replacement_exits_history_traversal(self, egg_app):
+        from egg.edit_answer import set_input_panel_text
+        from eggthreads import record_submitted_command
+
+        record_submitted_command(egg_app.db, egg_app.current_thread, "old", source="test")
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("draft")
+        editor.cursor.row = 0
+        assert egg_app.handle_key("\x1b[A") is True
+        assert egg_app._input_history_navigator().active is True
+
+        set_input_panel_text(egg_app, "external draft")
+
+        assert egg_app._input_history_navigator().active is False
+
+    def test_history_refresh_failure_keeps_cached_entries(self, egg_app, monkeypatch):
+        from eggthreads import record_submitted_command
+
+        record_submitted_command(egg_app.db, egg_app.current_thread, "cached", source="test")
+        navigator = egg_app._input_history_navigator()
+        monkeypatch.setattr(
+            "egg.input.list_input_history",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        egg_app._reset_input_history_navigation(reload_entries=True)
+
+        assert navigator.older("draft") == "cached"
+
+    def test_scrollback_action_does_not_discard_recalled_draft(self, egg_app):
+        from eggthreads import record_submitted_command
+
+        record_submitted_command(egg_app.db, egg_app.current_thread, "old", source="test")
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("draft")
+        editor.cursor.row = 0
+        assert egg_app.handle_key('\x1b[A') is True
+        assert egg_app._input_history_navigator().active is True
+
+        assert egg_app.handle_key('\x1b[5~') is True
+        assert egg_app._input_history_navigator().active is True
+        assert egg_app.handle_key('\x1b[B') is True
+        assert editor.get_text() == "draft"
+
+    def test_submitting_recalled_command_adds_one_new_history_entry(self, egg_app):
+        from eggthreads import list_input_history, record_submitted_command
+
+        record_submitted_command(egg_app.db, egg_app.current_thread, "/help", source="test")
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("")
+        editor.cursor.row = 0
+
+        assert egg_app.handle_key('\x1b[A') is True
+        assert editor.get_text() == "/help"
+        assert egg_app.handle_key('\r') is True
+        assert list_input_history(egg_app.db, egg_app.current_thread)[-2:] == ["/help", "/help"]
+
+    def test_submitted_message_is_available_on_the_next_up_press(self, egg_app):
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("new prompt")
+
+        assert egg_app.handle_key("\r") is True
+        assert editor.get_text() == ""
+        assert egg_app.handle_key("\x1b[A") is True
+        assert editor.get_text() == "new prompt"
+
+    def test_command_is_not_dispatched_when_history_persistence_fails(self, egg_app, monkeypatch):
+        dispatched = []
+        monkeypatch.setattr(
+            "egg.input.record_submitted_command",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        monkeypatch.setattr(egg_app, "handle_command", dispatched.append)
+
+        assert egg_app.on_submit("/help") is False
+        assert dispatched == []
+        assert any("Failed to record input history" in message for message in egg_app._system_log)
+
+    def test_input_history_is_thread_scoped_across_switches(self, egg_app):
+        from eggthreads import append_message, create_root_thread, record_submitted_command
+
+        first = egg_app.current_thread
+        second = create_root_thread(egg_app.db, name="second")
+        append_message(egg_app.db, second, "system", "system")
+        record_submitted_command(egg_app.db, first, "first input", source="test")
+        record_submitted_command(egg_app.db, second, "second input", source="test")
+
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("")
+        editor.cursor.row = 0
+        assert egg_app.handle_key('\x1b[A') is True
+        assert editor.get_text() == "first input"
+
+        egg_app._set_current_thread(second)
+        editor.set_text("")
+        editor.cursor.row = 0
+        assert egg_app.handle_key('\x1b[A') is True
+        assert editor.get_text() == "second input"
 
     def test_unknown_key_delegates_to_editor(self, egg_app, monkeypatch):
         """Unknown keys should be delegated to the editor."""

@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Paperclip, Send, Loader2, Terminal, StopCircle, X, ImageIcon } from "lucide-react";
-import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, uploadAttachment, generateThreadImage, attachmentUrl, fetchImageGenerationModels } from "@/lib/api";
+import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, fetchInputHistory, uploadAttachment, generateThreadImage, attachmentUrl, fetchImageGenerationModels } from "@/lib/api";
 import type { AutocompleteSuggestion, ImageGenerationRequest } from "@/lib/api";
 import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, isImageContentPart, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
 import { useAppStore, type ShowRecordTarget } from "@/lib/store";
@@ -17,6 +17,15 @@ import {
 } from "@/lib/transcript";
 import { AutocompleteRequestCoordinator, isAutocompleteEligible } from "@/lib/autocomplete";
 import { ComposerDraftBuffer, restoreFailedDraft } from "@/lib/composerDraft";
+import {
+  INPUT_HISTORY_LIMIT,
+  initialInputHistoryState,
+  inputHistoryQueryKey,
+  isTextareaHistoryBoundary,
+  navigateInputHistory,
+  resetInputHistory,
+  type InputHistoryState,
+} from "@/lib/inputHistory";
 import { beginOptimisticSend, completeOptimisticSend, createClientOperationId, rollbackOptimisticSend, type SendMessageOperation } from "@/lib/messageOperations";
 import { ProtectedImage } from "@/components/ProtectedFileLink";
 import clsx from "clsx";
@@ -119,6 +128,9 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   const dragDepthRef = useRef(0);
   const pendingCommandOpsRef = useRef(new Map<string, number>());
   const pendingImageOpsRef = useRef(new Map<string, number>());
+  const inputHistoryByThreadRef = useRef(new Map<string, InputHistoryState>());
+  const inputHistoryLoadedThreadsRef = useRef(new Set<string>());
+  const appliedInputHistoryDataByThreadRef = useRef(new Map<string, unknown>());
   const router = useRouter();
   const queryClient = useQueryClient();
   const setShowRecordTarget = useAppStore((state) => state.setShowRecordTarget);
@@ -170,6 +182,32 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   const setDisplayVerbosity = useAppStore((state) => state.setDisplayVerbosity);
   const enterMode = useAppStore((state) => state.enterMode);
 
+  const inputHistoryState = useCallback((sourceThreadId: string): InputHistoryState => {
+    let state = inputHistoryByThreadRef.current.get(sourceThreadId);
+    if (!state) {
+      state = initialInputHistoryState();
+      inputHistoryByThreadRef.current.set(sourceThreadId, state);
+    }
+    return state;
+  }, []);
+
+  const resetHistoryNavigation = useCallback((sourceThreadId = currentThreadId) => {
+    const state = inputHistoryState(sourceThreadId);
+    if (state.position === null && !state.draft) return;
+    inputHistoryByThreadRef.current.set(sourceThreadId, resetInputHistory(state));
+  }, [currentThreadId, inputHistoryState]);
+
+  const appendInputHistoryEntry = useCallback((sourceThreadId: string, text?: string) => {
+    const normalized = text?.trim();
+    if (!normalized) return;
+    const entries = inputHistoryState(sourceThreadId).entries;
+    inputHistoryByThreadRef.current.set(
+      sourceThreadId,
+      initialInputHistoryState([...entries, normalized].slice(-INPUT_HISTORY_LIMIT)),
+    );
+    inputHistoryLoadedThreadsRef.current.add(sourceThreadId);
+  }, [inputHistoryState]);
+
   const { data: threadState } = useQuery({
     queryKey: ["threadState", currentThreadId],
     queryFn: () => fetchThreadState(currentThreadId!),
@@ -177,6 +215,24 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   });
   const activeGetUserWait = Boolean(threadState?.active_get_user_wait);
   const getUserWaitingNote = threadState?.get_user_waiting_note;
+
+  const inputHistoryQuery = useQuery({
+    queryKey: inputHistoryQueryKey(currentThreadId),
+    queryFn: () => fetchInputHistory(currentThreadId, INPUT_HISTORY_LIMIT),
+    enabled: Boolean(currentThreadId),
+  });
+  if (
+    inputHistoryQuery.isSuccess
+    && inputHistoryQuery.data !== undefined
+    && appliedInputHistoryDataByThreadRef.current.get(currentThreadId) !== inputHistoryQuery.data
+  ) {
+    appliedInputHistoryDataByThreadRef.current.set(currentThreadId, inputHistoryQuery.data);
+    inputHistoryByThreadRef.current.set(
+      currentThreadId,
+      initialInputHistoryState(inputHistoryQuery.data),
+    );
+    inputHistoryLoadedThreadsRef.current.add(currentThreadId);
+  }
 
   const { data: imageModelsData } = useQuery({
     queryKey: ["imageModels"],
@@ -203,6 +259,13 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       completeOptimisticSend(queryClient, operation, response.message_id);
       queryClient.invalidateQueries({ queryKey: ["threadState", operation.threadId] });
       addSystemLog("Message sent", "success");
+      const submittedText = typeof operation.content === "string"
+        ? operation.content
+        : operation.content.find(
+            (part): part is Extract<typeof part, { type: "text" }> => part.type === "text",
+          )?.text;
+      appendInputHistoryEntry(operation.threadId, submittedText);
+      void queryClient.invalidateQueries({ queryKey: inputHistoryQueryKey(operation.threadId) });
     },
     onError: (_error, operation) => {
       const currentDraft = draftBufferRef.current?.currentThreadId === operation.threadId
@@ -317,7 +380,16 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
 
   // Command mutation
   const commandMutation = useMutation({
-    mutationFn: ({ threadId: sourceThreadId, command, staged }: { threadId: string; operationId: string; command: string; draft: string; staged: AttachmentContentPart[] }) => executeCommand(sourceThreadId, command, staged),
+    mutationFn: ({ threadId: sourceThreadId, command, staged }: {
+      threadId: string;
+      operationId: string;
+      command: string;
+      draft: string;
+      staged: AttachmentContentPart[];
+    }) => executeCommand(sourceThreadId, command, {
+      stagedAttachments: staged,
+      recordInput: true,
+    }),
     onMutate: ({ threadId: sourceThreadId, operationId: commandOperationId, command }: { threadId: string; operationId: string; command: string; draft: string; staged: AttachmentContentPart[] }) => {
       const startedAt = Date.now();
       pendingCommandOpsRef.current.set(commandOperationId, startedAt);
@@ -357,6 +429,10 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       if (variables.threadId === currentThreadId) {
         setCommandPendingStartedAtMs(pendingCommandOpsRef.current.values().next().value ?? null);
       }
+      if (response.input_recorded) {
+        appendInputHistoryEntry(variables.threadId, variables.command);
+      }
+      void queryClient.invalidateQueries({ queryKey: inputHistoryQueryKey(variables.threadId) });
       if (response.success) {
         queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
         const isEditAnswerModalAction = response.data?.action === "open_edit_answer_modal";
@@ -415,6 +491,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         if (response.data?.action === "request_completion" && variables.threadId === currentThreadId) {
           const restored = typeof response.data?.input === "string" ? response.data.input : variables.command;
           setComposerDraft(variables.threadId, restored);
+          resetHistoryNavigation(variables.threadId);
           setInput(restored);
           window.setTimeout(() => {
             const textarea = textareaRef.current;
@@ -517,6 +594,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
               const end = textarea.selectionEnd || 0;
               const before = textarea.value.substring(0, start);
               const after = textarea.value.substring(end);
+              resetHistoryNavigation(variables.threadId);
               setInput(before + text + after);
               setTimeout(() => {
                 textarea.setSelectionRange(start + text.length, start + text.length);
@@ -569,7 +647,9 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
     if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
     autocompleteRef.current?.cancel();
     const cursorPos = textareaRef.current?.selectionStart ?? input.length;
-    if (!currentThreadId || !isAutocompleteEligible(input, cursorPos)) {
+    const autocompleteEligible = isAutocompleteEligible(input, cursorPos);
+    const navigatingHistory = inputHistoryState(currentThreadId).position !== null;
+    if (!currentThreadId || navigatingHistory || !autocompleteEligible) {
       setAutocompleteLoading(false);
       setSuggestions([]);
       setShowSuggestions(false);
@@ -596,7 +676,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
       autocompleteRef.current?.cancel();
     };
-  }, [input, currentThreadId]);
+  }, [input, currentThreadId, inputHistoryState]);
 
   // Apply suggestion - use replace value to determine how much to delete
   const applySuggestion = useCallback((suggestion: AutocompleteSuggestion) => {
@@ -643,6 +723,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
     const after = input.slice(tokenEnd);
     const newValue = before + suggestion.insert + after;
 
+    resetHistoryNavigation(currentThreadId);
     setInput(newValue);
     setSuggestions([]);
     setShowSuggestions(false);
@@ -653,7 +734,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       textarea.setSelectionRange(newCursorPos, newCursorPos);
       textarea.focus();
     }, 0);
-  }, [input]);
+  }, [currentThreadId, input, resetHistoryNavigation]);
 
   // Persist edits only at coalesced/safe boundaries. Store publications from
   // external owners hydrate local state without being written back over them.
@@ -664,7 +745,13 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
 
   useEffect(() => {
     const external = draftBufferRef.current!.acceptExternal(currentThreadId, storedInput);
-    if (external !== null) setLocalInput(external);
+    if (external !== null) {
+      const history = inputHistoryByThreadRef.current.get(currentThreadId);
+      if (history) {
+        inputHistoryByThreadRef.current.set(currentThreadId, resetInputHistory(history));
+      }
+      setLocalInput(external);
+    }
   }, [currentThreadId, storedInput]);
 
   useEffect(() => {
@@ -774,6 +861,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
     // If an external insertion raced the click/key event, hydrate it and let
     // the operator review it instead of sending and clearing a stale snapshot.
     if (flushDraft() !== null) return;
+    resetHistoryNavigation(currentThreadId);
     if (isCommand(trimmed)) {
       const commandOperationId = createClientOperationId("cmd");
       setStagedAttachments(currentThreadId, []);
@@ -884,6 +972,47 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         e.preventDefault();
         setShowSuggestions(false);
         return;
+      }
+    }
+
+    if (
+      (e.key === "ArrowUp" || e.key === "ArrowDown")
+      && !e.altKey
+      && !e.ctrlKey
+      && !e.metaKey
+      && !e.shiftKey
+    ) {
+      const textarea = e.currentTarget as HTMLTextAreaElement;
+      const direction = e.key === "ArrowUp" ? "older" : "newer";
+      if (!inputHistoryLoadedThreadsRef.current.has(currentThreadId)) return;
+      const history = inputHistoryState(currentThreadId);
+      const autocompleteOwnsArrows = history.position === null && (
+        (showSuggestions && suggestions.length > 0)
+        || (
+          autocompleteLoading
+          && (input.trimStart().startsWith("/") || input.trimStart().startsWith("$"))
+        )
+      );
+      if (
+        !autocompleteOwnsArrows
+        && isTextareaHistoryBoundary(textarea, direction)
+      ) {
+        const result = navigateInputHistory(history, direction, input);
+        if (result) {
+          e.preventDefault();
+          inputHistoryByThreadRef.current.set(currentThreadId, result.state);
+          // Recalled text is a view over history, not the durable draft. The
+          // first actual edit publishes it as a new draft through onChange.
+          setLocalInput(result.value);
+          window.setTimeout(() => {
+            const liveTextarea = textareaRef.current;
+            if (!liveTextarea) return;
+            const cursor = direction === "older" ? 0 : result.value.length;
+            liveTextarea.setSelectionRange(cursor, cursor);
+            liveTextarea.focus();
+          }, 0);
+          return;
+        }
       }
     }
 
@@ -1185,7 +1314,10 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         <textarea
           ref={textareaRef}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            resetHistoryNavigation(currentThreadId);
+            setInput(e.target.value);
+          }}
           onBlur={flushDraft}
           onPaste={handlePaste}
           onKeyDown={handleKeyDown}

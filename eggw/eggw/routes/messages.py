@@ -13,15 +13,18 @@ from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
 
 from eggthreads import (
     COMPACTION_EVENT_TYPE,
+    DEFAULT_INPUT_HISTORY_LIMIT,
+    MAX_INPUT_HISTORY_LIMIT,
     SnapshotBuilder,
     ToolOutputPublicationPlan,
     ThreadsDB,
-    append_normal_user_message,
+    append_submitted_user_message,
     build_tool_call_states,
     create_snapshot,
     finalize_tool_output,
     get_active_get_user_message_waiting_note,
     interrupt_thread,
+    list_input_history,
 )
 from eggthreads.attachment_staging import safe_display_filename, save_attachment_bytes_for_thread
 from eggthreads.content_parts import content_to_plain_text
@@ -61,6 +64,18 @@ router = APIRouter(prefix="/api/threads", tags=["messages"])
 
 GET_USER_MESSAGE_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
 GET_USER_INTERRUPT_CONTENT = "User interrupted get_user_message_while_preserving_llm_turn."
+
+
+def _get_input_history_sync(db_path: str, thread_id: str, limit: int) -> Optional[list[str]]:
+    """Read bounded input history on a dedicated worker connection."""
+
+    fresh_db = ThreadsDB(db_path)
+    try:
+        if fresh_db.get_thread_metadata(thread_id) is None:
+            return None
+        return list_input_history(fresh_db, thread_id, limit=limit)
+    finally:
+        fresh_db.conn.close()
 
 
 def _attachment_workspace() -> Path:
@@ -445,6 +460,31 @@ async def get_messages(
     return [item.model_dump(mode="json") for item in snapshot.items]
 
 
+@router.get("/{thread_id}/input-history")
+async def get_input_history(
+    thread_id: str,
+    limit: int = Query(
+        default=DEFAULT_INPUT_HISTORY_LIMIT,
+        ge=1,
+        le=MAX_INPUT_HISTORY_LIMIT,
+    ),
+):
+    """Return reusable human inputs, oldest to newest, for one thread."""
+
+    if not core.db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    history = await asyncio.get_running_loop().run_in_executor(
+        None,
+        _get_input_history_sync,
+        str(core.db.path),
+        thread_id,
+        limit,
+    )
+    if history is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return {"items": history}
+
+
 @router.post("/{thread_id}/messages")
 async def send_message(thread_id: str, request: SendMessageRequest):
     """Send a message to a thread."""
@@ -456,7 +496,12 @@ async def send_message(thread_id: str, request: SendMessageRequest):
         raise HTTPException(status_code=404, detail="Thread not found")
 
     # Append user message
-    msg_id = append_normal_user_message(core.db, thread_id, request.content)
+    msg_id = append_submitted_user_message(
+        core.db,
+        thread_id,
+        request.content,
+        source="eggw",
+    )
 
     # Ensure scheduler is running for this thread's root
     ensure_scheduler_for(thread_id)

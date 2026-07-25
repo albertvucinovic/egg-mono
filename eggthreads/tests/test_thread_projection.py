@@ -66,6 +66,18 @@ def test_projection_without_snapshot_is_bounded_and_preserves_provider_payload_m
     assert second not in [item.msg_id for item in projection.messages]
 
 
+def test_input_submission_event_extends_snapshot_without_changing_messages(tmp_path) -> None:
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="input-history-noop")
+    ts.append_message(db, thread_id, "user", "visible")
+    ts.create_snapshot(db, thread_id)
+
+    ts.record_submitted_command(db, thread_id, "/help", source="test")
+    projection = ts.load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
+
+    assert [message.payload["content"] for message in projection.messages] == ["visible"]
+
+
 def test_snapshot_seed_plus_tail_matches_full_replay_for_edit_delete_continue_and_provider_fields(tmp_path) -> None:
     db = _make_db(tmp_path)
     thread_id = ts.create_root_thread(db, name="projection-tail")
@@ -316,6 +328,19 @@ def test_ra1_provider_context_matches_with_no_stale_and_current_snapshot(tmp_pat
     assert [item[:2] + item[4:] for item in _provider_signature(without_snapshot)] == [
         item[:2] + item[4:] for item in _provider_signature(stale_snapshot)
     ] == [item[:2] + item[4:] for item in _provider_signature(current_snapshot)]
+
+
+def test_input_history_marker_never_reaches_encrypted_provider_payload(tmp_path) -> None:
+    db = _make_db(tmp_path, "history-provider-boundary.sqlite")
+    thread_id = ts.create_root_thread(db, name="history provider boundary")
+    ts.append_message(db, thread_id, "system", "standing rules")
+    ts.append_submitted_user_message(db, thread_id, "operator prompt", source="test")
+
+    provider_messages = _run_ra1_and_capture(db, thread_id)
+
+    assert provider_messages[-1]["content"] == "operator prompt"
+    assert "input_history_recorded" not in provider_messages[-1]
+
 
 
 def test_ra1_provider_context_stays_at_captured_projection_watermark(tmp_path, monkeypatch) -> None:

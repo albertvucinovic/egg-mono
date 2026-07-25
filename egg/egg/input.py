@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Optional
+from typing import Optional
 
-from eggthreads import interrupt_thread
+from eggthreads import InputHistoryNavigator, interrupt_thread, list_input_history, record_submitted_command
 
 from .utils import read_clipboard
 from eggthreads import sanitize_terminal_text
@@ -65,7 +65,7 @@ KEYBOARD_SHORTCUTS_HELP = """Keyboard shortcuts:
     Ctrl+C — Interrupt active work; otherwise clear a draft; on idle empty input, quit.
   Input and completion:
     Tab — Accept the selected autocomplete suggestion.
-    Up/Down — Move between input lines or autocomplete suggestions.
+    Up/Down — Move between lines/suggestions; at first/last line, recall older/newer inputs.
     Left/Right — Move the cursor; Home/End — move to the line boundary.
     Esc — Dismiss autocomplete.
     Backspace/Delete — Delete before/at the cursor.
@@ -120,6 +120,170 @@ class InputMixin:
 
     # The command help renderer discovers this optional client-specific text.
     keyboard_shortcuts_help = KEYBOARD_SHORTCUTS_HELP
+
+    def _input_history_navigator(self) -> InputHistoryNavigator:
+        navigators = getattr(self, '_input_history_navigators', None)
+        if not isinstance(navigators, dict):
+            navigators = {}
+            self._input_history_navigators = navigators
+        thread_id = str(self.current_thread)
+        navigator = navigators.get(thread_id)
+        if navigator is None:
+            try:
+                entries = list_input_history(self.db, thread_id)
+            except Exception as exc:
+                entries = []
+                self.log_system(f'Failed to load input history: {exc}')
+            navigator = InputHistoryNavigator(entries)
+            navigators[thread_id] = navigator
+        return navigator
+
+    def _reset_input_history_navigation(self, *, reload_entries: bool = False) -> None:
+        navigators = getattr(self, '_input_history_navigators', None)
+        if not isinstance(navigators, dict):
+            return
+        navigator = navigators.get(str(getattr(self, 'current_thread', '')))
+        if navigator is None:
+            return
+        if reload_entries:
+            try:
+                entries = list_input_history(self.db, str(self.current_thread))
+            except Exception as exc:
+                self.log_system(f'Failed to refresh input history: {exc}')
+                navigator.reset()
+                return
+            navigator.replace_entries(entries)
+        else:
+            navigator.reset()
+
+    def _replace_input_from_history(self, text: str, *, at_start: bool) -> None:
+        editor = self.input_panel.editor.editor
+        editor.set_text(text)
+        lines = getattr(editor, 'lines', text.split('\n') if text else [''])
+        if at_start:
+            editor.cursor.row = 0
+            editor.cursor.col = 0
+        else:
+            editor.cursor.row = max(0, len(lines) - 1)
+            editor.cursor.col = len(lines[editor.cursor.row]) if lines else 0
+        editor._clamp_cursor()
+        if at_start:
+            self.input_panel._scroll_top = 0
+        else:
+            try:
+                viewport = max(1, int(getattr(self.input_panel, 'current_height', 8)) - 2)
+            except Exception:
+                viewport = 6
+            self.input_panel._scroll_top = max(0, int(editor.cursor.row) - viewport + 1)
+        self.input_panel._hscroll_left = 0
+
+    def _input_navigation_key(self, key: str) -> bool:
+        """Return whether *key* navigates without mutating the input."""
+
+        cursor_keys = {
+            'up', 'down', 'left', 'right', 'home', 'end',
+            '\x1b[A', '\x1b[B', '\x1b[C', '\x1b[D',
+            '\x1b[H', '\x1b[F', '\x1bOH', '\x1bOF', '\x1b[1~', '\x1b[4~',
+            '\x1b[5~', '\x1b[5;2~', '\x1b[6~', '\x1b[6;2~',
+        }
+        if key in cursor_keys:
+            return True
+        try:
+            import readchar  # type: ignore
+
+            return key in {
+                getattr(readchar.key, name, object())
+                for name in ('UP', 'DOWN', 'LEFT', 'RIGHT', 'HOME', 'END')
+            }
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_up_key(key: str) -> bool:
+        if key in ('\x1b[A', 'up'):
+            return True
+        try:
+            import readchar  # type: ignore
+
+            return key == getattr(readchar.key, 'UP', object())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_down_key(key: str) -> bool:
+        if key in ('\x1b[B', 'down'):
+            return True
+        try:
+            import readchar  # type: ignore
+
+            return key == getattr(readchar.key, 'DOWN', object())
+        except Exception:
+            return False
+
+    def _navigate_input_history(self, direction: str) -> bool:
+        editor = self.input_panel.editor.editor
+        if bool(getattr(editor, '_completion_active', False) or getattr(editor, '_completion_pending', False)):
+            return False
+        cursor = getattr(editor, 'cursor', None)
+        lines = getattr(editor, 'lines', None)
+        if cursor is None or not isinstance(lines, list) or not lines:
+            return False
+        navigator = self._input_history_navigator()
+        if direction == 'older':
+            if int(cursor.row) != 0:
+                return False
+            current_text = editor.get_text() if hasattr(editor, 'get_text') else self.input_panel.get_text()
+            recalled = navigator.older(current_text)
+            if recalled is None:
+                return False
+            self._replace_input_from_history(recalled, at_start=True)
+            return True
+        if int(cursor.row) != len(lines) - 1:
+            return False
+        recalled = navigator.newer()
+        if recalled is None:
+            return False
+        self._replace_input_from_history(recalled, at_start=False)
+        return True
+
+    def _record_submitted_command(self, text: str) -> bool:
+        """Persist one command submission before dispatching it.
+
+        Command execution must not proceed when the durable history write fails:
+        otherwise a successfully executed command could disappear from reusable
+        input history, violating the submission invariant introduced by this
+        feature.
+        """
+
+        try:
+            record_submitted_command(self.db, self.current_thread, text, source='egg')
+        except Exception as exc:
+            self.log_system(f'Failed to record input history: {exc}')
+            return False
+        self._reset_input_history_navigation(reload_entries=True)
+        return True
+
+    def _note_input_submission(self, text: str, *, reload_entries: bool = True) -> None:
+        # Commands refresh immediately in _record_submitted_command(). Normal
+        # messages publish input.submitted in the same process and should be
+        # available on the very next Up press without waiting for the watcher.
+        if reload_entries and text and not text.startswith(('/', '$')):
+            self._reset_input_history_navigation(reload_entries=True)
+            return
+        self._reset_input_history_navigation()
+
+    def _finish_input_submission(
+        self,
+        text: str,
+        *,
+        should_clear: bool,
+        reload_entries: bool = True,
+    ) -> None:
+        if not should_clear:
+            return
+        self._note_input_submission(text, reload_entries=reload_entries)
+        self.input_panel.clear_text()
+        self.input_panel.increment_message_count()
 
     def handle_key(self, key: str) -> bool:
         """Handle a single key press from the input panel.
@@ -193,6 +357,7 @@ class InputMixin:
                 ed_wrapper = self.input_panel.editor
                 paste_active = bool(getattr(ed_wrapper, '_bracketed_paste_active', False))
                 if paste_active or '\x1b[200~' in key or '\x1b[201~' in key:
+                    self._reset_input_history_navigation()
                     return bool(ed_wrapper._handle_key(key))
             except Exception:
                 pass
@@ -202,6 +367,7 @@ class InputMixin:
         # main loop calls flush_pending_esc_if_stale() after each input
         # drain to complete standalone Esc presses that see no follow-up.
         if isinstance(key, str) and key == '\x1b':
+            self._reset_input_history_navigation()
             self._pending_esc = True
             self._pending_esc_time = now
             return True
@@ -343,6 +509,7 @@ class InputMixin:
 
             # No active work. If there's text in the input panel, clear it.
             if not text_empty:
+                self._reset_input_history_navigation()
                 self.input_panel.clear_text()
                 try:
                     self.log_system('Input cleared with Ctrl+C (press Ctrl+C again on empty input to quit).')
@@ -361,7 +528,9 @@ class InputMixin:
             # First, try to handle any pending approval using the current
             # input text as the answer. This works in both /enterMode
             # send and newline.
-            if self.handle_pending_approval_answer(self.input_panel.get_text(), source='Ctrl+D'):
+            approval_text = self.input_panel.get_text()
+            if self.handle_pending_approval_answer(approval_text, source='Ctrl+D'):
+                self._reset_input_history_navigation()
                 return True
             # No pending approval (or unrecognized answer), treat Ctrl+D
             # as normal send.
@@ -370,29 +539,41 @@ class InputMixin:
                 has_staged_attachments = int(self._staged_attachment_count_for_current_thread()) > 0
             except Exception:
                 has_staged_attachments = False
+            submission_succeeded = False
             if text or has_staged_attachments:
                 try:
                     if text.startswith('/'):
                         registry = getattr(self, 'command_registry', None)
                         parts = text[1:].split(None, 1)
                         cmd = parts[0] if parts else ''
-                        if registry is not None and cmd and getattr(registry, 'is_async', lambda _name: False)(cmd):
-                            self.input_panel.clear_text()
-                            self.input_panel.increment_message_count()
+                        if (
+                            registry is not None
+                            and cmd
+                            and getattr(registry, 'is_async', lambda _name: False)(cmd)
+                        ):
+                            if not self._record_submitted_command(text):
+                                return True
+                            self._finish_input_submission(text, should_clear=True)
                             self._schedule_user_command(text)
                             return True
                     should_clear = self.on_submit(text)
+                    submission_succeeded = True
                 except Exception as e:
                     self.log_system(f"Submit error: {e}")
                     should_clear = True
+                    submission_succeeded = False
             else:
                 should_clear = True
-            if should_clear:
-                self.input_panel.clear_text()
-                self.input_panel.increment_message_count()
+                submission_succeeded = False
+            self._finish_input_submission(
+                text,
+                should_clear=should_clear,
+                reload_entries=submission_succeeded,
+            )
             return True
         # Clear input on Ctrl+E
         if key == ctrl_e or key == '\x05':
+            self._reset_input_history_navigation()
             self.input_panel.clear_text()
             try:
                 self.log_system('Input cleared.')
@@ -416,6 +597,7 @@ class InputMixin:
                 # Reset scroll positions to show from start
                 self.input_panel._scroll_top = 0
                 self.input_panel._hscroll_left = 0
+                self._reset_input_history_navigation()
                 self.log_system(f'Pasted {len(safe_content)} characters from clipboard.')
             return True
         # Newline insertion shortcuts (independent of /enterMode):
@@ -423,6 +605,7 @@ class InputMixin:
         #   - Alt+Enter
         # These are normalized by eggdisplay into logical key names.
         if key in ('shift-enter', 'alt-enter'):
+            self._reset_input_history_navigation()
             try:
                 self.input_panel.editor.editor.insert_newline()
             except Exception:
@@ -434,42 +617,72 @@ class InputMixin:
             # If we have a pending approval prompt and Enter-sends mode
             # is active, interpret y/n/o/a answers via the same helper as
             # Ctrl+D before treating Enter as a normal send.
-            if self.enter_sends and self.handle_pending_approval_answer(self.input_panel.get_text(), source='Enter'):
-                return True
+            if self.enter_sends:
+                approval_text = self.input_panel.get_text()
+                if self.handle_pending_approval_answer(approval_text, source='Enter'):
+                    self._reset_input_history_navigation()
+                    return True
             if self.enter_sends:
                 text = self.input_panel.get_text().strip()
                 try:
                     has_staged_attachments = int(self._staged_attachment_count_for_current_thread()) > 0
                 except Exception:
                     has_staged_attachments = False
+                submission_succeeded = False
                 if text or has_staged_attachments:
                     try:
                         if text.startswith('/'):
                             registry = getattr(self, 'command_registry', None)
                             parts = text[1:].split(None, 1)
                             cmd = parts[0] if parts else ''
-                            if registry is not None and cmd and getattr(registry, 'is_async', lambda _name: False)(cmd):
-                                self.input_panel.clear_text()
-                                self.input_panel.increment_message_count()
+                            if (
+                                registry is not None
+                                and cmd
+                                and getattr(registry, 'is_async', lambda _name: False)(cmd)
+                            ):
+                                if not self._record_submitted_command(text):
+                                    return True
+                                self._finish_input_submission(text, should_clear=True)
                                 self._schedule_user_command(text)
                                 return True
                         should_clear = self.on_submit(text)
+                        submission_succeeded = True
                     except Exception as e:
                         self.log_system(f"Submit error: {e}")
                         should_clear = True
+                        submission_succeeded = False
                 else:
                     should_clear = True
-                if should_clear:
-                    self.input_panel.clear_text()
-                    self.input_panel.increment_message_count()
+                    submission_succeeded = False
+                self._finish_input_submission(
+                    text,
+                    should_clear=should_clear,
+                    reload_entries=submission_succeeded,
+                )
                 return True
             else:
                 # Insert newline in editor
+                self._reset_input_history_navigation()
                 try:
                     self.input_panel.editor.editor.insert_newline()
                 except Exception:
                     pass
                 return True
+        editor = self.input_panel.editor.editor
+        completion_owns_arrows = bool(
+            getattr(editor, '_completion_active', False)
+            or getattr(editor, '_completion_pending', False)
+        )
+        if not completion_owns_arrows:
+            if self._is_up_key(key) and self._navigate_input_history('older'):
+                return True
+            if self._is_down_key(key) and self._navigate_input_history('newer'):
+                return True
+
+        # Navigation-only actions keep the saved draft/history position. Any
+        # edit or completion action exits recall.
+        if not self._input_navigation_key(key):
+            self._reset_input_history_navigation()
         # delegate to editor engine
         return self.input_panel.editor._handle_key(key)
 

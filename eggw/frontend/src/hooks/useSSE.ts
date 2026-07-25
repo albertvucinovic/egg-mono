@@ -47,6 +47,7 @@ import {
 import { emptyThreadStreamingState } from "@/lib/store";
 import { canEvictThreadEphemeralState } from "@/lib/threadEphemeral";
 import { applyCanonicalModelSwitch, reconcileThreadModelSnapshot } from "@/lib/modelSync";
+import { INPUT_SUBMITTED_EVENT_TYPE, inputHistoryQueryKey } from "@/lib/inputHistory";
 
 const TOOL_TIMEOUT_KEYS = [
   "timeout",
@@ -648,6 +649,12 @@ export function useSSE(threadId: string | null) {
       } catch (err) {
         console.error("Failed to parse msg.create:", err);
       }
+    });
+
+    // Input history is durable UI state but not a transcript message. Consume
+    // its sequence and refresh the selected composer's bounded query.
+    addThreadEventListener(INPUT_SUBMITTED_EVENT_TYPE, () => {
+      void queryClient.invalidateQueries({ queryKey: inputHistoryQueryKey(threadId) });
     });
 
     // Canonical edits retain the original message position. Get-user answers

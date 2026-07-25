@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
+from eggthreads import record_submitted_command
 
 from ..models import CommandLifecycleResponse, CommandRequest
 from .. import core
@@ -65,22 +66,36 @@ async def execute_command(thread_id: str, request: CommandRequest):
                 started_at=started_at,
                 finished_at=finished_at,
                 elapsed_sec=max(0.0, (finished_at - started_at).total_seconds()),
+                input_recorded=False,
             )
 
     try:
-        core.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=thread_id,
-            type_="user_command.started",
-            payload={
-                "command_id": command_id,
-                "command_name": command_name,
-                "command": request.command,
-                "started_at": _iso(started_at),
-            },
-        )
+        savepoint = f"start_user_command_{os.urandom(8).hex()}"
+        core.db.conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            if request.record_input:
+                # Only composer submissions opt in. Toolbar/global shortcuts also
+                # use this endpoint but are actions, not reusable textual input.
+                record_submitted_command(core.db, thread_id, request.command, source="eggw")
+            core.db.append_event(
+                event_id=os.urandom(10).hex(),
+                thread_id=thread_id,
+                type_="user_command.started",
+                payload={
+                    "command_id": command_id,
+                    "command_name": command_name,
+                    "command": request.command,
+                    "input_submission": bool(request.record_input),
+                    "started_at": _iso(started_at),
+                },
+            )
+            core.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except Exception:
+            core.db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            core.db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
     except Exception:
-        pass
+        raise HTTPException(status_code=500, detail="Failed to persist command submission")
 
     try:
         response = await dispatch_command(thread_id, request.command, staged_attachments=request.staged_attachments)
@@ -132,4 +147,5 @@ async def execute_command(thread_id: str, request: CommandRequest):
         started_at=started_at,
         finished_at=finished_at,
         elapsed_sec=elapsed_sec,
+        input_recorded=bool(request.record_input),
     )

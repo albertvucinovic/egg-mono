@@ -403,6 +403,21 @@ def test_create_snapshot_unknown_tail_event_falls_back_to_canonical_projection(t
     assert db.get_thread(tid).snapshot_last_event_seq == db.max_event_seq(tid)
 
 
+def test_create_snapshot_input_history_tail_uses_reviewed_noop_fast_path(tmp_path, monkeypatch) -> None:
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    msg_id = ts.append_message(db, tid, "user", "first")
+    ts.create_snapshot(db, tid)
+    ts.record_submitted_command(db, tid, "/help", source="test")
+
+    monkeypatch.setattr("eggthreads.projection.load_thread_projection", _fail_canonical_projection)
+    snapshot = ts.create_snapshot(db, tid)
+
+    assert [message["msg_id"] for message in snapshot["messages"]] == [msg_id]
+    assert db.get_thread(tid).snapshot_last_event_seq == db.max_event_seq(tid)
+
+
 def test_create_snapshot_async_uses_worker_owned_connection(tmp_path, monkeypatch) -> None:
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()

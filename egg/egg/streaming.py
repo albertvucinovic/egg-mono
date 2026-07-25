@@ -7,7 +7,12 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from eggthreads import create_snapshot, EventWatcher, ThreadsDB
+from eggthreads import (
+    INPUT_SUBMITTED_EVENT_TYPE,
+    EventWatcher,
+    ThreadsDB,
+    create_snapshot,
+)
 from eggdisplay import ChunkedText
 from rich.markup import escape as rich_escape
 
@@ -307,6 +312,7 @@ class StreamingMixin:
             snapshot_required_through = -1
             saw_children_status_event = False
             saw_get_user_input_event = False
+            saw_input_submission = False
             saw_approval_event = False
             for idx, e in enumerate(batch):
                 try:
@@ -317,6 +323,8 @@ class StreamingMixin:
                         saw_compaction_marker = True
                     elif event_type in ("tool_call.approval", "tool_call.output_approval"):
                         saw_approval_event = True
+                    elif event_type == INPUT_SUBMITTED_EVENT_TYPE:
+                        saw_input_submission = True
                     if event_type in CHILDREN_PANEL_RELEVANT_EVENT_TYPES:
                         saw_children_status_event = True
                     if event_type in GET_USER_INPUT_RELEVANT_EVENT_TYPES:
@@ -353,6 +361,12 @@ class StreamingMixin:
             if saw_get_user_input_event:
                 try:
                     self._refresh_get_user_message_input_mode()
+                except Exception:
+                    pass
+
+            if saw_input_submission and thread_id == self.current_thread:
+                try:
+                    self._reset_input_history_navigation(reload_entries=True)
                 except Exception:
                     pass
 
