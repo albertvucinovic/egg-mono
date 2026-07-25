@@ -8,7 +8,7 @@ from typing import Any, Generic, TypeVar
 
 from eggflow import FlowExecutor, Task
 
-from ._identity import canonical_candidate, canonical_json, digest_payload
+from .identity import canonical_candidate, canonical_json, digest_payload
 
 ExampleT = TypeVar("ExampleT")
 OutputT = TypeVar("OutputT")
@@ -35,7 +35,8 @@ class Evaluation(Generic[OutputT]):
             if not isinstance(self.objectives, Mapping):
                 raise TypeError("objectives must be a mapping or None")
             objectives = {
-                str(name): _score(value, str(name)) for name, value in self.objectives.items()
+                str(name): _score(value, str(name))
+                for name, value in self.objectives.items()
             }
         object.__setattr__(self, "score", score)
         object.__setattr__(self, "objectives", objectives)
@@ -91,7 +92,7 @@ def evaluation_task(
     metric_identity: Any,
     example_identity: Any,
 ) -> Evaluate[ExampleT, OutputT]:
-    """Build the one primitive both GEPA implementations cache through Eggflow."""
+    """Build one durable metric-call Task."""
 
     normalized = dict(canonical_candidate(candidate))
     return Evaluate(
@@ -129,7 +130,8 @@ async def evaluate_all(
     calls = sum(
         1
         for task in tasks
-        if (row := executor.store.get(task.get_cache_key())) is None or row["status"] != "COMPLETED"
+        if (row := executor.store.get(task.get_cache_key())) is None
+        or row["status"] != "COMPLETED"
     )
     if not tasks:
         return [], calls

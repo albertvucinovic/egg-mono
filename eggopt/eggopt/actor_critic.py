@@ -24,14 +24,14 @@ from eggthreads import (
     thread_state,
 )
 
-from ._full_context import run_with_full_context_limit
-from ._context import (
+from .context_limit import run_with_full_context_limit
+from .context import (
     _current_evaluation,
     _current_evaluation_context_limit,
     _evaluation_runtime,
 )
-from ._identity import canonical_json, digest_payload
-from .gepa.production_drive import default_solver_safe_tools, solver_safe_tools
+from .identity import canonical_json, digest_payload
+from .tools import default_safe_tools, safe_tools
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,7 @@ class Agent:
     llm: Any = field(repr=False, compare=False)
     identity: Mapping[str, Any]
     tools: ToolRegistry = field(
-        default_factory=default_solver_safe_tools, repr=False, compare=False
+        default_factory=default_safe_tools, repr=False, compare=False
     )
     model_key: str | None = None
     models_path: str = "models.json"
@@ -65,7 +65,7 @@ class Agent:
                 "runner_config.context_limit is an Eggthreads provider-context limit; "
                 "pass Eggopt's full-history context_limit instead"
             )
-        tools, allowed = solver_safe_tools(
+        tools, allowed = safe_tools(
             self.tools,
             allowed_tools=self.allowed_tools,
         )
@@ -504,7 +504,7 @@ async def _run_until_waiting(
     after_seq: int,
     context_limit: int | None,
 ) -> None:
-    for _ in range(256):
+    while True:
         state = thread_state(db, thread_id)
         if state == "waiting_user":
             if _latest_answer(db, thread_id, after_seq) is not None:
@@ -521,7 +521,6 @@ async def _run_until_waiting(
             raise RuntimeError("ActorCritic tool call requires approval")
         if not progressed and thread_state(db, thread_id) != "waiting_user":
             raise RuntimeError("ActorCritic agent stalled")
-    raise RuntimeError("ActorCritic agent did not settle")
 
 
 def _critic_decision(value: Any) -> dict[str, str]:
