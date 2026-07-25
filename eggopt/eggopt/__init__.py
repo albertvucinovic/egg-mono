@@ -12,6 +12,7 @@ from .gepa import (
     optimize_anything,
     plan_optimization,
 )
+from .thread_tool import ThreadTool
 
 __all__ = [
     "ActorCritic",
@@ -23,6 +24,7 @@ __all__ = [
     "GEPAResult",
     "Mutator",
     "SelectParents",
+    "ThreadTool",
     "current_evaluation",
     "optimize_anything",
     "plan_optimization",
