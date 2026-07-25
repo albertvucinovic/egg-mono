@@ -5,6 +5,12 @@ from dataclasses import dataclass, field
 import json
 from typing import Any, Dict, List, Optional, Set
 
+from eggthreads.inspection import shortest_unique_record_id_suffix
+from eggthreads.tool_effects import ToolEffect, classify_tool_effect
+
+
+_ARGUMENTS_UNSET = object()
+
 
 def _positive_int(value: Any) -> int:
     try:
@@ -38,6 +44,15 @@ def serialize_min_tool_call_tokens(tool_call: Any) -> str:
 
 
 @dataclass
+class MinToolCallSummary:
+    """One inspectable tool call retained by a min-verbosity run summary."""
+
+    name: str
+    tool_call_id: str
+    effect: ToolEffect = ToolEffect.UNKNOWN
+
+
+@dataclass
 class MinHiddenActivitySummary:
     """Aggregate one consecutive run of hidden min-verbosity activity.
 
@@ -51,6 +66,8 @@ class MinHiddenActivitySummary:
     reasoning_blocks: int = 0
     total_tokens: int = 0
     tool_names: List[str] = field(default_factory=list)
+    tool_calls: List[MinToolCallSummary] = field(default_factory=list)
+    record_ids: List[str] = field(default_factory=list)
     _result_tool_names: List[str] = field(default_factory=list, repr=False)
     _seen_tool_call_ids: Set[str] = field(default_factory=set, repr=False)
 
@@ -63,6 +80,8 @@ class MinHiddenActivitySummary:
         self.reasoning_blocks = 0
         self.total_tokens = 0
         self.tool_names.clear()
+        self.tool_calls.clear()
+        self.record_ids.clear()
         self._result_tool_names.clear()
         self._seen_tool_call_ids.clear()
 
@@ -87,10 +106,21 @@ class MinHiddenActivitySummary:
         self.reasoning_blocks += 1
         self.add_tokens(tokens)
 
+    def add_record_ids(self, record_ids: Any) -> None:
+        """Merge the current thread's inspectable IDs for unambiguous hints."""
+
+        seen = {record_id.casefold() for record_id in self.record_ids}
+        for value in record_ids or ():
+            record_id = str(value or "").strip()
+            if record_id and record_id.casefold() not in seen:
+                self.record_ids.append(record_id)
+                seen.add(record_id.casefold())
+
     def add_tool_execution(
         self,
         *,
         name: Any = None,
+        arguments: Any = _ARGUMENTS_UNSET,
         tokens: Any = 0,
         tool_call_id: Optional[str] = None,
     ) -> None:
@@ -102,11 +132,28 @@ class MinHiddenActivitySummary:
             self._seen_tool_call_ids.add(call_id)
         self.tool_executions += 1
         self._add_tool_name(name)
+        normalized_name = self._normalize_tool_name(name) or "tool"
+        if call_id and arguments is not _ARGUMENTS_UNSET:
+            self.tool_calls.append(
+                MinToolCallSummary(
+                    name=normalized_name,
+                    tool_call_id=call_id,
+                    effect=classify_tool_effect(normalized_name, arguments).effect,
+                )
+            )
         self.add_tokens(tokens)
 
-    def add_tool_result(self, *, name: Any = None, tokens: Any = 0) -> None:
+    def add_tool_result(
+        self,
+        *,
+        name: Any = None,
+        tokens: Any = 0,
+        record_id: Any = None,
+    ) -> None:
         self.tool_results += 1
         self._add_result_tool_name(name)
+        if record_id:
+            self.add_record_ids((record_id,))
         self.add_tokens(tokens)
 
 
@@ -131,9 +178,17 @@ def format_min_hidden_activity_summary(summary: MinHiddenActivitySummary) -> str
         parts.append(f"total tokens {summary.total_tokens}")
 
     text = ", ".join(parts)
-    tool_names = summary.tool_names or summary._result_tool_names
-    if tool_names:
-        text += "\nTools: " + ", ".join(tool_names)
+    if summary.tool_calls:
+        record_ids = [*summary.record_ids, *(call.tool_call_id for call in summary.tool_calls)]
+        calls: List[str] = []
+        for call in summary.tool_calls:
+            hint = shortest_unique_record_id_suffix(call.tool_call_id, record_ids)
+            calls.append(f"{call.name}({hint}) · {call.effect.label}")
+        text += "\nTools: " + ", ".join(calls)
+    else:
+        tool_names = summary.tool_names or summary._result_tool_names
+        if tool_names:
+            text += "\nTools: " + ", ".join(tool_names)
     return text
 
 

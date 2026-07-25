@@ -21,6 +21,7 @@ ShowResolutionStatus = Literal["selected", "ambiguous", "missing"]
 SHOW_AMBIGUOUS_LIMIT = 10
 SHOW_COMPLETION_LIMIT = 20
 SHOW_PREVIEW_CHARS = 80
+SHOW_COMPACT_ID_MIN_CHARS = 8
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,36 @@ def _message_preview(message: Mapping[str, Any]) -> str:
 
 def _candidate_sort_key(candidate: ShowRecordCandidate) -> tuple[int, int, str, str]:
     return (-candidate.event_seq, -candidate.order, candidate.kind, candidate.record_id)
+
+
+def shortest_unique_record_id_suffix(
+    record_id: Any,
+    record_ids: Sequence[Any],
+    *,
+    min_chars: int = SHOW_COMPACT_ID_MIN_CHARS,
+) -> str:
+    """Return a case-insensitive, ``/show``-compatible unique ID suffix.
+
+    Transcript presentation uses this to keep tool identities compact without
+    inventing a second identifier.  The returned text is always a literal
+    suffix of *record_id*, so the normal ``/show`` resolver accepts it.
+    """
+
+    full_id = str(record_id or "").strip()
+    if not full_id:
+        return ""
+    normalized = {
+        str(candidate or "").strip().casefold()
+        for candidate in record_ids
+        if str(candidate or "").strip()
+    }
+    normalized.add(full_id.casefold())
+    minimum = min(len(full_id), max(1, int(min_chars)))
+    for length in range(minimum, len(full_id) + 1):
+        suffix = full_id[-length:]
+        if sum(candidate.endswith(suffix.casefold()) for candidate in normalized) == 1:
+            return suffix
+    return full_id
 
 
 def _effective_candidates(db: Any, thread_id: str) -> tuple[list[ShowRecordCandidate], int]:
@@ -417,11 +448,13 @@ def show_record_completion_items(
 
 __all__ = [
     "SHOW_AMBIGUOUS_LIMIT",
+    "SHOW_COMPACT_ID_MIN_CHARS",
     "SHOW_COMPLETION_LIMIT",
     "ShowRecordCandidate",
     "ShowRecordResolution",
     "list_show_record_candidates",
     "resolve_show_record",
+    "shortest_unique_record_id_suffix",
     "show_record_completion_items",
     "show_record_target",
 ]

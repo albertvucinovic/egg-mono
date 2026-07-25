@@ -1100,12 +1100,12 @@ class TestConsolePrintMessage:
 
         assert any('Reasoning' in title and 'msg_id: msg_assistant_medium' in title and '4.2 tps' in title for title in titles)
         assert any('Tool Calls' in title and 'msg_id: msg_assistant_medium' in title and '4.2 tps' in title for title in titles)
-        assert any('bash' in title and 'msg_id: msg_tool_medium' in title and 'tool_call_id: call_full_1234567890' in title for title in titles)
+        assert any('READ' in title and 'bash' in title and 'msg_id: msg_tool_medium' in title and '34567890' in title for title in titles)
         joined_bodies = "\n".join(bodies)
         assert 'Answer body' in joined_bodies
         assert 'Private reasoning body' not in joined_bodies
         assert 'Completed tool result body' in joined_bodies
-        assert 'call_full_1234567890' in joined_bodies
+        assert 'bash(34567890)' in joined_bodies
         assert 'cmd: echo hello' in joined_bodies
 
     def test_medium_tool_panels_follow_toggle_borders(self, egg_app, monkeypatch):
@@ -1169,7 +1169,7 @@ class TestConsolePrintMessage:
         result_text = items[0].renderable.renderable
         rendered = self._render_panel_text(items[0].renderable)
         assert 'optimized result preview' in rendered
-        assert "Raw output: read_long_tool_output('rawabc123', chunk_number=1)" in rendered
+        assert "Raw: read_long_tool_output('rawabc123', chunk_number=1)" in rendered
         raw_command = " read_long_tool_output('rawabc123', chunk_number=1)"
         assert any(
             result_text.plain[span.start:span.end] == raw_command
@@ -1194,7 +1194,7 @@ class TestConsolePrintMessage:
         assert 'result-line-39' in rendered
         assert 'result-line-20' not in rendered
         assert 'omitted 20 lines' in rendered
-        assert 'Inspect complete persisted record: /show msg-long-result' in rendered
+        assert 'Inspect: /show msg-long-result' in rendered
         result_text = items[0].renderable.renderable
         assert any(
             'omitted 20 lines' in result_text.plain[span.start:span.end]
@@ -1234,13 +1234,13 @@ class TestConsolePrintMessage:
         call_text = call_items[0].renderable.renderable
         result_text = result_items[0].renderable.renderable
         assert call_text.plain.find('[red]literal[/red]') >= 0
-        assert result_text.plain == '[red]literal result[/red]'
+        assert result_text.plain == '  OUTPUT\n    [red]literal result[/red]'
         assert any(str(span.style) == 'egg.accent' for span in call_text.spans)
         assert any(str(span.style) == 'egg.tool_call_title' for span in call_text.spans)
         assert any(str(span.style) == 'egg.muted' for span in call_text.spans)
         assert any(str(span.style) == 'egg.foreground' for span in result_text.spans)
-        assert str(call_items[0].renderable.border_style) == 'egg.tool_call'
-        assert str(result_items[0].renderable.border_style) == 'egg.tool'
+        assert str(call_items[0].renderable.border_style) == 'egg.accent'
+        assert str(result_items[0].renderable.border_style) == 'egg.muted'
 
     def test_medium_semantic_coloring_still_honors_toggle_borders(self, egg_app, monkeypatch):
         from rich import box as rich_box
@@ -1292,8 +1292,8 @@ class TestConsolePrintMessage:
         call_text = egg_app._static_transcript_message_renderables(assistant)[0].renderable.renderable
         result_text = egg_app._static_transcript_message_renderables(result)[0].renderable.renderable
 
-        assert call_text.plain.endswith('script:\n     cat example.py')
-        assert result_text.plain == '--- STDOUT ---\ndef answer():\n    return 42'
+        assert call_text.plain.endswith('script:\n        cat example.py')
+        assert result_text.plain == '  STDOUT\n    def answer():\n        return 42'
         assert any(call_text.plain[span.start:span.end] == 'cat' for span in call_text.spans)
         assert any(result_text.plain[span.start:span.end] == 'def' for span in result_text.spans)
 
@@ -1455,7 +1455,7 @@ class TestConsolePrintMessage:
         assert '1 reasoning block' in joined_bodies
         assert 'Executed 1 tool, got 1 tool result' in joined_bodies
         assert 'total tokens' in joined_bodies
-        assert 'Tools: bash' in joined_bodies
+        assert 'Tools: bash(34567890) · READ' in joined_bodies
         assert f'msg_id: {tool}' not in joined_bodies
         assert 'tool_call_id: call_full_1234567890' not in joined_bodies
 
@@ -1515,7 +1515,7 @@ class TestConsolePrintMessage:
         assert 'Hidden details:' not in joined_bodies
         assert 'Executed 2 tools, got 2 tool results, 1 reasoning block' in joined_bodies
         assert joined_bodies.count('Executed 2 tools, got 2 tool results, 1 reasoning block') == 1
-        assert 'Tools: bash, python_repl' in joined_bodies
+        assert 'Tools: bash(h_1234567890) · READ, python_repl(n_1234567890) · UNKNOWN' in joined_bodies
         assert 'private reasoning body' not in joined_bodies
         assert 'bash result body' not in joined_bodies
         assert 'python result body' not in joined_bodies
@@ -2039,7 +2039,7 @@ class TestFullScreenScrollbackWiring:
                     bodies.append(str(getattr(renderable, "plain", renderable)))
         assert bodies[-1].count("Executed") == 1
         assert "Executed 2 tools, got 2 tool results, 2 reasoning blocks" in bodies[-1]
-        assert "Tools: bash, python_repl" in bodies[-1]
+        assert "Tools: bash(l_bash_1) · READ, python_repl(python_1) · UNKNOWN" in bodies[-1]
 
     def test_full_screen_min_visible_message_finalizes_and_resets_summary_update(self, egg_app):
         """Visible messages bound a full-screen min summary run."""
@@ -2335,7 +2335,7 @@ class TestTranscriptScrollbackSource:
         assert "Executed 1 tool" in text
         assert "got 1 tool result" in text
         assert "1 reasoning block" in text
-        assert "Tools: bash" in text
+        assert "Tools: bash(azy_bash) · READ" in text
 
         # No legacy Hidden Details panels
         assert "Hidden Details" not in text
@@ -2574,3 +2574,52 @@ class TestPrintBanner:
 
         # Should not raise
         egg_app.print_banner()
+
+
+def test_medium_tool_call_wraps_inside_logical_argument_margin(egg_app):
+    egg_app._display_verbosity = "medium"
+    item = egg_app._static_transcript_message_renderables({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_margin_12345678",
+            "function": {
+                "name": "bash",
+                "arguments": {
+                    "script": "nl -ba eggthreads/eggthreads/sandbox.py | sed -n '1925,1985p'; "
+                    "nl -ba eggw/frontend/package.json | sed -n '1,80p'",
+                    "timeout": 30,
+                },
+            },
+        }],
+    })[0]
+
+    console = Console(record=True, width=72)
+    console.print(item.renderable)
+    lines = console.export_text(styles=False).splitlines()
+    script_lines = [line for line in lines if "nl -ba" in line]
+
+    assert len(script_lines) >= 2
+    assert all(len(line) - len(line.lstrip(" ")) >= 6 for line in script_lines)
+
+
+def test_medium_mixed_tool_group_uses_may_write_border_and_labels(egg_app):
+    egg_app._display_verbosity = "medium"
+    item = egg_app._static_transcript_message_renderables({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_read_12345678",
+                "function": {"name": "bash", "arguments": {"script": "rg needle src"}},
+            },
+            {
+                "id": "call_write_87654321",
+                "function": {"name": "bash", "arguments": {"script": "touch result.txt"}},
+            },
+        ],
+    })[0]
+
+    assert str(item.renderable.border_style) == "yellow"
+    assert "READ  bash(12345678)" in item.renderable.renderable.plain
+    assert "MAY WRITE  bash(87654321)" in item.renderable.renderable.plain

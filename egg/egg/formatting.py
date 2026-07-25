@@ -26,6 +26,8 @@ from eggthreads import (
 )
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.output_optimizer.observability import format_output_optimizer_summary
+from eggthreads.inspection import shortest_unique_record_id_suffix
+from eggthreads.tool_effects import ToolEffect, classify_tool_effect
 
 from .utils import snapshot_messages
 from .min_run_summary import (
@@ -462,15 +464,49 @@ class FormattingMixin:
             except Exception:
                 per_message_tokens = {}
         hidden_summary = MinHiddenActivitySummary()
+        declared_calls = {
+            call.tool_call_id: call
+            for message in msgs
+            if isinstance(message, dict)
+            for call in [
+                tool_call_presentation(raw_call)
+                for raw_call in (message.get('tool_calls') or [])
+                if isinstance(raw_call, dict)
+            ]
+            if call.tool_call_id
+        }
+        declared_call_ids = list(declared_calls)
+        inspectable_record_ids = [
+            str(message.get('msg_id') or '')
+            for message in msgs
+            if isinstance(message, dict) and message.get('msg_id')
+        ] + declared_call_ids
+        hidden_summary.add_record_ids(inspectable_record_ids)
 
         def add_hidden_reasoning(*, tokens: Any = 0) -> None:
             hidden_summary.add_reasoning_block(tokens=tokens)
 
-        def add_hidden_tool_call(*, name: Any = None, tokens: Any = 0, tool_call_id: str = "") -> None:
-            hidden_summary.add_tool_execution(name=name, tokens=tokens, tool_call_id=tool_call_id)
+        def add_hidden_tool_call(
+            *,
+            name: Any = None,
+            arguments: Any = None,
+            tokens: Any = 0,
+            tool_call_id: str = "",
+        ) -> None:
+            hidden_summary.add_tool_execution(
+                name=name,
+                arguments=arguments,
+                tokens=tokens,
+                tool_call_id=tool_call_id,
+            )
 
-        def add_hidden_tool_result(*, name: Any = None, tokens: Any = 0) -> None:
-            hidden_summary.add_tool_result(name=name, tokens=tokens)
+        def add_hidden_tool_result(
+            *,
+            name: Any = None,
+            tokens: Any = 0,
+            record_id: Any = None,
+        ) -> None:
+            hidden_summary.add_tool_result(name=name, tokens=tokens, record_id=record_id)
 
         def flush_hidden() -> None:
             if verbosity != 'min' or not hidden_summary.has_activity():
@@ -479,6 +515,7 @@ class FormattingMixin:
             if summary:
                 lines.append(summary)
             hidden_summary.clear()
+            hidden_summary.add_record_ids(inspectable_record_ids)
 
         def tool_call_info(tc: Any) -> tuple[str, str, str]:
             call = tool_call_presentation(tc)
@@ -547,7 +584,11 @@ class FormattingMixin:
                                 args_str = str(args or '')
                             lines.append(f"[ToolCall] {name} {args_str}")
                     elif verbosity == 'medium':
-                        tool_calls_text = format_medium_tool_calls(tcs, inspect_message_id=msg_id)
+                        tool_calls_text = format_medium_tool_calls(
+                            tcs,
+                            inspect_message_id=msg_id,
+                            record_ids=inspectable_record_ids,
+                        )
                         if tool_calls_text:
                             lines.append(f"[Tool Calls ({len(tcs)}){tps_text}{msg_id_text}]\n{tool_calls_text}")
                     else:
@@ -561,6 +602,7 @@ class FormattingMixin:
                             name, _args_str, tc_id = tool_call_info(tc)
                             add_hidden_tool_call(
                                 name=name,
+                                arguments=tool_call_presentation(tc).arguments,
                                 tokens=tool_call_tokens if idx == 0 else 0,
                                 tool_call_id=tc_id,
                             )
@@ -576,7 +618,11 @@ class FormattingMixin:
                                 preview = format_medium_streamed_tool_result(txt, inspect_message_id=msg_id)
                                 lines.append(f"{header}\n{preview}")
                             else:
-                                add_hidden_tool_result(name=nm, tokens=count_min_hidden_text_tokens(txt))
+                                add_hidden_tool_result(
+                                    name=nm,
+                                    tokens=count_min_hidden_text_tokens(txt),
+                                    record_id=msg_id,
+                                )
                 tc_stream = m.get('tool_calls_stream') or {}
                 if isinstance(tc_stream, dict):
                     for nm, txt in tc_stream.items():
@@ -623,16 +669,29 @@ class FormattingMixin:
                         if optimizer_summary:
                             header += f" [{optimizer_summary}]"
                         if verbosity == 'medium':
+                            call = declared_calls.get(tool_call_id)
+                            effect = call.effect if call is not None else classify_tool_effect(name).effect
+                            hint = shortest_unique_record_id_suffix(
+                                tool_call_id,
+                                inspectable_record_ids or [tool_call_id],
+                            )
+                            effect_label = effect.label
                             preview = format_medium_tool_result(
                                 content,
                                 inspect_message_id=msg_id,
                                 recovery_hint=tool_result_recovery_hint(m),
                             )
-                            lines.append(f"{header}\n{preview}")
+                            lines.append(
+                                f"[{effect_label} {lower_label}: {name}({hint}){tps_text}{msg_id_text}]"
+                                + (f" [{optimizer_summary}]" if optimizer_summary else "")
+                                + "\n"
+                                + "\n".join(f"  {line}" for line in preview.splitlines())
+                            )
                         else:
                             add_hidden_tool_result(
                                 name=name,
                                 tokens=min_message_token_count(per_message_tokens, msg_id, 'content', content),
+                                record_id=msg_id,
                             )
             elif role == 'system':
                 content = content_to_plain_text(m.get('content')).strip()

@@ -15,9 +15,10 @@ from rich.text import Text
 from rich.markdown import Markdown
 from rich import box as rich_box
 
-from eggthreads import create_snapshot
+from eggthreads import create_snapshot, shortest_unique_record_id_suffix
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.output_optimizer.observability import format_output_optimizer_summary
+from eggthreads.tool_effects import ToolEffect
 
 from .utils import snapshot_messages, looks_markdown
 from .min_run_summary import (
@@ -1330,6 +1331,9 @@ class PanelsMixin:
         if not isinstance(summary, MinHiddenActivitySummary):
             summary = MinHiddenActivitySummary()
             target['summary'] = summary
+        summary.add_record_ids(
+            (getattr(self, '_show_record_ids', None) or {}).keys()
+        )
         return target
 
     def _clear_static_hidden_details_state(self, state: Dict[str, Any]) -> None:
@@ -1338,6 +1342,11 @@ class PanelsMixin:
             summary.clear()
         else:
             state['summary'] = MinHiddenActivitySummary()
+        summary = state.get('summary')
+        if isinstance(summary, MinHiddenActivitySummary):
+            summary.add_record_ids(
+                (getattr(self, '_show_record_ids', None) or {}).keys()
+            )
 
     def _has_static_hidden_details_activity(
         self,
@@ -1366,8 +1375,10 @@ class PanelsMixin:
         header: str,
         *,
         name: Any = None,
+        arguments: Any = None,
         tokens: Any = 0,
         tool_call_id: Optional[str] = None,
+        record_id: Any = None,
     ) -> None:
         target = self._ensure_static_hidden_details_state(state)
         summary = target.get('summary')
@@ -1377,9 +1388,14 @@ class PanelsMixin:
         if kind == 'reasoning':
             summary.add_reasoning_block(tokens=tokens)
         elif kind == 'tool_calls':
-            summary.add_tool_execution(name=name, tokens=tokens, tool_call_id=tool_call_id)
+            summary.add_tool_execution(
+                name=name,
+                arguments=arguments,
+                tokens=tokens,
+                tool_call_id=tool_call_id,
+            )
         elif kind == 'tool_results':
-            summary.add_tool_result(name=name, tokens=tokens)
+            summary.add_tool_result(name=name, tokens=tokens, record_id=record_id)
 
     def _record_static_hidden_detail(self, kind: str, header: str) -> None:
         self._record_static_hidden_detail_in_state(
@@ -1573,6 +1589,9 @@ class PanelsMixin:
                 result="egg.foreground",
                 muted="egg.muted",
                 command="egg.accent",
+                read="bold cyan",
+                may_write="bold yellow",
+                unknown="egg.muted",
             )
         return MediumToolStyles(
             call="bold cyan",
@@ -1582,7 +1601,27 @@ class PanelsMixin:
             result="white",
             muted="dim",
             command="bold cyan",
+            read="bold cyan",
+            may_write="bold yellow",
+            unknown="dim",
         )
+
+    def _tool_effect_border_style(self, effect: ToolEffect) -> str:
+        """Return an advisory effect color while honoring the panel box policy."""
+
+        if effect is ToolEffect.READ:
+            return "egg.accent" if getattr(self, '_rich_theme', None) is not None else "cyan"
+        if effect is ToolEffect.MAY_WRITE:
+            return "egg.tool_call" if getattr(self, '_rich_theme', None) is not None else "yellow"
+        return "egg.muted" if getattr(self, '_rich_theme', None) is not None else "dim"
+
+    def _tool_effect_style(self, effect: ToolEffect) -> str:
+        styles = self._medium_tool_styles()
+        return {
+            ToolEffect.READ: styles.read,
+            ToolEffect.MAY_WRITE: styles.may_write,
+            ToolEffect.UNKNOWN: styles.unknown,
+        }[effect]
 
     def _medium_syntax_theme(self) -> Any:
         """Resolve a transparent syntax palette through the active Egg theme."""
@@ -1625,9 +1664,18 @@ class PanelsMixin:
             if replace or not isinstance(current, dict)
             else dict(current)
         )
+        current_record_ids = getattr(self, '_show_record_ids', None)
+        record_ids: Dict[str, None] = (
+            {}
+            if replace or not isinstance(current_record_ids, dict)
+            else dict(current_record_ids)
+        )
         for message in messages if isinstance(messages, list) else ():
             if not isinstance(message, dict):
                 continue
+            message_id = str(message.get('msg_id') or message.get('id') or '')
+            if message_id:
+                record_ids[message_id] = None
             calls = message.get('tool_calls')
             if not isinstance(calls, list):
                 continue
@@ -1635,7 +1683,9 @@ class PanelsMixin:
                 call = tool_call_presentation(raw_call)
                 if call.tool_call_id:
                     index[call.tool_call_id] = call
+                    record_ids[call.tool_call_id] = None
         self._tool_call_presentation_index = index
+        self._show_record_ids = record_ids
 
     def _tool_result_call_presentation(self, message: Dict[str, Any]) -> Any:
         call_id = str(message.get('tool_call_id') or '')
@@ -1847,7 +1897,7 @@ class PanelsMixin:
                     else:
                         args_str = str(args or '')
                     tc_id = call.tool_call_id
-                    tool_call_infos.append((name, args_str, tc_id))
+                    tool_call_infos.append((name, args, args_str, tc_id, call.effect))
                     if verbosity == 'max':
                         lines.append(f"{name}({args_str})")
                     elif verbosity == 'min':
@@ -1879,12 +1929,13 @@ class PanelsMixin:
                 if verbosity == 'min':
                     fallback_text = serialize_min_tool_call_tokens(tcs)
                     token_count = self._static_min_summary_token_count(pm_tokens["tool_calls"], fallback_text)
-                    for idx, (name, _args_str, tc_id) in enumerate(tool_call_infos):
+                    for idx, (name, args, _args_str, tc_id, _effect) in enumerate(tool_call_infos):
                         self._record_static_hidden_detail_in_state(
                             hidden_details,
                             'tool_calls',
                             f"{tc_title} | {lines[idx] if idx < len(lines) else name}",
                             name=name,
+                            arguments=args,
                             tokens=token_count if idx == 0 else 0,
                             tool_call_id=tc_id,
                         )
@@ -1894,6 +1945,9 @@ class PanelsMixin:
                             tcs,
                             styles=self._medium_tool_styles(),
                             inspect_message_id=str(msg_id or ''),
+                            record_ids=(
+                                (getattr(self, '_show_record_ids', None) or {}).keys()
+                            ),
                             syntax_theme=(
                                 self._medium_syntax_theme()
                                 if self._syntax_highlighting_enabled()
@@ -1903,10 +1957,20 @@ class PanelsMixin:
                         if verbosity == 'medium'
                         else Text("\n".join(lines), no_wrap=False, overflow='fold', style=tool_call_body_style)
                     )
+                    effects = {effect for _name, _args, _args_str, _tc_id, effect in tool_call_infos}
+                    group_effect = (
+                        ToolEffect.MAY_WRITE
+                        if ToolEffect.MAY_WRITE in effects
+                        else ToolEffect.UNKNOWN
+                        if ToolEffect.UNKNOWN in effects
+                        else ToolEffect.READ
+                    )
                     items.append(self._static_transcript_panel_renderable(
                         tool_calls_renderable,
                         tc_title,
-                        tool_call_border_style,
+                        self._tool_effect_border_style(group_effect)
+                        if verbosity == 'medium'
+                        else tool_call_border_style,
                     ))
             # Streamed-only metadata if present in snapshot (optional)
             tstream = m.get('tool_stream') or {}
@@ -1969,6 +2033,7 @@ class PanelsMixin:
                                 " | ".join(title_parts),
                                 name=nm,
                                 tokens=count_min_hidden_text_tokens(txt),
+                                record_id=msg_id,
                             )
             tc_stream = m.get('tool_calls_stream') or {}
             if isinstance(tc_stream, dict) and tc_stream:
@@ -2047,15 +2112,21 @@ class PanelsMixin:
                 title += f" [dim]({msg_tps})[/dim]"
             tool_call_id = str(m.get('tool_call_id') or '')
             if tool_call_id and verbosity != 'max':
-                title += f" [dim]tool_call_id: {tool_call_id}[/dim]"
+                known_ids = list(
+                    (getattr(self, '_show_record_ids', None) or {}).keys()
+                )
+                hint = shortest_unique_record_id_suffix(tool_call_id, known_ids or [tool_call_id])
+                title += f" [dim]·[/dim] [{self._medium_tool_styles().command}]{rich_escape(hint)}[/{self._medium_tool_styles().command}]"
             optimizer_summary = self._output_optimizer_summary(m, include_artifact_id=True)
             if optimizer_summary:
                 title += f" [dim]{rich_escape(optimizer_summary)}[/dim]"
             if verbosity == 'max':
                 panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             elif verbosity == 'medium':
-                result_border_style = "egg.tool" if getattr(self, '_rich_theme', None) is not None else 'yellow'
                 result_call = self._tool_result_call_presentation(m)
+                result_effect = result_call.effect if result_call is not None else ToolEffect.UNKNOWN
+                effect_markup = self._tool_effect_style(result_effect)
+                title = f"[{effect_markup}]{result_effect.label}[/{effect_markup}]  {title}"
                 panel(
                     medium_tool_result_text(
                         content,
@@ -2071,7 +2142,7 @@ class PanelsMixin:
                         ),
                     ),
                     title,
-                    result_border_style,
+                    self._tool_effect_border_style(result_effect),
                 )
             else:
                 self._record_static_hidden_detail_in_state(
@@ -2080,6 +2151,7 @@ class PanelsMixin:
                     full_title_for(title),
                     name=name,
                     tokens=self._static_min_summary_token_count(pm_tokens["content"], content),
+                    record_id=msg_id,
                 )
             return items
 
@@ -2099,8 +2171,7 @@ class PanelsMixin:
         live observability.
         """
         self._mark_static_transcript_changed()
-        calls = m.get('tool_calls') if isinstance(m, dict) else None
-        if isinstance(calls, list):
+        if isinstance(m, dict):
             self._remember_tool_call_presentations([m], replace=False)
         hidden_details = self._ensure_static_hidden_details_state()
         before_hidden = self._has_static_hidden_details_activity(hidden_details)

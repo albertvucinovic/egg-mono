@@ -264,3 +264,25 @@ def test_show_target_keeps_bounded_raw_output_recovery_affordance(tmp_path: Path
     assert target["message"]["output_optimizer"]["raw_hint"] == (
         "read_long_tool_output('rawabc123', chunk_number=1)"
     )
+
+
+def test_shortest_unique_record_id_suffix_is_show_compatible_and_case_insensitive():
+    from eggthreads.inspection import shortest_unique_record_id_suffix
+
+    ids = ("call_alpha_ABCDEF0012345678", "call_beta_ABCDEF0098765678")
+    assert shortest_unique_record_id_suffix(ids[0], ids) == "12345678"
+    assert shortest_unique_record_id_suffix(ids[1], ids) == "98765678"
+
+
+def test_shortest_unique_record_id_suffix_expands_on_collision():
+    from eggthreads.inspection import shortest_unique_record_id_suffix
+
+    ids = ("call_alpha_A12345678", "call_beta_B12345678")
+    assert shortest_unique_record_id_suffix(ids[0], ids) == "A12345678"
+    assert shortest_unique_record_id_suffix(ids[1], ids) == "B12345678"
+
+
+def test_shortest_unique_record_id_suffix_includes_target_when_catalog_is_empty():
+    from eggthreads.inspection import shortest_unique_record_id_suffix
+
+    assert shortest_unique_record_id_suffix("call_target_12345678", ()) == "12345678"

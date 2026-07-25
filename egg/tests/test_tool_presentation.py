@@ -71,11 +71,11 @@ def test_medium_tool_group_keeps_order_and_exact_ids():
         },
     ])
 
-    assert rendered.index("1. bash · tool_call_id: call-a") < rendered.index(
-        "2. bash · tool_call_id: call-b"
+    assert rendered.index("1. READ  bash(call-a)") < rendered.index(
+        "2. READ  bash(call-b)"
     )
-    assert "   script:\n     echo a" in rendered
-    assert "   script:\n     echo b" in rendered
+    assert "      script:\n        echo a" in rendered
+    assert "      script:\n        echo b" in rendered
 
 
 def test_medium_tool_group_emits_one_inspection_hint_when_arguments_are_bounded():
@@ -193,8 +193,8 @@ def test_medium_tool_group_without_ids_stays_readable_without_guessing():
         {"function": {"name": "bash", "arguments": {"script": "echo second"}}},
     ])
 
-    assert "1. bash\n" in rendered
-    assert "2. bash\n" in rendered
+    assert "1. READ  bash\n" in rendered
+    assert "2. READ  bash\n" in rendered
     assert "tool_call_id:" not in rendered
 
 
@@ -214,10 +214,11 @@ def test_medium_tool_call_rich_text_uses_semantic_styles_and_literal_values():
 
     assert "echo [red]literal[/red]" in rendered.plain
     styled = [(rendered.plain[span.start:span.end], str(span.style)) for span in rendered.spans]
-    assert ("1.", "bold cyan") in styled
+    assert ("  1.", "bold cyan") in styled
+    assert ("READ", "bold cyan") in styled
     assert ("bash", "bold yellow") in styled
     assert ("script", "bold cyan") in styled
-    assert ("tool_call_id:", "dim") in styled
+    assert ("ll-color", "bold cyan") in styled
     # User/tool-supplied Rich-looking text is one literal value span, never parsed.
     assert any("[red]literal[/red]" in value and style == "white" for value, style in styled)
 
@@ -228,9 +229,12 @@ def test_medium_tool_result_styles_only_metadata_not_literal_output():
         styles=SEMANTIC_STYLES,
     )
 
-    assert rendered.plain == "[red]literal result[/red]"
-    assert len(rendered.spans) == 1
-    assert str(rendered.spans[0].style) == "white"
+    assert rendered.plain == "  OUTPUT\n    [red]literal result[/red]"
+    assert any(
+        rendered.plain[span.start:span.end] == "    [red]literal result[/red]"
+        and str(span.style) == "white"
+        for span in rendered.spans
+    )
 
 
 def test_medium_multiline_argument_does_not_reclassify_value_colons_as_keys():
@@ -293,9 +297,54 @@ def test_medium_bash_result_highlights_sections_without_styling_metadata_as_code
         syntax_theme=SYNTAX_THEME,
     )
 
-    assert rendered.plain == '--- STDOUT ---\n{"ok": true}\n--- STDERR ---\nplain diagnostic'
+    assert rendered.plain == '  STDOUT\n    {"ok": true}\n  STDERR\n    plain diagnostic'
     styled = [(rendered.plain[span.start:span.end], str(span.style)) for span in rendered.spans]
-    assert ("--- STDOUT ---", "dim") in styled
-    assert ("--- STDERR ---", "dim") in styled
+    assert ("  STDOUT", "dim") in styled
+    assert ("  STDERR", "dim") in styled
     assert any('"ok"' in value and "yellow" in style for value, style in styled)
     assert any("plain diagnostic" in value and style == "white" for value, style in styled)
+
+
+def test_medium_tool_group_uses_effect_badges_compact_ids_and_logical_margins():
+    rendered = format_medium_tool_calls([
+        {
+            "id": "call_read_ABCDEF0012345678",
+            "function": {
+                "name": "bash",
+                "arguments": {"script": "rg -n needle src | head -20", "timeout": 30},
+            },
+        },
+        {
+            "id": "call_write_ABCDEF0098765678",
+            "function": {
+                "name": "bash",
+                "arguments": {"script": "applypatch <<'PATCH'\n*** Begin Patch\nPATCH"},
+            },
+        },
+    ])
+
+    assert "  1. READ  bash(12345678)" in rendered
+    assert "  2. MAY WRITE  bash(98765678)" in rendered
+    assert "      script:\n        rg -n needle src | head -20" in rendered
+    assert "      timeout: 30" in rendered
+
+
+def test_medium_result_has_indented_channels_and_metadata():
+    rendered = medium_tool_result_text(
+        "--- STDOUT ---\none\n--- STDERR ---\ntwo",
+        styles=SEMANTIC_STYLES,
+    )
+
+    assert rendered.plain == "  STDOUT\n    one\n  STDERR\n    two"
+
+
+def test_medium_tool_id_hint_expands_against_other_thread_records():
+    rendered = format_medium_tool_calls(
+        [{
+            "id": "call_alpha_A12345678",
+            "function": {"name": "bash", "arguments": {"script": "rg needle"}},
+        }],
+        record_ids=("call_alpha_A12345678", "call_beta_B12345678"),
+    )
+
+    assert "bash(A12345678)" in rendered
