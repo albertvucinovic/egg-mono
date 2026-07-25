@@ -35,7 +35,9 @@ async def run_with_full_context_limit(
     task = asyncio.create_task(runner.run_once())
     try:
         while not task.done():
-            await asyncio.sleep(0)
+            done, _ = await asyncio.wait({task}, timeout=10.0)
+            if task in done:
+                break
             current = full_context_tokens(db, thread_id)
             if current >= limit:
                 if task.done():
