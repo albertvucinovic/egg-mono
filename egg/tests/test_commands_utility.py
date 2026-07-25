@@ -58,6 +58,7 @@ class TestCmdHelp:
             "Home/End", "Esc", "Backspace/Delete", "PageUp", "PageDown",
         ):
             assert shortcut in rendered
+        assert "first/last line, recall older/newer inputs" in rendered
 
     def test_help_uses_command_registry_metadata(self):
         from egg.commands.utility import UtilityCommandsMixin

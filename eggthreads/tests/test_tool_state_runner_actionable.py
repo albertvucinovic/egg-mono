@@ -1073,6 +1073,34 @@ def test_reducer_cache_keeps_one_current_projection_per_thread(tmp_path):
     assert first.max_event_seq < second.max_event_seq
 
 
+def test_reducer_cache_treats_input_submission_as_safe_noop_tail(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-input-history"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event(
+        "msg-assistant",
+        tid,
+        "msg.create",
+        {"role": "assistant", "content": "done"},
+        msg_id="m-assistant",
+    )
+    before = _reduce_thread_events(db, tid)
+    assert before.coarse_thread_state_without_lease == "waiting_user"
+
+    eggthreads.record_submitted_command(db, tid, "/help", source="test")
+    monkeypatch.setattr(
+        "eggthreads.tool_state._reduce_loaded_thread_events",
+        lambda *_args, **_kwargs: pytest.fail("input history tail should reduce incrementally"),
+    )
+
+    after = _reduce_thread_events(db, tid)
+
+    assert after.coarse_thread_state_without_lease == "waiting_user"
+    assert after.max_event_seq == db.max_event_seq(tid)
+
+
 def test_reducer_cache_incrementally_applies_plain_messages_and_llm_boundaries(tmp_path, monkeypatch):
     from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
 

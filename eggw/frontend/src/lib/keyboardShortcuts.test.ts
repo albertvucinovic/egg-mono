@@ -48,5 +48,6 @@ describe("EggW keyboard shortcuts", () => {
     ]) {
       expect(rendered).toContain(expected);
     }
+    expect(rendered).toContain("Recall older/newer input at the first/last line: Up/Down");
   });
 });

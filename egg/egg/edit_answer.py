@@ -36,6 +36,9 @@ def editor_argv_for_path(path: Path) -> list[str]:
 
 
 def set_input_panel_text(app: Any, text: str) -> None:
+    reset_history = getattr(app, "_reset_input_history_navigation", None)
+    if callable(reset_history):
+        reset_history()
     safe = sanitize_terminal_text(text)
     editor = app.input_panel.editor.editor
     editor.set_text(safe)

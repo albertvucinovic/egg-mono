@@ -83,6 +83,7 @@ class TestRA2ToolMessageFormat:
         assert tool_msgs[0]["role"] == "tool"
         assert tool_msgs[0]["tool_call_id"] == "tc1"
 
+
     def test_ra2_tool_message_preserves_tool_call_id(self) -> None:
         """tool_call_id must be preserved - required by most providers."""
         msgs = [
@@ -777,3 +778,13 @@ def test_full_sanitizer_repairs_complete_multicall_wait_declaration_only_as_a_wh
         {"role": "user", "content": "before"},
         {"role": "user", "content": "after"},
     ]
+
+
+def test_input_history_marker_is_local_only() -> None:
+    assert _sanitize([
+        {
+            "role": "user",
+            "content": "operator prompt",
+            "input_history_recorded": True,
+        }
+    ]) == [{"role": "user", "content": "operator prompt"}]

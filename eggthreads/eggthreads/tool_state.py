@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .db import ThreadsDB
+from .input_history import INPUT_SUBMITTED_EVENT_TYPE
 
 
 GET_USER_MESSAGE_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
@@ -215,6 +216,8 @@ def _latest_cached_reduction_before(
 
 def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any]) -> bool:
     ev_type = ev.get("type")
+    if ev_type == INPUT_SUBMITTED_EVENT_TYPE:
+        return True
     if ev_type == "msg.edit":
         return _is_consumed_get_user_message_edit(payload)
     if ev_type == "msg.delete":
@@ -460,6 +463,8 @@ def _try_reduce_thread_events_incrementally(
 
     for ev, payload, ev_seq in records:
         ev_type = ev.get("type")
+        if ev_type == INPUT_SUBMITTED_EVENT_TYPE:
+            continue
         inv = ev.get("invoke_id")
         if ev_type == "stream.open":
             if payload.get("stream_kind") == "llm" and isinstance(inv, str) and inv:
@@ -520,6 +525,8 @@ def _try_reduce_thread_events_incrementally(
     interrupted_invokes: set[str] = set()
     for ev, payload, ev_seq in records:
         ev_type = ev.get("type")
+        if ev_type == INPUT_SUBMITTED_EVENT_TYPE:
+            continue
         if ev_type == "msg.edit" and _is_consumed_get_user_message_edit(payload):
             tcid = str(payload.get("consumed_by_tool_call_id") or "")
             tc = tool_call_states.get(tcid)
@@ -826,6 +833,8 @@ def _try_reduce_thread_events_incrementally(
                 "Tool execution stream closed before the tool reported a result.",
             )
     for ev, payload, _ev_seq in records:
+        if ev.get("type") == INPUT_SUBMITTED_EVENT_TYPE:
+            continue
         raw_tcid = payload.get("tool_call_id") or payload.get("awaiting_user_message_tool_call_id")
         if raw_tcid:
             touched_get_user_ids.add(str(raw_tcid))

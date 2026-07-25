@@ -2330,7 +2330,7 @@ class ThreadRunner:
                 # eggthreads snapshot/DB metadata
                 'msg_id', 'ts',
                 # eggthreads-only flags
-                'no_api', 'keep_user_turn',
+                'no_api', 'keep_user_turn', 'input_history_recorded',
                 # eggthreads local annotations
                 'model_key', 'reasoning',
             }
@@ -3004,6 +3004,7 @@ class ThreadRunner:
             m2 = dict(m)
             m2.pop("api_usage", None)
             m2.pop("provider_usage", None)
+            m2.pop("input_history_recorded", None)
             # Local/UI-only optimizer observability metadata must not be sent
             # to providers.  The provider sees the already-approved preview in
             # content, while raw/audit metadata remains in events/snapshots.
