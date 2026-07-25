@@ -516,6 +516,11 @@ class TaskStore:
     """)
     self.conn.commit()
 
+  def close(self) -> None:
+    """Close this durable task-store handle."""
+
+    self.conn.close()
+
   def get(self, key: str) -> Optional[sqlite3.Row]:
     """Retrieve a task record by cache key.
 
@@ -526,6 +531,21 @@ class TaskStore:
         Row with cache_key, status, result_blob, updated_at, or None if not found.
     """
     return self.conn.execute("select * from tasks where cache_key=?", (key,)).fetchone()
+
+  def count(self, *, status: Optional[str] = None, key_prefix: Optional[str] = None) -> int:
+    """Count durable task records without exposing storage internals."""
+
+    clauses = []
+    values = []
+    if status is not None:
+      clauses.append("status=?")
+      values.append(status)
+    if key_prefix is not None:
+      clauses.append("substr(cache_key, 1, ?)=?")
+      values.extend((len(key_prefix), key_prefix))
+    where = f" where {' and '.join(clauses)}" if clauses else ""
+    row = self.conn.execute(f"select count(*) from tasks{where}", values).fetchone()
+    return int(row[0])
 
   def create(self, key: str, task: Task) -> None:
     """Create a new task record with PENDING status.
@@ -766,9 +786,13 @@ class FlowExecutor:
       except Exception as e:
         return Result(error=f"Completed Task but the result not unpickeling, error: {str(e)}", metadata={"corrupt": True})
 
-    # Call recover() before re-running a FAILED task
-    if row and row['status'] == "FAILED":
-      logger.debug(f"Task {task.__class__.__name__} was FAILED, attempting recovery...")
+    # A stale RUNNING row means the prior process stopped before it could persist
+    # a result. Recover it through the same task-owned hook as an explicit
+    # non-terminal failure before re-executing.
+    if row and row['status'] in {"FAILED", "RUNNING"}:
+      logger.debug(
+        f"Task {task.__class__.__name__} was {row['status']}, attempting recovery..."
+      )
 
       # CRITICAL: Check if the cached result is terminal - if so, DON'T retry
       cached_result = None
@@ -777,7 +801,7 @@ class FlowExecutor:
       except Exception:
         pass
 
-      if cached_result and cached_result.is_terminal:
+      if row['status'] == "FAILED" and cached_result and cached_result.is_terminal:
         # Terminal error - never retry, return cached failure immediately
         logger.debug(f"Task {task.__class__.__name__} has terminal error, not retrying")
         return cached_result
@@ -796,14 +820,20 @@ class FlowExecutor:
           if result is False:
             should_retry = False
       except Exception as e:
-        # Log recovery failure but continue with re-execution
-        logger.warning(f"Task recovery failed: {e}")
+        # A failed cleanup cannot safely fall through into task execution. Keep
+        # the task retryable unless the recovery error itself is terminal.
+        recovery_failure = Result(
+          error=f"Task recovery failed: {e}",
+          terminal=_is_terminal_exception(e),
+        )
+        self.store.update(key, "FAILED", result=recovery_failure)
+        return recovery_failure
 
       if not should_retry:
         # Task decided not to retry - return the cached FAILED result
-        if cached_result:
-          return cached_result
-        return Result(error="Task recovery returned False, not retrying")
+        failure = cached_result or Result(error="Task recovery returned False, not retrying")
+        self.store.update(key, "FAILED", result=failure)
+        return failure
 
     if not row:
       self.store.create(key, task)

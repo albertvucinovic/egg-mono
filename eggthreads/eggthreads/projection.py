@@ -214,6 +214,31 @@ class ThreadProjection:
     def message_dicts(self) -> List[Dict[str, Any]]:
         return [message.as_message_dict() for message in self.messages]
 
+    def message(self, msg_id: str) -> Optional[ProjectedMessage]:
+        """Return one effective message by durable id, if present."""
+
+        return next((message for message in self.messages if message.msg_id == msg_id), None)
+
+    def latest_message(
+        self,
+        *,
+        role: Optional[str] = None,
+        metadata_key: Optional[str] = None,
+        metadata_value: Any = None,
+    ) -> Optional[ProjectedMessage]:
+        """Return the latest effective message matching public message fields."""
+
+        for message in reversed(self.messages):
+            if role is not None and message.payload.get("role") != role:
+                continue
+            if metadata_key is not None and metadata_key not in message.payload:
+                continue
+            if metadata_key is not None and metadata_value is not None:
+                if message.payload.get(metadata_key) != metadata_value:
+                    continue
+            return message
+        return None
+
     def to_snapshot_dict(self) -> Dict[str, Any]:
         return {
             "messages": self.message_dicts(),
@@ -772,18 +797,18 @@ def project_event_records(
 def load_thread_projection(
     db: ThreadsDB,
     thread_id: str,
-    through_event_seq: int,
+    through_event_seq: Optional[int] = None,
     *,
     use_snapshot: bool = True,
 ) -> ThreadProjection:
-    """Load canonical message state through exactly ``through_event_seq``.
+    """Load canonical message state through ``through_event_seq`` or the latest event.
 
     A coherent versioned snapshot at or before the target may seed replay. If
     absent, malformed, newer than the target, or internally inconsistent, full
     replay starts at the event log. Both paths apply the same reducer.
     """
 
-    target = int(through_event_seq)
+    target = db.max_event_seq(thread_id) if through_event_seq is None else int(through_event_seq)
     if target < -1:
         raise ValueError("through_event_seq must be >= -1")
     thread = db.get_thread(thread_id)

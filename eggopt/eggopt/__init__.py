@@ -12,6 +12,7 @@ from .gepa import (
     optimize_anything,
     plan_optimization,
 )
+from .recovery import InteractionRecovery, InteractionRecoveryError
 from .thread_tool import ThreadTool
 
 __all__ = [
@@ -22,6 +23,8 @@ __all__ = [
     "GEPA",
     "GEPAConfig",
     "GEPAResult",
+    "InteractionRecovery",
+    "InteractionRecoveryError",
     "Mutator",
     "SelectParents",
     "ThreadTool",

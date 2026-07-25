@@ -33,6 +33,7 @@ from .context import (
     _evaluation_runtime,
 )
 from .identity import canonical_json, digest_payload
+from .recovery import InteractionRecovery
 from .tools import default_safe_tools, safe_tools
 
 _NO_ANSWER = object()
@@ -152,6 +153,24 @@ class ActorCritic(Task):
         if self.names is not None:
             identity["names"] = self.names
         return digest_payload("eggopt.actor-critic.v1", identity)
+
+    def recover_interaction(
+        self,
+        db: Any,
+        evaluation_id: str,
+        context_limit: int | None,
+    ) -> bool:
+        names = self.names or ("Actor", "Critic")
+        critic_id = _named_child(db, evaluation_id, names[1])
+        actor_id = _named_child(db, critic_id, names[0]) if critic_id else None
+        if actor_id is None:
+            return True
+        return _recover_latest_interaction(
+            db,
+            actor_id,
+            self.actor.context_limit or context_limit,
+            f"ActorCritic {names[0]}",
+        )
 
     def run(self):
         context = _current_evaluation()
@@ -482,7 +501,7 @@ class _AgentTurn(Task):
             )
         else:
             persisted_answer = _answer_after_message(
-                db, self.thread_id, _message_event_seq(db, prompt_id)
+                db, self.thread_id, _message_event_seq(db, self.thread_id, prompt_id)
             )
             if persisted_answer is not _NO_ANSWER:
                 return persisted_answer
@@ -564,36 +583,53 @@ def _critic_decision(value: Any) -> dict[str, str]:
 
 
 def _prompt_message_id(db: Any, thread_id: str, semantic_key: str) -> str | None:
-    row = db.conn.execute(
-        "SELECT msg_id FROM events WHERE thread_id=? AND type='msg.create' "
-        "AND json_extract(payload_json, '$.eggopt_actor_critic_key')=? "
-        "ORDER BY event_seq DESC LIMIT 1",
-        (thread_id, semantic_key),
-    ).fetchone()
-    return str(row[0]) if row and row[0] else None
+    projection = load_thread_projection(db, thread_id)
+    message = projection.latest_message(
+        metadata_key="eggopt_actor_critic_key",
+        metadata_value=semantic_key,
+    )
+    return message.msg_id if message is not None else None
+
+
+def _recover_latest_interaction(
+    db: Any,
+    thread_id: str,
+    context_limit: int | None,
+    operation: str,
+) -> bool:
+    projection = load_thread_projection(db, thread_id)
+    message = projection.latest_message(
+        role="user",
+        metadata_key="eggopt_actor_critic_key",
+    )
+    if message is None:
+        return True
+    return InteractionRecovery(
+        db,
+        thread_id,
+        message.msg_id,
+        context_limit,
+        operation,
+    ).recover()
 
 
 def _prompt_event_seq(db: Any, thread_id: str, semantic_key: str) -> int:
-    row = db.conn.execute(
-        "SELECT event_seq FROM events WHERE thread_id=? AND type='msg.create' "
-        "AND json_extract(payload_json, '$.eggopt_actor_critic_key')=? "
-        "ORDER BY event_seq DESC LIMIT 1",
-        (thread_id, semantic_key),
-    ).fetchone()
-    if row is None:
+    projection = load_thread_projection(db, thread_id)
+    message = projection.latest_message(
+        metadata_key="eggopt_actor_critic_key",
+        metadata_value=semantic_key,
+    )
+    if message is None:
         raise RuntimeError("ActorCritic prompt was not persisted")
-    return int(row[0])
+    return message.created_event_seq
 
 
-def _message_event_seq(db: Any, message_id: str) -> int:
-    row = db.conn.execute(
-        "SELECT event_seq FROM events WHERE msg_id=? AND type='msg.create' "
-        "ORDER BY event_seq DESC LIMIT 1",
-        (message_id,),
-    ).fetchone()
-    if row is None:
+def _message_event_seq(db: Any, thread_id: str, message_id: str) -> int:
+    projection = load_thread_projection(db, thread_id)
+    message = projection.message(message_id)
+    if message is None:
         raise RuntimeError("ActorCritic prompt event is unavailable")
-    return int(row[0])
+    return message.created_event_seq
 
 
 def _answer_after_message(db: Any, thread_id: str, after_seq: int) -> Any:
@@ -601,7 +637,7 @@ def _answer_after_message(db: Any, thread_id: str, after_seq: int) -> Any:
 
 
 def _latest_answer(db: Any, thread_id: str, after_seq: int) -> Any:
-    projection = load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
+    projection = load_thread_projection(db, thread_id)
     answers = [
         message
         for message in projection.messages

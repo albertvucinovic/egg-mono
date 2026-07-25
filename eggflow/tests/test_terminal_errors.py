@@ -275,6 +275,91 @@ def test_normal_error_calls_recover(executor, store):
     asyncio.run(run())
 
 
+def test_interrupted_running_task_calls_recover_before_retry(executor, store):
+    """A process-stale RUNNING row must use the task recovery hook."""
+
+    recover_calls = []
+
+    @dataclass
+    class InterruptedTask(Task):
+        async def run(self):
+            return "recovered"
+
+        async def recover(self) -> bool:
+            recover_calls.append("recover_called")
+            return True
+
+    task = InterruptedTask()
+    store.create(task.get_cache_key(), task)
+    store.update(task.get_cache_key(), "RUNNING")
+
+    assert asyncio.run(executor.run(task)) == "recovered"
+    assert recover_calls == ["recover_called"]
+
+
+def test_interrupted_running_task_does_not_run_when_recovery_fails(executor, store):
+    runs = []
+
+    @dataclass
+    class BrokenRecoveryTask(Task):
+        async def run(self):
+            runs.append("run")
+            return "unsafe"
+
+        async def recover(self) -> bool:
+            raise RuntimeError("cleanup failed")
+
+    task = BrokenRecoveryTask()
+    store.create(task.get_cache_key(), task)
+    store.update(task.get_cache_key(), "RUNNING")
+
+    result = asyncio.run(executor.run(wrapped(task)))
+
+    assert result.error == "Task recovery failed: cleanup failed"
+    assert runs == []
+
+
+def test_interrupted_running_task_respects_recovery_refusal(executor, store):
+    runs = []
+
+    @dataclass
+    class RefusedRecoveryTask(Task):
+        async def run(self):
+            runs.append("run")
+            return "unsafe"
+
+        async def recover(self) -> bool:
+            return False
+
+    task = RefusedRecoveryTask()
+    store.create(task.get_cache_key(), task)
+    store.update(task.get_cache_key(), "RUNNING")
+
+    result = asyncio.run(executor.run(wrapped(task)))
+
+    assert result.error == "Task recovery returned False, not retrying"
+    assert runs == []
+
+
+def test_task_store_counts_status_and_prefix_without_sql_callers(store):
+    @dataclass
+    class CountedTask(Task):
+        name: str
+
+    first = CountedTask("first")
+    second = CountedTask("second")
+    store.create("evaluation:first", first)
+    store.create("evaluation:second", second)
+    store.create("other:first", first)
+    store.update("evaluation:first", "COMPLETED", Result(value=1))
+    store.update("evaluation:second", "FAILED", Result(error="failed"))
+    store.update("other:first", "COMPLETED", Result(value=1))
+
+    assert store.count() == 3
+    assert store.count(status="COMPLETED") == 2
+    assert store.count(status="COMPLETED", key_prefix="evaluation:") == 1
+
+
 def test_terminal_error_skips_recover(executor, store):
     """Terminal errors should NOT call recover() - return cached failure immediately."""
     recover_calls = []
