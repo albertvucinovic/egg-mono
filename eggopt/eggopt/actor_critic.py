@@ -15,8 +15,10 @@ from eggthreads import (
     append_message,
     approve_tool_calls_for_thread,
     create_child_thread,
+    current_thread_model,
     list_children_with_meta,
     load_thread_projection,
+    set_thread_model,
     set_thread_tool_allowlist,
     set_thread_tools_enabled,
     set_thread_sandbox_config,
@@ -74,6 +76,18 @@ class Agent:
         if self.system_prompt is not None and not self.system_prompt:
             raise ValueError("agent system_prompt must be non-empty or None")
 
+    @property
+    def task_identity(self) -> Mapping[str, Any]:
+        """Return the durable identity of this agent's execution semantics."""
+
+        return {
+            "identity": self.identity,
+            "model_key": self.model_key,
+            "models_path": self.models_path,
+            "allowed_tools": sorted(self.allowed_tools),
+            "system_prompt": self.system_prompt,
+        }
+
 
 @dataclass(frozen=True)
 class ActorCriticResult:
@@ -119,9 +133,9 @@ class ActorCritic(Task):
         context = _current_evaluation()
         identity = {
             "evaluation": context["_evaluation_key"],
-            "actor": self.actor.identity,
+            "actor": self.actor.task_identity,
             "critic": (
-                self.critic.identity
+                self.critic.task_identity
                 if isinstance(self.critic, Agent)
                 else _task_identity(self.critic)
             ),
@@ -133,10 +147,6 @@ class ActorCritic(Task):
             ),
             "max_rounds": self.max_rounds,
         }
-        if self.actor.system_prompt is not None:
-            identity["actor_system_prompt"] = self.actor.system_prompt
-        if isinstance(self.critic, Agent) and self.critic.system_prompt is not None:
-            identity["critic_system_prompt"] = self.critic.system_prompt
         if self.names is not None:
             identity["names"] = self.names
         return digest_payload("eggopt.actor-critic.v1", identity)
@@ -225,16 +235,14 @@ class _EnsurePair(Task):
     def get_cache_key(self) -> str:
         identity = {
             "evaluation": self.evaluation_id,
-            "actor": self.actor.identity,
+            "actor": self.actor.task_identity,
             "critic": (
-                self.critic.identity
+                self.critic.task_identity
                 if isinstance(self.critic, Agent)
                 else _task_identity(self.critic)
             ),
             "names": self.names,
         }
-        if self.actor.system_prompt is not None:
-            identity["actor_system_prompt"] = self.actor.system_prompt
         return digest_payload("eggopt.actor-critic.ensure-pair.v1", identity)
 
     def run(self):
@@ -326,13 +334,10 @@ class _ConfigureAgent(Task):
         # v2 makes the full solver-safe default part of durable configuration.
         identity = {
             "thread": self.thread_id,
-            "agent": self.agent.identity,
+            "agent": self.agent.task_identity,
             "workspace": self.workspace,
-            "allowed_tools": sorted(self.agent.allowed_tools),
             "role": self.role,
         }
-        if self.agent.system_prompt is not None:
-            identity["system_prompt"] = self.agent.system_prompt
         return digest_payload("eggopt.actor-critic.configure-agent.v2", identity)
 
     def run(self) -> None:
@@ -344,6 +349,17 @@ class _ConfigureAgent(Task):
             raise ValueError(
                 "ActorCritic run_dir must be inside the current project directory"
             ) from exc
+        if (
+            self.agent.model_key is not None
+            and current_thread_model(db, self.thread_id) != self.agent.model_key
+        ):
+            set_thread_model(
+                db,
+                self.thread_id,
+                self.agent.model_key,
+                reason=f"ActorCritic {self.role}",
+                models_path=self.agent.models_path,
+            )
         set_thread_working_directory(
             db,
             self.thread_id,
@@ -443,7 +459,7 @@ class _AgentTurn(Task):
             "eggopt.actor-critic.turn.v1",
             {
                 "thread": self.thread_id,
-                "agent": self.agent.identity,
+                "agent": self.agent.task_identity,
                 "prompt": self.prompt,
                 "role": self.role,
                 "round": self.round_number,
