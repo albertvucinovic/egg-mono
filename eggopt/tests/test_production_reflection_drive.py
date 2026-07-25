@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import pickle
 from pathlib import Path
 
 import pytest
@@ -661,6 +662,50 @@ def test_runtime_persists_default_and_explicit_gepa_allowlists(tmp_path, monkeyp
             runtime.threads, runtime.study_id
         ).allowed_tools == {"python_exec"}
         assert get_context_limit(runtime.threads, runtime.study_id) == 24_000
+
+
+def test_runtime_study_id_is_owned_by_eggflow_among_unrelated_roots(
+    tmp_path, monkeypatch
+):
+    from eggflow import Result
+    from eggopt import Reflection
+    from eggopt.runtime import Runtime
+    from eggthreads import ThreadsDB, create_root_thread, list_root_threads
+
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "run"
+    egg = root / ".egg"
+    egg.mkdir(parents=True)
+    threads = ThreadsDB(egg / "threads.sqlite")
+    threads.init_schema()
+    before = create_root_thread(threads, name="Unrelated Before")
+    threads.conn.close()
+    reflection = Reflection.eggthreads(
+        llm=MustNotRunLLM(), identity={"model": "flow-owned-study"}
+    )
+
+    with Runtime.open(root, reflection) as runtime:
+        study_id = runtime.study_id
+        assert study_id != before
+        assert runtime.threads.get_thread(study_id).name == "GEPA Study"
+        after = create_root_thread(runtime.threads, name="Unrelated After")
+
+    with Runtime.open(root, reflection) as resumed:
+        assert resumed.study_id == study_id
+        assert set(list_root_threads(resumed.threads)) == {before, study_id, after}
+
+    store = TaskStore(str(egg / "flow.db"))
+    try:
+        row = store.conn.execute(
+            "SELECT status, result_blob FROM tasks WHERE cache_key LIKE "
+            "'eggopt.runtime.create-study.v1:%'"
+        ).fetchone()
+        result = pickle.loads(row["result_blob"])
+        assert row["status"] == "COMPLETED"
+        assert isinstance(result, Result)
+        assert result.value == study_id
+    finally:
+        store.conn.close()
 
 
 def test_solver_safe_profile_is_exact_sandboxed_and_inherited(tmp_path, monkeypatch):

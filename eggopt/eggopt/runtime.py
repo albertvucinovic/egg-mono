@@ -15,7 +15,6 @@ from eggthreads import (
     ToolRegistry,
     create_root_thread,
     get_context_limit,
-    list_root_threads,
     set_context_limit,
 )
 
@@ -121,10 +120,6 @@ class Runtime(Generic[ExampleT, OutputT]):
         flow = FlowExecutor(store)
         threads = ThreadsDB(egg / "threads.sqlite")
         threads.init_schema()
-        legacy_id = _legacy_study_id(threads)
-        roots = list_root_threads(threads)
-        if legacy_id is None and len(roots) > 1:
-            raise RuntimeError("Eggopt run directory contains multiple root threads")
         study_id = _sync(
             flow.run(
                 _CreateStudy(
@@ -136,7 +131,6 @@ class Runtime(Generic[ExampleT, OutputT]):
                         or root / "workspaces" / "mutation"
                     ),
                     study_name or reflection.study_name,
-                    legacy_id or (roots[0] if roots else None),
                 )
             )
         )
@@ -183,14 +177,11 @@ class _CreateStudy(Task):
     reflection: Reflection
     workspace: Path
     name: str
-    legacy_id: str | None = None
 
     def get_cache_key(self) -> str:
         return digest_payload("eggopt.runtime.create-study.v1", {})
 
     def run(self) -> str:
-        if self.legacy_id is not None:
-            return self.legacy_id
         if getattr(self.reflection.drive, "requires_study_thread", False):
             thread_id, _profile = create_solver_safe_study(
                 self.threads,
@@ -202,17 +193,6 @@ class _CreateStudy(Task):
             )
             return thread_id
         return create_root_thread(self.threads, name=self.name)
-
-
-def _legacy_study_id(threads: ThreadsDB) -> str | None:
-    """Read compatibility for studies created before the cached setup Task."""
-
-    row = threads.conn.execute(
-        "SELECT json_extract(payload_json, '$.study_id') "
-        "FROM events WHERE type='eggopt.study' ORDER BY event_seq LIMIT 1"
-    ).fetchone()
-    return str(row[0]) if row and row[0] else None
-
 
 def _sync(awaitable: Any) -> Any:
     try:
