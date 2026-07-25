@@ -35,6 +35,8 @@ from .context import (
 from .identity import canonical_json, digest_payload
 from .tools import default_safe_tools, safe_tools
 
+_NO_ANSWER = object()
+
 
 @dataclass(frozen=True)
 class Agent:
@@ -482,7 +484,7 @@ class _AgentTurn(Task):
             persisted_answer = _answer_after_message(
                 db, self.thread_id, _message_event_seq(db, prompt_id)
             )
-            if persisted_answer is not None:
+            if persisted_answer is not _NO_ANSWER:
                 return persisted_answer
         after_seq = _prompt_event_seq(db, self.thread_id, semantic_key)
         if self.agent.auto_approve_tools:
@@ -508,7 +510,7 @@ class _AgentTurn(Task):
             self.context_limit,
         )
         response = _latest_answer(db, self.thread_id, after_seq)
-        if response is None:
+        if response is _NO_ANSWER:
             raise RuntimeError(f"{self.role} produced no final answer")
         return response
 
@@ -523,7 +525,7 @@ async def _run_until_waiting(
     while True:
         state = thread_state(db, thread_id)
         if state == "waiting_user":
-            if _latest_answer(db, thread_id, after_seq) is not None:
+            if _latest_answer(db, thread_id, after_seq) is not _NO_ANSWER:
                 return
             raise RuntimeError("ActorCritic agent settled without a final answer")
         progressed = await run_with_full_context_limit(
@@ -594,20 +596,20 @@ def _message_event_seq(db: Any, message_id: str) -> int:
     return int(row[0])
 
 
-def _answer_after_message(db: Any, thread_id: str, after_seq: int) -> Any | None:
+def _answer_after_message(db: Any, thread_id: str, after_seq: int) -> Any:
     return _latest_answer(db, thread_id, after_seq)
 
 
-def _latest_answer(db: Any, thread_id: str, after_seq: int) -> Any | None:
+def _latest_answer(db: Any, thread_id: str, after_seq: int) -> Any:
     projection = load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
     answers = [
-        message.payload.get("content")
+        message
         for message in projection.messages
         if message.created_event_seq > after_seq
         and message.payload.get("role") == "assistant"
         and not message.payload.get("tool_calls")
     ]
-    return answers[-1] if answers else None
+    return answers[-1].payload.get("content") if answers else _NO_ANSWER
 
 
 def _callable_identity(function: Any) -> Mapping[str, str]:

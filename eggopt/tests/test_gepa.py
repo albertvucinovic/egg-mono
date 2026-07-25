@@ -738,6 +738,71 @@ class ScriptedAgentLLM:
         }
 
 
+class ReasoningOnlyAgentLLM(ScriptedAgentLLM):
+    async def astream_chat(self, _messages, **_kwargs):
+        self.calls += 1
+        content = next(self.replies)
+        yield {
+            "type": "message",
+            "role": "assistant",
+            "content": content,
+            "reasoning": "internal reasoning",
+            "stop_reason": "end_turn",
+        }
+
+
+def test_actor_critic_sends_empty_final_answer_to_task_critic(tmp_path, monkeypatch):
+    from eggflow import Task
+    from eggopt import ActorCritic, Agent
+
+    monkeypatch.chdir(tmp_path)
+    actor = ReasoningOnlyAgentLLM(["", '{"answer":"valid"}'])
+    reviews = []
+
+    @dataclass
+    class Review(Task):
+        answer: str | None = None
+
+        def run(self):
+            reviews.append(self.answer)
+            if self.answer:
+                return {"decision": "accept", "feedback": "Valid."}
+            return {"decision": "revise", "feedback": "Return a final answer."}
+
+    class Evaluator:
+        def task(self, _candidate, _case):
+            return Evaluate()
+
+    class Evaluate(Task):
+        def run(self):
+            result = yield ActorCritic(
+                actor=Agent(actor, {"role": "reasoning-only"}),
+                critic=Review(),
+                actor_prompt=lambda _round, state: state["feedback"] or "Answer.",
+                max_rounds=2,
+            )
+            return 1.0, {"answer": result.answer, "accepted": result.accepted}
+
+    result = optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=[{"id": "one"}],
+        objective="Produce an answer.",
+        config=GEPAConfig(
+            run_dir=tmp_path / "reasoning-only",
+            max_candidates=1,
+            max_evaluator_calls=1,
+            generator=Increment(),
+            evaluator_identity={"name": "reasoning-only-test"},
+            case_id=lambda case: case["id"],
+        ),
+    )
+
+    assert reviews == ["", '{"answer":"valid"}']
+    assert result.feedback == (({"answer": '{"answer":"valid"}', "accepted": True},),)
+    assert actor.calls == 2
+
+
 def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatch):
     from eggflow import Task
     from eggopt import ActorCritic, Agent
