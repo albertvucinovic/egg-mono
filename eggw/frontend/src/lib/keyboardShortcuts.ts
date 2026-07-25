@@ -18,6 +18,7 @@ export const EGGW_SHORTCUT_GROUPS: readonly ShortcutHelpGroup[] = [
     items: [
       { label: "Toggle tool auto-approval", keys: "Ctrl+Alt+A" },
       { label: "Toggle sandboxing (X for sandboX)", keys: "Ctrl+Alt+X" },
+      { label: "Cycle transcript verbosity (min → medium → max)", keys: "Ctrl+Alt+V" },
       {
         label: "Cancel streaming, blur the composer, or close a dialog",
         keys: "Esc",
@@ -75,7 +76,7 @@ type ModifierKeyEvent = Pick<
 
 function isCtrlAltCode(
   event: ModifierKeyEvent,
-  code: "KeyA" | "KeyX",
+  code: "KeyA" | "KeyV" | "KeyX",
 ): boolean {
   return (
     event.altKey &&
@@ -93,4 +94,8 @@ export function isToggleAutoApprovalShortcut(event: ModifierKeyEvent): boolean {
 
 export function isToggleSandboxingShortcut(event: ModifierKeyEvent): boolean {
   return isCtrlAltCode(event, "KeyX");
+}
+
+export function isCycleDisplayVerbosityShortcut(event: ModifierKeyEvent): boolean {
+  return isCtrlAltCode(event, "KeyV");
 }

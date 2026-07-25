@@ -53,7 +53,7 @@ class TestCmdHelp:
         rendered = str(app.printed)
 
         for shortcut in (
-            "Ctrl+Alt+A", "Ctrl+Alt+X", "Enter or Ctrl+D", "Shift+Enter or Alt+Enter",
+            "Ctrl+Alt+A", "Ctrl+Alt+X", "Ctrl+Alt+V", "Enter or Ctrl+D", "Shift+Enter or Alt+Enter",
             "Ctrl+E", "Ctrl+P", "Ctrl+C", "Tab", "Up/Down", "Left/Right",
             "Home/End", "Esc", "Backspace/Delete", "PageUp", "PageDown",
         ):

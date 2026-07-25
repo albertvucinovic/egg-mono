@@ -45,17 +45,19 @@ _MOUSE_BODY_PARTIAL_RE = _re.compile(r"^-?\d*(?:;-?\d*){0,2}$")
 # fall through to the editor as before.
 _ORPHAN_MOUSE_WINDOW_SEC = 0.30
 
-# Ctrl+Alt+A / Ctrl+Alt+X are mnemonic, pass through stock tmux, and are
-# unbound in default Readline emacs mode. They also avoid common terminal menu
-# mnemonics and the audited Sway configuration. Terminals encode these as ESC
-# plus the corresponding control byte.
+# These mnemonic Ctrl+Alt chords pass through stock tmux and avoid the audited
+# Sway and terminal bindings. Terminals encode them as ESC plus the corresponding
+# control byte; Ctrl+Alt+V intentionally overrides Readline's Meta+Ctrl+V only
+# inside Egg's editor.
 _TOGGLE_AUTO_APPROVAL_KEY = "\x1b\x01"
 _TOGGLE_SANDBOXING_KEY = "\x1b\x18"
+_CYCLE_DISPLAY_VERBOSITY_KEY = "\x1b\x16"
 
 KEYBOARD_SHORTCUTS_HELP = """Keyboard shortcuts:
   Actions:
     Ctrl+Alt+A — Toggle tool auto-approval (/toggleAutoApproval).
     Ctrl+Alt+X — Toggle sandboxing (/toggleSandboxing; X for sandboX).
+    Ctrl+Alt+V — Cycle transcript verbosity min → medium → max → min.
     Enter or Ctrl+D — Send (Enter follows /enterMode).
     Shift+Enter or Alt+Enter — Insert a newline.
     Ctrl+E — Clear the input draft.
@@ -212,6 +214,12 @@ class InputMixin:
             return True
         if key == _TOGGLE_SANDBOXING_KEY:
             self.handle_command('/toggleSandboxing')
+            return True
+        if key == _CYCLE_DISPLAY_VERBOSITY_KEY:
+            levels = ('min', 'medium', 'max')
+            current = getattr(self, '_display_verbosity', 'min')
+            next_level = levels[(levels.index(current) + 1) % len(levels)] if current in levels else 'min'
+            self.handle_command(f'/displayVerbosity {next_level}')
             return True
 
         # Ctrl+D sends, Ctrl+E clears input, Ctrl+C exits

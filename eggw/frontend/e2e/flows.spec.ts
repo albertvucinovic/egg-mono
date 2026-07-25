@@ -1099,32 +1099,52 @@ test.describe('Composer draft and autocomplete ownership', () => {
     const input = page.getByTestId('message-input');
     await expect(input).toBeVisible();
     await input.fill('unsent draft');
-    const dispatchSafetyShortcut = (code: 'KeyA' | 'KeyX', altGraph = false) => page.evaluate(({ code, altGraph }) => {
-      const event = new KeyboardEvent('keydown', { code, key: code === 'KeyA' ? 'a' : 'x', ctrlKey: true, altKey: true, bubbles: true });
+    const dispatchAppShortcut = (code: 'KeyA' | 'KeyV' | 'KeyX', altGraph = false) => page.evaluate(({ code, altGraph }) => {
+      const event = new KeyboardEvent('keydown', { code, key: code.slice(-1).toLowerCase(), ctrlKey: true, altKey: true, bubbles: true });
       Object.defineProperty(event, 'getModifierState', { value: (key: string) => altGraph && key === 'AltGraph' });
       document.dispatchEvent(event);
     }, { code, altGraph });
 
     // Unknown settings cannot be safely inverted, and AltGraph must never be
     // interpreted as the Ctrl+Alt safety chord used by keyboard layouts.
-    await dispatchSafetyShortcut('KeyA');
-    await dispatchSafetyShortcut('KeyA', true);
+    await dispatchAppShortcut('KeyA');
+    await dispatchAppShortcut('KeyA', true);
     expect(autoApprovalRequests).toBe(0);
     releaseSettings();
     await expect(page.getByTitle('Auto-approval OFF')).toBeVisible();
 
     // Two events before React publishes mutation state still produce one true
     // toggle because the handler owns a synchronous operation gate.
-    await dispatchSafetyShortcut('KeyA');
-    await dispatchSafetyShortcut('KeyA');
+    await dispatchAppShortcut('KeyA');
+    await dispatchAppShortcut('KeyA');
     await expect.poll(() => autoApprovalRequests).toBe(1);
     releaseAutoApproval();
     await expect(page.getByTitle('Auto-approval ON')).toBeVisible();
     await expect(input).toHaveValue('unsent draft');
 
-    await dispatchSafetyShortcut('KeyX');
+    await dispatchAppShortcut('KeyX');
     await expect(page.getByText('Sandbox on')).toBeVisible();
     await expect(input).toHaveValue('unsent draft');
+
+    const verbosity = page.getByTitle('Transcript display verbosity');
+    await expect(verbosity).toHaveValue('min');
+    await dispatchAppShortcut('KeyV', true);
+    await expect(verbosity).toHaveValue('min');
+    await page.evaluate(() => {
+      const dialog = document.createElement('div');
+      dialog.setAttribute('role', 'dialog');
+      dialog.setAttribute('aria-modal', 'true');
+      dialog.dataset.testid = 'verbosity-shortcut-dialog';
+      document.body.append(dialog);
+    });
+    await dispatchAppShortcut('KeyV');
+    await expect(verbosity).toHaveValue('min');
+    await page.locator('[data-testid="verbosity-shortcut-dialog"]').evaluate((element) => element.remove());
+    for (const level of ['medium', 'max', 'min']) {
+      await dispatchAppShortcut('KeyV');
+      await expect(verbosity).toHaveValue(level);
+      await expect(input).toHaveValue('unsent draft');
+    }
   });
 
   test('gates ordinary prose and renders only the latest autocomplete response', async ({ page }) => {

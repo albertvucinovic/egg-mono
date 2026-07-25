@@ -89,6 +89,24 @@ class TestHandleKeySafetyShortcuts:
         assert commands == [command]
         assert egg_app.input_panel.get_text() == "draft stays here"
 
+    def test_ctrl_alt_v_cycles_display_verbosity_without_changing_draft(
+        self, egg_app, monkeypatch
+    ):
+        egg_app.input_panel.editor.editor.set_text("draft stays here")
+        egg_app._display_verbosity = "min"
+        redraws = []
+        monkeypatch.setattr(
+            egg_app,
+            "redraw_static_view",
+            lambda **kwargs: redraws.append(kwargs),
+        )
+
+        for expected in ("medium", "max", "min"):
+            assert egg_app.handle_key("\x1b\x16") is True
+            assert egg_app._display_verbosity == expected
+            assert egg_app.input_panel.get_text() == "draft stays here"
+        assert len(redraws) == 3
+
     def test_similar_escape_sequence_is_not_a_toggle(self, egg_app, monkeypatch):
         commands = []
         monkeypatch.setattr(egg_app, "handle_command", commands.append)

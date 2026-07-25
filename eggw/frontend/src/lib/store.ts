@@ -297,6 +297,7 @@ interface AppState {
   setEnterMode: (mode: "send" | "newline") => void;
   displayVerbosity: DisplayVerbosity;
   setDisplayVerbosity: (level: DisplayVerbosity) => void;
+  cycleDisplayVerbosity: () => void;
   showRecordTargetByThread: Record<string, ShowRecordTarget>;
   setShowRecordTarget: (threadId: string, target: ShowRecordTarget | null) => void;
   transcriptMountBoundaryByThread: Record<string, TranscriptMountBoundary>;
@@ -595,6 +596,13 @@ export const useAppStore = create<AppState>((set) => ({
   setEnterMode: (mode) => set({ enterMode: mode }),
   displayVerbosity: "min",
   setDisplayVerbosity: (level) => set({ displayVerbosity: level }),
+  cycleDisplayVerbosity: () => set((state) => ({
+    displayVerbosity: state.displayVerbosity === "min"
+      ? "medium"
+      : state.displayVerbosity === "medium"
+        ? "max"
+        : "min",
+  })),
   showRecordTargetByThread: {},
   setShowRecordTarget: (threadId, target) => set((state) => {
     const next = { ...state.showRecordTargetByThread };

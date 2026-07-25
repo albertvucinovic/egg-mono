@@ -17,4 +17,11 @@ describe("session-local display verbosity", () => {
     useAppStore.getState().setDisplayVerbosity("max");
     expect(useAppStore.getState().displayVerbosity).toBe("max");
   });
+
+  it("cycles min to medium to max to min", () => {
+    for (const level of ["medium", "max", "min"] as const) {
+      useAppStore.getState().cycleDisplayVerbosity();
+      expect(useAppStore.getState().displayVerbosity).toBe(level);
+    }
+  });
 });

@@ -26,7 +26,7 @@ import { HelpDialog } from "@/components/HelpDialog";
 import { OverlayPanel } from "@/components/ui/OverlayPanel";
 import { ControlGroup, IconButton, Select, StatusChip, Switch } from "@/components/ui/primitives";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
-import { isToggleAutoApprovalShortcut, isToggleSandboxingShortcut } from "@/lib/keyboardShortcuts";
+import { isCycleDisplayVerbosityShortcut, isToggleAutoApprovalShortcut, isToggleSandboxingShortcut } from "@/lib/keyboardShortcuts";
 
 export default function ThreadPage() {
   const params = useParams();
@@ -48,6 +48,7 @@ export default function ThreadPage() {
   const setEnterMode = useAppStore((state) => state.setEnterMode);
   const displayVerbosity = useAppStore((state) => state.displayVerbosity);
   const setDisplayVerbosity = useAppStore((state) => state.setDisplayVerbosity);
+  const cycleDisplayVerbosity = useAppStore((state) => state.cycleDisplayVerbosity);
   const setComposerDraft = useAppStore((state) => state.setComposerDraft);
   const [showHelp, setShowHelp] = useState(false);
   const [showMobileControls, setShowMobileControls] = useState(false);
@@ -206,7 +207,7 @@ export default function ThreadPage() {
 
   // Keyboard shortcuts
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    // Safety toggles remain available while the composer is focused. Ctrl+Alt+A/X
+    // App shortcuts remain available while the composer is focused. Ctrl+Alt+A/X/V
     // avoid common browser/terminal shortcuts and audited Readline/tmux/Sway bindings.
     if (!document.querySelector('[role="dialog"][aria-modal="true"]') && isToggleAutoApprovalShortcut(e)) {
       e.preventDefault();
@@ -220,6 +221,11 @@ export default function ThreadPage() {
       } else if (sandboxStatus?.user_control_enabled === false) {
         addSystemLog("User sandbox control is disabled for this thread", "error");
       }
+      return;
+    }
+    if (!document.querySelector('[role="dialog"][aria-modal="true"]') && isCycleDisplayVerbosityShortcut(e)) {
+      e.preventDefault();
+      cycleDisplayVerbosity();
       return;
     }
 
@@ -343,7 +349,7 @@ export default function ThreadPage() {
         });
       }
     }
-  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, router, interruptThreadStreaming, toggleAutoApproval, sandboxMutation.mutate, sandboxMutation.isPending, sandboxStatus?.user_control_enabled]);
+  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, router, interruptThreadStreaming, toggleAutoApproval, sandboxMutation.mutate, sandboxMutation.isPending, sandboxStatus?.user_control_enabled, cycleDisplayVerbosity]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);
