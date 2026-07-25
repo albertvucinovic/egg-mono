@@ -66,6 +66,39 @@ def test_projection_without_snapshot_is_bounded_and_preserves_provider_payload_m
     assert second not in [item.msg_id for item in projection.messages]
 
 
+def test_projection_message_queries_hide_event_storage(tmp_path) -> None:
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+    first = ts.append_message(
+        db,
+        thread_id,
+        "user",
+        "first",
+        extra={"semantic_key": "first-key"},
+    )
+    latest = ts.append_message(
+        db,
+        thread_id,
+        "user",
+        "latest",
+        extra={"semantic_key": "latest-key"},
+    )
+    ts.append_message(db, thread_id, "assistant", "answer")
+
+    projection = ts.load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
+
+    assert projection.message(first).payload["content"] == "first"
+    assert projection.message("missing") is None
+    assert projection.latest_message(role="user").msg_id == latest
+    assert projection.latest_message(
+        role="user", metadata_key="semantic_key"
+    ).msg_id == latest
+    assert projection.latest_message(
+        role="user", metadata_key="semantic_key", metadata_value="first-key"
+    ).msg_id == first
+    assert ts.load_thread_projection(db, thread_id) == projection
+
+
 def test_input_submission_event_extends_snapshot_without_changing_messages(tmp_path) -> None:
     db = _make_db(tmp_path)
     thread_id = ts.create_root_thread(db, name="input-history-noop")

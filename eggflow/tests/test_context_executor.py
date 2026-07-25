@@ -1,3 +1,4 @@
+import pytest
 import asyncio
 from dataclasses import dataclass
 from typing import ClassVar
@@ -235,3 +236,15 @@ def test_execute_with_raw_returns_result(executor):
         assert value == "Executed raw"
 
     asyncio.run(run())
+
+
+def test_task_store_close_closes_database_handle(tmp_path):
+    import sqlite3
+
+    from eggflow import TaskStore
+
+    store = TaskStore(str(tmp_path / "flow.db"))
+    store.close()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        store.get("missing")

@@ -39,8 +39,8 @@ class Runtime:
         return cls(root, store, flow, threads, study_id, mutation_id, runtime_key)
 
     def close(self) -> None:
-        self.threads.conn.close()
-        self.store.conn.close()
+        self.threads.close()
+        self.store.close()
 
     def __enter__(self) -> Runtime:
         return self

@@ -105,6 +105,11 @@ class ThreadsDB:
         cur.executescript(SCHEMA_SQL)
         cur.close()
 
+    def close(self) -> None:
+        """Close this database handle."""
+
+        self.conn.close()
+
     # Threads -----------------------------------------------------------
     def create_thread(self, thread_id: str, name: Optional[str] = None, parent_id: Optional[str] = None,
                       waiting_until: Optional[str] = None, initial_model_key: Optional[str] = None, depth: int = 0,

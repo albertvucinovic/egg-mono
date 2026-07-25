@@ -207,3 +207,12 @@ def test_get_thread_metadata_does_not_load_snapshot_json(tmp_path):
     assert row.name == "Metadata"
     assert row.short_recap == "recap"
     assert row.snapshot_json is None
+
+
+def test_close_closes_database_handle(tmp_path) -> None:
+    db, _ = _make_temp_db(tmp_path)
+
+    db.close()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        db.get_thread("missing")

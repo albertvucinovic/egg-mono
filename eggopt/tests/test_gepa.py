@@ -751,6 +751,225 @@ class ReasoningOnlyAgentLLM(ScriptedAgentLLM):
         }
 
 
+def test_actor_critic_recovery_continues_interrupted_turn(tmp_path, monkeypatch):
+    from eggflow import Task
+    from eggopt import ActorCritic, Agent
+    from eggthreads import append_message, create_child_thread, create_root_thread
+
+    monkeypatch.chdir(tmp_path)
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    evaluation_id = create_root_thread(db, name="Evaluation")
+    critic_id = create_child_thread(db, evaluation_id, name="Critic")
+    actor_id = create_child_thread(db, critic_id, name="Actor")
+    trigger_id = append_message(
+        db,
+        actor_id,
+        "user",
+        "Answer.",
+        extra={"eggopt_actor_critic_key": "turn-key"},
+    )
+    invocation = "interrupted-invoke"
+    db.append_event(
+        "interrupted-open",
+        actor_id,
+        "stream.open",
+        {"stream_kind": "llm"},
+        msg_id="interrupted-stream-message",
+        invoke_id=invocation,
+    )
+    db.append_event(
+        "interrupted-reasoning",
+        actor_id,
+        "stream.delta",
+        {"reason": "partial reasoning"},
+        invoke_id=invocation,
+        chunk_seq=0,
+    )
+    db.append_event(
+        "interrupted-close",
+        actor_id,
+        "stream.close",
+        {},
+        invoke_id=invocation,
+    )
+
+    @dataclass
+    class Review(Task):
+        def run(self):
+            return {"decision": "accept", "feedback": "Valid."}
+
+    interaction = ActorCritic(
+        actor=Agent(object(), {"role": "interrupted"}),
+        critic=Review(),
+        actor_prompt=lambda _round, _state: "Answer.",
+        max_rounds=1,
+    )
+
+    assert interaction.recover_interaction(db, evaluation_id, None) is True
+    continuation = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='control.interrupt' "
+        "AND json_extract(payload_json, '$.purpose')='continue'",
+        (actor_id,),
+    ).fetchone()
+    assert continuation is not None
+    assert trigger_id in continuation[0]
+
+
+def test_actor_critic_recovery_repairs_structurally_unhealthy_turn(
+    tmp_path, monkeypatch
+):
+    from eggflow import Task
+    from eggopt import ActorCritic, Agent
+    from eggthreads import append_message, create_child_thread, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    evaluation_id = create_root_thread(db, name="Evaluation")
+    critic_id = create_child_thread(db, evaluation_id, name="Critic")
+    actor_id = create_child_thread(db, critic_id, name="Actor")
+    trigger_id = append_message(
+        db,
+        actor_id,
+        "user",
+        "Answer.",
+        extra={"eggopt_actor_critic_key": "turn-key"},
+    )
+    db.append_event(
+        "interrupted-open",
+        actor_id,
+        "stream.open",
+        {"stream_kind": "llm"},
+        msg_id="interrupted-stream-message",
+        invoke_id="unclosed-invoke",
+    )
+
+    @dataclass
+    class Review(Task):
+        def run(self):
+            return {"decision": "accept", "feedback": "Valid."}
+
+    interaction = ActorCritic(
+        actor=Agent(object(), {"role": "interrupted"}),
+        critic=Review(),
+        actor_prompt=lambda _round, _state: "Answer.",
+        max_rounds=1,
+    )
+
+    assert interaction.recover_interaction(db, evaluation_id, None) is True
+    continuation = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='control.interrupt' "
+        "AND json_extract(payload_json, '$.purpose')='continue'",
+        (actor_id,),
+    ).fetchone()
+    assert continuation is not None
+    assert trigger_id in continuation[0]
+
+
+def test_actor_critic_recovery_does_not_continue_completed_turn(tmp_path):
+    from eggflow import Task
+    from eggopt import ActorCritic, Agent
+    from eggthreads import append_message, create_child_thread, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    evaluation_id = create_root_thread(db, name="Evaluation")
+    critic_id = create_child_thread(db, evaluation_id, name="Critic")
+    actor_id = create_child_thread(db, critic_id, name="Actor")
+    append_message(
+        db,
+        actor_id,
+        "user",
+        "Answer.",
+        extra={"eggopt_actor_critic_key": "turn-key"},
+    )
+    append_message(db, actor_id, "assistant", "Complete answer.")
+
+    @dataclass
+    class Review(Task):
+        def run(self):
+            return {"decision": "accept", "feedback": "Valid."}
+
+    interaction = ActorCritic(
+        actor=Agent(object(), {"role": "complete"}),
+        critic=Review(),
+        actor_prompt=lambda _round, _state: "Answer.",
+        max_rounds=1,
+    )
+
+    assert interaction.recover_interaction(db, evaluation_id, None) is True
+    assert db.conn.execute(
+        "SELECT 1 FROM events WHERE thread_id=? AND type='control.interrupt'",
+        (actor_id,),
+    ).fetchone() is None
+
+
+def test_actor_critic_recovery_keeps_context_limit_terminal(tmp_path, monkeypatch):
+    from eggflow import ContextLimitExceededError, Task
+    from eggopt import ActorCritic, Agent
+    from eggthreads import append_message, create_child_thread, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    evaluation_id = create_root_thread(db, name="Evaluation")
+    critic_id = create_child_thread(db, evaluation_id, name="Critic")
+    actor_id = create_child_thread(db, critic_id, name="Actor")
+    append_message(
+        db,
+        actor_id,
+        "user",
+        "Answer.",
+        extra={"eggopt_actor_critic_key": "turn-key"},
+    )
+    monkeypatch.setattr(
+        "eggopt.recovery.full_context_tokens", lambda _db, _thread_id: 100
+    )
+
+    @dataclass
+    class Review(Task):
+        def run(self):
+            return {"decision": "accept", "feedback": "Valid."}
+
+    interaction = ActorCritic(
+        actor=Agent(object(), {"role": "limited"}),
+        critic=Review(),
+        actor_prompt=lambda _round, _state: "Answer.",
+        max_rounds=1,
+    )
+
+    with pytest.raises(ContextLimitExceededError, match="100 >= 100"):
+        interaction.recover_interaction(db, evaluation_id, 100)
+
+
+def test_case_evaluation_delegates_failed_retry_recovery(tmp_path):
+    import asyncio
+
+    from eggopt.gepa.evaluation import _EvaluateCase
+    from eggthreads import ThreadsDB
+
+    calls = []
+
+    class RecoverableEvaluator:
+        def recover(self, candidate, case, *, evaluation_thread_id):
+            calls.append((candidate, case, evaluation_thread_id))
+            return True
+
+    task = _EvaluateCase(
+        RecoverableEvaluator(),
+        {"instruction": "candidate"},
+        {"id": "case"},
+        {"name": "recoverable"},
+        "case",
+        ("evaluation-thread", str(tmp_path), "runtime-key"),
+        ThreadsDB(tmp_path / "threads.sqlite"),
+    )
+
+    assert asyncio.run(task.recover()) is True
+    assert calls == [
+        ({"instruction": "candidate"}, {"id": "case"}, "evaluation-thread")
+    ]
+
+
 def test_actor_critic_sends_empty_final_answer_to_task_critic(tmp_path, monkeypatch):
     from eggflow import Task
     from eggopt import ActorCritic, Agent

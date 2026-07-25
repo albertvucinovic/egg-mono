@@ -132,6 +132,7 @@ class _EvaluateCase(Task):
     evaluator_identity: Any
     case_identity: Any
     node: tuple[str, str, str]
+    threads: ThreadsDB | None = field(repr=False, compare=False)
     context_limit: int | None = None
 
     def get_cache_key(self) -> str:
@@ -145,6 +146,27 @@ class _EvaluateCase(Task):
                 "example": canonical_json(self.case_identity, what="case identity"),
             },
         )
+
+    async def recover(self) -> bool:
+        factory = getattr(self.evaluator, "recover", None)
+        if not callable(factory):
+            return True
+        parameters = inspect.signature(factory).parameters
+        if self.threads is None and any(
+            name in parameters for name in ("threads", "evaluation_thread_id")
+        ):
+            raise RuntimeError("evaluation recovery runtime is unavailable")
+        context = {
+            "threads": self.threads,
+            "evaluation_thread_id": self.node[0],
+            "context_limit": self.context_limit,
+        }
+        value = factory(
+            dict(self.candidate),
+            self.case,
+            **{name: item for name, item in context.items() if name in parameters},
+        )
+        return bool(await value) if inspect.isawaitable(value) else bool(value)
 
     def run(self):
         context = {
@@ -262,6 +284,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                 self.evaluator_identity,
                 identity,
                 node,
+                self.threads,
                 self.context_limit,
             )
             for case, identity, node in zip(
@@ -380,6 +403,7 @@ def _new_call_count(flow, candidate, cases, case_ids, evaluator, evaluator_ident
             evaluator_identity,
             case_identity,
             ("budget-only", "budget-only", "budget-only"),
+            None,
         )
         row = flow.store.get(task.get_cache_key())
         if row is None or row["status"] != "COMPLETED":
@@ -388,10 +412,4 @@ def _new_call_count(flow, candidate, cases, case_ids, evaluator, evaluator_ident
 
 
 def _completed_evaluator_calls(flow: FlowExecutor) -> int:
-    prefix = f"{_EVALUATION}:"
-    return int(
-        flow.store.conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status='COMPLETED' AND cache_key LIKE ?",
-            (prefix + "%",),
-        ).fetchone()[0]
-    )
+    return flow.store.count(status="COMPLETED", key_prefix=f"{_EVALUATION}:")
