@@ -15,13 +15,12 @@ from eggthreads import (
 
 from eggopt import (
     Agent,
-    NativeGEPAConfig,
-    Reflection,
+    GEPAConfig,
     current_evaluation,
     optimize_anything,
     plan_optimization,
 )
-from eggopt.gepa import SOLVER_SAFE_TOOLS
+from eggopt.tools import SAFE_TOOLS
 
 
 class Evaluator:
@@ -61,9 +60,9 @@ def test_agent_defaults_to_safe_tools_and_accepts_explicit_replacement():
     from eggthreads import ToolRegistry
 
     default = Agent(object(), {"role": "default"})
-    assert default.allowed_tools == SOLVER_SAFE_TOOLS
+    assert default.allowed_tools == SAFE_TOOLS
     assert {item["function"]["name"] for item in default.tools.tools_spec()}.issuperset(
-        SOLVER_SAFE_TOOLS
+        SAFE_TOOLS
     )
 
     restricted = Agent(
@@ -138,22 +137,22 @@ def test_agent_can_opt_into_tool_auto_approval():
 
 
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
-def test_native_gepa_evaluator_context_limit_must_be_positive(limit):
+def test_gepa_evaluator_context_limit_must_be_positive(limit):
     with pytest.raises(ValueError, match="evaluator_context_limit"):
-        NativeGEPAConfig(evaluator_context_limit=limit)
+        GEPAConfig(evaluator_context_limit=limit)
 
 
-def test_native_gepa_progress_must_be_callable():
+def test_gepa_progress_must_be_callable():
     with pytest.raises(TypeError, match="progress"):
-        NativeGEPAConfig(progress="verbose")
+        GEPAConfig(progress="verbose")
 
 
 def config(tmp_path, evaluator, generator, **changes):
-    base = NativeGEPAConfig(
+    base = GEPAConfig(
         run_dir=tmp_path / "native",
         max_candidates=2,
         max_evaluator_calls=20,
-        reflection_minibatch_size=1,
+        mutation_minibatch_size=1,
         parents_per_candidate=2,
         seed=1,
         evaluator_identity={"name": "threshold", "version": 1},
@@ -161,22 +160,6 @@ def config(tmp_path, evaluator, generator, **changes):
         generator=generator,
     )
     return replace(base, **changes)
-
-
-def test_generation_cache_identity_includes_private_runtime_policy(monkeypatch):
-    import eggopt.native_gepa as native
-
-    task = native.GenerateCandidate(
-        object(),
-        ({"instruction": "seed"},),
-        ({"case": "one"},),
-        "Improve it.",
-        0,
-    )
-
-    safe_key = task.get_cache_key()
-    monkeypatch.setattr(native, "_MUTATION_RUNTIME_POLICY", "unsafe-legacy")
-    assert task.get_cache_key() != safe_key
 
 
 def test_optimize_anything_is_case_wise_pareto_search(tmp_path):
@@ -268,7 +251,7 @@ def test_minibatch_acceptance_can_send_ties_to_full_validation(tmp_path):
 
 def test_minibatch_acceptance_rejects_unknown_policy():
     with pytest.raises(ValueError, match="minibatch_acceptance"):
-        NativeGEPAConfig(minibatch_acceptance="unknown")
+        GEPAConfig(minibatch_acceptance="unknown")
 
 
 def test_progress_callback_reports_each_case_and_candidate(tmp_path):
@@ -355,7 +338,7 @@ def test_progress_projects_cached_results_on_resume(tmp_path):
     ]
 
 
-def test_native_gepa_results_live_only_in_eggflow(tmp_path):
+def test_gepa_results_live_only_in_eggflow(tmp_path):
     optimize_anything(
         {"instruction": "0"},
         evaluator=Evaluator(),
@@ -374,15 +357,15 @@ def test_native_gepa_results_live_only_in_eggflow(tmp_path):
     try:
         assert (
             db.conn.execute(
-                "SELECT COUNT(*) FROM events WHERE type LIKE 'eggopt.native-gepa.%-result.v1' "
-                "OR type='eggopt.native-gepa.progress.v1'"
+                "SELECT COUNT(*) FROM events WHERE type LIKE 'eggopt.gepa.%-result.v1' "
+                "OR type='eggopt.gepa.progress.v1'"
             ).fetchone()[0]
             == 0
         )
         assert (
             db.conn.execute(
                 "SELECT COUNT(*) FROM events WHERE type='msg.create' "
-                "AND json_extract(payload_json, '$.eggopt_kind') LIKE 'eggopt.native-gepa.%'"
+                "AND json_extract(payload_json, '$.eggopt_kind') LIKE 'eggopt.gepa.%'"
             ).fetchone()[0]
             == 0
         )
@@ -523,18 +506,12 @@ def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(
     evaluator = ContextEvaluator()
     generator = Increment()
     dataset = [{"id": "easy", "target": 1}]
-    reflection = Reflection.eggthreads(
-        llm=object(),
-        identity={"model": "unused"},
-        allowed_tools={"python_exec"},
-    )
     cfg = config(
         tmp_path,
         evaluator,
         generator,
         max_candidates=1,
         parents_per_candidate=1,
-        reflection=reflection,
     )
 
     optimize_anything(
@@ -552,12 +529,13 @@ def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(
 
     db = ThreadsDB(tmp_path / "native" / ".egg" / "threads.sqlite")
     try:
-        mutation = list_root_threads(db)[0]
-        assert db.get_thread(mutation).name == "Mutation"
-        assert not get_thread_tools_config(db, mutation).is_tool_allowed(
-            "send_message_to_child"
-        )
-        candidates = list_children_with_meta(db, mutation)
+        study = list_root_threads(db)[0]
+        assert db.get_thread(study).name == "GEPA"
+        validation = list_children_with_meta(db, study)[0]
+        assert validation[1] == "Validation"
+        mutation = list_children_with_meta(db, validation[0])[0]
+        assert mutation[1] == "Mutation"
+        candidates = list_children_with_meta(db, mutation[0])
         assert candidates[0][1] == "Candidate 1 Evaluation"
         assert get_thread_tools_config(db, candidates[0][0]).is_tool_allowed(
             "send_message_to_child"
@@ -574,7 +552,7 @@ def test_plan_reports_total_and_incremental_cost():
         valset_size=20,
         max_candidates=5,
         max_evaluator_calls=100,
-        reflection_minibatch_size=3,
+        mutation_minibatch_size=3,
         completed_candidates=2,
         completed_evaluator_calls=46,
     )
@@ -660,7 +638,7 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
         evaluator=ActorCriticEvaluator(),
         dataset=[{"id": "one"}],
         objective="Produce valid JSON.",
-        config=NativeGEPAConfig(
+        config=GEPAConfig(
             run_dir=run_dir,
             max_candidates=1,
             max_evaluator_calls=1,
@@ -684,10 +662,7 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
             thread_id = db.conn.execute(
                 "SELECT thread_id FROM threads WHERE name=?", (name,)
             ).fetchone()[0]
-            assert (
-                get_thread_tools_config(db, thread_id).allowed_tools
-                == SOLVER_SAFE_TOOLS
-            )
+            assert get_thread_tools_config(db, thread_id).allowed_tools == SAFE_TOOLS
             assert get_context_limit(db, thread_id) == 9_000
             if name == "Actor":
                 assert get_thread_auto_approval_status(db, thread_id) is True
@@ -721,7 +696,7 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
         evaluator=ReplayEvaluator(),
         dataset=[{"id": "one"}],
         objective="Produce valid JSON.",
-        config=NativeGEPAConfig(
+        config=GEPAConfig(
             run_dir=run_dir,
             max_candidates=1,
             max_evaluator_calls=1,
@@ -772,7 +747,7 @@ def test_actor_critic_context_limit_uses_full_history_not_provider_context(
             return EvaluateWithActorCritic()
 
     monkeypatch.setattr(
-        "eggopt._full_context.thread_token_stats",
+        "eggopt.context_limit.thread_token_stats",
         lambda _db, _thread: {"context_tokens": 10, "full_thread_tokens": 100},
     )
 
@@ -784,7 +759,7 @@ def test_actor_critic_context_limit_uses_full_history_not_provider_context(
             evaluator=Evaluator(),
             dataset=[{"id": "one"}],
             objective="Produce valid JSON.",
-            config=NativeGEPAConfig(
+            config=GEPAConfig(
                 run_dir=run_dir,
                 max_candidates=1,
                 max_evaluator_calls=1,
@@ -850,7 +825,7 @@ def test_actor_critic_accepts_a_task_as_critic(tmp_path, monkeypatch):
                 "rounds": result.rounds,
             }
 
-    config = NativeGEPAConfig(
+    config = GEPAConfig(
         run_dir=run_dir,
         max_candidates=1,
         max_evaluator_calls=1,
@@ -980,7 +955,7 @@ def test_async_evaluator_is_cached_without_extra_api_types(tmp_path):
         return float(int(candidate["instruction"]) >= case["target"]), {"async": True}
 
     generator = Increment()
-    cfg = NativeGEPAConfig(
+    cfg = GEPAConfig(
         run_dir=tmp_path / "async",
         max_candidates=1,
         max_evaluator_calls=1,
@@ -1000,3 +975,84 @@ def test_async_evaluator_is_cached_without_extra_api_types(tmp_path):
 
     assert first.feedback == second.feedback == (({"async": True},),)
     assert calls == 1
+
+
+class ScriptedMutationLLM:
+    current_model_key = "scripted-mutation"
+
+    def __init__(self, replies):
+        self.replies = iter(replies)
+        self.calls = 0
+
+    def set_model(self, key):
+        self.current_model_key = key
+
+    def set_model_with_config(self, key, _config):
+        self.current_model_key = key
+
+    async def astream_chat(self, *_args, **_kwargs):
+        self.calls += 1
+        yield {
+            "type": "message",
+            "role": "assistant",
+            "content": next(self.replies),
+            "stop_reason": "end_turn",
+        }
+
+
+def test_mutation_uses_actor_critic_with_deterministic_validation(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from eggopt import Mutator
+
+    monkeypatch.chdir(tmp_path)
+    llm = ScriptedMutationLLM(
+        [
+            "not json",
+            json.dumps({"mutations": [{"instruction": "1"}]}),
+        ]
+    )
+    evaluator = Evaluator()
+    result = optimize_anything(
+        {"instruction": "0"},
+        evaluator=evaluator,
+        dataset=[{"id": "one", "target": 1}],
+        objective="Reach the target.",
+        config=GEPAConfig(
+            run_dir=tmp_path / "mutation",
+            max_candidates=1,
+            max_evaluator_calls=3,
+            mutation_minibatch_size=1,
+            parents_per_candidate=1,
+            minibatch_acceptance="improvement_or_equal",
+            mutator=Mutator.eggthreads(
+                llm=llm,
+                identity={"model": "scripted-mutation"},
+                instruction="Improve the instruction.",
+                allowed_tools=set(),
+                max_correction_turns=1,
+            ),
+            evaluator_identity={"name": "mutation-critic-test"},
+            case_id=lambda case: case["id"],
+        ),
+    )
+
+    assert result.best_candidate == {"instruction": "1"}
+    assert llm.calls == 2
+    db = ThreadsDB(tmp_path / "mutation" / ".egg" / "threads.sqlite")
+    try:
+        validation = db.conn.execute(
+            "SELECT thread_id FROM threads WHERE name='Validation'"
+        ).fetchone()
+        mutation = db.conn.execute(
+            "SELECT thread_id FROM threads WHERE name='Mutation'"
+        ).fetchone()
+        assert validation and mutation
+        parent = db.conn.execute(
+            "SELECT parent_id FROM children WHERE child_id=?", (mutation[0],)
+        ).fetchone()
+        assert tuple(parent) == (validation[0],)
+    finally:
+        db.conn.close()

@@ -20,7 +20,6 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
-upstream = ["gepa==0.1.4"]
 
 [tool.setuptools.packages.find]
 where = ["."]
