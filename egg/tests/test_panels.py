@@ -1151,6 +1151,19 @@ class TestConsolePrintMessage:
         assert with_borders
         assert all(panel.box == rich_box.SQUARE for panel in with_borders)
 
+    def test_medium_tool_result_indents_its_entire_border(self, egg_app):
+        egg_app._display_verbosity = "medium"
+        item = egg_app._static_transcript_message_renderables({
+            "role": "tool",
+            "name": "bash",
+            "content": "result",
+            "tool_call_id": "call-result-border",
+        })[0]
+
+        rendered = self._render_panel_text(item.renderable)
+
+        assert next(line for line in rendered.splitlines() if line.strip()).startswith("      ")
+
     def test_medium_tool_panel_keeps_optimizer_raw_recovery(self, egg_app):
         egg_app._display_verbosity = "medium"
 
@@ -1460,7 +1473,7 @@ class TestConsolePrintMessage:
         assert '1 reasoning block' in joined_bodies
         assert 'Executed 1 tool, got 1 tool result' in joined_bodies
         assert 'total tokens' in joined_bodies
-        assert 'Tools: bash(34567890) r' in joined_bodies
+        assert 'calls [bash(34567890)]' in joined_bodies
         assert f'msg_id: {tool}' not in joined_bodies
         assert 'tool_call_id: call_full_1234567890' not in joined_bodies
 
@@ -1520,7 +1533,7 @@ class TestConsolePrintMessage:
         assert 'Hidden details:' not in joined_bodies
         assert 'Executed 2 tools, got 2 tool results, 1 reasoning block' in joined_bodies
         assert joined_bodies.count('Executed 2 tools, got 2 tool results, 1 reasoning block') == 1
-        assert 'Tools: bash(h_1234567890) r, python_repl(n_1234567890)' in joined_bodies
+        assert 'calls [bash(h_1234567890) python_repl(n_1234567890)]' in joined_bodies
         assert 'private reasoning body' not in joined_bodies
         assert 'bash result body' not in joined_bodies
         assert 'python result body' not in joined_bodies
@@ -2044,7 +2057,10 @@ class TestFullScreenScrollbackWiring:
                     bodies.append(str(getattr(renderable, "plain", renderable)))
         assert bodies[-1].count("Executed") == 1
         assert "Executed 2 tools, got 2 tool results, 2 reasoning blocks" in bodies[-1]
-        assert "Tools: bash(l_bash_1) r, python_repl(python_1)" in bodies[-1]
+        assert (
+            "calls [bash(l_bash_1)] results [bash(l_bash_1)] | "
+            "calls [python_repl(python_1)] results [python_repl(python_1)]"
+        ) in bodies[-1]
 
     def test_full_screen_min_visible_message_finalizes_and_resets_summary_update(self, egg_app):
         """Visible messages bound a full-screen min summary run."""
@@ -2340,7 +2356,7 @@ class TestTranscriptScrollbackSource:
         assert "Executed 1 tool" in text
         assert "got 1 tool result" in text
         assert "1 reasoning block" in text
-        assert "Tools: bash(azy_bash) r" in text
+        assert "calls [bash(azy_bash)] results [bash(" in text
 
         # No legacy Hidden Details panels
         assert "Hidden Details" not in text

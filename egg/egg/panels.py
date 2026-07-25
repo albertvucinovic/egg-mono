@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from rich.console import Console, Group
 from rich.markup import escape as rich_escape
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
@@ -75,6 +76,33 @@ class _StaticTranscriptRenderable:
     renderable: Any
     fallback: Optional[str] = None
     kind: str = ''
+
+
+@dataclass(frozen=True)
+class _IndentedTranscriptPanel:
+    """Expose panel properties while rendering the whole border at a margin."""
+
+    panel: Panel
+    left: int
+
+    @property
+    def renderable(self) -> Any:
+        return self.panel.renderable
+
+    @property
+    def border_style(self) -> Any:
+        return self.panel.border_style
+
+    @property
+    def box(self) -> Any:
+        return self.panel.box
+
+    @property
+    def title(self) -> Any:
+        return self.panel.title
+
+    def __rich_console__(self, console: Any, options: Any) -> Any:
+        yield Padding(self.panel, (0, 0, 0, self.left), expand=True)
 
 
 @dataclass(frozen=True)
@@ -1382,6 +1410,8 @@ class PanelsMixin:
         tokens: Any = 0,
         tool_call_id: Optional[str] = None,
         record_id: Any = None,
+        group_id: Any = None,
+        effect: ToolEffect = ToolEffect.UNKNOWN,
     ) -> None:
         target = self._ensure_static_hidden_details_state(state)
         summary = target.get('summary')
@@ -1396,9 +1426,16 @@ class PanelsMixin:
                 arguments=arguments,
                 tokens=tokens,
                 tool_call_id=tool_call_id,
+                group_id=group_id,
             )
         elif kind == 'tool_results':
-            summary.add_tool_result(name=name, tokens=tokens, record_id=record_id)
+            summary.add_tool_result(
+                name=name,
+                tokens=tokens,
+                record_id=record_id,
+                tool_call_id=tool_call_id,
+                effect=effect,
+            )
 
     def _record_static_hidden_detail(self, kind: str, header: str) -> None:
         self._record_static_hidden_detail_in_state(
@@ -1553,6 +1590,7 @@ class PanelsMixin:
         *,
         fallback: Optional[str] = None,
         title_align: str = "center",
+        left_margin: int = 0,
     ) -> _StaticTranscriptRenderable:
         """Build a static transcript Panel renderable with a plain fallback."""
         if fallback is None:
@@ -1569,6 +1607,11 @@ class PanelsMixin:
                 border_style=border,
                 box=self._get_static_box(),
             )
+            if left_margin:
+                panel_renderable = _IndentedTranscriptPanel(
+                    panel_renderable,
+                    max(0, int(left_margin)),
+                )
         except Exception:
             panel_renderable = fallback
         return _StaticTranscriptRenderable(panel_renderable, fallback)
@@ -1954,6 +1997,7 @@ class PanelsMixin:
                             arguments=args,
                             tokens=token_count if idx == 0 else 0,
                             tool_call_id=tc_id,
+                            group_id=msg_id,
                         )
                 else:
                     call_token_text = ""
@@ -2128,6 +2172,7 @@ class PanelsMixin:
                                 name=nm,
                                 tokens=count_min_hidden_text_tokens(txt),
                                 tool_call_id=str(nm or ''),
+                                group_id=msg_id,
                             )
             return items
 
@@ -2171,7 +2216,7 @@ class PanelsMixin:
                 identity = rich_escape(identity_name)
                 if identity_hint:
                     identity += f"({rich_escape(identity_hint)})"
-                title = f"[{effect_markup}]{' ' * 6}{result_effect.label}  {identity}[/{effect_markup}]"
+                title = f"[{effect_markup}]{result_effect.label}  {identity}[/{effect_markup}]"
                 metadata = m.get('output_optimizer') if isinstance(m.get('output_optimizer'), dict) else {}
                 optimizer_fields = []
                 raw_artifact = str(metadata.get('artifact_id') or '').strip()
@@ -2206,8 +2251,10 @@ class PanelsMixin:
                     title,
                     self._tool_effect_border_style(result_effect),
                     title_align="left",
+                    left_margin=6,
                 ))
             else:
+                result_call = self._tool_result_call_presentation(m)
                 self._record_static_hidden_detail_in_state(
                     hidden_details,
                     'tool_results',
@@ -2215,6 +2262,8 @@ class PanelsMixin:
                     name=name,
                     tokens=self._static_min_summary_token_count(pm_tokens["content"], content),
                     record_id=msg_id,
+                    tool_call_id=tool_call_id,
+                    effect=result_call.effect if result_call is not None else ToolEffect.UNKNOWN,
                 )
             return items
 

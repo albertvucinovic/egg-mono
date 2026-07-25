@@ -36,28 +36,123 @@ class TestMinHiddenActivitySummary:
             tool_call_id="call_alpha_A12345678",
         )
 
-        assert "Tools: bash(A12345678) r" in format_min_hidden_activity_summary(summary)
+        assert "calls [bash(A12345678)]" in format_min_hidden_activity_summary(summary)
 
-    def test_min_tool_entries_use_compact_effect_suffixes(self):
-        from egg.min_run_summary import MinHiddenActivitySummary, format_min_hidden_activity_summary
+    def test_min_tool_entries_use_colors_without_effect_labels(self):
+        from egg.min_run_summary import (
+            MinHiddenActivitySummary,
+            MinToolStyles,
+            format_min_hidden_activity_summary,
+            min_hidden_activity_summary_text,
+        )
+        from eggthreads.tool_effects import ToolEffect
 
         summary = MinHiddenActivitySummary()
         summary.add_tool_execution(
-            name="bash", arguments={"script": "rg needle"}, tool_call_id="call_read_12345678"
+            name="bash",
+            arguments={"script": "rg needle"},
+            tool_call_id="call_read_12345678",
+            group_id="group",
         )
         summary.add_tool_execution(
-            name="bash", arguments={"script": "touch result"}, tool_call_id="call_write_87654321"
+            name="bash",
+            arguments={"script": "touch result"},
+            tool_call_id="call_write_87654321",
+            group_id="group",
         )
         summary.add_tool_execution(
-            name="python_repl", arguments={"code": "print(1)"}, tool_call_id="call_unknown_abcdefgh"
+            name="python_repl",
+            arguments={"code": "print(1)"},
+            tool_call_id="call_unknown_abcdefgh",
+            group_id="group",
+        )
+        summary.add_tool_result(
+            name="bash",
+            tool_call_id="call_read_12345678",
+            record_id="msg_result_read_11112222",
+            effect=ToolEffect.READ,
+        )
+        summary.add_tool_result(
+            name="bash",
+            tool_call_id="call_write_87654321",
+            record_id="msg_result_write_33334444",
+            effect=ToolEffect.MAY_WRITE,
+        )
+        summary.add_tool_result(
+            name="python_repl",
+            tool_call_id="call_unknown_abcdefgh",
+            record_id="msg_result_unknown_55556666",
+            effect=ToolEffect.UNKNOWN,
+        )
+
+        rendered = format_min_hidden_activity_summary(summary)
+        rich_rendered = min_hidden_activity_summary_text(
+            summary,
+            styles=MinToolStyles(
+                summary="summary",
+                separator="separator",
+                read="read",
+                may_write="write",
+                unknown="unknown",
+            ),
+        )
+
+        assert (
+            "calls [bash(12345678) bash(87654321) python_repl(abcdefgh)] "
+            "results [bash(11112222) bash(33334444) python_repl(55556666)]"
+        ) in rendered
+        assert not any(label in rendered for label in ("READ", "WRITE", "UNKNOWN"))
+        spans_by_text = {
+            rich_rendered.plain[span.start:span.end]: str(span.style)
+            for span in rich_rendered.spans
+        }
+        assert spans_by_text["bash(12345678)"] == "read"
+        assert spans_by_text["bash(87654321)"] == "write"
+        assert spans_by_text["python_repl(abcdefgh)"] == "unknown"
+        assert spans_by_text["bash(11112222)"] == "read"
+        assert spans_by_text["bash(33334444)"] == "write"
+        assert spans_by_text["python_repl(55556666)"] == "unknown"
+
+    def test_min_summary_keeps_each_call_group_with_its_results(self):
+        from egg.min_run_summary import MinHiddenActivitySummary, format_min_hidden_activity_summary
+        from eggthreads.tool_effects import ToolEffect
+
+        summary = MinHiddenActivitySummary()
+        summary.add_tool_execution(
+            name="bash", arguments={"script": "rg one"}, tool_call_id="call_read_12345678", group_id="group-a"
+        )
+        summary.add_tool_execution(
+            name="bash", arguments={"script": "touch two"}, tool_call_id="call_write_87654321", group_id="group-a"
+        )
+        summary.add_tool_execution(
+            name="python_repl", arguments={"code": "3"}, tool_call_id="call_unknown_abcdefgh", group_id="group-b"
+        )
+        summary.add_tool_result(
+            name="bash",
+            tool_call_id="call_read_12345678",
+            record_id="msg_result_read_11112222",
+            effect=ToolEffect.READ,
+        )
+        summary.add_tool_result(
+            name="bash",
+            tool_call_id="call_write_87654321",
+            record_id="msg_result_write_33334444",
+            effect=ToolEffect.MAY_WRITE,
+        )
+        summary.add_tool_result(
+            name="python_repl",
+            tool_call_id="call_unknown_abcdefgh",
+            record_id="msg_result_unknown_55556666",
+            effect=ToolEffect.UNKNOWN,
         )
 
         rendered = format_min_hidden_activity_summary(summary)
 
-        assert "bash(12345678) r" in rendered
-        assert "bash(87654321) w" in rendered
-        assert "python_repl(abcdefgh)" in rendered
-        assert "UNKNOWN" not in rendered
+        assert (
+            "calls [bash(12345678) bash(87654321)] "
+            "results [bash(11112222) bash(33334444)] | "
+            "calls [python_repl(abcdefgh)] results [python_repl(55556666)]"
+        ) in rendered
 
 
 class TestFormatThreadLine:
@@ -483,7 +578,7 @@ class TestFormatMessagesText:
         assert "1 reasoning block" in text
         assert "Executed 1 tool, got 1 tool result" in text
         assert "total tokens" in text
-        assert "Tools: bash(34567890) r" in text
+        assert "calls [bash(34567890)]" in text
         assert f"[Reasoning [msg_id: {assistant}]]" not in text
         assert "[ToolCall [tool_call_id: call_full_1234567890]] bash" not in text
         assert f"[Tool: bash [msg_id: {tool}] [tool_call_id: call_full_1234567890]]" not in text
@@ -547,7 +642,7 @@ class TestFormatMessagesText:
         text = TestApp().format_messages_text(tid)
 
         assert "Executed 2 tools, got 2 tool results, 1 reasoning block" in text
-        assert "Tools: bash(h_1234567890) r, python_repl(n_1234567890)" in text
+        assert "calls [bash(h_1234567890) python_repl(n_1234567890)]" in text
         assert text.count("Executed 2 tools, got 2 tool results, 1 reasoning block") == 1
         assert "Hidden details:" not in text
         assert "bash result body" not in text

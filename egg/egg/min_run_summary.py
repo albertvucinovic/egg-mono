@@ -52,6 +52,17 @@ class MinToolCallSummary:
     name: str
     tool_call_id: str
     effect: ToolEffect = ToolEffect.UNKNOWN
+    group_id: str = ""
+
+
+@dataclass(frozen=True)
+class MinToolResultSummary:
+    """One inspectable result paired to a compact tool-call identity."""
+
+    name: str
+    tool_call_id: str
+    record_id: str
+    effect: ToolEffect = ToolEffect.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,7 @@ class MinHiddenActivitySummary:
     total_tokens: int = 0
     tool_names: List[str] = field(default_factory=list)
     tool_calls: List[MinToolCallSummary] = field(default_factory=list)
+    tool_results_list: List[MinToolResultSummary] = field(default_factory=list)
     record_ids: List[str] = field(default_factory=list)
     _result_tool_names: List[str] = field(default_factory=list, repr=False)
     _seen_tool_call_ids: Set[str] = field(default_factory=set, repr=False)
@@ -94,6 +106,7 @@ class MinHiddenActivitySummary:
         self.total_tokens = 0
         self.tool_names.clear()
         self.tool_calls.clear()
+        self.tool_results_list.clear()
         self.record_ids.clear()
         self._result_tool_names.clear()
         self._seen_tool_call_ids.clear()
@@ -136,6 +149,7 @@ class MinHiddenActivitySummary:
         arguments: Any = _ARGUMENTS_UNSET,
         tokens: Any = 0,
         tool_call_id: Optional[str] = None,
+        group_id: Any = None,
     ) -> None:
         """Count a tool execution/tool call, de-duping by call id when known."""
         call_id = str(tool_call_id or "").strip()
@@ -152,6 +166,7 @@ class MinHiddenActivitySummary:
                     name=normalized_name,
                     tool_call_id=call_id,
                     effect=classify_tool_effect(normalized_name, arguments).effect,
+                    group_id=str(group_id or "").strip(),
                 )
             )
         self.add_tokens(tokens)
@@ -162,11 +177,24 @@ class MinHiddenActivitySummary:
         name: Any = None,
         tokens: Any = 0,
         record_id: Any = None,
+        tool_call_id: Any = None,
+        effect: ToolEffect = ToolEffect.UNKNOWN,
     ) -> None:
         self.tool_results += 1
         self._add_result_tool_name(name)
         if record_id:
             self.add_record_ids((record_id,))
+        call_id = str(tool_call_id or "").strip()
+        result_id = str(record_id or "").strip()
+        if call_id or result_id:
+            self.tool_results_list.append(
+                MinToolResultSummary(
+                    name=self._normalize_tool_name(name) or "tool",
+                    tool_call_id=call_id,
+                    record_id=result_id,
+                    effect=effect,
+                )
+            )
         self.add_tokens(tokens)
 
 
@@ -177,12 +205,68 @@ def _plural(count: int, singular: str, plural: Optional[str] = None) -> str:
 
 def _min_tool_entry(call: MinToolCallSummary, record_ids: List[str]) -> str:
     hint = shortest_unique_record_id_suffix(call.tool_call_id, record_ids)
-    suffix = {
-        ToolEffect.READ: " r",
-        ToolEffect.MAY_WRITE: " w",
-        ToolEffect.UNKNOWN: "",
-    }[call.effect]
-    return f"{call.name}({hint}){suffix}"
+    return f"{call.name}({hint})"
+
+
+def _min_tool_result_entry(result: MinToolResultSummary, record_ids: List[str]) -> str:
+    identity = result.record_id or result.tool_call_id
+    hint = shortest_unique_record_id_suffix(identity, record_ids)
+    return f"{result.name}({hint})"
+
+
+def _grouped_tool_calls(summary: MinHiddenActivitySummary) -> List[List[MinToolCallSummary]]:
+    groups: List[List[MinToolCallSummary]] = []
+    for call in summary.tool_calls:
+        if groups and call.group_id and groups[-1][0].group_id == call.group_id:
+            groups[-1].append(call)
+        else:
+            groups.append([call])
+    return groups
+
+
+def _grouped_tool_activity(
+    summary: MinHiddenActivitySummary,
+) -> List[tuple[List[MinToolCallSummary], List[MinToolResultSummary]]]:
+    """Pair each ordered call group with its results."""
+
+    groups = [(calls, []) for calls in _grouped_tool_calls(summary)]
+    call_group_indexes = {
+        call.tool_call_id: group_index
+        for group_index, (calls, _results) in enumerate(groups)
+        for call in calls
+        if call.tool_call_id
+    }
+    unmatched_results: List[MinToolResultSummary] = []
+    for result in summary.tool_results_list:
+        group_index = call_group_indexes.get(result.tool_call_id)
+        if group_index is None:
+            unmatched_results.append(result)
+        else:
+            groups[group_index][1].append(result)
+    if unmatched_results:
+        groups.append(([], unmatched_results))
+    return groups
+
+
+def _min_tool_activity_group(
+    calls: List[MinToolCallSummary],
+    results: List[MinToolResultSummary],
+    *,
+    call_record_ids: List[str],
+    result_record_ids: List[str],
+) -> str:
+    parts: List[str] = []
+    if calls:
+        parts.append(
+            "calls [" + " ".join(_min_tool_entry(call, call_record_ids) for call in calls) + "]"
+        )
+    if results:
+        parts.append(
+            "results ["
+            + " ".join(_min_tool_result_entry(result, result_record_ids) for result in results)
+            + "]"
+        )
+    return " ".join(parts)
 
 
 def format_min_hidden_activity_summary(summary: MinHiddenActivitySummary) -> str:
@@ -201,12 +285,19 @@ def format_min_hidden_activity_summary(summary: MinHiddenActivitySummary) -> str
         parts.append(f"total tokens {summary.total_tokens}")
 
     text = ", ".join(parts)
-    if summary.tool_calls:
-        record_ids = [*summary.record_ids, *(call.tool_call_id for call in summary.tool_calls)]
-        calls: List[str] = []
-        for call in summary.tool_calls:
-            calls.append(_min_tool_entry(call, record_ids))
-        text += "\nTools: " + ", ".join(calls)
+    activity_groups = _grouped_tool_activity(summary)
+    if activity_groups:
+        call_record_ids = [*summary.record_ids, *(call.tool_call_id for call in summary.tool_calls)]
+        result_record_ids = [*summary.record_ids, *(result.record_id for result in summary.tool_results_list)]
+        text += "\n" + " | ".join(
+            _min_tool_activity_group(
+                calls,
+                results,
+                call_record_ids=call_record_ids,
+                result_record_ids=result_record_ids,
+            )
+            for calls, results in activity_groups
+        )
     else:
         tool_names = summary.tool_names or summary._result_tool_names
         if tool_names:
@@ -222,22 +313,41 @@ def min_hidden_activity_summary_text(
     """Render a min summary with each complete tool identity color-coded."""
 
     plain = format_min_hidden_activity_summary(summary)
-    if not plain or not summary.tool_calls:
+    if not plain or (not summary.tool_calls and not summary.tool_results_list):
         return Text(plain, style=styles.summary)
 
-    counts, _separator, _tools = plain.partition("\nTools: ")
+    counts = plain.split("\n", 1)[0]
     text = Text(counts, style=styles.summary)
-    text.append("\nTools: ", style=styles.summary)
     record_ids = [*summary.record_ids, *(call.tool_call_id for call in summary.tool_calls)]
     effect_styles = {
         ToolEffect.READ: styles.read,
         ToolEffect.MAY_WRITE: styles.may_write,
         ToolEffect.UNKNOWN: styles.unknown,
     }
-    for index, call in enumerate(summary.tool_calls):
-        if index:
-            text.append(", ", style=styles.separator)
-        text.append(_min_tool_entry(call, record_ids), style=effect_styles[call.effect])
+    result_record_ids = [*summary.record_ids, *(result.record_id for result in summary.tool_results_list)]
+    text.append("\n")
+    for group_index, (calls, results) in enumerate(_grouped_tool_activity(summary)):
+        if group_index:
+            text.append(" | ", style=styles.separator)
+        if calls:
+            text.append("calls [", style=styles.summary)
+            for index, call in enumerate(calls):
+                if index:
+                    text.append(" ", style=styles.separator)
+                text.append(_min_tool_entry(call, record_ids), style=effect_styles[call.effect])
+            text.append("]", style=styles.summary)
+        if calls and results:
+            text.append(" ", style=styles.separator)
+        if results:
+            text.append("results [", style=styles.summary)
+            for index, result in enumerate(results):
+                if index:
+                    text.append(" ", style=styles.separator)
+                text.append(
+                    _min_tool_result_entry(result, result_record_ids),
+                    style=effect_styles[result.effect],
+                )
+            text.append("]", style=styles.summary)
     return text
 
 

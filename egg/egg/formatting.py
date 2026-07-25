@@ -493,12 +493,14 @@ class FormattingMixin:
             arguments: Any = None,
             tokens: Any = 0,
             tool_call_id: str = "",
+            group_id: str = "",
         ) -> None:
             hidden_summary.add_tool_execution(
                 name=name,
                 arguments=arguments,
                 tokens=tokens,
                 tool_call_id=tool_call_id,
+                group_id=group_id,
             )
 
         def add_hidden_tool_result(
@@ -506,8 +508,16 @@ class FormattingMixin:
             name: Any = None,
             tokens: Any = 0,
             record_id: Any = None,
+            tool_call_id: Any = None,
+            effect: ToolEffect = ToolEffect.UNKNOWN,
         ) -> None:
-            hidden_summary.add_tool_result(name=name, tokens=tokens, record_id=record_id)
+            hidden_summary.add_tool_result(
+                name=name,
+                tokens=tokens,
+                record_id=record_id,
+                tool_call_id=tool_call_id,
+                effect=effect,
+            )
 
         def flush_hidden() -> None:
             if verbosity != 'min' or not hidden_summary.has_activity():
@@ -614,6 +624,7 @@ class FormattingMixin:
                                 arguments=tool_call_presentation(tc).arguments,
                                 tokens=tool_call_tokens if idx == 0 else 0,
                                 tool_call_id=tc_id,
+                                group_id=msg_id,
                             )
                 # Streamed-only metadata (if snapshot captured)
                 tstream = m.get('tool_stream') or {}
@@ -646,6 +657,7 @@ class FormattingMixin:
                                 add_hidden_tool_call(
                                     tokens=count_min_hidden_text_tokens(txt),
                                     tool_call_id=str(nm or ''),
+                                    group_id=msg_id,
                                 )
             elif role == 'user':
                 content = content_to_plain_text(m.get('content')).strip()
@@ -708,10 +720,13 @@ class FormattingMixin:
                                 + "\n".join(f"            {line}" for line in preview.splitlines())
                             )
                         else:
+                            call = declared_calls.get(tool_call_id)
                             add_hidden_tool_result(
                                 name=name,
                                 tokens=min_message_token_count(per_message_tokens, msg_id, 'content', content),
                                 record_id=msg_id,
+                                tool_call_id=tool_call_id,
+                                effect=call.effect if call is not None else classify_tool_effect(name).effect,
                             )
             elif role == 'system':
                 content = content_to_plain_text(m.get('content')).strip()
