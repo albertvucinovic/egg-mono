@@ -426,21 +426,28 @@ def show_record_completion_items(
 ) -> list[dict[str, Any]]:
     """Return bounded catalog completion items for the final ``/show`` token."""
 
+    from .autocomplete_sidecar import query_autocomplete_records
+
     text = str(arg or "")
     fragment = text.split()[-1] if text.split() else ""
-    candidates, _watermark = _effective_candidates(db, thread_id)
-    if fragment:
-        candidates = _matching_candidates(candidates, fragment)
+    page = query_autocomplete_records(
+        db,
+        thread_id,
+        fragment,
+        limit=limit,
+    )
+    if page.state != "ready":
+        return []
     items: list[dict[str, Any]] = []
-    for candidate in candidates[: max(0, int(limit))]:
-        short_id = candidate.record_id[-8:] if len(candidate.record_id) > 8 else candidate.record_id
-        preview = f" · {candidate.preview}" if candidate.preview else ""
+    for record in page.records:
+        short_id = record.record_id[-8:] if len(record.record_id) > 8 else record.record_id
+        preview = f" · {record.preview}" if record.preview else ""
         items.append(
             {
-                "display": f"[{short_id}] {candidate.label}{preview}",
-                "insert": candidate.record_id,
+                "display": f"[{short_id}] {record.label}{preview}",
+                "insert": record.record_id,
                 "replace": len(fragment),
-                "meta": f"{candidate.kind} · {candidate.record_id}",
+                "meta": f"{record.kind} · {record.record_id}",
             }
         )
     return items

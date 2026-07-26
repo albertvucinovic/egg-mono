@@ -75,6 +75,23 @@ from .completion_catalog import (
     record_id_completion_items,
     thread_completion_items,
 )
+from .autocomplete_sidecar import (
+    AUTOCOMPLETE_SIDECAR_VERSION,
+    AutocompleteBuildResult,
+    AutocompleteCatalogStatus,
+    AutocompletePage,
+    AutocompleteRecord,
+    autocomplete_catalog_status,
+    autocomplete_semantic_event_seq,
+    autocomplete_sidecar_path,
+    build_autocomplete_catalog,
+    clear_autocomplete_catalog,
+    catch_up_autocomplete_catalog,
+    query_autocomplete_records,
+    query_autocomplete_content_records,
+    query_autocomplete_terms,
+)
+from .autocomplete_manager import AutocompleteSidecarManager
 from .api import (
     validate_model_handle,
     create_root_thread,
@@ -561,6 +578,12 @@ __all__ = [
     'InputPrefixRegistry', 'InputPrefixSpec',
     'EditorSource', 'read_editor_draft_file', 'resolve_editor_source',
     'global_completion_items', 'merge_completion_items', 'record_id_completion_items', 'thread_completion_items',
+    'AUTOCOMPLETE_SIDECAR_VERSION', 'AutocompleteBuildResult', 'AutocompleteCatalogStatus',
+    'AutocompletePage', 'AutocompleteRecord', 'autocomplete_catalog_status', 'autocomplete_semantic_event_seq',
+    'autocomplete_sidecar_path', 'build_autocomplete_catalog', 'clear_autocomplete_catalog',
+    'catch_up_autocomplete_catalog',
+    'query_autocomplete_records', 'query_autocomplete_content_records', 'query_autocomplete_terms',
+    'AutocompleteSidecarManager',
     'SESSION_COMMAND_COMPLETIONS', 'SESSION_ON_COMPLETIONS', 'SESSION_TARGET_COMPLETIONS',
     'OUTPUT_OPTIMIZER_COMMAND_COMPLETIONS', 'OUTPUT_OPTIMIZER_MODE_COMPLETIONS',
     'EGG_COMMAND_COMPLETIONS', 'FRONTEND_EDITOR_COMMAND_COMPLETIONS', 'EGGW_COMMAND_COMPLETIONS',

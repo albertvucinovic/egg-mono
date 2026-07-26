@@ -407,11 +407,12 @@ def create_default_command_registry() -> CommandRegistry:
     register_plugins(CommandPluginContext(command_registry=registry), [ModelPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [AuthPlugin()])
 
-    from .builtin_plugins import DiagnosticsPlugin, OutputOptimizerAdminPlugin, ToolsAdminPlugin
+    from .builtin_plugins import AutocompleteCachePlugin, DiagnosticsPlugin, OutputOptimizerAdminPlugin, ToolsAdminPlugin
 
     register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [OutputOptimizerAdminPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [DiagnosticsPlugin()])
+    register_plugins(CommandPluginContext(command_registry=registry), [AutocompleteCachePlugin()])
 
     from .builtin_plugins import AnswerUserPlugin, CompactionPlugin, DisplayInputPlugin, InspectionPlugin, SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin, WebPlugin
 

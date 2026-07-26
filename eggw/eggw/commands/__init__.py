@@ -83,6 +83,7 @@ from ..core import ensure_scheduler_for
 _SHARED_COMMAND_ADAPTER_COMMANDS = {
     "btw",
     "show",
+    "autocompleteCache",
     "waitForThreads",
     "outputOptimizerStatus",
     "outputOptimizerOn",
@@ -237,6 +238,8 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
         elif command_name == "btw":
             return _execute_shared_command(thread_id, command_name, command_arg)
         elif command_name == "show":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "autocompleteCache":
             return _execute_shared_command(thread_id, command_name, command_arg)
         elif command_name == "skills":
             return await cmd_skills(thread_id, command_arg)

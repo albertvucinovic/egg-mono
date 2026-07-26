@@ -162,6 +162,7 @@ def test_show_command_and_completion_share_authoritative_result_shape(tmp_path: 
     db = _db(tmp_path)
     thread_id = ts.create_root_thread(db, name="command")
     _append_with_id(db, thread_id, "message-for-show-12345678", "assistant", "full body", reasoning="reason")
+    assert ts.build_autocomplete_catalog(db, thread_id).state == "ready"
     registry = create_default_command_registry()
     context = CommandContext(db=db, current_thread=thread_id)
 

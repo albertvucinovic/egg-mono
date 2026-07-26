@@ -40,7 +40,6 @@ from eggthreads.command_catalog import (  # type: ignore
     create_default_command_registry,
     command_completion_names,
 )
-from eggthreads.content_parts import content_to_plain_text
 from eggllm.capabilities import is_chat_model
 from eggthreads.artifact_completion import (
     artifact_workspace_from_db,
@@ -84,12 +83,14 @@ class AsyncCompletionWorker:
         command_registry: Any,
         loop: Any,
         on_result: Callable[[CompletionRequest, List[Dict[str, str]]], None],
+        request_catalog_build: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._db_path = db_path
         self._llm = llm
         self._command_registry = command_registry
         self._loop = loop
         self._on_result = on_result
+        self._request_catalog_build = request_catalog_build
         self._condition = threading.Condition()
         self._pending: Optional[CompletionRequest] = None
         self._stopping = False
@@ -138,6 +139,14 @@ class AsyncCompletionWorker:
                         self._llm,
                         self._command_registry,
                     )
+                    try:
+                        from eggthreads import autocomplete_catalog_status
+
+                        status = autocomplete_catalog_status(db, request.thread_id)
+                        if status.state in {"missing", "stale", "error"} and self._request_catalog_build is not None:
+                            self._request_catalog_build(request.thread_id)
+                    except Exception:
+                        pass
                 except Exception:
                     items = []
                 try:
@@ -312,46 +321,26 @@ class EggCompleter(Completer):
         ]
 
     def _recent_words(self, tid: str, limit_msgs: int = 200):
-        # Extract recent words from snapshot messages for this thread
-        words: list[str] = []
+        """Compatibility helper backed by the complete-history term index."""
         try:
-            th = self.db.get_thread(tid)
-            if not th or not th.snapshot_json:
-                return words
-            import json as _json
-            snap = _json.loads(th.snapshot_json)
-            msgs = snap.get('messages', []) or []
-            # consider only recent slice
-            for m in msgs[-limit_msgs:]:
-                try:
-                    role = (m or {}).get('role')
-                    if role not in ('user', 'assistant', 'system', 'tool'):
-                        continue
-                    txt = content_to_plain_text((m or {}).get('content'))
-                    if not isinstance(txt, str) or not txt:
-                        continue
-                    # tokenize by words; keep 3+ char tokens
-                    for w in re.findall(r"[A-Za-z0-9_]{3,}", txt):
-                        words.append(w)
-                except Exception:
-                    continue
+            from eggthreads import query_autocomplete_terms
+
+            state, terms = query_autocomplete_terms(self.db, tid, "", limit=max(1, limit_msgs))
+            return list(terms) if state == "ready" else []
         except Exception:
-            pass
-        return words
+            return []
 
     def _conversation_word_matches(self, fragment: str, tid: str) -> list[str]:
         if not fragment:
             return []
-        recent = self._recent_words(tid)
-        seen: set[str] = set()
-        out: list[str] = []
-        fl = fragment.lower()
-        for w in reversed(recent):  # prefer more recent tokens
-            wl = w.lower()
-            if wl.startswith(fl) and wl not in seen:
-                seen.add(wl)
-                out.append(w)
-        return out
+        try:
+            from eggthreads import query_autocomplete_terms
+
+            state, terms = query_autocomplete_terms(self.db, tid, fragment, limit=50)
+            return list(terms) if state == "ready" else []
+        except Exception:
+            return []
+
 
     # ---- Completion routing --------------------------------------------
     def get_completions(self, document, complete_event) -> Iterable[Completion]:  # type: ignore
@@ -598,73 +587,33 @@ class EggCompleter(Completer):
                     yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
             return
 
-        # 8) /continue: suggest message IDs from current thread
-        if text.startswith('/continue '):
-            prefix = text[len('/continue '):]
-            # Handle msg_id= named argument
-            search_term = prefix
-            if 'msg_id=' in prefix:
-                m = re.search(r'msg_id=(\S*)$', prefix)
-                if m:
-                    search_term = m.group(1)
-            pref_l = search_term.lower()
-            if tid:
-                try:
-                    th = self.db.get_thread(tid)
-                    if th and th.snapshot_json:
-                        import json as _json
-                        snap = _json.loads(th.snapshot_json)
-                        msgs = snap.get('messages', []) or []
-                        for msg in reversed(msgs):  # Most recent first
-                            msg_id = msg.get('msg_id', '')
-                            if not msg_id:
-                                continue
-                            role = msg.get('role', 'unknown')
-                            content = content_to_plain_text(msg.get('content', ''))
-                            content_preview = content[:40].replace('\n', ' ')
-                            hay = f"{msg_id} {role} {content}".lower()
-                            if pref_l and pref_l not in hay:
-                                continue
-                            disp = f"[{msg_id[-8:]}] <{role}> {content_preview}"
-                            yield Completion(msg_id, start_position=-len(search_term), display=disp)
-                except Exception:
-                    pass
-            return
+        # /continue and /duplicateThread share complete-history sidecar search.
+        for command, order in (('/continue ', 'newest'), ('/duplicateThread ', 'oldest')):
+            if not text.startswith(command):
+                continue
+            argument = text[len(command):]
+            search_term = argument.split()[-1] if argument.split() else ''
+            if 'msg_id=' in argument:
+                match_obj = re.search(r'msg_id=(\S*)$', argument)
+                if match_obj:
+                    search_term = match_obj.group(1)
+            if command.startswith('/duplicateThread') and not (argument.split() or 'msg_id=' in argument):
+                return
+            try:
+                from eggthreads import query_autocomplete_content_records
 
-        # 9) /duplicateThread: suggest message IDs when in msg_id position
-        if text.startswith('/duplicateThread '):
-            prefix = text[len('/duplicateThread '):]
-            # Handle msg_id= named argument
-            search_term = prefix.split()[-1] if prefix.split() else ''
-            if 'msg_id=' in prefix:
-                m = re.search(r'msg_id=(\S*)$', prefix)
-                if m:
-                    search_term = m.group(1)
-            pref_l = search_term.lower()
-            # Only suggest messages if we're past the first arg (name)
-            parts = prefix.split()
-            if len(parts) >= 1 or 'msg_id=' in prefix:
-                if tid:
-                    try:
-                        th = self.db.get_thread(tid)
-                        if th and th.snapshot_json:
-                            import json as _json
-                            snap = _json.loads(th.snapshot_json)
-                            msgs = snap.get('messages', []) or []
-                            for msg in msgs:  # Chronological order for checkpoint selection
-                                msg_id = msg.get('msg_id', '')
-                                if not msg_id:
-                                    continue
-                                role = msg.get('role', 'unknown')
-                                content = content_to_plain_text(msg.get('content', ''))
-                                content_preview = content[:40].replace('\n', ' ')
-                                hay = f"{msg_id} {role} {content}".lower()
-                                if pref_l and pref_l not in hay:
-                                    continue
-                                disp = f"[{msg_id[-8:]}] <{role}> {content_preview}"
-                                yield Completion(msg_id, start_position=-len(search_term), display=disp)
-                    except Exception:
-                        pass
+                page = query_autocomplete_content_records(
+                    self.db, tid, search_term, order=order, limit=50
+                )
+                if page.state == 'ready':
+                    for record in page.records:
+                        yield Completion(
+                            record.message_id,
+                            start_position=-len(search_term),
+                            display=f"[{record.record_id[-8:]}] {record.label} {record.preview}",
+                        )
+            except Exception:
+                pass
             return
 
         # (handled above)
@@ -771,37 +720,13 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
     def _conversation_suggestions(tid: str, fragment: str) -> List[str]:
         if not fragment:
             return []
-        words: list[str] = []
         try:
-            th = db.get_thread(tid)
-            if not th or not th.snapshot_json:
-                return []
-            import json as _json
-            snap = _json.loads(th.snapshot_json)
-            msgs = snap.get('messages', []) or []
-            for m in msgs[-200:]:
-                try:
-                    role = (m or {}).get('role')
-                    if role not in ('user', 'assistant', 'system', 'tool'):
-                        continue
-                    txt = content_to_plain_text((m or {}).get('content'))
-                    if not isinstance(txt, str) or not txt:
-                        continue
-                    for w in re.findall(r"[A-Za-z0-9_]{3,}", txt):
-                        words.append(w)
-                except Exception:
-                    continue
+            from eggthreads import query_autocomplete_terms
+
+            state, terms = query_autocomplete_terms(db, tid, fragment, limit=50)
+            return list(terms) if state == "ready" else []
         except Exception:
-            pass
-        fl = fragment.lower()
-        seen: set[str] = set()
-        out: list[str] = []
-        for w in reversed(words):
-            wl = w.lower()
-            if wl.startswith(fl) and wl not in seen:
-                seen.add(wl)
-                out.append(w)
-        return out[:50]
+            return []
 
     def _providers() -> List[str]:
         try:
@@ -985,7 +910,9 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                     string_items.append(item)
                 elif isinstance(item, Mapping):
                     out_items.append(dict(item))
-            return _finish(out_items + _mk_items(string_items, arg_tok))
+            # A command-owned completion is authoritative for its argument
+            # shape. Do not re-run generic record/thread lookup underneath it.
+            return merge_completion_items(out_items, _mk_items(string_items, arg_tok), limit=50)
 
         # /setThreadPriority: suggest parameter names and thread IDs
         if cmd == '/setThreadPriority':
@@ -1010,108 +937,40 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                     out_items.append(it)
             return _finish(out_items)
 
-        # /continue: suggest message IDs from current thread
-        if cmd == '/continue':
-            # Handle named argument: extract value after msg_id=
+        # /continue and /duplicateThread: full-history content/ID search
+        # comes from the versioned sidecar; no snapshot blob is loaded here.
+        if cmd in ('/continue', '/duplicateThread'):
             search_term = arg_tok
             replace_len = len(arg_tok) if arg_tok else 0
             if 'msg_id=' in sub:
-                m = re.search(r'msg_id=(\S*)$', sub)
-                if m:
-                    search_term = m.group(1)
+                match_obj = re.search(r'msg_id=(\S*)$', sub)
+                if match_obj:
+                    search_term = match_obj.group(1)
                     replace_len = len(search_term)
-
+            if cmd == '/duplicateThread' and not (sub.split() or 'msg_id=' in sub):
+                return _finish([])
             try:
-                tid = get_current_thread()
+                from eggthreads import query_autocomplete_content_records
+
+                page = query_autocomplete_content_records(
+                    db, current_tid, search_term,
+                    order='newest' if cmd == '/continue' else 'oldest',
+                    limit=30,
+                )
+                if page.state != 'ready':
+                    return _finish([])
+                out_items: List[Dict[str, str]] = []
+                for record in page.records:
+                    item: Dict[str, str] = {
+                        'display': f"[{record.record_id[-8:]}] {record.label} {record.preview}",
+                        'insert': record.message_id,
+                    }
+                    if replace_len:
+                        item['replace'] = str(replace_len)
+                    out_items.append(item)
+                return _finish(out_items)
             except Exception:
-                tid = None
-            if tid:
-                try:
-                    th = db.get_thread(tid)
-                    if th and th.snapshot_json:
-                        import json as _json
-                        snap = _json.loads(th.snapshot_json)
-                        msgs = snap.get('messages', []) or []
-                        out_items: List[Dict[str, str]] = []
-                        search_lower = (search_term or '').lower()
-                        # Reverse order: most recent first for /continue
-                        for msg in reversed(msgs):
-                            msg_id = msg.get('msg_id', '')
-                            if not msg_id:
-                                continue
-                            role = msg.get('role', 'unknown')
-                            content = content_to_plain_text(msg.get('content', ''))
-                            content_preview = content[:40].replace('\n', ' ')
-                            if len(content) > 40:
-                                content_preview += '...'
-                            hay = f"{msg_id} {role} {content}".lower()
-                            if search_lower and search_lower not in hay:
-                                continue
-                            disp = f"[{msg_id[-8:]}] <{role}> {content_preview}"
-                            it: Dict[str, str] = {"display": disp, "insert": msg_id}
-                            if replace_len:
-                                it["replace"] = str(replace_len)
-                            out_items.append(it)
-                            if len(out_items) >= 30:
-                                break
-                        return _finish(out_items)
-                except Exception:
-                    pass
-            return _finish([])
-
-        # /duplicateThread: suggest message IDs when in msg_id position
-        if cmd == '/duplicateThread':
-            # Handle named argument: extract value after msg_id=
-            search_term = arg_tok
-            replace_len = len(arg_tok) if arg_tok else 0
-            if 'msg_id=' in sub:
-                m = re.search(r'msg_id=(\S*)$', sub)
-                if m:
-                    search_term = m.group(1)
-                    replace_len = len(search_term)
-
-            # Check if we're in msg_id position (second positional or after msg_id=)
-            parts = sub.split()
-            in_msg_id_position = len(parts) >= 1 or 'msg_id=' in sub
-
-            if in_msg_id_position:
-                try:
-                    tid = get_current_thread()
-                except Exception:
-                    tid = None
-                if tid:
-                    try:
-                        th = db.get_thread(tid)
-                        if th and th.snapshot_json:
-                            import json as _json
-                            snap = _json.loads(th.snapshot_json)
-                            msgs = snap.get('messages', []) or []
-                            out_items: List[Dict[str, str]] = []
-                            search_lower = (search_term or '').lower()
-                            # Forward order for /duplicateThread (picking checkpoint)
-                            for msg in msgs:
-                                msg_id = msg.get('msg_id', '')
-                                if not msg_id:
-                                    continue
-                                role = msg.get('role', 'unknown')
-                                content = content_to_plain_text(msg.get('content', ''))
-                                content_preview = content[:40].replace('\n', ' ')
-                                if len(content) > 40:
-                                    content_preview += '...'
-                                hay = f"{msg_id} {role} {content}".lower()
-                                if search_lower and search_lower not in hay:
-                                    continue
-                                disp = f"[{msg_id[-8:]}] <{role}> {content_preview}"
-                                it: Dict[str, str] = {"display": disp, "insert": msg_id}
-                                if replace_len:
-                                    it["replace"] = str(replace_len)
-                                out_items.append(it)
-                                if len(out_items) >= 30:
-                                    break
-                            return _finish(out_items)
-                    except Exception:
-                        pass
-            return _finish([])
+                return _finish([])
 
         # Other commands: no specific suggestions
         return _finish([])

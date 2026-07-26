@@ -246,12 +246,12 @@ class TestEggCompleter:
 
     def test_conversation_word_suggestions(self, isolated_db, monkeypatch):
         """Should provide conversation word suggestions."""
-        from eggthreads import create_root_thread, create_snapshot, append_message
+        from eggthreads import append_message, build_autocomplete_catalog, create_root_thread
         import json
 
         thread = create_root_thread(isolated_db, name="TestThread")
         append_message(isolated_db, thread, "user", "Hello world testing")
-        create_snapshot(isolated_db, thread)
+        assert build_autocomplete_catalog(isolated_db, thread).state == "ready"
 
         completer = EggCompleter(isolated_db, lambda: thread, None)
         doc = MockDocument("test")
@@ -597,11 +597,11 @@ class TestEggCompleterHelpers:
 
     def test_recent_words_extracts_from_messages(self, isolated_db):
         """Should extract words from recent messages."""
-        from eggthreads import create_root_thread, create_snapshot, append_message
+        from eggthreads import append_message, build_autocomplete_catalog, create_root_thread
 
         thread = create_root_thread(isolated_db, name="TestThread")
         append_message(isolated_db, thread, "user", "testing functionality here")
-        create_snapshot(isolated_db, thread)
+        assert build_autocomplete_catalog(isolated_db, thread).state == "ready"
 
         completer = EggCompleter(isolated_db, lambda: thread, None)
 
@@ -613,11 +613,11 @@ class TestEggCompleterHelpers:
 
     def test_conversation_word_matches_filters_by_prefix(self, isolated_db):
         """Should filter conversation words by prefix."""
-        from eggthreads import create_root_thread, create_snapshot, append_message
+        from eggthreads import append_message, build_autocomplete_catalog, create_root_thread
 
         thread = create_root_thread(isolated_db, name="TestThread")
         append_message(isolated_db, thread, "user", "testing temperature terminal")
-        create_snapshot(isolated_db, thread)
+        assert build_autocomplete_catalog(isolated_db, thread).state == "ready"
 
         completer = EggCompleter(isolated_db, lambda: thread, None)
 
@@ -628,10 +628,11 @@ class TestEggCompleterHelpers:
 
 
 def test_show_completion_uses_shared_record_catalog(isolated_db):
-    from eggthreads import append_message, create_root_thread
+    from eggthreads import append_message, build_autocomplete_catalog, create_root_thread
 
     thread = create_root_thread(isolated_db, name="show completion")
     msg_id = append_message(isolated_db, thread, "assistant", "completion body")
+    assert build_autocomplete_catalog(isolated_db, thread).state == "ready"
     items = get_autocomplete_items(
         f"/show {msg_id[-5:]}",
         len(f"/show {msg_id[-5:]}"),
@@ -670,12 +671,12 @@ def test_thread_selector_completion_uses_lightweight_list_rows(isolated_db, monk
 
 
 def test_global_completion_offers_record_and_thread_ids_in_plain_text(isolated_db):
-    from eggthreads import append_message, create_root_thread, create_snapshot
+    from eggthreads import append_message, build_autocomplete_catalog, create_root_thread
 
     current = create_root_thread(isolated_db, name="current")
     other = create_root_thread(isolated_db, name="other")
     msg_id = append_message(isolated_db, current, "assistant", "body")
-    create_snapshot(isolated_db, current)
+    assert build_autocomplete_catalog(isolated_db, current).state == "ready"
 
     record_items = get_autocomplete_items(
         f"ask {msg_id[-5:]}", len(f"ask {msg_id[-5:]}") , isolated_db, lambda: current, None

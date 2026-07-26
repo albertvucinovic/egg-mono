@@ -40,7 +40,7 @@ def test_sidecar_path_is_versioned_deterministic_and_db_specific(tmp_path: Path)
     assert first == same
     assert first != other
     assert first.parent.name == "cache"
-    assert first.name.endswith("-autocomplete-v1.sqlite")
+    assert first.name.endswith("-autocomplete-v4.sqlite")
 
 
 def test_cold_read_is_explicit_and_does_not_build_or_create_sidecar(tmp_path: Path) -> None:
@@ -110,7 +110,7 @@ def test_query_is_case_insensitive_exact_prefix_suffix_and_all_pages_reachable(t
 
     exact = sidecar.query_autocomplete_records(db, thread_id, "record-010-suffix")
     prefix = sidecar.query_autocomplete_records(db, thread_id, "ReCoRd-01", limit=100)
-    suffix = sidecar.query_autocomplete_records(db, thread_id, "sUfFiX", limit=100)
+    suffix = sidecar.query_autocomplete_records(db, thread_id, "sUfFiX", match="all", limit=100)
 
     assert [record.record_id for record in exact.records] == ["Record-010-Suffix"]
     assert len(prefix.records) == 10
@@ -213,3 +213,162 @@ def test_sidecar_build_does_not_change_canonical_schema(tmp_path: Path) -> None:
 
     assert _schema(db) == before
     assert sidecar.autocomplete_sidecar_path(db.path).is_file()
+
+
+def test_status_and_clear_are_inspectable_and_disposable(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "root")
+    _append(db, thread_id, "message-one", "user", "one")
+
+    missing = sidecar.autocomplete_catalog_status(db, thread_id)
+    assert missing.state == "missing"
+    assert missing.size_bytes == 0
+
+    built = sidecar.build_autocomplete_catalog(db, thread_id)
+    ready = sidecar.autocomplete_catalog_status(db, thread_id)
+    assert built.state == "ready"
+    assert ready.state == "ready"
+    assert ready.through_event_seq == sidecar.autocomplete_semantic_event_seq(db, thread_id)
+    assert ready.active_generation
+    assert ready.size_bytes > 0
+
+    assert sidecar.clear_autocomplete_catalog(db, thread_id) is True
+    assert sidecar.autocomplete_catalog_status(db, thread_id).state == "missing"
+    assert sidecar.query_autocomplete_records(db, thread_id).state == "missing"
+
+
+def test_full_history_content_and_term_indexes_include_oldest_message(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "root")
+    _append(db, thread_id, "oldest-message", "user", "AncientNeedleWord begins here")
+    for index in range(300):
+        _append(db, thread_id, f"newer-{index:03d}", "assistant", f"ordinary content {index}")
+
+    assert sidecar.build_autocomplete_catalog(db, thread_id, batch_size=19).state == "ready"
+    content = sidecar.query_autocomplete_content_records(
+        db, thread_id, "ancientneedle", order="oldest", limit=10
+    )
+    term_state, terms = sidecar.query_autocomplete_terms(db, thread_id, "ancient", limit=10)
+
+    assert content.state == "ready"
+    assert [record.record_id for record in content.records] == ["oldest-message"]
+    assert term_state == "ready"
+    assert terms == ("AncientNeedleWord",)
+
+
+def test_query_plans_use_sidecar_indexes(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "root")
+    for index in range(20):
+        _append(db, thread_id, f"Record-{index:03d}-Suffix", "assistant", f"needle body {index}")
+    assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+    status = sidecar.autocomplete_catalog_status(db, thread_id)
+    conn = sqlite3.connect(status.sidecar_path)
+    try:
+        generation = status.active_generation
+        plans = {
+            "identity": conn.execute(
+                "EXPLAIN QUERY PLAN SELECT record_id FROM completion_records WHERE thread_id=? AND generation=? AND normalized_id=?",
+                (thread_id, generation, "record-001-suffix"),
+            ).fetchall(),
+            "suffix": conn.execute(
+                "EXPLAIN QUERY PLAN SELECT record_id FROM completion_records WHERE thread_id=? AND generation=? AND reversed_normalized_id>=? AND reversed_normalized_id<?",
+                (thread_id, generation, "xiffus", "xiffus\U0010ffff"),
+            ).fetchall(),
+            "newest": conn.execute(
+                "EXPLAIN QUERY PLAN SELECT record_id FROM completion_records WHERE thread_id=? AND generation=? ORDER BY event_seq DESC,item_order DESC,record_id ASC LIMIT 20",
+                (thread_id, generation),
+            ).fetchall(),
+        }
+    finally:
+        conn.close()
+
+    assert any("completion_records_identity" in row[3] for row in plans["identity"])
+    assert any("completion_records_suffix" in row[3] for row in plans["suffix"])
+    assert any("completion_records_newest" in row[3] for row in plans["newest"])
+
+
+def test_incremental_catch_up_matches_canonical_edits_deletes_and_continue(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "root")
+    _append(db, thread_id, "first", "user", "AlphaWord")
+    _append(db, thread_id, "second", "assistant", "BetaWord")
+    _append(db, thread_id, "third", "assistant", "GammaWord")
+    assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+
+    ts.edit_message(db, thread_id, "first", "AlphaEditedWord")
+    ts.delete_message(db, thread_id, "second")
+    db.append_event(
+        event_id="continue-event",
+        thread_id=thread_id,
+        type_="control.interrupt",
+        payload={"purpose": "continue", "continue_from_msg_id": "first"},
+    )
+    _append(db, thread_id, "after", "assistant", "DeltaWord")
+
+    result = sidecar.catch_up_autocomplete_catalog(db, thread_id, batch_size=2)
+    page = sidecar.query_autocomplete_records(db, thread_id, limit=100)
+    expected = ts.list_show_record_candidates(db, thread_id)
+
+    assert result.state == "ready"
+    assert page.state == "ready"
+    assert [record.record_id for record in page.records] == [candidate.record_id for candidate in expected]
+    assert {record.record_id for record in page.records} == {"first", "after"}
+    assert sidecar.query_autocomplete_terms(db, thread_id, "alpha") == (
+        "ready", ("AlphaEditedWord",)
+    )
+    assert sidecar.query_autocomplete_terms(db, thread_id, "beta") == ("ready", ())
+
+
+def test_incremental_tool_result_repairs_both_pairing_directions(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "root")
+    _append(
+        db,
+        thread_id,
+        "declaration",
+        "assistant",
+        "",
+        tool_calls=[{
+            "id": "call-paired",
+            "type": "function",
+            "function": {"name": "bash", "arguments": "{}"},
+        }],
+    )
+    assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+    _append(
+        db,
+        thread_id,
+        "result",
+        "tool",
+        "done",
+        name="bash",
+        tool_call_id="call-paired",
+    )
+
+    assert sidecar.catch_up_autocomplete_catalog(db, thread_id).state == "ready"
+    page = sidecar.query_autocomplete_records(db, thread_id, limit=20)
+    by_id = {record.record_id: record for record in page.records}
+    assert by_id["call-paired"].paired_message_ids == ("result",)
+    assert by_id["result"].paired_message_ids == ("declaration",)
+
+
+def test_incremental_catch_up_does_not_replay_full_canonical_projection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "root")
+    _append(db, thread_id, "first", "user", "one")
+    assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+    _append(db, thread_id, "second", "assistant", "two")
+
+    monkeypatch.setattr(
+        sidecar,
+        "load_thread_projection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("incremental catch-up must use sidecar projection state")
+        ),
+    )
+
+    assert sidecar.catch_up_autocomplete_catalog(db, thread_id).state == "ready"
+    assert sidecar.query_autocomplete_records(db, thread_id, "second").state == "ready"

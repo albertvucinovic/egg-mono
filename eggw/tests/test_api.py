@@ -4113,13 +4113,14 @@ class TestAutocomplete:
         assert displays == {"chat", "threads", "system"}
 
     def test_global_autocomplete_offers_record_thread_and_editor_at_file(self, client, tmp_path, monkeypatch):
-        from eggthreads import append_message, set_thread_working_directory
+        from eggthreads import append_message, build_autocomplete_catalog, set_thread_working_directory
 
         monkeypatch.chdir(tmp_path)
         current = client.post("/api/threads", json={"name": "Completion Current"}).json()["id"]
         other = client.post("/api/threads", json={"name": "Completion Other"}).json()["id"]
         set_thread_working_directory(core_state.db, current, str(tmp_path))
         msg_id = append_message(core_state.db, current, "assistant", "global record body")
+        assert build_autocomplete_catalog(core_state.db, current).state == "ready"
         (tmp_path / "my file.md").write_text("x", encoding="utf-8")
 
         for line, expected in (
@@ -4156,9 +4157,10 @@ class TestAutocomplete:
     def test_show_autocomplete_uses_shared_bounded_record_catalog(self, client):
         create_resp = client.post("/api/threads", json={"name": "Show completion"})
         thread_id = create_resp.json()["id"]
-        from eggthreads import append_message
+        from eggthreads import append_message, build_autocomplete_catalog
 
         message_id = append_message(core_state.db, thread_id, "assistant", "AUTOCOMPLETE SHOW BODY")
+        assert build_autocomplete_catalog(core_state.db, thread_id).state == "ready"
         line = f"/show {message_id[-6:]}"
         response = client.get(
             "/api/autocomplete",
@@ -4464,3 +4466,23 @@ def test_phase10_read_only_web_paths_defer_stranded_tc4_to_shared_scheduler(
     ).fetchall()
     assert len(rows) == 1
     assert json.loads(rows[0][0])["decision_source"] == "automatic_policy"
+
+
+def test_autocomplete_cold_sidecar_schedules_background_build(client, app, monkeypatch):
+    from eggthreads import autocomplete_catalog_status
+    thread_id = client.post("/api/threads", json={"name": "Cold completion"}).json()["id"]
+    from eggthreads import append_message
+    message_id = append_message(core_state.db, thread_id, "assistant", "cold catalog body")
+    scheduled = []
+    app.state.autocomplete_sidecar_manager = MagicMock()
+    app.state.autocomplete_sidecar_manager.request_build.side_effect = lambda selected: scheduled.append(selected) or True
+
+    response = client.get(
+        "/api/autocomplete",
+        params={"line": f"/show {message_id[-6:]}", "cursor": 12, "thread_id": thread_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["suggestions"] == []
+    assert scheduled == [thread_id]
+    assert autocomplete_catalog_status(core_state.db, thread_id).state == "missing"

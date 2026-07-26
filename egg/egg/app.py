@@ -347,6 +347,7 @@ class EggDisplayApp(
         self._input_thread: Optional[Any] = None
         self._input_ready_event: Optional[asyncio.Event] = None
         self._completion_worker: Optional[AsyncCompletionWorker] = None
+        self._autocomplete_sidecar_manager = None
         self._ui_loop: Optional[asyncio.AbstractEventLoop] = None
         self._external_terminal_active: bool = False
         self._external_terminal_release_event: Optional[asyncio.Event] = None
@@ -1099,12 +1100,16 @@ class EggDisplayApp(
         self.running = True
         self._ui_loop = asyncio.get_running_loop()
         self._input_ready_event = asyncio.Event()
+        from eggthreads import AutocompleteSidecarManager
+
+        self._autocomplete_sidecar_manager = AutocompleteSidecarManager(self.db.path)
         self._completion_worker = AsyncCompletionWorker(
             getattr(self.db, 'path', '.egg/threads.sqlite'),
             self.llm_client,
             self.command_registry,
             self._ui_loop,
             self._apply_async_completion,
+            self._autocomplete_sidecar_manager.request_build,
         )
         self.input_panel.editor.input_ready_callback = self._notify_input_ready
         await self.start_watching_current()
@@ -1290,6 +1295,13 @@ class EggDisplayApp(
                 worker.stop()
                 try:
                     worker.join(0.5)
+                except Exception:
+                    pass
+            sidecar_manager = self._autocomplete_sidecar_manager
+            self._autocomplete_sidecar_manager = None
+            if sidecar_manager is not None:
+                try:
+                    sidecar_manager.close(wait=False)
                 except Exception:
                     pass
             try:

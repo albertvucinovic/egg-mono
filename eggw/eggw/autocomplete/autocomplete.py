@@ -1,11 +1,10 @@
 """Autocomplete logic for eggw backend."""
 from __future__ import annotations
 
-import json
 import re
 from typing import Optional, List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from eggthreads import list_threads, create_default_tools
 from eggthreads.artifact_completion import (
@@ -15,7 +14,6 @@ from eggthreads.artifact_completion import (
     is_provider_artifact_id_position,
     provider_artifact_completion_items,
 )
-from eggthreads.content_parts import content_to_plain_text
 from eggthreads.command_catalog import (
     CommandContext,
     EGGW_COMMAND_COMPLETIONS,
@@ -60,6 +58,7 @@ def last_token(s: str) -> str:
 
 @router.get("/api/autocomplete")
 async def get_autocomplete(
+    request: Request,
     line: str,
     cursor: int = -1,
     thread_id: Optional[str] = None,
@@ -74,6 +73,17 @@ async def get_autocomplete(
     """
     if not core.db:
         return {"suggestions": []}
+
+    try:
+        from eggthreads import autocomplete_catalog_status
+
+        status = autocomplete_catalog_status(core.db, thread_id) if thread_id else None
+        if status is not None and status.state in {"missing", "stale", "error"}:
+            manager = getattr(request.app.state, "autocomplete_sidecar_manager", None)
+            if manager is not None:
+                manager.request_build(thread_id)
+    except Exception:
+        pass
 
     if cursor < 0:
         cursor = len(line)
@@ -128,8 +138,7 @@ async def get_autocomplete(
                     }
                     for item in registry_items
                 )
-                generic = global_completion_items(core.db, thread_id, prefix, limit=20)
-                return {"suggestions": merge_completion_items(suggestions, generic, limit=20)}
+                return {"suggestions": merge_completion_items(suggestions, limit=20)}
 
             if cmd == '/model':
                 # Model name suggestions - replace entire argument (supports multi-word search)
@@ -175,14 +184,9 @@ async def get_autocomplete(
                     }
                 except Exception:
                     pass
-                streaming_threads = set()
-                for candidate in list_threads(core.db):
-                    try:
-                        root_id = core.get_thread_root_id(candidate.thread_id)
-                    except Exception:
-                        continue
-                    if root_id in streaming_roots:
-                        streaming_threads.add(candidate.thread_id)
+                # Exact live leases are added by the shared completion helper.
+                # Do not walk every thread's ancestry before filtering matches.
+                streaming_threads = set(streaming_roots)
                 suggestions.extend(thread_completion_items(
                     core.db,
                     arg_tok,
@@ -361,27 +365,15 @@ async def get_autocomplete(
                     if match:
                         # Complete thread ID after thread=
                         search_term = match.group(1)
-                        search_lower = search_term.lower()
-                        threads = list_threads(core.db)
-                        try:
-                            threads.sort(key=lambda t: t.created_at or '', reverse=True)
-                        except Exception:
-                            pass
-                        for t in threads[:50]:
-                            tid = t.thread_id
-                            name = t.name or ''
-                            recap = t.short_recap or ''
-                            hay = f"{tid} {name} {recap}".lower()
-                            if search_lower and search_lower not in hay:
-                                continue
-                            display = f"{tid[-8:]} - {recap[:30]}" if recap else tid[-8:]
-                            if name:
-                                display += f" ({name})"
-                            suggestions.append({
-                                "display": display,
-                                "insert": tid,
-                                "replace": len(search_term),
-                            })
+                        suggestions.extend(thread_completion_items(
+                            core.db,
+                            search_term,
+                            current_thread=thread_id,
+                            match_metadata=True,
+                            include_empty=True,
+                            include_streaming=True,
+                            limit=50,
+                        ))
                 else:
                     # Suggest parameter names
                     params = ['priority=', 'threshold=', 'apiTimeout=', 'thread=']
@@ -394,117 +386,39 @@ async def get_autocomplete(
                                 "replace": len(arg_tok),
                             })
 
-            elif cmd in ('/continue', '/compact'):
-                # Message ID suggestions from current thread
-                # Show messages in reverse order (most recent first) so user can pick continue point
-
+            elif cmd in ('/continue', '/compact', '/duplicateThread'):
                 if cmd == '/compact':
                     for selector in ('last_user', 'last_llm'):
                         if not arg_tok or arg_tok.lower() in selector:
                             suggestions.append({
-                                "display": selector,
-                                "insert": selector,
-                                "replace": len(arg_tok),
+                                "display": selector, "insert": selector, "replace": len(arg_tok),
                             })
-
-                # Handle named argument: extract value after msg_id=
                 search_term = arg_tok
                 replace_len = len(arg_tok)
                 if 'msg_id=' in arg:
-                    match = re.search(r'msg_id=(\S*)$', arg)
-                    if match:
-                        search_term = match.group(1)
+                    match_obj = re.search(r'msg_id=(\S*)$', arg)
+                    if match_obj:
+                        search_term = match_obj.group(1)
                         replace_len = len(search_term)
+                in_position = cmd != '/duplicateThread' or len(arg.split()) >= 1 or 'msg_id=' in arg
+                if in_position and thread_id:
+                    try:
+                        from eggthreads import query_autocomplete_content_records
 
-                search_lower = search_term.lower()
-
-                if thread_id:
-                    t = core.db.get_thread(thread_id)
-                    if t and t.snapshot_json:
-                        try:
-                            snap = json.loads(t.snapshot_json)
-                            msgs = snap.get('messages', []) or []
-                            # Reverse order: most recent messages first
-                            for msg in reversed(msgs):
-                                msg_id = msg.get('msg_id', '')
-                                if not msg_id:
-                                    continue
-                                role = msg.get('role', 'unknown')
-                                content = content_to_plain_text(msg.get('content', ''))
-                                # Truncate content for display
-                                content_preview = content[:40].replace('\n', ' ')
-                                if len(content) > 40:
-                                    content_preview += '...'
-
-                                # Build searchable string
-                                hay = f"{msg_id} {role} {content}".lower()
-                                if search_lower and search_lower not in hay:
-                                    continue
-
-                                # Build display: [msg_id_short] <role> content_preview
-                                display = f"[{msg_id[-8:]}] <{role}> {content_preview}"
+                        page = query_autocomplete_content_records(
+                            core.db, thread_id, search_term,
+                            order='oldest' if cmd == '/duplicateThread' else 'newest',
+                            limit=30,
+                        )
+                        if page.state == 'ready':
+                            for record in page.records:
                                 suggestions.append({
-                                    "display": display,
-                                    "insert": msg_id,
+                                    "display": f"[{record.record_id[-8:]}] {record.label} {record.preview}",
+                                    "insert": record.message_id,
                                     "replace": replace_len,
                                 })
-                                if len(suggestions) >= 30:
-                                    break
-                        except Exception:
-                            pass
-
-            elif cmd == '/duplicateThread':
-                # Message ID suggestions for /duplicateThread
-                # Format: /duplicateThread [name] [msg_id] or /duplicateThread name=<n> msg_id=<id>
-                # Suggest message IDs when it looks like we're typing the msg_id argument
-
-                # Handle named argument: extract value after msg_id=
-                search_term = arg_tok
-                replace_len = len(arg_tok)
-                if 'msg_id=' in arg:
-                    # Find the value after msg_id=
-                    match = re.search(r'msg_id=(\S*)$', arg)
-                    if match:
-                        search_term = match.group(1)
-                        replace_len = len(search_term)
-
-                search_lower = search_term.lower()
-
-                # Check if we're likely in msg_id position (second positional or after msg_id=)
-                parts = arg.split()
-                in_msg_id_position = len(parts) >= 1 or 'msg_id=' in arg
-
-                if in_msg_id_position and thread_id:
-                    t = core.db.get_thread(thread_id)
-                    if t and t.snapshot_json:
-                        try:
-                            snap = json.loads(t.snapshot_json)
-                            msgs = snap.get('messages', []) or []
-                            # Show messages in order (oldest first for duplicate - picking a checkpoint)
-                            for msg in msgs:
-                                msg_id = msg.get('msg_id', '')
-                                if not msg_id:
-                                    continue
-                                role = msg.get('role', 'unknown')
-                                content = content_to_plain_text(msg.get('content', ''))
-                                content_preview = content[:40].replace('\n', ' ')
-                                if len(content) > 40:
-                                    content_preview += '...'
-
-                                hay = f"{msg_id} {role} {content}".lower()
-                                if search_lower and search_lower not in hay:
-                                    continue
-
-                                display = f"[{msg_id[-8:]}] <{role}> {content_preview}"
-                                suggestions.append({
-                                    "display": display,
-                                    "insert": msg_id,
-                                    "replace": replace_len,
-                                })
-                                if len(suggestions) >= 30:
-                                    break
-                        except Exception:
-                            pass
+                    except Exception:
+                        pass
 
     # Shell command completion ($ prefix)
     elif prefix.startswith('$'):
@@ -519,29 +433,18 @@ async def get_autocomplete(
         # If filesystem found matches, use those
         if generic:
             suggestions.extend(generic)
-        # Otherwise, fall back to conversation word completion
+        # Otherwise, use the complete-history sidecar term index.
         elif thread_id and tok and len(tok) >= 2:
-            t = core.db.get_thread(thread_id)
-            if t and t.snapshot_json:
-                try:
-                    snap = json.loads(t.snapshot_json)
-                    msgs = snap.get('messages', []) or []
-                    words = set()
-                    tok_lower = tok.lower()
-                    for msg in msgs[-100:]:  # Last 100 messages
-                        content = content_to_plain_text(msg.get('content'))
-                        if isinstance(content, str):
-                            for word in re.findall(r"[A-Za-z0-9_]{3,}", content):
-                                if word.lower().startswith(tok_lower) and word.lower() != tok_lower:
-                                    words.add(word)
-                    for word in sorted(words)[:15]:
-                        suggestions.append({
-                            "display": word,
-                            "insert": word,
-                            "replace": len(tok),
-                        })
-                except Exception:
-                    pass
+            try:
+                from eggthreads import query_autocomplete_terms
+
+                state, words = query_autocomplete_terms(core.db, thread_id, tok, limit=15)
+                if state == "ready":
+                    suggestions.extend({
+                        "display": word, "insert": word, "replace": len(tok),
+                    } for word in words)
+            except Exception:
+                pass
 
     generic = global_completion_items(core.db, thread_id, prefix, limit=20)
     return {"suggestions": merge_completion_items(suggestions, generic, limit=20)}

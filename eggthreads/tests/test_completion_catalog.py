@@ -14,7 +14,7 @@ def test_global_completion_combines_files_records_and_threads(tmp_path: Path, mo
     current = ts.create_root_thread(db, "current")
     other = ts.create_root_thread(db, "other")
     msg_id = ts.append_message(db, current, "assistant", "completion body")
-    ts.create_snapshot(db, current)
+    assert ts.build_autocomplete_catalog(db, current).state == "ready"
     (tmp_path / "abc-file.txt").write_text("x", encoding="utf-8")
 
     record_items = global_completion_items(db, current, f"ask {msg_id[-5:]}")
@@ -59,7 +59,7 @@ def test_global_id_minimum_counts_alphanumeric_characters(tmp_path: Path) -> Non
     db.init_schema()
     thread = ts.create_root_thread(db, "current")
     ts.append_message(db, thread, "assistant", "", extra={"tool_calls": [{"id": "A__bC", "function": {"name": "bash", "arguments": "{}"}}]})
-    ts.create_snapshot(db, thread)
+    assert ts.build_autocomplete_catalog(db, thread).state == "ready"
 
     assert record_id_completion_items(db, thread, "a__") == []
     assert record_id_completion_items(db, thread, "a__bc")[0]["insert"] == "A__bC"
@@ -100,55 +100,33 @@ def test_shared_thread_completion_accepts_frontend_streaming_state(tmp_path: Pat
     assert items[0]["display"].startswith("[STREAMING]")
 
 
-def test_record_completion_cache_ignores_non_message_watermark_churn(tmp_path: Path, monkeypatch) -> None:
-    import eggthreads.completion_catalog as catalog
-
+def test_record_completion_sidecar_ignores_nonsemantic_churn(tmp_path: Path) -> None:
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()
     thread = ts.create_root_thread(db, "current")
     message_id = ts.append_message(db, thread, "assistant", "body")
-    ts.create_snapshot(db, thread)
+    assert ts.build_autocomplete_catalog(db, thread).state == "ready"
+    assert record_id_completion_items(db, thread, message_id[-5:])
 
-    catalog.clear_completion_cache()
-    calls = 0
-    original = catalog.list_show_record_candidates
+    db.append_event(
+        event_id="heartbeat",
+        thread_id=thread,
+        type_="provider_request.started",
+        payload={},
+    )
 
-    def counted(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(catalog, "list_show_record_candidates", counted)
-    monkeypatch.setattr(catalog.time, "monotonic", lambda: 1.0)
-    assert catalog.record_id_completion_items(db, thread, message_id[-5:])
-    monkeypatch.setattr(catalog.time, "monotonic", lambda: 2.0)
-    assert catalog.record_id_completion_items(db, thread, message_id[-5:])
-    for index in range(3):
-        db.append_event(
-            event_id=f"heartbeat-{index}",
-            thread_id=thread,
-            type_="provider_request.started",
-            payload={"index": index},
-        )
-        assert catalog.record_id_completion_items(db, thread, message_id[-5:])
-
-    assert calls == 2
-    catalog.clear_completion_cache()
+    assert record_id_completion_items(db, thread, message_id[-5:])
 
 
-def test_record_completion_does_not_cache_first_partial_write_burst(tmp_path: Path, monkeypatch) -> None:
-    import eggthreads.completion_catalog as catalog
-
+def test_record_completion_never_serves_partial_or_stale_generation(tmp_path: Path) -> None:
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()
     thread = ts.create_root_thread(db, "current")
     first_id = ts.append_message(db, thread, "assistant", "first")
-    ts.create_snapshot(db, thread)
-    catalog.clear_completion_cache()
-    monkeypatch.setattr(catalog.time, "monotonic", lambda: 0.0)
+    assert ts.build_autocomplete_catalog(db, thread).state == "ready"
+    assert record_id_completion_items(db, thread, first_id[-5:])
 
-    assert catalog.record_id_completion_items(db, thread, first_id[-5:])
     second_id = ts.append_message(db, thread, "assistant", "second")
-    assert catalog.record_id_completion_items(db, thread, second_id[-5:])
-
-    catalog.clear_completion_cache()
+    assert record_id_completion_items(db, thread, first_id[-5:]) == []
+    assert ts.build_autocomplete_catalog(db, thread).state == "ready"
+    assert record_id_completion_items(db, thread, second_id[-5:])

@@ -3,107 +3,20 @@ from __future__ import annotations
 """Reusable, UI-neutral completion sources composed by Egg frontends."""
 
 import re
-import threading
-import time
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .api import get_thread_statuses_bulk, get_thread_working_directory, list_threads
 from .artifact_completion import current_completion_token, filesystem_completion_items
-from .inspection import list_show_record_candidates, _record_id_hint_rank
+from .autocomplete_sidecar import query_autocomplete_records
 
 GLOBAL_ID_MIN_CHARS = 3
-_COMPLETION_CACHE_LIMIT = 8
-_RECORD_CACHE_STABLE_AFTER_SEC = 0.25
-_record_cache: "OrderedDict[tuple[str, str, int], tuple[dict[str, str], ...]]" = OrderedDict()
-_record_cache_lock = threading.Lock()
-_record_cache_pending: dict[tuple[str, str, int], float] = {}
-
-
 def _match_count(value: str) -> int:
     return sum(character.isalnum() for character in value)
 
 
 def clear_completion_cache() -> None:
-    """Drop process-local completion acceleration state."""
-
-    with _record_cache_lock:
-        _record_cache.clear()
-        _record_cache_pending.clear()
-
-
-def _db_identity(db: Any) -> str:
-    try:
-        return str(Path(db.path).expanduser().resolve())
-    except Exception:
-        return f"memory:{id(db)}"
-
-
-def _record_catalog(db: Any, thread_id: str) -> tuple[dict[str, str], ...]:
-    get_metadata = getattr(db, "get_thread_metadata", None)
-    thread = get_metadata(thread_id) if callable(get_metadata) else db.get_thread(thread_id)
-    snapshot_seq = int(getattr(thread, "snapshot_last_event_seq", -1)) if thread is not None else -1
-    semantic_seq = -1
-    for event_type in (
-        "msg.create",
-        "msg.edit",
-        "msg.delete",
-        "control.interrupt",
-        "tool_call.output_approval",
-    ):
-        row = db.conn.execute(
-            "SELECT MAX(event_seq) FROM events INDEXED BY events_thread_type "
-            "WHERE thread_id=? AND type=?",
-            (thread_id, event_type),
-        ).fetchone()
-        if row and row[0] is not None:
-            semantic_seq = max(semantic_seq, int(row[0]))
-    key = (_db_identity(db), str(thread_id), max(snapshot_seq, semantic_seq))
-    now = time.monotonic()
-    with _record_cache_lock:
-        cached = _record_cache.get(key)
-        if cached is not None:
-            _record_cache.move_to_end(key)
-            return cached
-        _record_cache_pending.setdefault(key, now)
-    items = []
-    for candidate in list_show_record_candidates(db, thread_id):
-        short_id = candidate.record_id[-8:] if len(candidate.record_id) > 8 else candidate.record_id
-        preview = f" · {candidate.preview}" if candidate.preview else ""
-        items.append({
-            "record_id": candidate.record_id,
-            "display": f"[{short_id}] {candidate.label}{preview}",
-            "meta": f"{candidate.kind} · {candidate.record_id}",
-        })
-    value = tuple(items)
-    # A streaming provider can append the assistant declaration and its tool
-    # result in separate commits. Cache only after this semantic watermark has
-    # remained stable briefly so the first partial catalog cannot be reused as
-    # if it represented the completed write burst.
-    with _record_cache_lock:
-        stable_since = _record_cache_pending.get(key)
-        if stable_since is None or time.monotonic() - stable_since < _RECORD_CACHE_STABLE_AFTER_SEC:
-            return value
-        for pending_key in [
-            pending_key
-            for pending_key in _record_cache_pending
-            if pending_key[:2] == key[:2] and pending_key != key
-        ]:
-            _record_cache_pending.pop(pending_key, None)
-        for stale_key in [
-            cached_key
-            for cached_key in _record_cache
-            if cached_key[:2] == key[:2] and cached_key != key
-        ]:
-            _record_cache.pop(stale_key, None)
-            _record_cache_pending.pop(stale_key, None)
-        _record_cache[key] = value
-        _record_cache_pending.pop(key, None)
-        _record_cache.move_to_end(key)
-        while len(_record_cache) > _COMPLETION_CACHE_LIMIT:
-            _record_cache.popitem(last=False)
-    return value
+    """Compatibility no-op; the shared sidecar has no process-local catalog."""
 
 
 def _identity_fragment(raw_token: str) -> tuple[str, int]:
@@ -125,22 +38,21 @@ def record_id_completion_items(
     wanted, matched_length = _identity_fragment(fragment)
     if _match_count(wanted) < GLOBAL_ID_MIN_CHARS:
         return []
-    ranked = []
-    for item in _record_catalog(db, thread_id):
-        rank = _record_id_hint_rank(item["record_id"], wanted)
-        if rank is not None:
-            ranked.append((rank, item))
-    best_rank = min((rank for rank, _item in ranked), default=None)
-    selected = [item for rank, item in ranked if rank == best_rank]
+    page = query_autocomplete_records(db, thread_id, wanted, limit=limit)
+    if page.state != "ready":
+        return []
     replace_count = matched_length if replace is None else max(0, int(replace))
     return [
         {
-            "display": item["display"],
-            "insert": item["record_id"],
+            "display": (
+                f"[{record.record_id[-8:] if len(record.record_id) > 8 else record.record_id}] "
+                f"{record.label}{f' · {record.preview}' if record.preview else ''}"
+            ),
+            "insert": record.record_id,
             "replace": str(replace_count),
-            "meta": item["meta"],
+            "meta": f"{record.kind} · {record.record_id}",
         }
-        for item in selected[: max(0, int(limit))]
+        for record in page.records
     ]
 
 
@@ -164,15 +76,40 @@ def thread_completion_items(
         return []
     wanted_l = wanted.lower()
     try:
-        rows = list_threads(db)
-        rows.sort(key=lambda row: getattr(row, "created_at", "") or "", reverse=True)
+        if wanted:
+            pattern = f"%{wanted.lower()}%"
+            if match_metadata:
+                sql = (
+                    "SELECT thread_id,name,short_recap,status,NULL AS snapshot_json,"
+                    "snapshot_last_event_seq,initial_model_key,depth,created_at FROM threads "
+                    "WHERE lower(thread_id) LIKE ? OR lower(coalesce(name,'')) LIKE ? "
+                    "OR lower(coalesce(short_recap,'')) LIKE ? ORDER BY created_at DESC LIMIT ?"
+                )
+                params = (pattern, pattern, pattern, max(0, int(limit)))
+            else:
+                sql = (
+                    "SELECT thread_id,name,short_recap,status,NULL AS snapshot_json,"
+                    "snapshot_last_event_seq,initial_model_key,depth,created_at FROM threads "
+                    "WHERE lower(thread_id) LIKE ? ORDER BY created_at DESC LIMIT ?"
+                )
+                params = (pattern, max(0, int(limit)))
+            from .db import ThreadRow
+
+            rows = [ThreadRow(**dict(row)) for row in db.conn.execute(sql, params).fetchall()]
+        else:
+            rows = list_threads(db)
+            rows.sort(key=lambda row: getattr(row, "created_at", "") or "", reverse=True)
+            rows = rows[: max(0, int(limit))]
     except Exception:
         rows = []
+    # Autocomplete needs exact live lease state, not full runner-actionability
+    # discovery for every thread in the database. The latter can project every
+    # long thread before we have even filtered or limited candidates.
     try:
         statuses = get_thread_statuses_bulk(
             db,
             [str(getattr(row, "thread_id", "") or "") for row in rows],
-            skip_runnability=not include_streaming,
+            skip_runnability=True,
         )
     except Exception:
         statuses = {}

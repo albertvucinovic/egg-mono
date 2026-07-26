@@ -6,6 +6,7 @@ from .display_input import DisplayInputPlugin
 from .diagnostics import DiagnosticsPlugin
 from .execution import ExecutionPlugin
 from .auth import AuthPlugin
+from .autocomplete_cache import AutocompleteCachePlugin
 from .answer_user import AnswerUserPlugin
 from .attachments import AttachmentToolsPlugin
 from .compaction import CompactionPlugin
@@ -30,6 +31,7 @@ __all__ = [
     "ApprovalPoliciesPlugin",
     "AttachmentToolsPlugin",
     "AuthPlugin",
+    "AutocompleteCachePlugin",
     "CompactionPlugin",
     "CrossThreadExecutionPlugin",
     "DiagnosticsPlugin",

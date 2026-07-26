@@ -1147,3 +1147,23 @@ def test_input_prefix_detects_async_callable_objects() -> None:
     assert registry.is_async("@@ work") is True
     result = asyncio.run(registry.execute_async("@@ work", CommandContext()))
     assert result is not None and result.message == "done"
+
+
+def test_autocomplete_cache_command_is_registered_and_completes(tmp_path):
+    import eggthreads as ts
+    from eggthreads.command_catalog import CommandContext, create_default_command_registry
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, "root")
+    registry = create_default_command_registry()
+
+    assert registry.get("autocompleteCache").usage.startswith("/autocompleteCache")
+    assert registry.complete(
+        "autocompleteCache", CommandContext(db=db, current_thread=thread_id), "re"
+    ) == ["rebuild"]
+    result = registry.execute(
+        "autocompleteCache", CommandContext(db=db, current_thread=thread_id), "status"
+    )
+    assert "Autocomplete cache: missing" in result.message
+    assert "autocomplete-v4.sqlite" in result.message

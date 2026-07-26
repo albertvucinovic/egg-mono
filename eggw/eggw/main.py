@@ -45,6 +45,9 @@ async def lifespan(app: FastAPI):
     # Log the absolute path being used
     print(f"Database: {core_state.db.path.absolute()}")
     core_state.db.init_schema()  # Create tables if they don't exist
+    from eggthreads import AutocompleteSidecarManager
+
+    app.state.autocomplete_sidecar_manager = AutocompleteSidecarManager(core_state.db.path)
 
     # Load models
     core_state.models_config, core_state.default_model_key = load_models_config()
@@ -76,6 +79,9 @@ async def lifespan(app: FastAPI):
         from .editor_files import clear_registered_editor_files
 
         clear_registered_editor_files()
+        manager = getattr(app.state, "autocomplete_sidecar_manager", None)
+        if manager is not None:
+            manager.close(wait=False)
 
 
 security_config = SecurityConfig.from_env()
