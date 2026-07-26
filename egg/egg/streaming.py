@@ -357,12 +357,6 @@ class StreamingMixin:
                     self._mark_static_transcript_changed(thread_id)
                 except Exception:
                     pass
-                manager = getattr(self, '_autocomplete_sidecar_manager', None)
-                if manager is not None:
-                    try:
-                        manager.request_build(thread_id)
-                    except Exception:
-                        pass
 
             if saw_get_user_input_event:
                 try:

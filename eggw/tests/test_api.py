@@ -1093,7 +1093,7 @@ class TestMessageOperations:
         assert body["snapshot_cursor"] == int(
             response.headers["x-egg-event-cursor"]
         )
-        assert body["next_before"]
+        assert body["next_before"] == body["items"][0]["id"]
 
 
     def test_get_messages_before_id_paginates_older_history(self, client):
@@ -1112,69 +1112,6 @@ class TestMessageOperations:
         assert response.status_code == 200
         data = response.json()
         assert [message["content"] for message in data] == ["first"]
-
-    def test_get_messages_sidecar_cursor_pages_without_snapshot_materialization(
-        self, client, monkeypatch
-    ):
-        """EggW follows opaque projection cursors for bounded older pages."""
-        from eggthreads import append_message, catch_up_autocomplete_catalog
-
-        thread_id = client.post(
-            "/api/threads", json={"name": "Sidecar Pagination"}
-        ).json()["id"]
-        for index in range(5):
-            append_message(core_state.db, thread_id, role="user", content=f"item-{index}")
-        assert catch_up_autocomplete_catalog(core_state.db, thread_id).state == "ready"
-
-        newest = client.get(
-            f"/api/threads/{thread_id}/messages?envelope=true&limit=2"
-        ).json()
-        assert [message["content"] for message in newest["items"]] == ["item-3", "item-4"]
-        assert newest["next_before"].startswith("tp1.")
-
-        monkeypatch.setattr(
-            "eggw.routes.messages._get_messages_sync",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("opaque page must not materialize snapshot_json")
-            ),
-        )
-        older = client.get(
-            f"/api/threads/{thread_id}/messages?envelope=true&limit=2"
-            f"&before_id={newest['next_before']}"
-        ).json()
-        assert [message["content"] for message in older["items"]] == ["item-1", "item-2"]
-        assert older["next_before"].startswith("tp1.")
-
-    def test_get_messages_opaque_cursor_never_falls_back_when_cache_is_stale(
-        self, client, monkeypatch
-    ):
-        """An older-page cursor waits for catch-up instead of scanning history."""
-        from eggthreads import append_message, catch_up_autocomplete_catalog
-
-        thread_id = client.post(
-            "/api/threads", json={"name": "Stale Sidecar Pagination"}
-        ).json()["id"]
-        for index in range(4):
-            append_message(core_state.db, thread_id, role="user", content=f"item-{index}")
-        assert catch_up_autocomplete_catalog(core_state.db, thread_id).state == "ready"
-        newest = client.get(
-            f"/api/threads/{thread_id}/messages?envelope=true&limit=2"
-        ).json()
-        append_message(core_state.db, thread_id, role="user", content="new tail")
-        monkeypatch.setattr(
-            "eggw.routes.messages._get_messages_sync",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("opaque cursor must not use snapshot fallback")
-            ),
-        )
-
-        response = client.get(
-            f"/api/threads/{thread_id}/messages?envelope=true&limit=2"
-            f"&before_id={newest['next_before']}"
-        )
-
-        assert response.status_code == 503
-        assert response.headers["retry-after"] == "1"
 
     def test_upload_attachment_returns_metadata_part_and_stores_bytes(self, client, test_db_path):
         from eggthreads.input_artifacts import resolve_input_bytes
@@ -4549,32 +4486,3 @@ def test_autocomplete_cold_sidecar_schedules_background_build(client, app, monke
     assert response.json()["suggestions"] == []
     assert scheduled == [thread_id]
     assert autocomplete_catalog_status(core_state.db, thread_id).state == "missing"
-
-
-def test_bounded_sidecar_messages_cover_newer_non_display_event(client, monkeypatch):
-    """Non-transcript events advance SSE cursor without disabling sidecar pages."""
-    from eggthreads import append_message, catch_up_autocomplete_catalog
-
-    thread_id = client.post("/api/threads", json={"name": "Non-display tail"}).json()["id"]
-    append_message(core_state.db, thread_id, role="user", content="visible")
-    assert catch_up_autocomplete_catalog(core_state.db, thread_id).state == "ready"
-    event_cursor = core_state.db.append_event(
-        event_id="runtime-config-after-message",
-        thread_id=thread_id,
-        type_="runtime.config",
-        payload={"test": True},
-    )
-    monkeypatch.setattr(
-        "eggw.routes.messages._get_messages_sync",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("non-display event must not force snapshot fallback")
-        ),
-    )
-
-    response = client.get(
-        f"/api/threads/{thread_id}/messages?envelope=true&limit=2"
-    )
-
-    assert response.status_code == 200
-    assert response.json()["items"][-1]["content"] == "visible"
-    assert response.json()["snapshot_cursor"] == event_cursor

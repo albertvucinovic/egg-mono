@@ -550,23 +550,22 @@ class TestUpdatePanels:
 
     def test_chat_header_tps_uses_snapshot_seq_cache(self, egg_app, monkeypatch):
         """Idle header TPS reads should not reparse snapshot messages."""
-        from eggthreads import append_message, catch_up_autocomplete_catalog, create_snapshot
+        from eggthreads import append_message, create_snapshot
 
         append_message(egg_app.db, egg_app.current_thread, "assistant", "done", extra={"tps": 8.0})
         create_snapshot(egg_app.db, egg_app.current_thread)
-        assert catch_up_autocomplete_catalog(
-            egg_app.db, egg_app.current_thread
-        ).state == "ready"
         egg_app._live_state = {"active_invoke": None, "stream_kind": None}
-        monkeypatch.setattr(
-            "egg.panels.snapshot_messages",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("header TPS must not parse snapshot messages")
-            ),
-        )
+        calls = {"count": 0}
+
+        def fake_snapshot_messages(db, thread_id):
+            calls["count"] += 1
+            return [{"role": "assistant", "content": "done", "tps": 8.0}]
+
+        monkeypatch.setattr("egg.panels.snapshot_messages", fake_snapshot_messages)
 
         assert egg_app.current_chat_header_tps() == "8.0 tps"
         assert egg_app.current_chat_header_tps() == "8.0 tps"
+        assert calls["count"] == 1
 
 class TestRenderGroup:
     """Tests for render_group()."""
@@ -2493,54 +2492,6 @@ class TestTranscriptScrollbackSource:
         assert watermark_reads == []
         assert source._snapshot_seq == egg_app.db.get_thread(egg_app.current_thread).snapshot_last_event_seq
         assert len(source._per_message_token_stats) >= 100
-
-    def test_sidecar_scrollback_fetches_older_pages_without_snapshot_json(
-        self, egg_app, monkeypatch
-    ):
-        """A warm source materializes only bounded pages while scrolling upward."""
-        import egg.panels as panels_module
-        from egg.panels import TranscriptScrollbackSource, _StaticTranscriptRenderable
-        from eggthreads import append_message, catch_up_autocomplete_catalog
-
-        for i in range(230):
-            append_message(egg_app.db, egg_app.current_thread, "user", f"paged-{i}")
-        assert catch_up_autocomplete_catalog(
-            egg_app.db, egg_app.current_thread
-        ).state == "ready"
-
-        page_calls = []
-        from eggthreads import query_transcript_page as query_page
-
-        def counted_query(*args, **kwargs):
-            page_calls.append(kwargs.get("cursor"))
-            return query_page(*args, **kwargs)
-
-        monkeypatch.setattr(
-            egg_app.db,
-            "get_thread",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("warm scrollback must not read snapshot_json")
-            ),
-        )
-        monkeypatch.setattr(panels_module, "query_transcript_page", counted_query, raising=False)
-
-        def fake_message_renderables(message, hidden_details=None, **kwargs):
-            content = str(message.get("content") or "")
-            return [_StaticTranscriptRenderable(content, content)]
-
-        monkeypatch.setattr(egg_app, "_static_transcript_message_renderables", fake_message_renderables)
-        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
-        monkeypatch.setattr(source, "_render_static_transcript_item_rows", self._fallback_rows)
-
-        assert source._sidecar_backed is True
-        assert len(source._blocks) == 100
-        assert list(source.rows_from_bottom(80, 0, 3)) == ["paged-227", "paged-228", "paged-229"]
-        assert len(source._blocks) == 100
-        rows = list(source.rows_from_bottom(80, 0, 205))
-        assert rows[0] == "paged-25"
-        assert rows[-1] == "paged-229"
-        assert len(source._blocks) == 231
-        assert len(page_calls) == 3
 
 
 class TestRedrawStaticView:

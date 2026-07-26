@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Process-local scheduling for cross-process-owned projection sidecar builds."""
+"""Process-local scheduling for cross-process-owned autocomplete sidecar builds."""
 
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor

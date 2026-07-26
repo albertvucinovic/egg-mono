@@ -81,8 +81,6 @@ from .autocomplete_sidecar import (
     AutocompleteCatalogStatus,
     AutocompletePage,
     AutocompleteRecord,
-    TranscriptEntry,
-    TranscriptPage,
     autocomplete_catalog_status,
     autocomplete_semantic_event_seq,
     autocomplete_sidecar_path,
@@ -92,8 +90,6 @@ from .autocomplete_sidecar import (
     query_autocomplete_records,
     query_autocomplete_content_records,
     query_autocomplete_terms,
-    query_transcript_page,
-    query_transcript_latest_tps,
 )
 from .autocomplete_manager import AutocompleteSidecarManager
 from .api import (
@@ -583,13 +579,10 @@ __all__ = [
     'EditorSource', 'read_editor_draft_file', 'resolve_editor_source',
     'global_completion_items', 'merge_completion_items', 'record_id_completion_items', 'thread_completion_items',
     'AUTOCOMPLETE_SIDECAR_VERSION', 'AutocompleteBuildResult', 'AutocompleteCatalogStatus',
-    'AutocompletePage', 'AutocompleteRecord', 'TranscriptEntry', 'TranscriptPage',
-    'autocomplete_catalog_status', 'autocomplete_semantic_event_seq',
+    'AutocompletePage', 'AutocompleteRecord', 'autocomplete_catalog_status', 'autocomplete_semantic_event_seq',
     'autocomplete_sidecar_path', 'build_autocomplete_catalog', 'clear_autocomplete_catalog',
     'catch_up_autocomplete_catalog',
     'query_autocomplete_records', 'query_autocomplete_content_records', 'query_autocomplete_terms',
-    'query_transcript_page',
-    'query_transcript_latest_tps',
     'AutocompleteSidecarManager',
     'SESSION_COMMAND_COMPLETIONS', 'SESSION_ON_COMPLETIONS', 'SESSION_TARGET_COMPLETIONS',
     'OUTPUT_OPTIMIZER_COMMAND_COMPLETIONS', 'OUTPUT_OPTIMIZER_MODE_COMPLETIONS',

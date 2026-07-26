@@ -25,7 +25,6 @@ from eggthreads import (
     get_active_get_user_message_waiting_note,
     interrupt_thread,
     list_input_history,
-    query_transcript_page,
 )
 from eggthreads.attachment_staging import safe_display_filename, save_attachment_bytes_for_thread
 from eggthreads.content_parts import content_to_plain_text
@@ -179,99 +178,6 @@ def _compaction_marker_message(marker: dict, fallback_start_seq: int) -> Message
         selector=marker.get("selector"),
         created_by=marker.get("created_by"),
     )
-
-
-def _message_content_from_transcript_entry(entry) -> MessageContent:
-    """Convert one shared sidecar entry to EggW's public message shape."""
-
-    if entry.kind == "compaction_marker":
-        return _compaction_marker_message(dict(entry.payload), entry.order_event_seq)
-    msg = dict(entry.payload)
-    msg_id = str(msg.get("msg_id") or entry.entry_id or "")
-    token_info = entry.token_stats if isinstance(entry.token_stats, dict) else {}
-    total_tokens = token_info.get("total_tokens")
-    try:
-        total_tokens = int(total_tokens) if total_tokens is not None else None
-    except (TypeError, ValueError):
-        total_tokens = None
-    timestamp = None
-    ts_raw = msg.get("ts")
-    if ts_raw:
-        try:
-            timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-        except Exception:
-            pass
-    return MessageContent(
-        id=msg_id,
-        role=str(msg.get("role") or ""),
-        content=msg.get("content"),
-        content_text=content_to_plain_text(msg.get("content")),
-        reasoning=msg.get("reasoning"),
-        tool_calls=msg.get("tool_calls"),
-        tool_stream=msg.get("tool_stream") if isinstance(msg.get("tool_stream"), dict) else None,
-        tool_calls_stream=(
-            msg.get("tool_calls_stream")
-            if isinstance(msg.get("tool_calls_stream"), dict)
-            else None
-        ),
-        tool_call_id=msg.get("tool_call_id"),
-        output_optimizer=(
-            msg.get("output_optimizer")
-            if isinstance(msg.get("output_optimizer"), dict)
-            else None
-        ),
-        name=msg.get("name"),
-        model_key=msg.get("model_key"),
-        timestamp=timestamp,
-        tokens=total_tokens,
-        tps=(
-            float(msg.get("tps"))
-            if isinstance(msg.get("tps"), (int, float)) and float(msg.get("tps")) > 0
-            else None
-        ),
-        answer_user_preserve_turn=bool(msg.get("answer_user_preserve_turn")),
-        consumed_by_tool_call_id=msg.get("consumed_by_tool_call_id"),
-        consumed_by_tool_name=msg.get("consumed_by_tool_name"),
-        origin=msg.get("origin"),
-        from_thread_id=msg.get("from_thread_id"),
-        recovery_notice=bool(msg.get("recovery_notice")),
-        event_seq=int(entry.order_event_seq),
-    )
-
-
-def _get_messages_from_sidecar_sync(
-    db_path: str,
-    thread_id: str,
-    limit: int,
-    page_cursor: str | None,
-) -> tuple[bool, Optional[MessageSnapshotResponse]]:
-    fresh_db = ThreadsDB(db_path)
-    try:
-        if fresh_db.get_thread_metadata(thread_id) is None:
-            return False, None
-        event_cursor_before = fresh_db.max_event_seq(thread_id)
-        page = query_transcript_page(
-            fresh_db,
-            thread_id,
-            limit=limit,
-            cursor=page_cursor,
-        )
-        if page.state != "ready":
-            return True, None
-        # Pin the public event cursor around the sidecar read. Non-display events
-        # may legitimately be newer than the projection watermark, but any
-        # concurrent append makes this read retry so a semantic append cannot be
-        # hidden behind a falsely-current SSE cursor.
-        event_cursor_after = fresh_db.max_event_seq(thread_id)
-        if event_cursor_before != event_cursor_after:
-            return True, None
-        return True, MessageSnapshotResponse(
-            items=[_message_content_from_transcript_entry(entry) for entry in page.entries],
-            snapshot_cursor=int(event_cursor_after),
-            next_before=page.next_cursor,
-        )
-    finally:
-        fresh_db.close()
 
 
 def _output_optimizer_metadata_by_tool_call_id(
@@ -517,10 +423,6 @@ async def get_messages(
         default=None,
         description="Optional id of the first loaded entry; returns entries before it.",
     ),
-    page_cursor: str | None = Query(
-        default=None,
-        description="Opaque immutable sidecar cursor for the next older page.",
-    ),
     envelope: bool = Query(
         default=False,
         description=(
@@ -542,56 +444,11 @@ async def get_messages(
     if not core.db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    # Bounded clients use the shared projection sidecar. Keep ``before_id`` as a
-    # compatibility path for older callers whose cursor is a message identity.
-    # The cold initial tail may use the coherent snapshot once while managed
-    # warming starts; opaque older-page cursors never fall back to O(history).
+    # Run database-heavy work in thread pool to avoid blocking event loop
     loop = asyncio.get_running_loop()
-    snapshot = None
-    sidecar_unavailable = False
-    sidecar_cursor = page_cursor or (
-        before_id if isinstance(before_id, str) and before_id.startswith("tp1.") else None
+    snapshot = await loop.run_in_executor(
+        None, _get_messages_sync, core.db.path, thread_id, limit, before_id
     )
-    use_sidecar = isinstance(limit, int) and limit > 0 and (
-        not before_id or sidecar_cursor is not None
-    )
-    if use_sidecar:
-        thread_exists, snapshot = await loop.run_in_executor(
-            None,
-            _get_messages_from_sidecar_sync,
-            core.db.path,
-            thread_id,
-            limit,
-            sidecar_cursor,
-        )
-        if not thread_exists:
-            raise HTTPException(status_code=404, detail="Thread not found")
-        if snapshot is None:
-            sidecar_unavailable = True
-            manager = getattr(get_messages, "_manager_override", None)
-            if manager is None:
-                try:
-                    from eggw.main import app as eggw_app
-
-                    manager = getattr(eggw_app.state, "autocomplete_sidecar_manager", None)
-                except Exception:
-                    manager = None
-            if manager is not None:
-                manager.request_build(thread_id)
-    opaque_older_page = bool(page_cursor) or (
-        isinstance(before_id, str) and before_id.startswith("tp1.")
-    )
-    if snapshot is None and not opaque_older_page:
-        snapshot = await loop.run_in_executor(
-            None, _get_messages_sync, core.db.path, thread_id, limit, before_id
-        )
-
-    if snapshot is None and sidecar_unavailable:
-        raise HTTPException(
-            status_code=503,
-            detail="Transcript projection cache is preparing; retry shortly",
-            headers={"Retry-After": "1"},
-        )
 
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Thread not found")

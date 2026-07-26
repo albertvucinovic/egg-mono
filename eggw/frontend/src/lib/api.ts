@@ -135,30 +135,6 @@ export interface MessageSnapshot<T = ApiMessage> {
   next_before: string | null;
 }
 
-function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    let timer: ReturnType<typeof globalThis.setTimeout>;
-    const onAbort = () => {
-      if (settled) return;
-      settled = true;
-      globalThis.clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      reject(new DOMException("Aborted", "AbortError"));
-    };
-    const cleanup = () => signal?.removeEventListener("abort", onAbort);
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve();
-    };
-    timer = globalThis.setTimeout(finish, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 export async function fetchMessages(
   threadId: string,
   options: { limit?: number; beforeId?: string; signal?: AbortSignal } = {},
@@ -166,14 +142,8 @@ export async function fetchMessages(
   const params = new URLSearchParams({ envelope: "true" });
   if (options.limit && options.limit > 0) params.set("limit", String(Math.trunc(options.limit)));
   if (options.beforeId) params.set("before_id", options.beforeId);
-  let res: Response;
-  for (let attempt = 0; ; attempt += 1) {
-    res = await apiFetch(`${API_BASE}/api/threads/${threadId}/messages?${params.toString()}`, { signal: options.signal });
-    if (res.status !== 503 || attempt >= 20) break;
-    const retryAfter = Number(res.headers.get("Retry-After") || 0.1);
-    await abortableDelay(Math.max(50, retryAfter * 1000), options.signal);
-  }
-  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to fetch messages"));
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/messages?${params.toString()}`, { signal: options.signal });
+  if (!res.ok) throw new Error("Failed to fetch messages");
   const payload = await res.json();
   if (!payload || !Array.isArray(payload.items) || !Number.isSafeInteger(payload.snapshot_cursor)) {
     throw new Error("Invalid message snapshot response");

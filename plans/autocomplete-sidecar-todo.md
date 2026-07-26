@@ -1,6 +1,6 @@
-# Shared Full-History Projection Sidecar — Implementation TODO
+# Full-History Autocomplete Sidecar — Implementation TODO
 
-**Status:** autocomplete authorized on 2026-07-25; transcript paging authorized on 2026-07-26
+**Status:** authorized by user on 2026-07-25; implementation in progress
 **Canonical database:** `.egg/threads.sqlite` remains unchanged and authoritative
 **Design basis:** `plans/cache-sidecar.md`, narrowed initially to full-history autocomplete
 
@@ -52,28 +52,7 @@
 - [ ] Validate multi-process Egg/EggW sharing, project moves/copies/replacements, deletion, disk-full/read-only, and safe cache removal.
 - [x] Run focused and broad EggThreads/Egg/EggW suites.
 
-## Phase 5 — Transcript paging and scrollback
-
-- [x] Promote the disposable cache to semantic v5 with complete message payloads,
-  timestamps, per-message token metadata, optimizer metadata, and compaction markers.
-- [x] Add indexed bounded `query_transcript_page()` with opaque immutable ordering
-  cursors that remain usable after a boundary message is deleted or skipped.
-- [x] Make terminal full-screen scrollback page raw history on demand for
-  `/displayVerbosity max|medium|min`, retaining width/verbosity render caches.
-- [x] Route bounded EggW tail and older-page reads through the shared API while
-  preserving canonical `before_id` compatibility for older callers.
-- [x] Preserve live correctness with projection watermarks, managed background
-  catch-up, retryable cold-cache responses, and canonical event replay. The
-  initial cold tail may use the coherent snapshot once while warming; opaque
-  older-page requests never fall back to total-history work.
-- [x] Add page, cursor-deletion, terminal lazy-loading, and EggW API tests.
-
 ## Status notes
 
 - 2026-07-25: User explicitly authorized sidecar implementation after confirming that autocomplete must retain complete-history functionality. Repository starts at `be31665`; only unrelated untracked `count-lines.sh` exists. No canonical schema change is authorized. Phase 1 begins with the shared EggThreads foundation and focused tests.
 - 2026-07-26: Foundation committed as `8a2eaf0`. Follow-up implementation now uses semantic sidecar v4 with full-history ID/content/term indexes, complete-history cursor paging, incremental semantic tails, shared Egg/EggW consumers, managed cold/stale builders, and user-facing operations. Real 15.6k-message thread: full v4 build ~8.4s in background; one-message semantic catch-up ~1.9s in background; warm `/show` ~26ms, `/continue` ~45ms, ordinary word completion ~65ms. Validation: EggThreads 1691 passed; Egg 697 passed; EggW 265 passed, 1 skipped, one pre-existing warning; compileall and `git diff --check` passed. Remaining follow-up hardening: corrupt-file quarantine, disk-full/read-only/deletion lifecycle, optional cooperative cancellation, broader multi-process fault injection.
-- 2026-07-26: Semantic v5 adds shared transcript paging. On the real 15.8k-message
-  `…Y4DKD` thread, warm 100-message pages measured ~17ms and 300-message pages
-  ~20ms including authority checks, payload decoding, token metadata, and record-ID
-  collection. Catch-up after concurrent activity measured ~2–3s in managed work.
-  Canonical `threads.sqlite` remains unchanged.
