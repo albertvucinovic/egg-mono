@@ -33,7 +33,7 @@
 
 - [x] Apply completion-relevant semantic event tails with a bounded tail size and full-rebuild fallback.
 - [x] Preserve create/edit/delete/continue/preserve/tool declaration/result semantics. (Optimizer metadata does not change completion identity/search output.)
-- [ ] Rebuild or fail closed for unknown semantic versions/events.
+- [x] Rebuild or fail closed for unknown semantic versions/events.
 - [x] Add differential tests against canonical `list_show_record_candidates()`.
 
 ## Phase 3 — Shared consumers
