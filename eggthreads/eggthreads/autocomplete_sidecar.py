@@ -127,6 +127,26 @@ def _open_sidecar(path: Path, *, create: bool) -> sqlite3.Connection:
     return conn
 
 
+def _open_sidecar_for_build(path: Path) -> sqlite3.Connection:
+    """Open a writable cache, quarantining only an unreadable disposable file."""
+
+    try:
+        return _open_sidecar(path, create=True)
+    except (sqlite3.DatabaseError, RuntimeError):
+        if not path.exists():
+            raise
+        quarantine = path.with_name(
+            f"{path.name}.corrupt-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        )
+        os.replace(path, quarantine)
+        for suffix in ("-wal", "-shm"):
+            try:
+                path.with_name(path.name + suffix).unlink()
+            except FileNotFoundError:
+                pass
+        return _open_sidecar(path, create=True)
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -447,7 +467,7 @@ def build_autocomplete_catalog(
     target_id = _canonical_anchor(db, thread_id, target)
     generation = uuid.uuid4().hex
     try:
-        conn = _open_sidecar(path, create=True)
+        conn = _open_sidecar_for_build(path)
     except Exception as exc:
         return AutocompleteBuildResult("error", thread_id, sidecar_path=path, error=f"{type(exc).__name__}: {exc}")
     try:
@@ -964,7 +984,7 @@ def catch_up_autocomplete_catalog(
     path = autocomplete_sidecar_path(db.path)
     if not path.exists():
         return build_autocomplete_catalog(db, thread_id, batch_size=batch_size)
-    conn = _open_sidecar(path, create=True)
+    conn = _open_sidecar_for_build(path)
     owner = uuid.uuid4().hex
     claimed = False
     try:

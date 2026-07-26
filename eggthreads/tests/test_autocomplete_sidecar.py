@@ -372,3 +372,24 @@ def test_incremental_catch_up_does_not_replay_full_canonical_projection(
 
     assert sidecar.catch_up_autocomplete_catalog(db, thread_id).state == "ready"
     assert sidecar.query_autocomplete_records(db, thread_id, "second").state == "ready"
+
+
+def test_corrupt_sidecar_is_quarantined_and_rebuilt_without_canonical_changes(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "root")
+    _append(db, thread_id, "message-one", "user", "one")
+    canonical_before = _schema(db)
+    path = sidecar.autocomplete_sidecar_path(db.path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"not sqlite")
+
+    result = sidecar.build_autocomplete_catalog(db, thread_id)
+
+    assert result.state == "ready"
+    assert sidecar.query_autocomplete_records(db, thread_id, "message").state == "ready"
+    assert _schema(db) == canonical_before
+    quarantined = list(path.parent.glob(path.name + ".corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == b"not sqlite"
