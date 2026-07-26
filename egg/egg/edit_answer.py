@@ -260,6 +260,16 @@ async def editor_command_async(ctx: Any, arg: str) -> CommandResult:
 def register_edit_answer_command(registry: Any, app: Any | None = None) -> None:
     """Register terminal-only editor commands if absent."""
 
+    def editor_completions(context: Any, arg: str):
+        text = str(arg or "")
+        if text.lstrip().startswith("@"):
+            return []
+        from eggthreads import show_record_completion_items
+
+        db = getattr(context, "db", None)
+        thread_id = getattr(context, "current_thread", None)
+        return show_record_completion_items(db, thread_id, text) if db is not None and thread_id else []
+
     try:
         registry.get(_EDIT_ANSWER_COMMAND)
     except KeyError:
@@ -282,6 +292,7 @@ def register_edit_answer_command(registry: Any, app: Any | None = None) -> None:
             category="input",
             usage="/editor [id_hint|path|@path|-- text]",
             description="Edit a transcript record/draft or edit a host file in $EDITOR.",
+            complete=editor_completions,
         ))
 
 
