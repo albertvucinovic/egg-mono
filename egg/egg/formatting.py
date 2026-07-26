@@ -444,10 +444,17 @@ class FormattingMixin:
         except Exception:
             return ''
 
-    def format_messages_text(self, thread_id: str, messages: Optional[List[Dict[str, Any]]] = None) -> str:
+    def format_messages_text(
+        self,
+        thread_id: str,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        *,
+        markers_by_start_seq: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    ) -> str:
         """Format messages in a thread for display."""
         msgs = messages if messages is not None else snapshot_messages(self.db, thread_id)
-        markers_by_start_seq = self._compaction_markers_by_start_seq(thread_id)
+        if markers_by_start_seq is None:
+            markers_by_start_seq = self._compaction_markers_by_start_seq(thread_id)
         lines: List[str] = []
         if not msgs and not markers_by_start_seq:
             return "No messages yet."
@@ -807,7 +814,43 @@ class FormattingMixin:
         ):
             return
 
-        base_full = self.format_messages_text(self.current_thread)
+        messages = None
+        sidecar_markers = None
+        try:
+            from eggthreads import query_transcript_page
+
+            page = query_transcript_page(
+                self.db,
+                self.current_thread,
+                limit=200,
+            )
+            if page.state == "ready":
+                messages = [
+                    dict(entry.payload)
+                    for entry in page.entries
+                    if entry.kind == "message"
+                ]
+                sidecar_markers = {}
+                for entry in page.entries:
+                    if entry.kind != "compaction_marker":
+                        continue
+                    marker = dict(entry.payload)
+                    try:
+                        start_seq = int(marker.get("start_event_seq"))
+                    except (TypeError, ValueError):
+                        continue
+                    sidecar_markers.setdefault(start_seq, []).append(marker)
+            else:
+                manager = getattr(self, '_autocomplete_sidecar_manager', None)
+                if manager is not None:
+                    manager.request_build(self.current_thread)
+        except Exception:
+            messages = None
+        base_full = self.format_messages_text(
+            self.current_thread,
+            messages=messages,
+            markers_by_start_seq=sidecar_markers,
+        )
         base_tail = self.truncate_for_chat_panel(base_full)
         self._chat_cache = {
             "thread_id": self.current_thread,

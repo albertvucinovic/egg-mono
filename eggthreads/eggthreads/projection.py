@@ -734,6 +734,11 @@ def _apply_events(
             )
             continue
 
+        if event.type == "thread.compaction":
+            # Display-only markers share the projection watermark but do not
+            # mutate effective provider messages.
+            continue
+
         if event.type == "control.interrupt" and event.payload.get("purpose") == "continue":
             continue_from = event.payload.get("continue_from_msg_id")
             if not isinstance(continue_from, str) or continue_from not in states:

@@ -40,7 +40,7 @@ def test_sidecar_path_is_versioned_deterministic_and_db_specific(tmp_path: Path)
     assert first == same
     assert first != other
     assert first.parent.name == "cache"
-    assert first.name.endswith("-autocomplete-v4.sqlite")
+    assert first.name.endswith("-autocomplete-v5.sqlite")
 
 
 def test_cold_read_is_explicit_and_does_not_build_or_create_sidecar(tmp_path: Path) -> None:
@@ -393,3 +393,214 @@ def test_corrupt_sidecar_is_quarantined_and_rebuilt_without_canonical_changes(
     quarantined = list(path.parent.glob(path.name + ".corrupt-*"))
     assert len(quarantined) == 1
     assert quarantined[0].read_bytes() == b"not sqlite"
+
+
+def test_transcript_pages_are_bounded_ordered_and_include_display_metadata(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "transcript")
+    first = ts.append_message(db, thread_id, "user", "first")
+    second = ts.append_message(
+        db,
+        thread_id,
+        "assistant",
+        "second",
+        extra={"reasoning": "thinking", "tps": 12.5},
+    )
+    third = ts.append_message(db, thread_id, "user", "third")
+    marker_seq = db.append_event(
+        event_id="compaction-event",
+        thread_id=thread_id,
+        type_="thread.compaction",
+        payload={
+            "start_msg_id": second,
+            "start_event_seq": db.conn.execute(
+                "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=? AND type='msg.create'",
+                (thread_id, second),
+            ).fetchone()[0],
+            "selector": "last_llm",
+            "created_by": "test",
+        },
+    )
+
+    assert sidecar.build_autocomplete_catalog(db, thread_id, batch_size=2).state == "ready"
+
+    newest = sidecar.query_transcript_page(db, thread_id, limit=2)
+    assert newest.state == "ready"
+    assert [entry.kind for entry in newest.entries] == ["message", "message"]
+    assert [entry.entry_id for entry in newest.entries] == [second, third]
+    assert newest.entries[0].payload["ts"]
+    assert newest.entries[0].payload["event_seq"] < newest.entries[1].payload["event_seq"]
+    assert newest.entries[0].token_stats["reasoning_tokens"] > 0
+    assert newest.next_cursor
+
+    older = sidecar.query_transcript_page(
+        db, thread_id, limit=2, cursor=newest.next_cursor
+    )
+    assert older.state == "ready"
+    assert [entry.kind for entry in older.entries] == ["message", "compaction_marker"]
+    assert older.entries[0].entry_id == first
+    assert older.entries[1].payload["marker_event_seq"] == marker_seq
+    assert older.entries[1].payload["selector"] == "last_llm"
+    assert older.next_cursor is None
+
+
+def test_transcript_cursor_survives_boundary_message_deletion(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "cursor")
+    ids = [ts.append_message(db, thread_id, "user", f"message {i}") for i in range(5)]
+    assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+    page = sidecar.query_transcript_page(db, thread_id, limit=2)
+    assert [entry.entry_id for entry in page.entries] == ids[-2:]
+    assert page.next_cursor
+
+    ts.delete_message(db, thread_id, ids[-2])
+    assert sidecar.catch_up_autocomplete_catalog(db, thread_id).state == "ready"
+    older = sidecar.query_transcript_page(db, thread_id, limit=10, cursor=page.next_cursor)
+    assert [entry.entry_id for entry in older.entries] == ids[:3]
+
+
+def test_transcript_page_does_not_materialize_snapshot_json(tmp_path: Path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "bounded")
+    for index in range(200):
+        _append(db, thread_id, f"message-{index}", "user", f"body {index}")
+    assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+    monkeypatch.setattr(
+        db,
+        "get_thread",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("transcript page must not load snapshot_json")
+        ),
+    )
+
+    page = sidecar.query_transcript_page(db, thread_id, limit=3)
+
+    assert page.state == "ready"
+    assert [entry.entry_id for entry in page.entries] == [
+        "message-197",
+        "message-198",
+        "message-199",
+    ]
+
+
+def test_transcript_page_query_plan_uses_order_index(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "query plan")
+    for index in range(30):
+        _append(db, thread_id, f"message-{index}", "user", f"body {index}")
+    assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+    path = sidecar.autocomplete_sidecar_path(db.path)
+    conn = sqlite3.connect(path)
+    try:
+        generation = conn.execute(
+            "SELECT active_generation FROM thread_authority WHERE thread_id=?",
+            (thread_id,),
+        ).fetchone()[0]
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT kind,entry_id FROM transcript_entries "
+            "WHERE thread_id=? AND generation=? "
+            "ORDER BY order_event_seq DESC,kind_order DESC,secondary_order DESC,kind DESC,entry_id DESC LIMIT 10",
+            (thread_id, generation),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert any("transcript_entries_order" in str(row) for row in plan)
+
+
+def test_transcript_optimizer_metadata_catches_up_without_token_drift(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "optimizer")
+    declaration = ts.append_message(
+        db,
+        thread_id,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [{
+                "id": "call-optimizer",
+                "type": "function",
+                "function": {"name": "bash", "arguments": "{}"},
+            }]
+        },
+    )
+    result_id = ts.append_message(
+        db,
+        thread_id,
+        "tool",
+        "large output",
+        extra={"name": "bash", "tool_call_id": "call-optimizer"},
+    )
+    assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+    before = sidecar.query_transcript_page(db, thread_id, limit=10)
+    before_result = next(entry for entry in before.entries if entry.entry_id == result_id)
+
+    db.append_event(
+        event_id="approval",
+        thread_id=thread_id,
+        type_="tool_call.output_approval",
+        payload={
+            "tool_call_id": "call-optimizer",
+            "decision": "partial",
+            "artifact_path": "/tmp/artifact123",
+            "channels": {
+                "raw": {"stored_in_finished_event": True},
+                "optimizer": {
+                    "optimized": True,
+                    "fallback": False,
+                    "raw_chars": 12000,
+                    "published_chars": 1000,
+                    "published_savings_pct": 91.67,
+                },
+            },
+        },
+    )
+    assert sidecar.catch_up_autocomplete_catalog(db, thread_id).state == "ready"
+    after = sidecar.query_transcript_page(db, thread_id, limit=10)
+    after_result = next(entry for entry in after.entries if entry.entry_id == result_id)
+
+    assert after_result.payload.get("output_optimizer")
+    assert after_result.token_stats == before_result.token_stats
+    assert next(entry for entry in after.entries if entry.entry_id == declaration)
+
+
+def test_compaction_marker_incrementally_joins_its_start_message(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, "marker tail")
+    first = ts.append_message(db, thread_id, "user", "first")
+    second = ts.append_message(db, thread_id, "assistant", "second")
+    assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+    start_seq = db.conn.execute(
+        "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=?",
+        (thread_id, second),
+    ).fetchone()[0]
+    marker_seq = db.append_event(
+        event_id="marker-tail",
+        thread_id=thread_id,
+        type_="thread.compaction",
+        payload={"start_msg_id": second, "start_event_seq": start_seq},
+    )
+
+    assert sidecar.catch_up_autocomplete_catalog(db, thread_id).state == "ready"
+    page = sidecar.query_transcript_page(db, thread_id, limit=10)
+
+    assert [entry.entry_id for entry in page.entries] == [
+        first,
+        f"compaction-{marker_seq}",
+        second,
+    ]
+
+
+def test_transcript_cursor_is_thread_bound(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    first_thread = ts.create_root_thread(db, "first")
+    second_thread = ts.create_root_thread(db, "second")
+    for thread_id in (first_thread, second_thread):
+        for index in range(3):
+            _append(db, thread_id, f"{thread_id}-{index}", "user", str(index))
+        assert sidecar.build_autocomplete_catalog(db, thread_id).state == "ready"
+    cursor = sidecar.query_transcript_page(db, first_thread, limit=1).next_cursor
+
+    page = sidecar.query_transcript_page(db, second_thread, limit=1, cursor=cursor)
+
+    assert page.state == "error"
+    assert "invalid transcript cursor" in (page.error or "")

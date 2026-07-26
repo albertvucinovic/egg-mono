@@ -54,6 +54,7 @@ class MessageContent(BaseModel):
     origin: Optional[str] = None
     from_thread_id: Optional[str] = None
     recovery_notice: bool = False
+    event_seq: Optional[int] = None
 
 
 class MessageSnapshotResponse(BaseModel):

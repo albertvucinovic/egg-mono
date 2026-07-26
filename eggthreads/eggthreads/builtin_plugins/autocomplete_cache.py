@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""User-facing operations for the disposable full-history autocomplete sidecar."""
+"""User-facing operations for the disposable full-history projection sidecar."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +16,7 @@ def _target(context: Any) -> tuple[Any, str] | None:
 
 def autocomplete_cache_command(context: Any, arg: str):
     from ..autocomplete_sidecar import (
+        AUTOCOMPLETE_SIDECAR_VERSION,
         autocomplete_catalog_status,
         catch_up_autocomplete_catalog,
         build_autocomplete_catalog,
@@ -62,7 +63,7 @@ def autocomplete_cache_command(context: Any, arg: str):
         message=(
             f"Autocomplete cache: {status.state}\n"
             f"  path: {path}\n"
-            f"  version: 4\n"
+            f"  version: {AUTOCOMPLETE_SIDECAR_VERSION}\n"
             f"  source watermark: {status.through_event_seq}\n"
             f"  build target: {status.target_event_seq}\n"
             f"  size: {status.size_bytes} bytes\n"
@@ -85,7 +86,7 @@ def register_autocomplete_cache_commands(registry: Any) -> None:
         autocomplete_cache_command,
         category="diagnostics",
         usage="/autocompleteCache [status|verify|warm|rebuild|clear]",
-        description="Inspect or maintain the disposable full-history autocomplete sidecar.",
+        description="Inspect or maintain the disposable full-history projection sidecar.",
         complete=autocomplete_cache_completions,
     ))
 

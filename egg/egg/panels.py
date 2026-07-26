@@ -16,7 +16,7 @@ from rich.text import Text
 from rich.markdown import Markdown
 from rich import box as rich_box
 
-from eggthreads import create_snapshot, shortest_unique_record_id_suffix
+from eggthreads import create_snapshot, query_transcript_page, shortest_unique_record_id_suffix
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.output_optimizer.observability import format_output_optimizer_summary
 from eggthreads.tool_effects import ToolEffect
@@ -45,6 +45,7 @@ from .syntax_highlighting import semantic_syntax_theme
 
 
 CHILDREN_PANEL_FALLBACK_REFRESH_SEC = 1.0
+TRANSCRIPT_SCROLLBACK_PAGE_SIZE = 100
 CHILDREN_PANEL_RELEVANT_EVENT_TYPES = (
     'msg.create',
     'msg.edit',
@@ -149,11 +150,20 @@ class TranscriptScrollbackSource:
             )
         except Exception:
             self._local_transcript_generation = -1
-        if refresh_snapshot:
-            self._refresh_snapshot_if_safe()
         self._snapshot_seq = -1
         self._per_message_token_stats: Dict[str, Dict[str, Any]] = {}
-        self._blocks = self._load_blocks()
+        self._blocks: List[_TranscriptScrollbackBlock] = []
+        self._next_page_cursor: Optional[str] = None
+        self._prefetched_sidecar_pages: Dict[str, Any] = {}
+        self._sidecar_backed = self._load_sidecar_page()
+        if not self._sidecar_backed:
+            if refresh_snapshot:
+                self._refresh_snapshot_if_safe()
+            self._blocks = self._load_blocks()
+        elif self._next_page_cursor:
+            # One-page look-behind resolves result names when a page begins in
+            # the middle of a tool call/result run without materializing history.
+            self._prefetch_older_sidecar_page()
         self._caches: Dict[Tuple[int, str], _TranscriptScrollbackCache] = {}
 
     def row_count(self, width: int) -> Optional[int]:
@@ -233,6 +243,106 @@ class TranscriptScrollbackSource:
             blocks.append(_TranscriptScrollbackBlock('message', dict(msg)))
         return blocks
 
+    def _load_sidecar_page(self, cursor: Optional[str] = None) -> bool:
+        """Append one bounded older page without materializing snapshot JSON."""
+
+        page = self._prefetched_sidecar_pages.pop(cursor, None) if cursor else None
+        if page is None:
+            try:
+                page = query_transcript_page(
+                    self._db,
+                    self._thread_id,
+                    limit=TRANSCRIPT_SCROLLBACK_PAGE_SIZE,
+                    cursor=cursor,
+                )
+            except Exception:
+                return False
+        if page.state != 'ready':
+            manager = getattr(self._panels, '_autocomplete_sidecar_manager', None)
+            if manager is not None:
+                try:
+                    manager.request_build(self._thread_id)
+                except Exception:
+                    pass
+            return False
+        if cursor is None:
+            self._snapshot_seq = int(page.projection_watermark)
+        page_blocks: List[_TranscriptScrollbackBlock] = []
+        for entry in page.entries:
+            payload = dict(entry.payload)
+            if entry.kind == 'message':
+                page_blocks.append(_TranscriptScrollbackBlock('message', payload))
+                record_ids = getattr(self._panels, '_show_record_ids', None)
+                if not isinstance(record_ids, dict):
+                    record_ids = {}
+                    self._panels._show_record_ids = record_ids
+                for record_id in entry.record_ids:
+                    if record_id:
+                        record_ids[str(record_id)] = None
+                msg_id = str(payload.get('msg_id') or '')
+                if msg_id and isinstance(entry.token_stats, dict):
+                    self._per_message_token_stats[msg_id] = dict(entry.token_stats)
+            else:
+                page_blocks.append(_TranscriptScrollbackBlock('marker', payload))
+        if cursor is None:
+            self._blocks = page_blocks
+        else:
+            self._blocks[:0] = page_blocks
+        page_messages = [
+            block.payload for block in page_blocks if block.kind == 'message'
+        ]
+        if cursor is None:
+            self._panels._tool_call_presentation_index = {}
+        self._panels._remember_tool_call_presentations(
+            page_messages,
+            replace=False,
+        )
+        self._next_page_cursor = page.next_cursor
+        if cursor is not None and self._next_page_cursor:
+            self._prefetch_older_sidecar_page()
+        return True
+
+    def _load_older_sidecar_page(self, cache: _TranscriptScrollbackCache) -> bool:
+        cursor = self._next_page_cursor
+        if not self._sidecar_backed or not cursor:
+            return False
+        previous_length = len(self._blocks)
+        if not self._load_sidecar_page(cursor):
+            self._next_page_cursor = None
+            return False
+        added = len(self._blocks) - previous_length
+        cache.next_block_index += added
+        return added > 0
+
+    def _prefetch_older_sidecar_page(self) -> None:
+        cursor = self._next_page_cursor
+        if not cursor:
+            return
+        try:
+            page = query_transcript_page(
+                self._db,
+                self._thread_id,
+                limit=TRANSCRIPT_SCROLLBACK_PAGE_SIZE,
+                cursor=cursor,
+            )
+        except Exception:
+            return
+        if page.state != 'ready':
+            return
+        self._prefetched_sidecar_pages[cursor] = page
+        record_ids = getattr(self._panels, '_show_record_ids', None)
+        if not isinstance(record_ids, dict):
+            record_ids = {}
+            self._panels._show_record_ids = record_ids
+        for entry in page.entries:
+            for record_id in entry.record_ids:
+                if record_id:
+                    record_ids[str(record_id)] = None
+        self._panels._remember_tool_call_presentations(
+            [dict(entry.payload) for entry in page.entries if entry.kind == 'message'],
+            replace=False,
+        )
+
     def _cache_key(self, width: int) -> Tuple[int, str]:
         width = max(1, int(width or 0))
         try:
@@ -278,6 +388,8 @@ class TranscriptScrollbackSource:
         needed_from_bottom = max(0, int(needed_from_bottom or 0))
         while not cache.complete and len(cache.rows) < needed_from_bottom:
             if cache.next_block_index < 0:
+                if self._load_older_sidecar_page(cache):
+                    continue
                 cache.complete = True
                 break
             block = self._blocks[cache.next_block_index]
@@ -298,7 +410,7 @@ class TranscriptScrollbackSource:
         # Flush any remaining accumulated hidden details at the end
         _flush_shared_hidden()
 
-        if cache.next_block_index < 0:
+        if cache.next_block_index < 0 and not self._next_page_cursor:
             cache.complete = True
         return cache
 
@@ -535,13 +647,31 @@ class PanelsMixin:
             return None
         if source._local_transcript_generation != self._static_transcript_generation():
             return None
-        try:
-            row = self.db.get_thread_metadata(self.current_thread)
-            current_snapshot_seq = int(row.snapshot_last_event_seq) if row is not None else -1
-        except Exception:
-            return None
-        if current_snapshot_seq != int(source._snapshot_seq):
-            return None
+        if source._sidecar_backed:
+            try:
+                from eggthreads import autocomplete_semantic_event_seq
+
+                current_snapshot_seq = autocomplete_semantic_event_seq(
+                    self.db, self.current_thread
+                )
+            except Exception:
+                return None
+            if current_snapshot_seq != int(source._snapshot_seq):
+                manager = getattr(self, '_autocomplete_sidecar_manager', None)
+                if manager is not None:
+                    try:
+                        manager.request_build(self.current_thread)
+                    except Exception:
+                        pass
+                return None
+        else:
+            try:
+                row = self.db.get_thread_metadata(self.current_thread)
+                current_snapshot_seq = int(row.snapshot_last_event_seq) if row is not None else -1
+            except Exception:
+                return None
+            if current_snapshot_seq != int(source._snapshot_seq):
+                return None
         return source
 
     def _is_full_screen_scrollback_renderer(self, renderer: Any = None) -> bool:
@@ -1199,24 +1329,20 @@ class PanelsMixin:
             return str(cache.get('value') or "")
 
         try:
-            msgs = snapshot_messages(self.db, self.current_thread)
+            from eggthreads import query_transcript_latest_tps
+
+            latest_tps = query_transcript_latest_tps(self.db, self.current_thread)
         except Exception:
-            msgs = []
-        for m in reversed(msgs or []):
-            if not isinstance(m, dict):
-                continue
-            if m.get('role') not in ('assistant', 'tool'):
-                continue
-            tps = m.get('tps')
+            latest_tps = None
+        if latest_tps is not None:
             try:
-                fv = float(tps)
+                fv = float(latest_tps)
             except Exception:
-                continue
-            if fv <= 0:
-                continue
-            value = self._fmt_header_metric(fv, 'tps')
-            self._chat_header_tps_cache = {'key': cache_key, 'value': value}
-            return value
+                fv = 0.0
+            if fv > 0:
+                value = self._fmt_header_metric(fv, 'tps')
+                self._chat_header_tps_cache = {'key': cache_key, 'value': value}
+                return value
         self._chat_header_tps_cache = {'key': cache_key, 'value': ""}
         return ""
 
@@ -2285,6 +2411,27 @@ class PanelsMixin:
         self._mark_static_transcript_changed()
         if isinstance(m, dict):
             self._remember_tool_call_presentations([m], replace=False)
+            msg_id = str(m.get('msg_id') or '')
+            if msg_id:
+                try:
+                    from eggthreads import snapshot_token_stats
+
+                    stats = snapshot_token_stats({'messages': [m]})
+                    raw_per_message = stats.get('per_message') if isinstance(stats, dict) else {}
+                    info = raw_per_message.get(msg_id, {}) if isinstance(raw_per_message, dict) else {}
+                    cache_key = (
+                        self.current_thread,
+                        self._snapshot_last_event_seq(self.current_thread),
+                    )
+                    cache = getattr(self, '_static_transcript_token_counts_cache', None)
+                    if not isinstance(cache, dict) or cache.get('key') != cache_key:
+                        cache = {'key': cache_key, 'per_message': {}}
+                        self._static_transcript_token_counts_cache = cache
+                    per_message = cache.get('per_message')
+                    if isinstance(per_message, dict):
+                        per_message[msg_id] = info
+                except Exception:
+                    pass
         hidden_details = self._ensure_static_hidden_details_state()
         before_hidden = self._has_static_hidden_details_activity(hidden_details)
         items = self._static_transcript_message_renderables(m, hidden_details)

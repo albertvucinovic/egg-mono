@@ -1166,7 +1166,8 @@ def test_autocomplete_cache_command_is_registered_and_completes(tmp_path):
         "autocompleteCache", CommandContext(db=db, current_thread=thread_id), "status"
     )
     assert "Autocomplete cache: missing" in result.message
-    assert "autocomplete-v4.sqlite" in result.message
+    assert "autocomplete-v5.sqlite" in result.message
+    assert "version: 5" in result.message
 
 
 def test_autocomplete_cache_warm_uses_injected_manager(tmp_path):

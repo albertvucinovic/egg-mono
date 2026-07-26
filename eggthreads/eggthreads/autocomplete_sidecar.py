@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-"""Disposable, versioned full-history autocomplete projection sidecar.
+"""Disposable, versioned full-history projection sidecar.
 
 The canonical ThreadsDB remains authoritative.  This module stores only derived
-completion metadata and publishes complete per-thread generations atomically.
+It serves autocomplete and paged transcript views from complete per-thread
+generations published atomically.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -28,16 +30,10 @@ from .inspection import (
 )
 from .projection import load_thread_projection
 
-AUTOCOMPLETE_SIDECAR_VERSION = 4
+AUTOCOMPLETE_SIDECAR_VERSION = 5
 AUTOCOMPLETE_SIDECAR_FILENAME = f"autocomplete-v{AUTOCOMPLETE_SIDECAR_VERSION}.sqlite"
 AUTOCOMPLETE_SIDECAR_BATCH_SIZE = 500
 AUTOCOMPLETE_BUILD_LEASE_SECONDS = 120
-AUTOCOMPLETE_SEMANTIC_EVENT_TYPES = (
-    "msg.create",
-    "msg.edit",
-    "msg.delete",
-    "control.interrupt",
-)
 AutocompleteOrder = Literal["newest", "oldest"]
 AutocompleteMatch = Literal["best", "all"]
 AutocompleteCatalogState = Literal["ready", "preparing", "missing", "stale", "error"]
@@ -89,6 +85,32 @@ class AutocompleteCatalogStatus:
     sidecar_path: Optional[Path] = None
     size_bytes: int = 0
     last_error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TranscriptEntry:
+    """One effective message or display-only marker from a published generation."""
+
+    kind: Literal["message", "compaction_marker"]
+    entry_id: str
+    order_event_seq: int
+    payload: Mapping[str, Any]
+    token_stats: Mapping[str, Any] | None = None
+    record_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TranscriptPage:
+    """Bounded newest-to-older transcript page, returned in display order."""
+
+    state: AutocompleteCatalogState
+    thread_id: str
+    projection_watermark: int = -1
+    event_cursor: int = -1
+    entries: tuple[TranscriptEntry, ...] = ()
+    next_cursor: Optional[str] = None
+    sidecar_path: Optional[Path] = None
+    error: Optional[str] = None
 
 
 def autocomplete_sidecar_path(db_path: Path | str) -> Path:
@@ -202,13 +224,39 @@ def _init_schema(conn: sqlite3.Connection) -> None:
           msg_id TEXT NOT NULL,
           created_event_seq INTEGER NOT NULL,
           last_event_seq INTEGER NOT NULL,
+          created_at TEXT,
           payload_json TEXT NOT NULL,
+          token_stats_json TEXT NOT NULL,
           deleted INTEGER NOT NULL,
           skipped_on_continue INTEGER NOT NULL,
           PRIMARY KEY(thread_id, generation, msg_id)
         );
         CREATE INDEX IF NOT EXISTS projected_messages_order
           ON projected_messages(thread_id, generation, created_event_seq, msg_id);
+        CREATE TABLE IF NOT EXISTS compaction_markers(
+          thread_id TEXT NOT NULL,
+          generation TEXT NOT NULL,
+          marker_event_seq INTEGER NOT NULL,
+          start_event_seq INTEGER NOT NULL,
+          ts TEXT,
+          payload_json TEXT NOT NULL,
+          PRIMARY KEY(thread_id, generation, marker_event_seq)
+        );
+        CREATE TABLE IF NOT EXISTS transcript_entries(
+          thread_id TEXT NOT NULL,
+          generation TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          entry_id TEXT NOT NULL,
+          order_event_seq INTEGER NOT NULL,
+          kind_order INTEGER NOT NULL,
+          secondary_order INTEGER NOT NULL,
+          PRIMARY KEY(thread_id, generation, kind, entry_id)
+        );
+        CREATE INDEX IF NOT EXISTS transcript_entries_order
+          ON transcript_entries(
+            thread_id, generation, order_event_seq DESC, kind_order DESC,
+            secondary_order DESC, kind DESC, entry_id DESC
+          );
         CREATE TABLE IF NOT EXISTS completion_terms(
           thread_id TEXT NOT NULL,
           generation TEXT NOT NULL,
@@ -260,7 +308,7 @@ def _canonical_anchor(db: Any, thread_id: str, event_seq: int) -> Optional[str]:
 
 
 def autocomplete_semantic_event_seq(db: Any, thread_id: str) -> int:
-    """Return the newest event that can change completion-visible history."""
+    """Return the newest event that can change the shared projected transcript."""
 
     row = db.conn.execute(
         """
@@ -268,7 +316,10 @@ def autocomplete_semantic_event_seq(db: Any, thread_id: str) -> int:
           FROM events
          WHERE thread_id=?
            AND (
-             type IN ('msg.create','msg.edit','msg.delete')
+             type IN (
+               'msg.create','msg.edit','msg.delete',
+               'tool_call.output_approval','thread.compaction'
+             )
              OR (type='control.interrupt' AND json_extract(payload_json,'$.purpose')='continue')
            )
         """,
@@ -336,7 +387,7 @@ def _completion_terms(message: Mapping[str, Any]) -> list[str]:
 
 def _candidate_rows(
     projection: Any,
-) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
     rows: list[dict[str, Any]] = []
     declarations: dict[str, list[str]] = {}
     results: dict[str, list[str]] = {}
@@ -348,15 +399,8 @@ def _candidate_rows(
         if not msg_id:
             continue
         kind = _message_kind(message)
-        per_message_terms: dict[str, list[Any]] = {}
         for term in _completion_terms(message):
             normalized_term = term.casefold()
-            local = per_message_terms.get(normalized_term)
-            if local is None:
-                per_message_terms[normalized_term] = [term, 1]
-            else:
-                local[0] = term
-                local[1] += 1
             current = terms.get(normalized_term)
             if current is None:
                 terms[normalized_term] = [term, int(state.created_event_seq), 1]
@@ -424,18 +468,116 @@ def _candidate_rows(
     return out, term_rows
 
 
+def _message_token_stats(message: Mapping[str, Any]) -> dict[str, Any]:
+    """Return presentation token fields without depending on a full snapshot."""
+
+    try:
+        from .token_count import snapshot_token_stats
+
+        msg_id = str(message.get("msg_id") or "page-message")
+        stats = snapshot_token_stats({"messages": [dict(message)]})
+        per_message = stats.get("per_message") if isinstance(stats, dict) else None
+        info = per_message.get(msg_id) if isinstance(per_message, dict) else None
+        return dict(info) if isinstance(info, dict) else {}
+    except Exception:
+        return {}
+
+
 def _projection_state_rows(projection: Any) -> list[tuple[Any, ...]]:
+    base_snapshot = getattr(projection, "base_snapshot", None)
+    base_token_stats = (
+        base_snapshot.get("token_stats")
+        if isinstance(base_snapshot, Mapping)
+        else None
+    )
+    base_per_message = (
+        base_token_stats.get("per_message")
+        if isinstance(base_token_stats, Mapping)
+        else None
+    )
+    base_per_message = base_per_message if isinstance(base_per_message, Mapping) else {}
+
+    def token_stats_for(state: Any) -> Mapping[str, Any]:
+        existing = base_per_message.get(state.msg_id)
+        if isinstance(existing, Mapping):
+            return existing
+        return _message_token_stats(state.as_message_dict())
+
     return [
         (
             state.msg_id,
             int(state.created_event_seq),
             int(state.last_event_seq),
+            state.created_at,
             json.dumps(dict(state.payload), ensure_ascii=False),
+            json.dumps(
+                token_stats_for(state),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
             1 if state.deleted else 0,
             1 if state.skipped_on_continue else 0,
         )
         for state in projection.message_states
     ]
+
+
+def _load_compaction_rows(
+    db: Any,
+    thread_id: str,
+    through_event_seq: int,
+) -> list[tuple[Any, ...]]:
+    """Return display marker rows through the published projection watermark."""
+
+    rows = db.conn.execute(
+        "SELECT event_seq,ts,payload_json FROM events "
+        "WHERE thread_id=? AND type='thread.compaction' AND event_seq<=? "
+        "ORDER BY event_seq",
+        (thread_id, int(through_event_seq)),
+    ).fetchall()
+    out: list[tuple[Any, ...]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except Exception:
+            payload = {}
+        if not isinstance(payload, Mapping):
+            payload = {}
+        try:
+            start_event_seq = int(payload.get("start_event_seq"))
+        except (TypeError, ValueError):
+            continue
+        out.append((
+            int(row["event_seq"]),
+            start_event_seq,
+            str(row["ts"]) if row["ts"] is not None else None,
+            json.dumps(dict(payload), ensure_ascii=False),
+        ))
+    return out
+
+
+def _transcript_entry_rows(
+    projection: Any,
+    compaction_rows: Sequence[tuple[Any, ...]],
+) -> list[tuple[Any, ...]]:
+    """Return one immutable ordering row per effective display entry."""
+
+    rows: list[tuple[Any, ...]] = [
+        ("message", state.msg_id, int(state.created_event_seq), 1, 0)
+        for state in projection.messages
+    ]
+    marker_counts: dict[int, int] = {}
+    for marker_event_seq, start_event_seq, _ts, _payload_json in compaction_rows:
+        ordinal = marker_counts.get(int(start_event_seq), 0)
+        marker_counts[int(start_event_seq)] = ordinal + 1
+        rows.append((
+            "compaction_marker",
+            str(int(marker_event_seq)),
+            int(start_event_seq),
+            0,
+            ordinal,
+        ))
+    return rows
 
 
 def _chunks(values: Sequence[Any], size: int) -> Iterator[Sequence[Any]]:
@@ -507,6 +649,8 @@ def build_autocomplete_catalog(
                 source_db.close()
         rows, term_rows = _candidate_rows(projection)
         projection_rows = _projection_state_rows(projection)
+        compaction_rows = _load_compaction_rows(db, thread_id, target)
+        transcript_rows = _transcript_entry_rows(projection, compaction_rows)
         sql = (
             "INSERT INTO completion_records(thread_id,generation,record_id,normalized_id,reversed_normalized_id,kind,message_id,tool_call_id,event_seq,item_order,label,preview,search_text,paired_message_ids_json) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
@@ -544,7 +688,21 @@ def build_autocomplete_catalog(
         for batch in _chunks(projection_rows, batch_size):
             conn.execute("BEGIN IMMEDIATE")
             conn.executemany(
-                "INSERT INTO projected_messages(thread_id,generation,msg_id,created_event_seq,last_event_seq,payload_json,deleted,skipped_on_continue) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO projected_messages(thread_id,generation,msg_id,created_event_seq,last_event_seq,created_at,payload_json,token_stats_json,deleted,skipped_on_continue) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ((thread_id, generation, *row) for row in batch),
+            )
+            conn.execute("COMMIT")
+        for batch in _chunks(compaction_rows, batch_size):
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                "INSERT INTO compaction_markers(thread_id,generation,marker_event_seq,start_event_seq,ts,payload_json) VALUES (?,?,?,?,?,?)",
+                ((thread_id, generation, *row) for row in batch),
+            )
+            conn.execute("COMMIT")
+        for batch in _chunks(transcript_rows, batch_size):
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                "INSERT INTO transcript_entries(thread_id,generation,kind,entry_id,order_event_seq,kind_order,secondary_order) VALUES (?,?,?,?,?,?,?)",
                 ((thread_id, generation, *row) for row in batch),
             )
             conn.execute("COMMIT")
@@ -577,6 +735,8 @@ def build_autocomplete_catalog(
                 (thread_id, generation),
             )
             conn.execute("DELETE FROM projected_messages WHERE thread_id=? AND generation<>?", (thread_id, generation))
+            conn.execute("DELETE FROM compaction_markers WHERE thread_id=? AND generation<>?", (thread_id, generation))
+            conn.execute("DELETE FROM transcript_entries WHERE thread_id=? AND generation<>?", (thread_id, generation))
         except sqlite3.Error:
             pass
         # A concurrent append after the captured watermark leaves this complete
@@ -592,6 +752,8 @@ def build_autocomplete_catalog(
             conn.execute("DELETE FROM completion_search WHERE thread_id=? AND generation=?", (thread_id, generation))
             conn.execute("DELETE FROM completion_terms WHERE thread_id=? AND generation=?", (thread_id, generation))
             conn.execute("DELETE FROM projected_messages WHERE thread_id=? AND generation=?", (thread_id, generation))
+            conn.execute("DELETE FROM compaction_markers WHERE thread_id=? AND generation=?", (thread_id, generation))
+            conn.execute("DELETE FROM transcript_entries WHERE thread_id=? AND generation=?", (thread_id, generation))
             conn.execute("DELETE FROM build_leases WHERE thread_id=? AND owner=?", (thread_id, owner))
             conn.execute(
                 "UPDATE thread_authority SET state=CASE WHEN active_generation IS NULL THEN 'error' ELSE 'ready' END,last_error=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE thread_id=?",
@@ -735,6 +897,243 @@ def query_autocomplete_records(
         conn.close()
 
 
+def _encode_transcript_cursor(row: sqlite3.Row, *, thread_id: str) -> str:
+    payload = [
+        1,
+        str(thread_id),
+        int(row["order_event_seq"]),
+        int(row["kind_order"]),
+        int(row["secondary_order"]),
+        str(row["kind"]),
+        str(row["entry_id"]),
+    ]
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    return "tp1." + encoded.rstrip("=")
+
+
+def _decode_transcript_cursor(
+    cursor: Optional[str],
+    *,
+    thread_id: str,
+) -> Optional[tuple[int, int, int, str, str]]:
+    if not cursor:
+        return None
+    try:
+        raw_cursor = str(cursor)
+        if not raw_cursor.startswith("tp1."):
+            raise ValueError
+        raw = raw_cursor.removeprefix("tp1.")
+        raw += "=" * (-len(raw) % 4)
+        version, cursor_thread_id, event_seq, kind_order, secondary_order, kind, entry_id = json.loads(
+            base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8")
+        )
+        if (
+            int(version) != 1
+            or str(cursor_thread_id) != str(thread_id)
+            or str(kind) not in {"message", "compaction_marker"}
+        ):
+            raise ValueError
+        return int(event_seq), int(kind_order), int(secondary_order), str(kind), str(entry_id)
+    except Exception as exc:
+        raise ValueError("invalid transcript cursor") from exc
+
+
+def _transcript_entry_from_row(row: sqlite3.Row) -> TranscriptEntry:
+    try:
+        record_ids = tuple(json.loads(row["record_ids_json"] or "[]"))
+    except Exception:
+        record_ids = ()
+    kind = str(row["kind"])
+    if kind == "message":
+        payload = json.loads(row["message_payload_json"])
+        if not isinstance(payload, dict):
+            payload = {}
+        public_id = "" if str(row["entry_id"]).startswith("event:") else str(row["entry_id"])
+        payload = dict(payload)
+        payload["msg_id"] = public_id
+        payload["event_seq"] = int(row["order_event_seq"])
+        if row["message_created_at"] is not None:
+            payload["ts"] = str(row["message_created_at"])
+        try:
+            token_stats = json.loads(row["message_token_stats_json"])
+        except Exception:
+            token_stats = {}
+        return TranscriptEntry(
+            "message",
+            public_id,
+            int(row["order_event_seq"]),
+            payload,
+            token_stats if isinstance(token_stats, dict) else {},
+            record_ids,
+        )
+
+    payload = json.loads(row["marker_payload_json"])
+    if not isinstance(payload, dict):
+        payload = {}
+    marker_event_seq = int(row["entry_id"])
+    marker = dict(payload)
+    marker["marker_event_seq"] = marker_event_seq
+    marker["event_seq"] = marker_event_seq
+    if row["marker_ts"] is not None:
+        marker["ts"] = str(row["marker_ts"])
+    return TranscriptEntry(
+        "compaction_marker",
+        f"compaction-{marker_event_seq}",
+        int(row["order_event_seq"]),
+        marker,
+        None,
+        (),
+    )
+
+
+def query_transcript_page(
+    db: Any,
+    thread_id: str,
+    *,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    allow_stale: bool = False,
+) -> TranscriptPage:
+    """Read one bounded effective-history page from the published sidecar."""
+
+    thread_id = str(thread_id or "").strip()
+    path = autocomplete_sidecar_path(db.path)
+    try:
+        conn = _open_sidecar(path, create=False)
+    except FileNotFoundError:
+        return TranscriptPage("missing", thread_id, sidecar_path=path)
+    except Exception as exc:
+        return TranscriptPage(
+            "error", thread_id, sidecar_path=path,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    try:
+        state, authority = _authority_state(db, conn, thread_id)
+        coherent_stale = (
+            state == "stale"
+            and bool(allow_stale)
+            and authority is not None
+            and bool(authority["active_generation"])
+            and db.get_thread_metadata(thread_id) is not None
+            and _canonical_anchor(db, thread_id, int(authority["through_event_seq"]))
+                == authority["through_event_id"]
+        )
+        if (state != "ready" and not coherent_stale) or authority is None:
+            return TranscriptPage(
+                state,
+                thread_id,
+                int(authority["through_event_seq"]) if authority is not None else -1,
+                event_cursor=int(authority["through_event_seq"]) if authority is not None else -1,
+                sidecar_path=path,
+                error=(
+                    str(authority["last_error"])
+                    if authority is not None and authority["last_error"]
+                    else None
+                ),
+            )
+        generation = str(authority["active_generation"])
+        where = ["e.thread_id=?", "e.generation=?"]
+        params: list[Any] = [thread_id, generation]
+        boundary = _decode_transcript_cursor(cursor, thread_id=thread_id)
+        if boundary is not None:
+            event_seq, kind_order, secondary_order, kind, entry_id = boundary
+            where.append(
+                "(e.order_event_seq<? "
+                "OR (e.order_event_seq=? AND e.kind_order<?) "
+                "OR (e.order_event_seq=? AND e.kind_order=? AND e.secondary_order<?) "
+                "OR (e.order_event_seq=? AND e.kind_order=? AND e.secondary_order=? AND e.kind<?) "
+                "OR (e.order_event_seq=? AND e.kind_order=? AND e.secondary_order=? AND e.kind=? AND e.entry_id<?))"
+            )
+            params.extend((
+                event_seq,
+                event_seq, kind_order,
+                event_seq, kind_order, secondary_order,
+                event_seq, kind_order, secondary_order, kind,
+                event_seq, kind_order, secondary_order, kind, entry_id,
+            ))
+        page_limit = max(1, min(int(limit or 0), 5000))
+        # The ordered scan is bounded by LIMIT; the correlated record-ID lookup
+        # touches only the one or few inspectable records owned by each message.
+        rows = conn.execute(
+            "SELECT e.*,pm.created_at AS message_created_at,"
+            "pm.payload_json AS message_payload_json,"
+            "pm.token_stats_json AS message_token_stats_json,"
+            "cm.ts AS marker_ts,cm.payload_json AS marker_payload_json,"
+            "COALESCE((SELECT json_group_array(record_id) FROM completion_records cr "
+            "WHERE cr.thread_id=e.thread_id AND cr.generation=e.generation "
+            "AND cr.message_id=e.entry_id),'[]') AS record_ids_json "
+            "FROM transcript_entries e "
+            "LEFT JOIN projected_messages pm ON e.kind='message' "
+            "AND pm.thread_id=e.thread_id AND pm.generation=e.generation AND pm.msg_id=e.entry_id "
+            "LEFT JOIN compaction_markers cm ON e.kind='compaction_marker' "
+            "AND cm.thread_id=e.thread_id AND cm.generation=e.generation "
+            "AND cm.marker_event_seq=CAST(e.entry_id AS INTEGER) "
+            "WHERE " + " AND ".join(where) +
+            " ORDER BY e.order_event_seq DESC,e.kind_order DESC,e.secondary_order DESC,e.kind DESC,e.entry_id DESC LIMIT ?",
+            (*params, page_limit + 1),
+        ).fetchall()
+        has_more = len(rows) > page_limit
+        visible_desc = rows[:page_limit]
+        entries = tuple(_transcript_entry_from_row(row) for row in reversed(visible_desc))
+        return TranscriptPage(
+            state,
+            thread_id,
+            int(authority["through_event_seq"]),
+            event_cursor=int(authority["through_event_seq"]),
+            entries=entries,
+            next_cursor=(
+                _encode_transcript_cursor(visible_desc[-1], thread_id=thread_id)
+                if has_more and visible_desc
+                else None
+            ),
+            sidecar_path=path,
+        )
+    except Exception as exc:
+        return TranscriptPage(
+            "error", thread_id, sidecar_path=path,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        conn.close()
+
+
+def query_transcript_latest_tps(
+    db: Any,
+    thread_id: str,
+    *,
+    allow_stale: bool = True,
+) -> Optional[float]:
+    """Return the newest persisted assistant/tool TPS without history decoding."""
+
+    thread_id = str(thread_id or "").strip()
+    path = autocomplete_sidecar_path(db.path)
+    try:
+        conn = _open_sidecar(path, create=False)
+    except Exception:
+        return None
+    try:
+        state, authority = _authority_state(db, conn, thread_id)
+        if authority is None or not authority["active_generation"]:
+            return None
+        if state not in ({"ready", "stale"} if allow_stale else {"ready"}):
+            return None
+        row = conn.execute(
+            "SELECT json_extract(payload_json,'$.tps') FROM projected_messages "
+            "WHERE thread_id=? AND generation=? AND deleted=0 AND skipped_on_continue=0 "
+            "AND json_extract(payload_json,'$.role') IN ('assistant','tool') "
+            "AND CAST(json_extract(payload_json,'$.tps') AS REAL)>0 "
+            "ORDER BY created_event_seq DESC,msg_id DESC LIMIT 1",
+            (thread_id, str(authority["active_generation"])),
+        ).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def autocomplete_catalog_status(db: Any, thread_id: str) -> AutocompleteCatalogStatus:
     """Return inspectable state without creating or rebuilding the sidecar."""
 
@@ -798,6 +1197,8 @@ def clear_autocomplete_catalog(db: Any, thread_id: str) -> bool:
         conn.execute("DELETE FROM completion_search WHERE thread_id=?", (thread_id,))
         conn.execute("DELETE FROM completion_terms WHERE thread_id=?", (thread_id,))
         conn.execute("DELETE FROM projected_messages WHERE thread_id=?", (thread_id,))
+        conn.execute("DELETE FROM compaction_markers WHERE thread_id=?", (thread_id,))
+        conn.execute("DELETE FROM transcript_entries WHERE thread_id=?", (thread_id,))
         conn.execute("DELETE FROM build_leases WHERE thread_id=?", (thread_id,))
         conn.execute("DELETE FROM thread_authority WHERE thread_id=?", (thread_id,))
         conn.execute("COMMIT")
@@ -937,7 +1338,7 @@ def _projection_from_sidecar(
             payload=json.loads(row["payload_json"]),
             created_event_seq=int(row["created_event_seq"]),
             created_event_id=None,
-            created_at=None,
+            created_at=(str(row["created_at"]) if row["created_at"] is not None else None),
             last_event_seq=int(row["last_event_seq"]),
             last_event_id=None,
             updated_at=None,
@@ -962,7 +1363,10 @@ def _semantic_tail_rows(db: Any, thread_id: str, after: int, through: int):
           FROM events
          WHERE thread_id=? AND event_seq>? AND event_seq<=?
            AND (
-             type IN ('msg.create','msg.edit','msg.delete')
+             type IN (
+               'msg.create','msg.edit','msg.delete',
+               'tool_call.output_approval','thread.compaction'
+             )
              OR (type='control.interrupt' AND json_extract(payload_json,'$.purpose')='continue')
            )
          ORDER BY event_seq
@@ -1098,6 +1502,18 @@ def _changed_message_ids(tail_rows: Sequence[Any], projection: Any) -> set[str]:
                     for state in projection.message_states
                     if start.created_event_seq < state.created_event_seq < boundary
                 )
+        elif event_type == "tool_call.output_approval":
+            try:
+                payload = json.loads(row["payload_json"])
+            except Exception:
+                payload = {}
+            tool_call_id = payload.get("tool_call_id") if isinstance(payload, dict) else None
+            if isinstance(tool_call_id, str) and tool_call_id:
+                changed.update(
+                    state.msg_id
+                    for state in projection.message_states
+                    if state.payload.get("tool_call_id") == tool_call_id
+                )
     related_tool_call_ids: set[str] = set()
     for state in projection.message_states:
         if state.msg_id not in changed:
@@ -1193,7 +1609,23 @@ def _catch_up_generation_in_place(
     generation = str(authority["active_generation"])
     changed = _changed_message_ids(tail_rows, projection)
     states = {state.msg_id: state for state in projection.message_states}
+    prior_token_stats: dict[str, Mapping[str, Any]] = {}
+    if changed:
+        placeholders = ",".join("?" for _ in changed)
+        for row in conn.execute(
+            f"SELECT msg_id,token_stats_json FROM projected_messages "
+            f"WHERE thread_id=? AND generation=? AND msg_id IN ({placeholders})",
+            (thread_id, generation, *sorted(changed)),
+        ).fetchall():
+            try:
+                info = json.loads(row["token_stats_json"])
+            except Exception:
+                info = {}
+            if isinstance(info, Mapping):
+                prior_token_stats[str(row["msg_id"])] = info
     record_rows = _message_rows_for_catalog(projection, changed)
+    compaction_rows = _load_compaction_rows(db, thread_id, target)
+    transcript_rows = _transcript_entry_rows(projection, compaction_rows)
     conn.execute("BEGIN IMMEDIATE")
     lease = conn.execute("SELECT owner FROM build_leases WHERE thread_id=?", (thread_id,)).fetchone()
     if lease is None or lease["owner"] != owner:
@@ -1219,10 +1651,24 @@ def _catch_up_generation_in_place(
         if state is None:
             continue
         conn.execute(
-            "INSERT INTO projected_messages(thread_id,generation,msg_id,created_event_seq,last_event_seq,payload_json,deleted,skipped_on_continue) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO projected_messages(thread_id,generation,msg_id,created_event_seq,last_event_seq,created_at,payload_json,token_stats_json,deleted,skipped_on_continue) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 thread_id, generation, state.msg_id, int(state.created_event_seq),
-                int(state.last_event_seq), json.dumps(dict(state.payload), ensure_ascii=False),
+                int(state.last_event_seq), state.created_at,
+                json.dumps(dict(state.payload), ensure_ascii=False),
+                json.dumps(
+                    (
+                        _message_token_stats(state.as_message_dict())
+                        if any(
+                            str(row["type"]) in {"msg.create", "msg.edit"}
+                            and str(row["msg_id"] or "") == state.msg_id
+                            for row in tail_rows
+                        )
+                        else prior_token_stats.get(state.msg_id, {})
+                    ),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 1 if state.deleted else 0, 1 if state.skipped_on_continue else 0,
             ),
         )
@@ -1236,6 +1682,22 @@ def _catch_up_generation_in_place(
             ((thread_id, generation, row[0], row[10]) for row in record_rows),
         )
     _refresh_completion_terms(conn, thread_id, generation)
+    conn.execute(
+        "DELETE FROM compaction_markers WHERE thread_id=? AND generation=?",
+        (thread_id, generation),
+    )
+    conn.executemany(
+        "INSERT INTO compaction_markers(thread_id,generation,marker_event_seq,start_event_seq,ts,payload_json) VALUES (?,?,?,?,?,?)",
+        ((thread_id, generation, *row) for row in compaction_rows),
+    )
+    conn.execute(
+        "DELETE FROM transcript_entries WHERE thread_id=? AND generation=?",
+        (thread_id, generation),
+    )
+    conn.executemany(
+        "INSERT INTO transcript_entries(thread_id,generation,kind,entry_id,order_event_seq,kind_order,secondary_order) VALUES (?,?,?,?,?,?,?)",
+        ((thread_id, generation, *row) for row in transcript_rows),
+    )
     target_id = _canonical_anchor(db, thread_id, target)
     conn.execute(
         "UPDATE thread_authority SET through_event_seq=?,through_event_id=?,state='ready',last_error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE thread_id=?",
