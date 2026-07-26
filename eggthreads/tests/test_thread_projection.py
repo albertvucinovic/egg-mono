@@ -574,6 +574,37 @@ def test_duplicate_completed_history_gets_clean_idle_boundary(tmp_path) -> None:
     assert ts.discover_runner_actionable(db, duplicate) is None
 
 
+def test_duplicate_materializes_source_before_destination_write_transaction(
+    tmp_path, monkeypatch
+) -> None:
+    """A concurrent WAL commit must not stale a read-to-write transaction."""
+
+    db = _make_db(tmp_path, "duplicate-concurrent-writer.sqlite")
+    source = ts.create_root_thread(db, name="source")
+    ts.append_message(db, source, "user", "at watermark")
+    writer = ts.ThreadsDB(db.path)
+    original = api_module._duplicate_configuration_at_watermark
+
+    def commit_after_source_projection(*args, **kwargs):
+        configuration = original(*args, **kwargs)
+        ts.append_message(writer, source, "user", "after watermark")
+        return configuration
+
+    monkeypatch.setattr(
+        api_module,
+        "_duplicate_configuration_at_watermark",
+        commit_after_source_projection,
+    )
+    try:
+        duplicate = ts.duplicate_thread(db, source)
+    finally:
+        writer.close()
+
+    assert [payload.get("content") for payload in _projected_payloads(db, duplicate)] == [
+        "at watermark"
+    ]
+
+
 def test_duplicate_child_freezes_inherited_effective_configuration(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path, "duplicate-inherited-config.sqlite")

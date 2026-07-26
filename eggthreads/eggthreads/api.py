@@ -547,15 +547,27 @@ def _duplicate_thread_at_watermark(
     base_name = source.name or source.short_recap or "Thread"
     new_thread_id = _ulid_like()
 
+    # Materialize the fixed source view before opening the destination write
+    # transaction.  In WAL mode, a deferred savepoint that reads first cannot
+    # be upgraded after another connection commits: SQLite returns
+    # SQLITE_BUSY_SNAPSHOT immediately, irrespective of busy_timeout.  Large,
+    # active threads make that race especially likely.
+    projection = load_thread_projection(
+        db, source_thread_id, int(through_event_seq)
+    )
+    tools_payload, config_events = _duplicate_configuration_at_watermark(
+        db, source_thread_id, int(through_event_seq)
+    )
+    source_compaction_start = _effective_compaction_start_from_projection(
+        db,
+        source_thread_id,
+        int(through_event_seq),
+        projection,
+    )
+
     savepoint = f"duplicate_thread_{new_thread_id}"
     db.conn.execute(f"SAVEPOINT {savepoint}")
     try:
-        projection = load_thread_projection(
-            db, source_thread_id, int(through_event_seq)
-        )
-        tools_payload, config_events = _duplicate_configuration_at_watermark(
-            db, source_thread_id, int(through_event_seq)
-        )
         db.create_thread(
             thread_id=new_thread_id,
             name=name or f"{base_name} [copy]",
@@ -579,12 +591,6 @@ def _duplicate_thread_at_watermark(
         # Compaction is provider-context state, not stale invocation lifecycle.
         # Preserve the effective boundary at the selected source watermark and
         # translate its source event_seq to the duplicate's new event log.
-        source_compaction_start = _effective_compaction_start_from_projection(
-            db,
-            source_thread_id,
-            int(through_event_seq),
-            projection,
-        )
         if source_compaction_start is not None:
             start_message = next(
                 (
