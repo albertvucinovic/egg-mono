@@ -155,6 +155,49 @@ def shortest_unique_record_id_suffix(
     return full_id
 
 
+def compact_record_id_suffixes(
+    record_ids: Sequence[Any],
+    *,
+    min_chars: int = SHOW_COMPACT_ID_MIN_CHARS,
+) -> dict[str, str]:
+    """Return shortest unique suffixes for a complete record-ID catalog.
+
+    Reversing and sorting makes IDs with a common suffix adjacent.  Therefore
+    each ID only needs comparison with its two neighbours, avoiding a complete
+    catalog scan every time a transcript row needs a compact ``/show`` hint.
+    Keys are case-folded exact IDs so callers can perform O(1) lookups.
+    """
+
+    normalized = {
+        str(candidate or "").strip().casefold(): str(candidate or "").strip()
+        for candidate in record_ids
+        if str(candidate or "").strip()
+    }
+    ordered = sorted(
+        (normalized_id[::-1], normalized_id, original)
+        for normalized_id, original in normalized.items()
+    )
+
+    def common_prefix(left: str, right: str) -> int:
+        limit = min(len(left), len(right))
+        index = 0
+        while index < limit and left[index] == right[index]:
+            index += 1
+        return index
+
+    hints: dict[str, str] = {}
+    minimum = max(1, int(min_chars))
+    for index, (reversed_id, normalized_id, original) in enumerate(ordered):
+        shared = 0
+        if index:
+            shared = max(shared, common_prefix(reversed_id, ordered[index - 1][0]))
+        if index + 1 < len(ordered):
+            shared = max(shared, common_prefix(reversed_id, ordered[index + 1][0]))
+        length = min(len(original), max(minimum, shared + 1))
+        hints[normalized_id] = original[-length:]
+    return hints
+
+
 def _effective_candidates(db: Any, thread_id: str) -> tuple[list[ShowRecordCandidate], int]:
     normalized_thread = str(thread_id or "").strip()
     if db is None or not normalized_thread or db.get_thread(normalized_thread) is None:
@@ -459,6 +502,7 @@ __all__ = [
     "SHOW_COMPLETION_LIMIT",
     "ShowRecordCandidate",
     "ShowRecordResolution",
+    "compact_record_id_suffixes",
     "list_show_record_candidates",
     "resolve_show_record",
     "shortest_unique_record_id_suffix",

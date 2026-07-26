@@ -158,7 +158,10 @@ def register_theme_command(registry: Any, app: Any) -> None:
         message = f"Theme changed to: {applied}"
         app.log_system(message)
         try:
-            app.redraw_static_view(reason="theme changed")
+            app.redraw_static_view(
+                reason="theme changed",
+                reuse_transcript_source=True,
+            )
         except Exception:
             pass
         return CommandResult(clear_input=True, message=message)

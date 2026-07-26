@@ -175,7 +175,10 @@ def syntax_highlighting_command(context: Any, arg: str):
     message = f"Syntax highlighting is now {state} (full-screen only)."
     _log(context, message)
     try:
-        app.redraw_static_view(reason="syntax highlighting changed")
+        app.redraw_static_view(
+            reason="syntax highlighting changed",
+            reuse_transcript_source=True,
+        )
     except Exception as e:
         _log(context, f"/syntaxHighlighting redraw error: {e}")
         return CommandResult(clear_input=False, message=f"{message} Redraw failed: {e}")
@@ -204,7 +207,10 @@ def toggle_borders_command(context: Any, arg: str):
     state = "on" if app._borders_visible else "off"
     _log(context, f"Borders are now {state}.")
     try:
-        app.redraw_static_view(reason="borders toggled")
+        app.redraw_static_view(
+            reason="borders toggled",
+            reuse_transcript_source=True,
+        )
     except Exception:
         pass
     return CommandResult(clear_input=True)

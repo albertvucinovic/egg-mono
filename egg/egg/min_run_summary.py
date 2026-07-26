@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 from rich.text import Text
 
-from eggthreads.inspection import shortest_unique_record_id_suffix
+from eggthreads.inspection import compact_record_id_suffixes, shortest_unique_record_id_suffix
 from eggthreads.tool_effects import ToolEffect, classify_tool_effect
 
 
@@ -93,6 +93,8 @@ class MinHiddenActivitySummary:
     tool_calls: List[MinToolCallSummary] = field(default_factory=list)
     tool_results_list: List[MinToolResultSummary] = field(default_factory=list)
     record_ids: List[str] = field(default_factory=list)
+    _record_id_set: Set[str] = field(default_factory=set, repr=False)
+    record_id_hints: Mapping[str, str] = field(default_factory=dict, repr=False)
     _result_tool_names: List[str] = field(default_factory=list, repr=False)
     _seen_tool_call_ids: Set[str] = field(default_factory=set, repr=False)
 
@@ -100,6 +102,8 @@ class MinHiddenActivitySummary:
         return bool(self.tool_executions or self.tool_results or self.reasoning_blocks)
 
     def clear(self) -> None:
+        """Clear run activity while retaining the shared immutable ID catalog."""
+
         self.tool_executions = 0
         self.tool_results = 0
         self.reasoning_blocks = 0
@@ -107,7 +111,6 @@ class MinHiddenActivitySummary:
         self.tool_names.clear()
         self.tool_calls.clear()
         self.tool_results_list.clear()
-        self.record_ids.clear()
         self._result_tool_names.clear()
         self._seen_tool_call_ids.clear()
 
@@ -135,12 +138,47 @@ class MinHiddenActivitySummary:
     def add_record_ids(self, record_ids: Any) -> None:
         """Merge the current thread's inspectable IDs for unambiguous hints."""
 
-        seen = {record_id.casefold() for record_id in self.record_ids}
         for value in record_ids or ():
             record_id = str(value or "").strip()
-            if record_id and record_id.casefold() not in seen:
+            normalized = record_id.casefold()
+            if record_id and normalized not in self._record_id_set:
                 self.record_ids.append(record_id)
-                seen.add(record_id.casefold())
+                self._record_id_set.add(normalized)
+
+    def set_record_id_catalog(
+        self,
+        record_ids: Any,
+        record_id_hints: Optional[Mapping[str, str]] = None,
+        normalized_record_ids: Optional[Set[str]] = None,
+    ) -> None:
+        """Install one shared immutable catalog without copying it per record."""
+
+        self.record_ids = record_ids if isinstance(record_ids, list) else list(record_ids or ())
+        self._record_id_set = (
+            normalized_record_ids
+            if normalized_record_ids is not None
+            else {
+                str(record_id or "").strip().casefold()
+                for record_id in self.record_ids
+                if str(record_id or "").strip()
+            }
+        )
+        self.record_id_hints = (
+            record_id_hints
+            if record_id_hints is not None
+            else compact_record_id_suffixes(self.record_ids)
+        )
+
+    def record_id_hint(self, record_id: Any) -> str:
+        full_id = str(record_id or "").strip()
+        if not full_id:
+            return ""
+        hint = self.record_id_hints.get(full_id.casefold())
+        if hint:
+            return str(hint)
+        if self.record_id_hints:
+            return full_id[-8:]
+        return shortest_unique_record_id_suffix(full_id, self.record_ids)
 
     def add_tool_execution(
         self,
@@ -203,14 +241,14 @@ def _plural(count: int, singular: str, plural: Optional[str] = None) -> str:
     return f"{count} {label}"
 
 
-def _min_tool_entry(call: MinToolCallSummary, record_ids: List[str]) -> str:
-    hint = shortest_unique_record_id_suffix(call.tool_call_id, record_ids)
+def _min_tool_entry(call: MinToolCallSummary, summary: MinHiddenActivitySummary) -> str:
+    hint = summary.record_id_hint(call.tool_call_id)
     return f"{call.name}({hint})"
 
 
-def _min_tool_result_entry(result: MinToolResultSummary, record_ids: List[str]) -> str:
+def _min_tool_result_entry(result: MinToolResultSummary, summary: MinHiddenActivitySummary) -> str:
     identity = result.record_id or result.tool_call_id
-    hint = shortest_unique_record_id_suffix(identity, record_ids)
+    hint = summary.record_id_hint(identity)
     return f"{result.name}({hint})"
 
 
@@ -252,18 +290,17 @@ def _min_tool_activity_group(
     calls: List[MinToolCallSummary],
     results: List[MinToolResultSummary],
     *,
-    call_record_ids: List[str],
-    result_record_ids: List[str],
+    summary: MinHiddenActivitySummary,
 ) -> str:
     parts: List[str] = []
     if calls:
         parts.append(
-            "calls [" + " ".join(_min_tool_entry(call, call_record_ids) for call in calls) + "]"
+            "calls [" + " ".join(_min_tool_entry(call, summary) for call in calls) + "]"
         )
     if results:
         parts.append(
             "results ["
-            + " ".join(_min_tool_result_entry(result, result_record_ids) for result in results)
+            + " ".join(_min_tool_result_entry(result, summary) for result in results)
             + "]"
         )
     return " ".join(parts)
@@ -287,14 +324,11 @@ def format_min_hidden_activity_summary(summary: MinHiddenActivitySummary) -> str
     text = ", ".join(parts)
     activity_groups = _grouped_tool_activity(summary)
     if activity_groups:
-        call_record_ids = [*summary.record_ids, *(call.tool_call_id for call in summary.tool_calls)]
-        result_record_ids = [*summary.record_ids, *(result.record_id for result in summary.tool_results_list)]
         text += "\n" + " | ".join(
             _min_tool_activity_group(
                 calls,
                 results,
-                call_record_ids=call_record_ids,
-                result_record_ids=result_record_ids,
+                summary=summary,
             )
             for calls, results in activity_groups
         )
@@ -318,13 +352,11 @@ def min_hidden_activity_summary_text(
 
     counts = plain.split("\n", 1)[0]
     text = Text(counts, style=styles.summary)
-    record_ids = [*summary.record_ids, *(call.tool_call_id for call in summary.tool_calls)]
     effect_styles = {
         ToolEffect.READ: styles.read,
         ToolEffect.MAY_WRITE: styles.may_write,
         ToolEffect.UNKNOWN: styles.unknown,
     }
-    result_record_ids = [*summary.record_ids, *(result.record_id for result in summary.tool_results_list)]
     text.append("\n")
     for group_index, (calls, results) in enumerate(_grouped_tool_activity(summary)):
         if group_index:
@@ -334,7 +366,7 @@ def min_hidden_activity_summary_text(
             for index, call in enumerate(calls):
                 if index:
                     text.append(" ", style=styles.separator)
-                text.append(_min_tool_entry(call, record_ids), style=effect_styles[call.effect])
+                text.append(_min_tool_entry(call, summary), style=effect_styles[call.effect])
             text.append("]", style=styles.summary)
         if calls and results:
             text.append(" ", style=styles.separator)
@@ -344,7 +376,7 @@ def min_hidden_activity_summary_text(
                 if index:
                     text.append(" ", style=styles.separator)
                 text.append(
-                    _min_tool_result_entry(result, result_record_ids),
+                    _min_tool_result_entry(result, summary),
                     style=effect_styles[result.effect],
                 )
             text.append("]", style=styles.summary)

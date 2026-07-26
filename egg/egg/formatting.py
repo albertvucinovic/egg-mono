@@ -26,7 +26,7 @@ from eggthreads import (
 )
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.output_optimizer.observability import format_output_optimizer_summary
-from eggthreads.inspection import shortest_unique_record_id_suffix
+from eggthreads.inspection import compact_record_id_suffixes
 from eggthreads.tool_effects import ToolEffect, classify_tool_effect
 
 from .utils import snapshot_messages
@@ -482,7 +482,12 @@ class FormattingMixin:
             for message in msgs
             if isinstance(message, dict) and message.get('msg_id')
         ] + declared_call_ids
-        hidden_summary.add_record_ids(inspectable_record_ids)
+        record_id_hints = compact_record_id_suffixes(inspectable_record_ids)
+        hidden_summary.set_record_id_catalog(
+            inspectable_record_ids,
+            record_id_hints,
+            set(record_id_hints),
+        )
 
         def add_hidden_reasoning(*, tokens: Any = 0) -> None:
             hidden_summary.add_reasoning_block(tokens=tokens)
@@ -606,6 +611,7 @@ class FormattingMixin:
                             tcs,
                             inspect_message_id=msg_id,
                             record_ids=inspectable_record_ids,
+                            record_id_hints=record_id_hints,
                             metadata_lines=metadata,
                         )
                         if tool_calls_text:
@@ -692,9 +698,9 @@ class FormattingMixin:
                         if verbosity == 'medium':
                             call = declared_calls.get(tool_call_id)
                             effect = call.effect if call is not None else classify_tool_effect(name).effect
-                            hint = shortest_unique_record_id_suffix(
-                                tool_call_id,
-                                inspectable_record_ids or [tool_call_id],
+                            hint = record_id_hints.get(
+                                tool_call_id.casefold(),
+                                tool_call_id[-8:],
                             )
                             effect_label = effect.label
                             preview = format_medium_tool_result(

@@ -287,3 +287,26 @@ def test_shortest_unique_record_id_suffix_includes_target_when_catalog_is_empty(
     from eggthreads.inspection import shortest_unique_record_id_suffix
 
     assert shortest_unique_record_id_suffix("call_target_12345678", ()) == "12345678"
+
+
+def test_compact_record_id_suffixes_matches_individual_resolution():
+    from eggthreads.inspection import (
+        compact_record_id_suffixes,
+        shortest_unique_record_id_suffix,
+    )
+
+    ids = (
+        "call_alpha_A12345678",
+        "call_beta_B12345678",
+        "01KYEXACT12345678",
+        "different",
+    )
+    hints = compact_record_id_suffixes(ids)
+
+    assert {
+        record_id: hints[record_id.casefold()]
+        for record_id in ids
+    } == {
+        record_id: shortest_unique_record_id_suffix(record_id, ids)
+        for record_id in ids
+    }

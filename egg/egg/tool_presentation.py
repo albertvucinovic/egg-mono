@@ -10,7 +10,7 @@ from rich.measure import Measurement
 from rich.padding import Padding
 from rich.text import Text
 
-from eggthreads.inspection import shortest_unique_record_id_suffix
+from eggthreads.inspection import compact_record_id_suffixes
 from eggthreads.tool_effects import ToolEffect, classify_tool_effect
 
 from .syntax_highlighting import (
@@ -344,15 +344,17 @@ def format_medium_tool_calls(
     *,
     inspect_message_id: str = "",
     record_ids: Iterable[Any] = (),
+    record_id_hints: dict[str, str] | None = None,
     metadata_lines: Iterable[str] = (),
 ) -> str:
     """Format one assistant tool-call group with stable exact identities."""
 
     calls = [tool_call_presentation(raw_call) for raw_call in tool_calls]
     known_record_ids = [*record_ids, *(call.tool_call_id for call in calls if call.tool_call_id)]
+    hints = record_id_hints or compact_record_id_suffixes(known_record_ids)
     blocks: list[str] = []
     for index, call in enumerate(calls, start=1):
-        hint = shortest_unique_record_id_suffix(call.tool_call_id, known_record_ids)
+        hint = hints.get(call.tool_call_id.casefold(), "")
         identity = f"({hint})" if hint else ""
         arguments = format_medium_tool_arguments(
             call.arguments,
@@ -565,6 +567,7 @@ def medium_tool_calls_text(
     styles: MediumToolStyles,
     inspect_message_id: str = "",
     record_ids: Iterable[Any] = (),
+    record_id_hints: dict[str, str] | None = None,
     syntax_theme: Any = None,
     metadata_lines: Iterable[str] = (),
 ) -> Text:
@@ -572,6 +575,7 @@ def medium_tool_calls_text(
 
     calls = [tool_call_presentation(raw_call) for raw_call in tool_calls]
     known_record_ids = [*record_ids, *(call.tool_call_id for call in calls if call.tool_call_id)]
+    hints = record_id_hints or compact_record_id_suffixes(known_record_ids)
     text = Text()
     any_bounded = False
     for line in metadata_lines:
@@ -589,7 +593,7 @@ def medium_tool_calls_text(
         text.append(call.effect.label, style=_effect_style(call.effect, styles))
         text.append("  ")
         text.append(call.name, style=styles.call_name)
-        hint = shortest_unique_record_id_suffix(call.tool_call_id, known_record_ids)
+        hint = hints.get(call.tool_call_id.casefold(), "")
         if hint:
             text.append("(", style=styles.muted)
             text.append(hint, style=styles.command)

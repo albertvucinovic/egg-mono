@@ -16,7 +16,7 @@ from rich.text import Text
 from rich.markdown import Markdown
 from rich import box as rich_box
 
-from eggthreads import create_snapshot, shortest_unique_record_id_suffix
+from eggthreads import compact_record_id_suffixes, create_snapshot, shortest_unique_record_id_suffix
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.output_optimizer.observability import format_output_optimizer_summary
 from eggthreads.tool_effects import ToolEffect
@@ -153,8 +153,20 @@ class TranscriptScrollbackSource:
             self._refresh_snapshot_if_safe()
         self._snapshot_seq = -1
         self._per_message_token_stats: Dict[str, Dict[str, Any]] = {}
+        self._record_ids: List[str] = []
+        self._normalized_record_ids: set[str] = set()
+        self._record_id_hints: Dict[str, str] = {}
+        self._tool_call_presentations: Dict[str, Any] = {}
         self._blocks = self._load_blocks()
-        self._caches: Dict[Tuple[int, str], _TranscriptScrollbackCache] = {}
+        self._record_ids = list(
+            (getattr(self._panels, '_show_record_ids', None) or {}).keys()
+        )
+        self._record_id_hints = compact_record_id_suffixes(self._record_ids)
+        self._normalized_record_ids = set(self._record_id_hints)
+        self._tool_call_presentations = dict(
+            getattr(self._panels, '_tool_call_presentation_index', None) or {}
+        )
+        self._caches: Dict[Tuple[Any, ...], _TranscriptScrollbackCache] = {}
 
     def row_count(self, width: int) -> Optional[int]:
         """Return the rendered row count only after this width is complete."""
@@ -233,7 +245,7 @@ class TranscriptScrollbackSource:
             blocks.append(_TranscriptScrollbackBlock('message', dict(msg)))
         return blocks
 
-    def _cache_key(self, width: int) -> Tuple[int, str]:
+    def _cache_key(self, width: int) -> Tuple[Any, ...]:
         width = max(1, int(width or 0))
         try:
             verbosity = self._panels._panel_display_verbosity_level()
@@ -242,7 +254,13 @@ class TranscriptScrollbackSource:
         verbosity = str(verbosity or 'max').strip().lower()
         if verbosity not in {'max', 'medium', 'min'}:
             verbosity = 'max'
-        return width, verbosity
+        return (
+            width,
+            verbosity,
+            bool(getattr(self._panels, '_borders_visible', True)),
+            bool(getattr(self._panels, '_syntax_highlighting', False)),
+            str(getattr(self._panels, '_theme', 'default') or 'default'),
+        )
 
     def _ensure_rows(self, width: int, needed_from_bottom: int) -> _TranscriptScrollbackCache:
         key = self._cache_key(width)
@@ -254,11 +272,17 @@ class TranscriptScrollbackSource:
             )
             self._caches[key] = cache
 
-        verbosity = key[1]
+        verbosity = str(key[1])
         shared_hidden_details = None
         if verbosity == 'min':
             try:
                 shared_hidden_details = self._panels._new_static_hidden_details_state()
+                self._panels._set_static_hidden_details_record_catalog(
+                    shared_hidden_details,
+                    self._record_ids,
+                    self._record_id_hints,
+                    self._normalized_record_ids,
+                )
             except Exception:
                 shared_hidden_details = None
 
@@ -339,6 +363,12 @@ class TranscriptScrollbackSource:
             elif verbosity == 'min':
                 try:
                     own_details = self._panels._new_static_hidden_details_state()
+                    self._panels._set_static_hidden_details_record_catalog(
+                        own_details,
+                        self._record_ids,
+                        self._record_id_hints,
+                        self._normalized_record_ids,
+                    )
                 except Exception:
                     own_details = None
             try:
@@ -346,6 +376,8 @@ class TranscriptScrollbackSource:
                     block.payload,
                     own_details,
                     per_message_token_stats=self._per_message_token_stats,
+                    record_id_hints=self._record_id_hints,
+                    tool_call_presentations=self._tool_call_presentations,
                 ))
             except Exception:
                 items = []
@@ -1362,10 +1394,32 @@ class PanelsMixin:
         if not isinstance(summary, MinHiddenActivitySummary):
             summary = MinHiddenActivitySummary()
             target['summary'] = summary
-        summary.add_record_ids(
-            (getattr(self, '_show_record_ids', None) or {}).keys()
-        )
+        if not summary.record_id_hints:
+            record_ids = list(
+                (getattr(self, '_show_record_ids', None) or {}).keys()
+            )
+            summary.set_record_id_catalog(
+                record_ids,
+                compact_record_id_suffixes(record_ids),
+            )
         return target
+
+    def _set_static_hidden_details_record_catalog(
+        self,
+        state: Dict[str, Any],
+        record_ids: List[str],
+        record_id_hints: Dict[str, str],
+        normalized_record_ids: set[str],
+    ) -> None:
+        summary = state.get('summary')
+        if not isinstance(summary, MinHiddenActivitySummary):
+            summary = MinHiddenActivitySummary()
+            state['summary'] = summary
+        summary.set_record_id_catalog(
+            record_ids,
+            record_id_hints,
+            normalized_record_ids,
+        )
 
     def _clear_static_hidden_details_state(self, state: Dict[str, Any]) -> None:
         summary = state.get('summary')
@@ -1375,9 +1429,8 @@ class PanelsMixin:
             state['summary'] = MinHiddenActivitySummary()
         summary = state.get('summary')
         if isinstance(summary, MinHiddenActivitySummary):
-            summary.add_record_ids(
-                (getattr(self, '_show_record_ids', None) or {}).keys()
-            )
+            if not summary.record_id_hints:
+                self._ensure_static_hidden_details_state(state)
 
     def _has_static_hidden_details_activity(
         self,
@@ -1721,13 +1774,13 @@ class PanelsMixin:
         index: Dict[str, Any] = (
             {}
             if replace or not isinstance(current, dict)
-            else dict(current)
+            else current
         )
         current_record_ids = getattr(self, '_show_record_ids', None)
         record_ids: Dict[str, None] = (
             {}
             if replace or not isinstance(current_record_ids, dict)
-            else dict(current_record_ids)
+            else current_record_ids
         )
         for message in messages if isinstance(messages, list) else ():
             if not isinstance(message, dict):
@@ -1787,6 +1840,8 @@ class PanelsMixin:
         hidden_details: Optional[Dict[str, Any]] = None,
         *,
         per_message_token_stats: Optional[Dict[str, Dict[str, Any]]] = None,
+        record_id_hints: Optional[Dict[str, str]] = None,
+        tool_call_presentations: Optional[Dict[str, Any]] = None,
     ) -> List[_StaticTranscriptRenderable]:
         """Build rich renderables for one static transcript message without printing.
 
@@ -1817,6 +1872,21 @@ class PanelsMixin:
                 "tool_calls": int(info.get('tool_calls_tokens') or 0),
                 "total": int(info.get('total_tokens') or 0),
             }
+        record_id_hints = record_id_hints or {}
+
+        def record_id_hint(record_id: Any) -> str:
+            full_id = str(record_id or '').strip()
+            if not full_id:
+                return ''
+            if record_id_hints:
+                cached = record_id_hints.get(full_id.casefold())
+                if cached:
+                    return str(cached)
+                return full_id[-8:]
+            return shortest_unique_record_id_suffix(
+                full_id,
+                (getattr(self, '_show_record_ids', None) or {}).keys(),
+            )
 
         def full_title_for(title: str) -> str:
             # Build a unified title with optional timestamp and msg_id.
@@ -2017,6 +2087,7 @@ class PanelsMixin:
                             record_ids=(
                                 (getattr(self, '_show_record_ids', None) or {}).keys()
                             ),
+                            record_id_hints=record_id_hints,
                             syntax_theme=(
                                 self._medium_syntax_theme()
                                 if self._syntax_highlighting_enabled()
@@ -2194,10 +2265,7 @@ class PanelsMixin:
                 title += f" [dim]({msg_tps})[/dim]"
             tool_call_id = str(m.get('tool_call_id') or '')
             if tool_call_id and verbosity != 'max':
-                known_ids = list(
-                    (getattr(self, '_show_record_ids', None) or {}).keys()
-                )
-                hint = shortest_unique_record_id_suffix(tool_call_id, known_ids or [tool_call_id])
+                hint = record_id_hint(tool_call_id)
                 title += f" [dim]·[/dim] [{self._medium_tool_styles().command}]{rich_escape(hint)}[/{self._medium_tool_styles().command}]"
             optimizer_summary = self._output_optimizer_summary(m, include_artifact_id=True)
             if optimizer_summary:
@@ -2205,14 +2273,15 @@ class PanelsMixin:
             if verbosity == 'max':
                 panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             elif verbosity == 'medium':
-                result_call = self._tool_result_call_presentation(m)
+                result_call = (
+                    tool_call_presentations.get(tool_call_id)
+                    if isinstance(tool_call_presentations, dict)
+                    else self._tool_result_call_presentation(m)
+                )
                 result_effect = result_call.effect if result_call is not None else ToolEffect.UNKNOWN
                 effect_markup = self._tool_effect_style(result_effect)
                 identity_name = result_call.name if result_call is not None else str(name)
-                identity_hint = shortest_unique_record_id_suffix(
-                    tool_call_id,
-                    list((getattr(self, '_show_record_ids', None) or {}).keys()) or [tool_call_id],
-                )
+                identity_hint = record_id_hint(tool_call_id)
                 identity = rich_escape(identity_name)
                 if identity_hint:
                     identity += f"({rich_escape(identity_hint)})"

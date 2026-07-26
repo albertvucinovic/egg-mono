@@ -76,7 +76,7 @@ class TestCmdToggleBorders:
     def test_toggles_borders_visibility(self, egg_app, monkeypatch):
         """Should toggle _borders_visible flag."""
         # Mock redraw to avoid side effects
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None, **_kwargs: None)
 
         initial = egg_app._borders_visible
 
@@ -86,7 +86,7 @@ class TestCmdToggleBorders:
 
     def test_toggles_back_to_original(self, egg_app, monkeypatch):
         """Should toggle back to original state on second call."""
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None, **_kwargs: None)
 
         initial = egg_app._borders_visible
 
@@ -99,7 +99,7 @@ class TestCmdToggleBorders:
         """Should change box styles on output panels when toggling on."""
         from rich import box as rich_box
 
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None, **_kwargs: None)
 
         # Initially borders should be hidden (off by default)
         assert egg_app._borders_visible is False
@@ -119,7 +119,7 @@ class TestCmdToggleBorders:
         """Should restore original box styles when toggling to on."""
         from rich import box as rich_box
 
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None, **_kwargs: None)
 
         # Store original styles (SQUARE, stored before being changed to MINIMAL)
         original_chat = egg_app._original_box_styles['chat']
@@ -136,7 +136,7 @@ class TestCmdToggleBorders:
 
     def test_does_not_affect_input_panel(self, egg_app, monkeypatch):
         """Should not change box style of input panel."""
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None, **_kwargs: None)
 
         original_input_box = egg_app.input_panel.style.box
 
@@ -147,7 +147,7 @@ class TestCmdToggleBorders:
 
     def test_logs_state_change(self, egg_app, monkeypatch):
         """Should log the borders state change."""
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None, **_kwargs: None)
 
         egg_app.handle_command("/toggleBorders")
 
@@ -158,14 +158,17 @@ class TestCmdToggleBorders:
     def test_triggers_redraw(self, egg_app, monkeypatch):
         """Should trigger a redraw after toggling."""
         redrawn = []
-        def mock_redraw(reason=None):
-            redrawn.append(reason)
+        def mock_redraw(**kwargs):
+            redrawn.append(kwargs)
         monkeypatch.setattr(egg_app, "redraw_static_view", mock_redraw)
 
         egg_app.handle_command("/toggleBorders")
 
         assert len(redrawn) == 1
-        assert "borders" in redrawn[0].lower()
+        assert redrawn == [{
+            "reason": "borders toggled",
+            "reuse_transcript_source": True,
+        }]
 
 
 class TestCmdDisplayVerbosity:
@@ -254,7 +257,7 @@ class TestCmdSyntaxHighlighting:
         egg_app.handle_command("/syntaxHighlighting")
 
         assert egg_app._syntax_highlighting is True
-        assert redrawn == [{"reason": "syntax highlighting changed"}]
+        assert redrawn == [{"reason": "syntax highlighting changed", "reuse_transcript_source": True}]
 
     def test_enables_and_redraws_full_transcript(self, egg_app, monkeypatch):
         redrawn = []
@@ -267,7 +270,7 @@ class TestCmdSyntaxHighlighting:
         egg_app.handle_command("/syntaxHighlighting on")
 
         assert egg_app._syntax_highlighting is True
-        assert redrawn == [{"reason": "syntax highlighting changed"}]
+        assert redrawn == [{"reason": "syntax highlighting changed", "reuse_transcript_source": True}]
         assert any("now on" in message for message in egg_app._system_log)
 
     def test_disables_and_same_state_is_truthful_noop(self, egg_app, monkeypatch):
@@ -284,8 +287,8 @@ class TestCmdSyntaxHighlighting:
 
         assert egg_app._syntax_highlighting is False
         assert redrawn == [
-            {"reason": "syntax highlighting changed"},
-            {"reason": "syntax highlighting changed"},
+            {"reason": "syntax highlighting changed", "reuse_transcript_source": True},
+            {"reason": "syntax highlighting changed", "reuse_transcript_source": True},
         ]
         assert any("already off" in message for message in egg_app._system_log)
 
@@ -332,24 +335,27 @@ class TestCmdTheme:
 
     def test_sets_theme_and_redraws(self, egg_app, monkeypatch):
         redrawn = []
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: redrawn.append(reason))
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda **kwargs: redrawn.append(kwargs))
 
         egg_app.handle_command("/theme matrix")
 
         assert egg_app._theme == "matrix"
         assert egg_app._rich_theme is not None
         assert any("Theme changed to: matrix" in msg for msg in egg_app._system_log)
-        assert redrawn == ["theme changed"]
+        assert redrawn == [{
+            "reason": "theme changed",
+            "reuse_transcript_source": True,
+        }]
 
     def test_background_variant_aliases_to_terminal_palette(self, egg_app, monkeypatch):
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None, **_kwargs: None)
 
         egg_app.handle_command("/theme dark-background")
 
         assert egg_app._theme == "dark"
 
     def test_black_and_white_themes_from_eggw_are_supported(self, egg_app, monkeypatch):
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None, **_kwargs: None)
 
         egg_app.handle_command("/theme mono")
         assert egg_app._theme == "mono"
@@ -381,7 +387,7 @@ class TestCmdTheme:
                 assert not styles[style_name].underline, (name, style_name)
 
     def test_invalid_theme_reports_error_without_changing_state(self, egg_app, monkeypatch):
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None, **_kwargs: None)
         egg_app.handle_command("/theme matrix")
 
         egg_app.handle_command("/theme no-such-theme")

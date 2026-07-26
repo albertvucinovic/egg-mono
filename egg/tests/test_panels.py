@@ -2312,6 +2312,97 @@ class TestTranscriptScrollbackSource:
         assert list(source.rows_from_bottom(80, 0, 2)) == ["cache-lazy-2", "cache-lazy-3"]
         assert rendered[-2:] == [("medium", "cache-lazy-3"), ("medium", "cache-lazy-2")]
 
+        egg_app._borders_visible = not egg_app._borders_visible
+        assert list(source.rows_from_bottom(80, 0, 2)) == ["cache-lazy-2", "cache-lazy-3"]
+        assert rendered[-2:] == [("medium", "cache-lazy-3"), ("medium", "cache-lazy-2")]
+
+        egg_app._syntax_highlighting = not egg_app._syntax_highlighting
+        assert list(source.rows_from_bottom(80, 0, 2)) == ["cache-lazy-2", "cache-lazy-3"]
+        assert rendered[-2:] == [("medium", "cache-lazy-3"), ("medium", "cache-lazy-2")]
+
+    def test_large_record_catalog_is_indexed_once_for_lazy_scrollback(
+        self, egg_app, monkeypatch
+    ):
+        """Min rendering must not rescan every inspectable ID per tool row."""
+        import egg.panels as panels_module
+        from egg.panels import TranscriptScrollbackSource, _StaticTranscriptRenderable
+        from eggthreads import append_message, create_snapshot
+
+        egg_app._display_verbosity = "min"
+        for index in range(1000):
+            append_message(egg_app.db, egg_app.current_thread, "user", f"catalog-{index}")
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [{
+                    "id": "call_target_12345678",
+                    "function": {"name": "bash", "arguments": {"script": "rg needle"}},
+                }],
+            },
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            "result",
+            extra={"name": "bash", "tool_call_id": "call_target_12345678"},
+        )
+        append_message(egg_app.db, egg_app.current_thread, "assistant", "done")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        indexed = []
+        original = panels_module.compact_record_id_suffixes
+
+        def counted(record_ids, **kwargs):
+            indexed.append(len(record_ids))
+            return original(record_ids, **kwargs)
+
+        monkeypatch.setattr(panels_module, "compact_record_id_suffixes", counted)
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        monkeypatch.setattr(source, "_render_static_transcript_item_rows", self._fallback_rows)
+
+        rows = source.rows_from_bottom(100, 0, 20)
+
+        assert "bash(12345678)" in "\n".join(rows)
+        assert indexed == [len(source._record_ids)]
+
+        egg_app._display_verbosity = "medium"
+        source.rows_from_bottom(100, 0, 20)
+        assert indexed == [len(source._record_ids)]
+
+    def test_presentation_settings_keep_source_and_select_distinct_row_caches(
+        self, egg_app, monkeypatch
+    ):
+        """Width-independent history survives while rendered variants stay exact."""
+        from egg.panels import TranscriptScrollbackSource
+
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        class Renderer:
+            def set_scrollback_source(self, _source):
+                pass
+
+        renderer = Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+        egg_app._transcript_scrollback_source_state = (renderer, source)
+
+        egg_app._display_verbosity = "max"
+        max_key = source._cache_key(100)
+        egg_app._display_verbosity = "min"
+        min_key = source._cache_key(100)
+        egg_app._borders_visible = not egg_app._borders_visible
+        borders_key = source._cache_key(100)
+        egg_app._syntax_highlighting = not egg_app._syntax_highlighting
+        syntax_key = source._cache_key(100)
+        egg_app._theme = "matrix"
+        theme_key = source._cache_key(100)
+
+        assert len({max_key, min_key, borders_key, syntax_key, theme_key}) == 5
+        assert egg_app._coherent_transcript_scrollback_source(renderer) is source
+
     def test_min_hidden_activity_block_uses_run_summary(self, egg_app, monkeypatch):
         """Lazy min render blocks should aggregate consecutive hidden activity."""
         from egg.panels import TranscriptScrollbackSource

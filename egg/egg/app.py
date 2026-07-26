@@ -1218,7 +1218,10 @@ class EggDisplayApp(
                                         except Exception:
                                             row_open = None
                                         if row_open is None:
-                                            self.redraw_static_view(reason='resize')
+                                            self.redraw_static_view(
+                                                reason='resize',
+                                                reuse_transcript_source=True,
+                                            )
                             except Exception:
                                 pass
 
