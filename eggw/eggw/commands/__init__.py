@@ -97,6 +97,12 @@ def _execute_shared_command(thread_id: str, command_name: str, command_arg: str)
     if command_name not in _SHARED_COMMAND_ADAPTER_COMMANDS:
         return CommandResponse(success=False, message=f"Unsupported shared command adapter: /{command_name}")
 
+    try:
+        from eggw.main import app as eggw_app
+
+        autocomplete_manager = getattr(eggw_app.state, "autocomplete_sidecar_manager", None)
+    except Exception:
+        autocomplete_manager = None
     result = create_default_command_registry().execute(
         command_name,
         CommandContext(
@@ -106,6 +112,7 @@ def _execute_shared_command(thread_id: str, command_name: str, command_arg: str)
             append_message=append_message,
             approve_tool_calls=approve_tool_calls_for_thread,
             create_snapshot=create_snapshot,
+            autocomplete_sidecar_manager=autocomplete_manager,
         ),
         command_arg,
     )

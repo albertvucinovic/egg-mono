@@ -1167,3 +1167,32 @@ def test_autocomplete_cache_command_is_registered_and_completes(tmp_path):
     )
     assert "Autocomplete cache: missing" in result.message
     assert "autocomplete-v4.sqlite" in result.message
+
+
+def test_autocomplete_cache_warm_uses_injected_manager(tmp_path):
+    import eggthreads as ts
+    from eggthreads.command_catalog import CommandContext, create_default_command_registry
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, "root")
+    requested = []
+
+    class Manager:
+        def request_build(self, selected):
+            requested.append(selected)
+            return True
+
+    result = create_default_command_registry().execute(
+        "autocompleteCache",
+        CommandContext(
+            db=db,
+            current_thread=thread_id,
+            autocomplete_sidecar_manager=Manager(),
+        ),
+        "warm",
+    )
+
+    assert result.clear_input is True
+    assert requested == [thread_id]
+    assert result.message == "Autocomplete cache build scheduled."

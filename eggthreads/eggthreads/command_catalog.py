@@ -61,6 +61,7 @@ class CommandContext:
     models_path: str | Path | None = None
     all_models_path: str | Path | None = None
     image_generation_models_path: str | Path | None = None
+    autocomplete_sidecar_manager: Any = None
     app: Any = None
 
 

@@ -880,6 +880,7 @@ class EggDisplayApp(
             models_path=str(MODELS_PATH),
             all_models_path=str(ALL_MODELS_PATH),
             image_generation_models_path=str(IMAGE_GENERATION_MODELS_PATH),
+            autocomplete_sidecar_manager=self._autocomplete_sidecar_manager,
             app=self,
         )
 

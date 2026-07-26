@@ -29,16 +29,11 @@ def autocomplete_cache_command(context: Any, arg: str):
     db, thread_id = target
     action = str(arg or "status").strip().casefold() or "status"
     if action in {"warm", "rebuild"}:
-        manager = getattr(context.app, "_autocomplete_sidecar_manager", None)
+        manager = context.autocomplete_sidecar_manager
+        if manager is None:
+            manager = getattr(context.app, "_autocomplete_sidecar_manager", None)
         if manager is None:
             manager = getattr(getattr(context.app, "state", None), "autocomplete_sidecar_manager", None)
-        if manager is None:
-            try:
-                from eggw.main import app as eggw_app
-
-                manager = getattr(eggw_app.state, "autocomplete_sidecar_manager", None)
-            except Exception:
-                manager = None
         if manager is not None and action == "warm":
             manager.request_build(thread_id)
             return CommandResult(clear_input=True, message="Autocomplete cache build scheduled.")
