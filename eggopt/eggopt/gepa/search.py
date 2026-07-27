@@ -150,6 +150,7 @@ def plan_optimization(
     max_candidates: int = 10,
     max_evaluator_calls: int = 100,
     mutation_minibatch_size: int = 3,
+    parents_per_candidate: int = 1,
     completed_candidates: int = 0,
     completed_evaluator_calls: int = 0,
 ) -> OptimizationPlan:
@@ -160,6 +161,7 @@ def plan_optimization(
         ("max_candidates", max_candidates, 1),
         ("max_evaluator_calls", max_evaluator_calls, 1),
         ("mutation_minibatch_size", mutation_minibatch_size, 1),
+        ("parents_per_candidate", parents_per_candidate, 1),
         ("completed_candidates", completed_candidates, 0),
         ("completed_evaluator_calls", completed_evaluator_calls, 0),
     ):
@@ -175,21 +177,27 @@ def plan_optimization(
         raise ValueError("valset_size must be a positive integer")
     batch = min(mutation_minibatch_size, dataset_size)
 
-    # Seed: one full evaluation. Each proposal: one minibatch check and, when
-    # accepted, one full evaluation. Cache overlap can make physical cost lower.
+    # Seed: one full validation. Each proposal evaluates every selected parent
+    # on a reflection minibatch, then the child on that minibatch and, when
+    # accepted, on the full validation set. Validation and reflection are
+    # deliberately different cache/thread scopes, even when dataset == valset.
+    reflection = batch * (parents_per_candidate + 1)
     generated = min(
         max_candidates,
-        max(0, (max_evaluator_calls - validation) // max(1, batch + validation)),
+        max(
+            0,
+            (max_evaluator_calls - validation) // max(1, reflection + validation),
+        ),
     )
     total_calls = min(
-        max_evaluator_calls, validation + generated * (batch + validation)
+        max_evaluator_calls, validation + generated * (reflection + validation)
     )
     return OptimizationPlan(
         max_candidates=max_candidates,
         max_evaluator_calls=max_evaluator_calls,
         generated_candidates=generated,
         full_evaluations=1 + generated,
-        minibatch_evaluations=generated,
+        minibatch_evaluations=generated * (parents_per_candidate + 1),
         minibatch_size=batch,
         evaluator_calls=total_calls,
         additional_generated_candidates=max(0, generated - completed_candidates),
@@ -313,7 +321,8 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
     flow: FlowExecutor = field(repr=False, compare=False)
     threads: ThreadsDB = field(repr=False, compare=False)
     study_id: str
-    candidate_parent_id: str
+    validation_id: str
+    reflection_id: str
     seed_candidate: Candidate
     dataset: list[CaseT] = field(repr=False, compare=False)
     dataset_ids: tuple[Any, ...]
@@ -334,6 +343,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             self.valset_ids,
             self.evaluator,
             self.evaluator_identity,
+            "full",
         )
         if (
             _completed_evaluator_calls(self.flow) + seed_needed
@@ -377,6 +387,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                     batch_ids,
                     self.evaluator,
                     self.evaluator_identity,
+                    "minibatch",
                 )
                 if calls + needed > self.config.max_evaluator_calls:
                     return _result(
@@ -436,6 +447,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 batch_ids,
                 self.evaluator,
                 self.evaluator_identity,
+                "minibatch",
             )
             if calls + child_needed > self.config.max_evaluator_calls:
                 return _result(
@@ -470,6 +482,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 self.valset_ids,
                 self.evaluator,
                 self.evaluator_identity,
+                "full",
             )
             if calls + full_needed > self.config.max_evaluator_calls:
                 continue
@@ -491,10 +504,11 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
         )
 
     def _evaluate(self, candidate, cases, case_ids, *, stage):
+        parent_id = self.validation_id if stage == "full" else self.reflection_id
         return _EvaluateCandidate(
             self.flow,
             self.threads,
-            self.candidate_parent_id,
+            parent_id,
             Path(self.config.run_dir).resolve(),
             candidate,
             cases,
@@ -583,7 +597,8 @@ def optimize_anything(
                     runtime.flow,
                     runtime.threads,
                     runtime.study_id,
-                    runtime.mutation_id,
+                    runtime.validation_id,
+                    runtime.reflection_id,
                     _candidate(seed_candidate),
                     data,
                     tuple(case_id(case) for case in data),

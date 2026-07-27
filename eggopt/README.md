@@ -43,9 +43,11 @@ use(result.best_candidate)
 - GEPA mutation uses `ActorCritic(actor=Mutation Agent, critic=ValidateMutation Task)`.
 - The deterministic Critic returns `revise` with a precise schema error; ActorCritic
   continues the same Mutation thread with that feedback.
-- The thread topology is `GEPA → Validation → Mutation`; candidate evaluations hang
-  below Mutation, so the Mutation agent may inspect their descendant transcripts
-  without being allowed to message them.
+- Full valset evaluations live under `GEPA → Validation`, outside Mutation's
+  descendant tree. Dataset minibatch evaluations live under
+  `GEPA → Mutation Review → Mutation → Reflection`, so Mutation may inspect only
+  reflection evidence and transcripts. The deterministic controller alone uses
+  valset scores for Pareto selection.
 - GEPA owns Pareto parent selection, minibatches, mutation requests, acceptance,
   evaluator budgets, and result assembly.
 - Domain code owns prompts, cases, evaluators, and model selection.

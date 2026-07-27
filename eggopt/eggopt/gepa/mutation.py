@@ -122,7 +122,7 @@ class Mutate(Task):
                 else state["feedback"]
             ),
             max_rounds=self.mutator.max_correction_turns + 1,
-            names=("Mutation", "Validation"),
+            names=("Mutation", "Mutation Review"),
         )
         if not result.accepted:
             raise ValueError(f"mutation remained invalid: {result.feedback}")

@@ -26,7 +26,7 @@ CaseT = TypeVar("CaseT")
 OutputT = TypeVar("OutputT")
 Candidate = dict[str, str]
 
-_EVALUATION = "eggopt.gepa.evaluate.v2"
+_EVALUATION = "eggopt.gepa.evaluate.v3"
 
 
 @dataclass(frozen=True)
@@ -57,25 +57,30 @@ def _candidate_identity(candidate: Candidate) -> str:
 @dataclass
 class _EnsureCandidateEvaluation(Task):
     threads: ThreadsDB = field(repr=False, compare=False)
-    study_id: str
+    parent_id: str
     candidate: Candidate
+    scope: str
 
     def get_cache_key(self) -> str:
         return digest_payload(
-            "eggopt.gepa.ensure-candidate-evaluation.v1",
-            canonical_candidate(self.candidate),
+            "eggopt.gepa.ensure-candidate-evaluation.v2",
+            {
+                "parent": self.parent_id,
+                "candidate": canonical_candidate(self.candidate),
+                "scope": self.scope,
+            },
         )
 
     def run(self) -> str:
         number = 1 + sum(
             name.startswith("Candidate ") and name.endswith(" Evaluation")
             for _thread_id, name, *_rest in list_children_with_meta(
-                self.threads, self.study_id
+                self.threads, self.parent_id
             )
         )
         return create_child_thread(
             self.threads,
-            self.study_id,
+            self.parent_id,
             name=f"Candidate {number} Evaluation",
             inherit_tools_config=False,
         )
@@ -88,18 +93,23 @@ class _EnsureCaseEvaluation(Task):
     run_root: Path
     candidate: Candidate
     case_identity: Any
+    scope: str
 
     def get_cache_key(self) -> str:
         return digest_payload(
-            "eggopt.gepa.ensure-case-evaluation.v1",
+            "eggopt.gepa.ensure-case-evaluation.v2",
             {
+                "candidate_thread": self.candidate_thread_id,
                 "candidate": canonical_candidate(self.candidate),
                 "case": self.case_identity,
+                "scope": self.scope,
             },
         )
 
     def run(self) -> tuple[str, str, str]:
-        workspace = _case_workspace(self.run_root, self.candidate, self.case_identity)
+        workspace = _case_workspace(
+            self.run_root, self.scope, self.candidate, self.case_identity
+        )
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "innerContext").mkdir(exist_ok=True)
         thread_id = create_child_thread(
@@ -134,6 +144,7 @@ class _EvaluateCase(Task):
     node: tuple[str, str, str]
     threads: ThreadsDB | None = field(repr=False, compare=False)
     context_limit: int | None = None
+    scope: str = "validation"
 
     def get_cache_key(self) -> str:
         return digest_payload(
@@ -144,6 +155,7 @@ class _EvaluateCase(Task):
                 ),
                 "candidate": canonical_candidate(self.candidate),
                 "example": canonical_json(self.case_identity, what="case identity"),
+                "scope": self.scope,
             },
         )
 
@@ -224,7 +236,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
 
     flow: FlowExecutor = field(repr=False, compare=False)
     threads: ThreadsDB = field(repr=False, compare=False)
-    study_id: str
+    parent_id: str
     run_root: Path
     candidate: Candidate
     cases: list[CaseT] = field(repr=False, compare=False)
@@ -252,8 +264,9 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
     def run(self):
         candidate_thread_id = yield _EnsureCandidateEvaluation(
             self.threads,
-            self.study_id,
+            self.parent_id,
             self.candidate,
+            self.stage,
         )
         case_nodes = yield [
             _EnsureCaseEvaluation(
@@ -262,6 +275,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                 self.run_root,
                 self.candidate,
                 identity,
+                self.stage,
             )
             for identity in self.case_identities
         ]
@@ -286,6 +300,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                 node,
                 self.threads,
                 self.context_limit,
+                self.stage,
             )
             for case, identity, node in zip(
                 self.cases, self.case_identities, case_nodes, strict=True
@@ -368,10 +383,13 @@ def _case_evaluation_identity(candidate: Candidate, case_identity: Any) -> str:
     )
 
 
-def _case_workspace(root: Path, candidate: Candidate, case_identity: Any) -> Path:
+def _case_workspace(
+    root: Path, scope: str, candidate: Candidate, case_identity: Any
+) -> Path:
     return (
         root
         / "workspaces"
+        / scope
         / f"candidate-{_candidate_identity(candidate).rsplit(':', 1)[-1][:10]}"
         / f"case-{_short_identity(case_identity)}"
         / "outerContext"
@@ -393,7 +411,9 @@ def _semantic_name(value: Any, fallback: str) -> str:
     return text[:48] or fallback
 
 
-def _new_call_count(flow, candidate, cases, case_ids, evaluator, evaluator_identity):
+def _new_call_count(
+    flow, candidate, cases, case_ids, evaluator, evaluator_identity, scope
+):
     count = 0
     for case, case_identity in zip(cases, case_ids, strict=True):
         task = _EvaluateCase(
@@ -404,6 +424,7 @@ def _new_call_count(flow, candidate, cases, case_ids, evaluator, evaluator_ident
             case_identity,
             ("budget-only", "budget-only", "budget-only"),
             None,
+            scope=scope,
         )
         row = flow.store.get(task.get_cache_key())
         if row is None or row["status"] != "COMPLETED":

@@ -20,7 +20,9 @@ class Runtime:
     flow: FlowExecutor
     threads: ThreadsDB
     study_id: str
+    validation_id: str
     mutation_id: str
+    reflection_id: str
     runtime_key: str
 
     @classmethod
@@ -33,10 +35,22 @@ class Runtime:
         flow = FlowExecutor(store)
         threads = ThreadsDB(egg / "threads.sqlite")
         threads.init_schema()
-        study_id, mutation_id = _sync(flow.run(_CreateStudy(threads)))
+        study_id, validation_id, mutation_id, reflection_id = _sync(
+            flow.run(_CreateStudy(threads))
+        )
         runtime_key = digest_payload("eggopt.gepa.runtime.v1", {"root": str(root)})
         _bind_evaluation_runtime(runtime_key, threads)
-        return cls(root, store, flow, threads, study_id, mutation_id, runtime_key)
+        return cls(
+            root,
+            store,
+            flow,
+            threads,
+            study_id,
+            validation_id,
+            mutation_id,
+            reflection_id,
+            runtime_key,
+        )
 
     def close(self) -> None:
         self.threads.close()
@@ -54,9 +68,9 @@ class _CreateStudy(Task):
     threads: ThreadsDB
 
     def get_cache_key(self) -> str:
-        return digest_payload("eggopt.gepa.create-study.v1", {})
+        return digest_payload("eggopt.gepa.create-study.v2", {})
 
-    def run(self) -> tuple[str, str]:
+    def run(self) -> tuple[str, str, str, str]:
         study_id = create_root_thread(self.threads, name="GEPA")
         validation_id = create_child_thread(
             self.threads,
@@ -64,13 +78,25 @@ class _CreateStudy(Task):
             name="Validation",
             inherit_tools_config=False,
         )
+        mutation_review_id = create_child_thread(
+            self.threads,
+            study_id,
+            name="Mutation Review",
+            inherit_tools_config=False,
+        )
         mutation_id = create_child_thread(
             self.threads,
-            validation_id,
+            mutation_review_id,
             name="Mutation",
             inherit_tools_config=False,
         )
-        return study_id, mutation_id
+        reflection_id = create_child_thread(
+            self.threads,
+            mutation_id,
+            name="Reflection",
+            inherit_tools_config=False,
+        )
+        return study_id, validation_id, mutation_id, reflection_id
 
 
 def _sync(awaitable: Any) -> Any:

@@ -8,6 +8,7 @@ import pytest
 from eggthreads import (
     ThreadsDB,
     get_thread_tools_config,
+    is_descendant_thread,
     list_children_with_meta,
     list_root_threads,
     list_threads,
@@ -679,16 +680,28 @@ def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(
     try:
         study = list_root_threads(db)[0]
         assert db.get_thread(study).name == "GEPA"
-        validation = list_children_with_meta(db, study)[0]
+        study_children = list_children_with_meta(db, study)
+        validation = next(child for child in study_children if child[1] == "Validation")
         assert validation[1] == "Validation"
-        mutation = list_children_with_meta(db, validation[0])[0]
+        mutation_review = next(
+            child for child in study_children if child[1] == "Mutation Review"
+        )
+        mutation = list_children_with_meta(db, mutation_review[0])[0]
         assert mutation[1] == "Mutation"
-        candidates = list_children_with_meta(db, mutation[0])
-        assert candidates[0][1] == "Candidate 1 Evaluation"
-        assert get_thread_tools_config(db, candidates[0][0]).is_tool_allowed(
+        reflection = list_children_with_meta(db, mutation[0])[0]
+        assert reflection[1] == "Reflection"
+
+        validation_candidates = list_children_with_meta(db, validation[0])
+        assert validation_candidates[0][1] == "Candidate 1 Evaluation"
+        assert not is_descendant_thread(db, mutation[0], validation_candidates[0][0])
+
+        reflection_candidates = list_children_with_meta(db, reflection[0])
+        assert reflection_candidates[0][1] == "Candidate 1 Evaluation"
+        assert is_descendant_thread(db, mutation[0], reflection_candidates[0][0])
+        assert get_thread_tools_config(db, reflection_candidates[0][0]).is_tool_allowed(
             "send_message_to_child"
         )
-        cases = list_children_with_meta(db, candidates[0][0])
+        cases = list_children_with_meta(db, reflection_candidates[0][0])
         assert cases[0][1] == "easy Evaluation"
     finally:
         db.conn.close()
@@ -708,10 +721,10 @@ def test_plan_reports_total_and_incremental_cost():
     assert plan.minibatch_size == 3
     assert plan.generated_candidates == 3
     assert plan.full_evaluations == 4
-    assert plan.minibatch_evaluations == 3
-    assert plan.evaluator_calls == 89
+    assert plan.minibatch_evaluations == 6
+    assert plan.evaluator_calls == 98
     assert plan.additional_generated_candidates == 1
-    assert plan.additional_evaluator_calls == 43
+    assert plan.additional_evaluator_calls == 52
 
 
 class ScriptedAgentLLM:
@@ -1333,6 +1346,51 @@ def test_valset_is_distinct_and_default_dataset_mode_matches_it(tmp_path):
         request[1][0]["cases"][0]["case"] == "train" for request in generator.requests
     )
 
+    db = ThreadsDB(tmp_path / "native" / ".egg" / "threads.sqlite")
+    try:
+        study = list_root_threads(db)[0]
+        study_children = list_children_with_meta(db, study)
+        validation_id = next(
+            child_id
+            for child_id, name, *_rest in study_children
+            if name == "Validation"
+        )
+        mutation_review_id = next(
+            child_id
+            for child_id, name, *_rest in study_children
+            if name == "Mutation Review"
+        )
+        mutation_id = next(
+            child_id
+            for child_id, name, *_rest in list_children_with_meta(
+                db, mutation_review_id
+            )
+            if name == "Mutation"
+        )
+        reflection_id = next(
+            child_id
+            for child_id, name, *_rest in list_children_with_meta(db, mutation_id)
+            if name == "Reflection"
+        )
+
+        validation_cases = {
+            name
+            for candidate_id, *_rest in list_children_with_meta(db, validation_id)
+            for _case_id, name, *_rest in list_children_with_meta(db, candidate_id)
+        }
+        reflection_cases = {
+            name
+            for candidate_id, *_rest in list_children_with_meta(db, reflection_id)
+            for _case_id, name, *_rest in list_children_with_meta(db, candidate_id)
+        }
+
+        assert validation_cases == {"validation Evaluation"}
+        assert reflection_cases == {"train Evaluation"}
+        assert not is_descendant_thread(db, mutation_id, validation_id)
+        assert is_descendant_thread(db, mutation_id, reflection_id)
+    finally:
+        db.close()
+
 
 def test_parent_selection_is_distinct_weighted_and_reproducible():
     import asyncio
@@ -1429,7 +1487,7 @@ def test_mutation_uses_actor_critic_with_deterministic_validation(
         config=GEPAConfig(
             run_dir=tmp_path / "mutation",
             max_candidates=1,
-            max_evaluator_calls=3,
+            max_evaluator_calls=4,
             mutation_minibatch_size=1,
             parents_per_candidate=1,
             minibatch_acceptance="improvement_or_equal",
@@ -1453,17 +1511,21 @@ def test_mutation_uses_actor_critic_with_deterministic_validation(
     try:
         from eggthreads import current_thread_model
 
-        validation = db.conn.execute(
-            "SELECT thread_id FROM threads WHERE name='Validation'"
+        mutation_review = db.conn.execute(
+            "SELECT thread_id FROM threads WHERE name='Mutation Review'"
         ).fetchone()
         mutation = db.conn.execute(
             "SELECT thread_id FROM threads WHERE name='Mutation'"
         ).fetchone()
-        assert validation and mutation
+        validation = db.conn.execute(
+            "SELECT thread_id FROM threads WHERE name='Validation'"
+        ).fetchone()
+        assert mutation_review and mutation and validation
         assert current_thread_model(db, mutation[0]) == "mutation-model"
         parent = db.conn.execute(
             "SELECT parent_id FROM children WHERE child_id=?", (mutation[0],)
         ).fetchone()
-        assert tuple(parent) == (validation[0],)
+        assert tuple(parent) == (mutation_review[0],)
+        assert not is_descendant_thread(db, mutation[0], validation[0])
     finally:
         db.conn.close()
