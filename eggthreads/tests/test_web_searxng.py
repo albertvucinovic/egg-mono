@@ -464,7 +464,7 @@ def test_unknown_search_backend_has_clear_valid_values(monkeypatch):
 
     msg = str(exc_info.value)
     assert "Unknown EGG_WEB_BACKEND='bogus'" in msg
-    assert 'auto, searxng, tavily' in msg
+    assert 'auto, parallel, searxng, tavily' in msg
 
 
 def _mock_n_results(monkeypatch, n: int):

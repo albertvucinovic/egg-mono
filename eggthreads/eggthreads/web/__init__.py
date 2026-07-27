@@ -19,6 +19,7 @@ from .fetch import (
     classify_fetch_quality,
     clear_fetch_cache,
 )
+from .parallel_ai import ParallelBackend
 from .search import SearchOrchestrator, clear_search_cache
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "FetchProvider",
     "FetchQuality",
     "FetchResponse",
+    "ParallelBackend",
     "SearchAttempt",
     "SearchOrchestrator",
     "SearchProvider",

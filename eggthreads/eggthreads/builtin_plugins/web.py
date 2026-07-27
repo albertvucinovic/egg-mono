@@ -266,8 +266,8 @@ def start_searxng_command(context: Any, arg: str):
         success_summary=(
             "Container up at http://localhost:8888. "
             "web_search can now use SearXNG as the local/no-key search fallback. "
-            "In auto mode, fetch_url uses Tavily Extract when configured, "
-            "otherwise direct HTTP."
+            "In auto mode, fetch_url uses Parallel Extract first, then Tavily "
+            "Extract when configured, then direct HTTP."
         ),
         timeout_sec=600,
     )
@@ -285,7 +285,7 @@ def stop_searxng_command(context: Any, arg: str):
         success_summary=(
             "Container stopped. web_search needs /startSearxng again unless a hosted "
             "search backend is configured. fetch_url is unaffected unless explicitly "
-            "pinned to Tavily without TAVILY_API_KEY."
+            "pinned to a hosted provider without its API key."
         ),
         timeout_sec=120,
     )
@@ -338,8 +338,8 @@ def register_web_tools(registry: ToolRegistry) -> None:
         description=(
             "Fetch and extract readable markdown from a URL. Use this when you "
             "already know the page URL. Backend is selected via EGG_WEB_FETCH_CHAIN, "
-            "EGG_WEB_FETCH_BACKEND, or EGG_WEB_BACKEND (default: auto; Tavily "
-            "Extract when configured, then direct HTTP)."
+            "EGG_WEB_FETCH_BACKEND, or EGG_WEB_BACKEND (default: auto; Parallel "
+            "Extract first, Tavily Extract second, then direct HTTP)."
         ),
         parameters_schema=fetch_schema,
         impl=fetch_url_tool,

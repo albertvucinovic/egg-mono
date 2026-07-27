@@ -1077,13 +1077,15 @@ Returns a registry pre-populated with common tools:
 - execute_tool_in_other_thread: Execute an opted-in tool in a strict descendant
   context and return its result to the calling ancestor
 - threads: Return the calling thread's accessible subtree as nested JSON
-- web_search: Provider-fallback web search. In default `auto` mode, Tavily is
-  tried first when `TAVILY_API_KEY` is set, then local SearXNG is used as the
-  no-key fallback. Configure an ordered fallback with `EGG_WEB_SEARCH_CHAIN`,
-  or pin with `EGG_WEB_SEARCH_BACKEND`, falling back to `EGG_WEB_BACKEND`;
-  backend values are `auto`, `searxng`, and `tavily`.
+- web_search: Provider-fallback web search. In default `auto` mode, Parallel is
+  tried first when `PARALLEL_API_KEY` is set, Tavily is tried second when
+  `TAVILY_API_KEY` is set, then local SearXNG is used as the no-key fallback.
+  Configure an ordered fallback with `EGG_WEB_SEARCH_CHAIN`, or pin with
+  `EGG_WEB_SEARCH_BACKEND`, falling back to `EGG_WEB_BACKEND`; backend values
+  are `auto`, `parallel`, `searxng`, and `tavily`.
 - fetch_url: Non-browser provider-fallback URL retrieval/extraction. In default
-  `auto` mode, Tavily Extract is tried first when `TAVILY_API_KEY` is set, then
+  `auto` mode, Parallel Extract is tried first when `PARALLEL_API_KEY` is set,
+  Tavily Extract is tried next when `TAVILY_API_KEY` is set, then
   direct HTTP is used as the local/no-key fallback with content-quality checks.
   Configure an ordered fallback with `EGG_WEB_FETCH_CHAIN`, or pin with
   `EGG_WEB_FETCH_BACKEND`, falling back to `EGG_WEB_BACKEND`; direct HTTP bounds

@@ -19,9 +19,9 @@ from .search import (
 
 
 DEFAULT_BACKEND = "auto"
-VALID_BACKENDS = "auto, searxng, tavily"
-VALID_SEARCH_CHAIN_PROVIDERS = "searxng, searx, tavily"
-VALID_FETCH_CHAIN_PROVIDERS = "searxng, searx, tavily, direct_http"
+VALID_BACKENDS = "auto, parallel, searxng, tavily"
+VALID_SEARCH_CHAIN_PROVIDERS = "parallel, tavily, searxng, searx"
+VALID_FETCH_CHAIN_PROVIDERS = "parallel, tavily, direct_http, searxng, searx"
 GLOBAL_BACKEND_ENV = "EGG_WEB_BACKEND"
 SEARCH_BACKEND_ENV = "EGG_WEB_SEARCH_BACKEND"
 FETCH_BACKEND_ENV = "EGG_WEB_FETCH_BACKEND"
@@ -84,16 +84,19 @@ def get_backend(name: str | None = None) -> WebBackend:
     if chosen == "tavily":
         from .tavily import TavilyBackend
         return TavilyBackend()
+    if chosen == "parallel":
+        return _parallel_backend()
     raise _unknown_backend_error(chosen, source)
 
 
 def get_search_orchestrator(name: str | None = None) -> SearchOrchestrator:
     """Resolve the search provider chain.
 
-    ``auto`` tries configured hosted providers first, then SearXNG.  Explicit
-    ``searxng`` or ``tavily`` remains pinned/deterministic.  If no explicit
-    name is passed, ``EGG_WEB_SEARCH_CHAIN`` can provide a comma-separated
-    ordered chain and takes precedence over backend selector env vars.
+    ``auto`` tries configured hosted providers first, then SearXNG. Explicit
+    ``parallel``, ``searxng``, or ``tavily`` remains pinned/deterministic. If
+    no explicit name is passed, ``EGG_WEB_SEARCH_CHAIN`` can provide a
+    comma-separated ordered chain and takes precedence over backend selector
+    env vars.
     """
     chain = _chosen_chain(name, SEARCH_CHAIN_ENV)
     if chain is not None:
@@ -129,16 +132,20 @@ def _search_providers_from_chain(value: str, source: str) -> list:
 def _search_providers_for_backend(chosen: str, source: str) -> list:
     if chosen == "auto":
         providers = []
+        if os.environ.get("PARALLEL_API_KEY"):
+            providers.append(_search_provider_from_name("parallel", source))
         if os.environ.get("TAVILY_API_KEY"):
             providers.append(_search_provider_from_name("tavily", source))
         providers.append(_search_provider_from_name("searxng", source))
         return providers
-    if chosen in ("searxng", "searx", "tavily"):
+    if chosen in ("parallel", "searxng", "searx", "tavily"):
         return [_search_provider_from_name(chosen, source)]
     raise _unknown_backend_error(chosen, source)
 
 
 def _search_provider_from_name(chosen: str, source: str):
+    if chosen == "parallel":
+        return _parallel_backend()
     if chosen in ("searxng", "searx"):
         from .searxng import SearxngBackend
 
@@ -207,16 +214,20 @@ def _fetch_providers_from_chain(value: str, source: str) -> list:
 def _fetch_providers_for_backend(chosen: str, source: str) -> list:
     if chosen == "auto":
         providers = []
+        if os.environ.get("PARALLEL_API_KEY"):
+            providers.append(_fetch_provider_from_name("parallel", source))
         if os.environ.get("TAVILY_API_KEY"):
             providers.append(_fetch_provider_from_name("tavily", source))
         providers.append(_fetch_provider_from_name("direct_http", source))
         return providers
-    if chosen in ("searxng", "searx", "tavily"):
+    if chosen in ("parallel", "searxng", "searx", "tavily"):
         return [_fetch_provider_from_name(chosen, source)]
     raise _unknown_backend_error(chosen, source)
 
 
 def _fetch_provider_from_name(chosen: str, source: str):
+    if chosen == "parallel":
+        return _parallel_backend()
     if chosen in ("searxng", "searx", "direct_http"):
         return DirectHttpFetchProvider()
     if chosen == "tavily":
@@ -224,6 +235,14 @@ def _fetch_provider_from_name(chosen: str, source: str):
 
         return TavilyBackend()
     raise _unknown_chain_provider_error(chosen, source, VALID_FETCH_CHAIN_PROVIDERS)
+
+
+def _parallel_backend():
+    """Return the shared Parallel.ai Search/Extract adapter."""
+
+    from .parallel_ai import ParallelBackend
+
+    return ParallelBackend()
 
 
 def _fetch_orchestrator(providers: list) -> FetchOrchestrator:

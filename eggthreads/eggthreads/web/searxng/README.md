@@ -5,9 +5,10 @@ This directory contains the local SearXNG compose setup used by Egg's
 fallback in the default `auto` provider chain.
 
 `fetch_url` does not fetch through SearXNG. In default `auto` mode it tries
-Tavily Extract when `TAVILY_API_KEY` is configured, then falls back to direct
-HTTP with local extraction and content-quality checks. No browser-based
-search/fetch provider is active in the default chain.
+Parallel Extract when `PARALLEL_API_KEY` is configured, Tavily Extract when
+`TAVILY_API_KEY` is configured, then falls back to direct HTTP with local
+extraction and content-quality checks. No browser-based search/fetch provider
+is active in the default chain.
 
 ## Start
 
@@ -39,10 +40,10 @@ If you get HTML rather than JSON, check that `settings.yml` includes `json` in
 
 By default, search runs in `auto` mode:
 
-- with `TAVILY_API_KEY`, `web_search` tries Tavily Search first and falls back
-  to SearXNG;
-- without `TAVILY_API_KEY`, `web_search` uses SearXNG as the only search
-  provider.
+- with `PARALLEL_API_KEY`, `web_search` tries Parallel Search first;
+- with `TAVILY_API_KEY`, `web_search` tries Tavily Search after Parallel and
+  before falling back to SearXNG;
+- without either hosted-provider key, `web_search` uses SearXNG only.
 
 To pin search to local/no-key SearXNG for a session:
 
@@ -58,19 +59,21 @@ global selector:
 export EGG_WEB_BACKEND=searxng   # search = SearXNG; fetch = direct HTTP compatibility
 ```
 
-To use Tavily for search/fetch when configured:
+To configure hosted search/fetch providers:
 
 ```bash
+export PARALLEL_API_KEY=...
 export TAVILY_API_KEY=tvly-...
-# Optional pins; auto mode also uses Tavily first when the key is set.
-export EGG_WEB_SEARCH_BACKEND=tavily
-export EGG_WEB_FETCH_BACKEND=tavily
+# Optional pins; auto mode uses Parallel first and Tavily second.
+export EGG_WEB_SEARCH_BACKEND=auto
+export EGG_WEB_FETCH_BACKEND=auto
 # Optional explicit ordered chains; no browser providers are active.
-export EGG_WEB_SEARCH_CHAIN=tavily,searxng
-export EGG_WEB_FETCH_CHAIN=tavily,direct_http
+export EGG_WEB_SEARCH_CHAIN=parallel,tavily,searxng
+export EGG_WEB_FETCH_CHAIN=parallel,tavily,direct_http
 ```
 
-Valid backend selector values are `auto`, `searxng`/`searx`, and `tavily`.
+Valid backend selector values are `auto`, `parallel`, `searxng`/`searx`, and
+`tavily`.
 Chain variables (`EGG_WEB_SEARCH_CHAIN`, `EGG_WEB_FETCH_CHAIN`) override split
 selectors for their own tool only. Split selectors (`EGG_WEB_SEARCH_BACKEND`,
 `EGG_WEB_FETCH_BACKEND`) override `EGG_WEB_BACKEND`. Chain values are

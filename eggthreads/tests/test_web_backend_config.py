@@ -27,6 +27,7 @@ def _clear_web_env(monkeypatch):
     monkeypatch.delenv("EGG_WEB_FETCH_CHAIN", raising=False)
     monkeypatch.delenv("EGG_WEB_SEARCH_BACKEND", raising=False)
     monkeypatch.delenv("EGG_WEB_FETCH_BACKEND", raising=False)
+    monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
 
@@ -130,7 +131,7 @@ def test_unknown_search_split_backend_names_correct_env_var(monkeypatch):
 
     msg = str(exc_info.value)
     assert "Unknown EGG_WEB_SEARCH_BACKEND='bogus'" in msg
-    assert "auto, searxng, tavily" in msg
+    assert "auto, parallel, searxng, tavily" in msg
     valid_values = msg.split("Valid values:", 1)[1]
     assert "browser" not in valid_values.lower()
     assert "playwright" not in valid_values.lower()
@@ -146,7 +147,7 @@ def test_unknown_fetch_split_backend_names_correct_env_var(monkeypatch):
 
     msg = str(exc_info.value)
     assert "Unknown EGG_WEB_FETCH_BACKEND='bogus'" in msg
-    assert "auto, searxng, tavily" in msg
+    assert "auto, parallel, searxng, tavily" in msg
     valid_values = msg.split("Valid values:", 1)[1]
     assert "browser" not in valid_values.lower()
     assert "playwright" not in valid_values.lower()
@@ -923,7 +924,7 @@ def test_unknown_chain_values_name_correct_env_and_valid_values(monkeypatch):
 
     search_msg = str(search_exc_info.value)
     assert "Unknown EGG_WEB_SEARCH_CHAIN provider 'playwright'" in search_msg
-    assert "searxng, searx, tavily" in search_msg
+    assert "parallel, tavily, searxng, searx" in search_msg
     assert "playwright" not in search_msg.split("Valid values:", 1)[1]
     assert "browser" not in search_msg.split("Valid values:", 1)[1].lower()
 
@@ -935,6 +936,172 @@ def test_unknown_chain_values_name_correct_env_and_valid_values(monkeypatch):
 
     fetch_msg = str(fetch_exc_info.value)
     assert "Unknown EGG_WEB_FETCH_CHAIN provider 'browser'" in fetch_msg
-    assert "searxng, searx, tavily, direct_http" in fetch_msg
+    assert "parallel, tavily, direct_http, searxng, searx" in fetch_msg
     assert "playwright" not in fetch_msg.split("Valid values:", 1)[1]
     assert "browser" not in fetch_msg.split("Valid values:", 1)[1].lower()
+
+
+def test_parallel_backend_can_be_pinned_for_search_and_fetch(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_BACKEND", "parallel")
+    monkeypatch.setenv("PARALLEL_API_KEY", "parallel-test")
+
+    search = get_search_orchestrator()
+    fetch = get_fetch_orchestrator()
+
+    assert [provider.name for provider in search.providers] == ["parallel"]
+    assert [provider.name for provider in fetch.providers] == ["parallel"]
+
+
+def test_auto_provider_order_is_parallel_then_tavily_then_local(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("PARALLEL_API_KEY", "parallel-test")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+
+    search = get_search_orchestrator()
+    fetch = get_fetch_orchestrator()
+
+    assert [provider.name for provider in search.providers] == [
+        "parallel", "tavily", "searxng"
+    ]
+    assert [provider.name for provider in fetch.providers] == [
+        "parallel", "tavily", "direct_http"
+    ]
+
+
+def test_explicit_parallel_search_chain_falls_back_to_tavily(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_SEARCH_CHAIN", "parallel,tavily,searxng")
+    monkeypatch.setenv("PARALLEL_API_KEY", "parallel-test")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        calls.append(url)
+        if url == "https://api.parallel.ai/v1/search":
+            return _MockResponse(503, {"error": {"message": "down"}})
+        return _MockResponse(200, {
+            "results": [{
+                "title": "Tavily",
+                "url": "https://tavily.example",
+                "content": "fallback",
+            }]
+        })
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    response = get_search_orchestrator().search_response("x", max_results=1)
+
+    assert calls == [
+        "https://api.parallel.ai/v1/search",
+        "https://api.tavily.com/search",
+    ]
+    assert [attempt.provider for attempt in response.attempts] == ["parallel", "tavily"]
+    assert [result.url for result in response.results] == ["https://tavily.example"]
+
+
+def test_explicit_parallel_fetch_chain_falls_back_to_tavily(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("EGG_WEB_FETCH_CHAIN", "parallel,tavily,direct_http")
+    monkeypatch.setenv("PARALLEL_API_KEY", "parallel-test")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        calls.append(url)
+        if url == "https://api.parallel.ai/v1/extract":
+            return _MockResponse(503, {"error": {"message": "down"}})
+        return _MockResponse(200, {
+            "results": [{
+                "url": "https://example.com",
+                "raw_content": "Tavily fallback",
+            }],
+            "failed_results": [],
+        })
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    response = get_fetch_orchestrator().fetch_response("https://example.com")
+
+    assert calls == [
+        "https://api.parallel.ai/v1/extract",
+        "https://api.tavily.com/extract",
+    ]
+    assert [attempt.provider for attempt in response.attempts] == ["parallel", "tavily"]
+    assert response.content == "Tavily fallback"
+
+
+def test_auto_search_stops_on_parallel_auth_error(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("PARALLEL_API_KEY", "bad-parallel-key")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        calls.append(url)
+        return _MockResponse(401, {"error": {"message": "invalid API key"}})
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    response = get_search_orchestrator().search_response("x", max_results=1)
+
+    assert calls == ["https://api.parallel.ai/v1/search"]
+    assert [attempt.provider for attempt in response.attempts] == ["parallel"]
+    assert response.attempts[0].fallback_eligible is False
+
+
+def test_auto_fetch_stops_on_parallel_auth_error(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("PARALLEL_API_KEY", "bad-parallel-key")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        calls.append(url)
+        return _MockResponse(401, {"error": {"message": "invalid API key"}})
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        get_fetch_orchestrator().fetch_response("https://example.com")
+
+    assert calls == ["https://api.parallel.ai/v1/extract"]
+    assert exc_info.value.fallback_eligible is False
+
+
+def test_parallel_credit_exhaustion_advances_auto_search_chain(monkeypatch):
+    _clear_web_env(monkeypatch)
+    monkeypatch.setenv("PARALLEL_API_KEY", "parallel-test")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_post(url, json=None, headers=None, timeout=None, stream=None):
+        calls.append(url)
+        if url == "https://api.parallel.ai/v1/search":
+            return _MockResponse(402, {
+                "error": {"message": "Payment required: insufficient credit in account"}
+            })
+        return _MockResponse(200, {
+            "results": [{
+                "title": "Tavily",
+                "url": "https://tavily.example",
+                "content": "fallback",
+            }]
+        })
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    response = get_search_orchestrator().search_response("x", max_results=1)
+
+    assert calls == [
+        "https://api.parallel.ai/v1/search",
+        "https://api.tavily.com/search",
+    ]
+    assert response.attempts[0].retriable is False
+    assert response.attempts[0].fallback_eligible is True
+    assert response.results[0].url == "https://tavily.example"
