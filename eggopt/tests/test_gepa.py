@@ -444,7 +444,13 @@ def test_progress_callback_reports_each_case_and_candidate(tmp_path):
     ]
     assert replay_events == events
     assert events[0]["case_count"] == 1
+    assert events[0]["candidate_thread_name"] == "Candidate 1 Evaluation"
     assert events[1]["case"] == "easy"
+    names_by_thread = {}
+    for event in events:
+        thread_id = event["candidate_thread_id"]
+        names_by_thread.setdefault(thread_id, event["candidate_thread_name"])
+        assert event["candidate_thread_name"] == names_by_thread[thread_id]
     assert events[1]["case_number"] == 1
     assert events[1]["case_count"] == 1
     assert events[-1]["kind"] == "candidate_evaluation"

@@ -306,12 +306,14 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                 self.cases, self.case_identities, case_nodes, strict=True
             )
         ]
+        candidate_thread_name = self.threads.get_thread(candidate_thread_id).name
         if self.progress is not None:
             self.progress(
                 {
                     "kind": "candidate_evaluation_started",
                     "stage": self.stage,
                     "candidate_thread_id": candidate_thread_id,
+                    "candidate_thread_name": candidate_thread_name,
                     "candidate": dict(self.candidate),
                     "case_count": len(tasks),
                 }
@@ -329,6 +331,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                             "kind": "case_evaluation",
                             "stage": self.stage,
                             "candidate_thread_id": candidate_thread_id,
+                            "candidate_thread_name": candidate_thread_name,
                             "candidate": dict(self.candidate),
                             "case": self.case_identities[index],
                             "case_number": index + 1,
@@ -345,6 +348,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                     "kind": "candidate_evaluation",
                     "stage": self.stage,
                     "candidate_thread_id": candidate_thread_id,
+                    "candidate_thread_name": candidate_thread_name,
                     "candidate": dict(self.candidate),
                     "aggregate_score": fmean(item.score for item in evaluations),
                     "case_count": len(evaluations),
