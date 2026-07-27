@@ -53,6 +53,8 @@ class MinToolCallSummary:
     tool_call_id: str
     effect: ToolEffect = ToolEffect.UNKNOWN
     group_id: str = ""
+    sequence: int = 0
+    activity_order: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,8 @@ class MinToolResultSummary:
     tool_call_id: str
     record_id: str
     effect: ToolEffect = ToolEffect.UNKNOWN
+    sequence: int = 0
+    activity_order: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,7 @@ class MinHiddenActivitySummary:
     record_id_hints: Mapping[str, str] = field(default_factory=dict, repr=False)
     _result_tool_names: List[str] = field(default_factory=list, repr=False)
     _seen_tool_call_ids: Set[str] = field(default_factory=set, repr=False)
+    _next_activity_sequence: int = field(default=0, repr=False)
 
     def has_activity(self) -> bool:
         return bool(self.tool_executions or self.tool_results or self.reasoning_blocks)
@@ -113,6 +118,22 @@ class MinHiddenActivitySummary:
         self.tool_results_list.clear()
         self._result_tool_names.clear()
         self._seen_tool_call_ids.clear()
+        self._next_activity_sequence = 0
+
+    def _activity_sequence(self) -> int:
+        """Return insertion order for display only; protocol identity stays exact-ID based."""
+
+        sequence = self._next_activity_sequence
+        self._next_activity_sequence += 1
+        return sequence
+
+    @staticmethod
+    def _normalize_activity_order(value: Any) -> Optional[int]:
+        try:
+            order = int(value)
+        except (TypeError, ValueError):
+            return None
+        return order if order >= 0 else None
 
     def add_tokens(self, tokens: Any) -> None:
         self.total_tokens += _positive_int(tokens)
@@ -188,6 +209,7 @@ class MinHiddenActivitySummary:
         tokens: Any = 0,
         tool_call_id: Optional[str] = None,
         group_id: Any = None,
+        activity_order: Any = None,
     ) -> None:
         """Count a tool execution/tool call, de-duping by call id when known."""
         call_id = str(tool_call_id or "").strip()
@@ -199,12 +221,15 @@ class MinHiddenActivitySummary:
         self._add_tool_name(name)
         normalized_name = self._normalize_tool_name(name) or "tool"
         if call_id and arguments is not _ARGUMENTS_UNSET:
+            sequence = self._activity_sequence()
             self.tool_calls.append(
                 MinToolCallSummary(
                     name=normalized_name,
                     tool_call_id=call_id,
                     effect=classify_tool_effect(normalized_name, arguments).effect,
                     group_id=str(group_id or "").strip(),
+                    sequence=sequence,
+                    activity_order=self._normalize_activity_order(activity_order),
                 )
             )
         self.add_tokens(tokens)
@@ -217,6 +242,7 @@ class MinHiddenActivitySummary:
         record_id: Any = None,
         tool_call_id: Any = None,
         effect: ToolEffect = ToolEffect.UNKNOWN,
+        activity_order: Any = None,
     ) -> None:
         self.tool_results += 1
         self._add_result_tool_name(name)
@@ -225,12 +251,15 @@ class MinHiddenActivitySummary:
         call_id = str(tool_call_id or "").strip()
         result_id = str(record_id or "").strip()
         if call_id or result_id:
+            sequence = self._activity_sequence()
             self.tool_results_list.append(
                 MinToolResultSummary(
                     name=self._normalize_tool_name(name) or "tool",
                     tool_call_id=call_id,
                     record_id=result_id,
                     effect=effect,
+                    sequence=sequence,
+                    activity_order=self._normalize_activity_order(activity_order),
                 )
             )
         self.add_tokens(tokens)
@@ -281,9 +310,53 @@ def _grouped_tool_activity(
             unmatched_results.append(result)
         else:
             groups[group_index][1].append(result)
-    if unmatched_results:
-        groups.append(([], unmatched_results))
-    return groups
+    # A visible preserve-turn note may split declaration and result into two
+    # display runs. Keep any result whose declaration is outside this summary
+    # at the result's real position instead of moving every unmatched result to
+    # the tail. Exact call/result pairing remains tool_call_id-based.
+    def activity_key(item: Any) -> tuple[int, int]:
+        order = item.activity_order
+        return (item.sequence if order is None else order, item.sequence)
+
+    for calls, results in groups:
+        call_indexes = {
+            call.tool_call_id: index
+            for index, call in enumerate(calls)
+            if call.tool_call_id
+        }
+        results.sort(
+            key=lambda result: (
+                call_indexes.get(result.tool_call_id, len(call_indexes)),
+                activity_key(result),
+            )
+        )
+
+    ordered_groups = []
+    for calls, results in groups:
+        call_order = min(activity_key(call) for call in calls)
+        if results and all(activity_key(result) < call_order for result in results):
+            # A lazy newest-to-oldest scan can encounter this group's results
+            # before its declarations. Pair by exact ID, but keep the visible
+            # group at the declarations' transcript position.
+            group_order = call_order
+        else:
+            group_order = min(
+                [call_order]
+                + [activity_key(result) for result in results]
+            )
+        ordered_groups.append((group_order, calls, results))
+    ordered_groups.extend(
+        (activity_key(result), [], [result])
+        for result in unmatched_results
+    )
+    ordered_groups.sort(key=lambda item: item[0])
+    merged: List[tuple[List[MinToolCallSummary], List[MinToolResultSummary]]] = []
+    for _order, calls, results in ordered_groups:
+        if not calls and merged and not merged[-1][0]:
+            merged[-1][1].extend(results)
+        else:
+            merged.append((calls, list(results)))
+    return merged
 
 
 def _min_tool_activity_group(

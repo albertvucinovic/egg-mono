@@ -499,6 +499,7 @@ class FormattingMixin:
             tokens: Any = 0,
             tool_call_id: str = "",
             group_id: str = "",
+            activity_order: Any = None,
         ) -> None:
             hidden_summary.add_tool_execution(
                 name=name,
@@ -506,6 +507,7 @@ class FormattingMixin:
                 tokens=tokens,
                 tool_call_id=tool_call_id,
                 group_id=group_id,
+                activity_order=activity_order,
             )
 
         def add_hidden_tool_result(
@@ -515,6 +517,7 @@ class FormattingMixin:
             record_id: Any = None,
             tool_call_id: Any = None,
             effect: ToolEffect = ToolEffect.UNKNOWN,
+            activity_order: Any = None,
         ) -> None:
             hidden_summary.add_tool_result(
                 name=name,
@@ -522,6 +525,7 @@ class FormattingMixin:
                 record_id=record_id,
                 tool_call_id=tool_call_id,
                 effect=effect,
+                activity_order=activity_order,
             )
 
         def flush_hidden() -> None:
@@ -631,6 +635,7 @@ class FormattingMixin:
                                 tokens=tool_call_tokens if idx == 0 else 0,
                                 tool_call_id=tc_id,
                                 group_id=msg_id,
+                                activity_order=event_seq_int,
                             )
                 # Streamed-only metadata (if snapshot captured)
                 tstream = m.get('tool_stream') or {}
@@ -733,6 +738,7 @@ class FormattingMixin:
                                 record_id=msg_id,
                                 tool_call_id=tool_call_id,
                                 effect=call.effect if call is not None else classify_tool_effect(name).effect,
+                                activity_order=event_seq_int,
                             )
             elif role == 'system':
                 content = content_to_plain_text(m.get('content')).strip()

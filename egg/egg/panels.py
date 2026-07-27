@@ -1465,6 +1465,7 @@ class PanelsMixin:
         record_id: Any = None,
         group_id: Any = None,
         effect: ToolEffect = ToolEffect.UNKNOWN,
+        activity_order: Any = None,
     ) -> None:
         target = self._ensure_static_hidden_details_state(state)
         summary = target.get('summary')
@@ -1480,6 +1481,7 @@ class PanelsMixin:
                 tokens=tokens,
                 tool_call_id=tool_call_id,
                 group_id=group_id,
+                activity_order=activity_order,
             )
         elif kind == 'tool_results':
             summary.add_tool_result(
@@ -1488,6 +1490,7 @@ class PanelsMixin:
                 record_id=record_id,
                 tool_call_id=tool_call_id,
                 effect=effect,
+                activity_order=activity_order,
             )
 
     def _record_static_hidden_detail(self, kind: str, header: str) -> None:
@@ -2068,6 +2071,7 @@ class PanelsMixin:
                             tokens=token_count if idx == 0 else 0,
                             tool_call_id=tc_id,
                             group_id=msg_id,
+                            activity_order=m.get('event_seq'),
                         )
                 else:
                     call_token_text = ""
@@ -2244,6 +2248,7 @@ class PanelsMixin:
                                 tokens=count_min_hidden_text_tokens(txt),
                                 tool_call_id=str(nm or ''),
                                 group_id=msg_id,
+                                activity_order=m.get('event_seq'),
                             )
             return items
 
@@ -2333,6 +2338,7 @@ class PanelsMixin:
                     record_id=msg_id,
                     tool_call_id=tool_call_id,
                     effect=result_call.effect if result_call is not None else ToolEffect.UNKNOWN,
+                    activity_order=m.get('event_seq'),
                 )
             return items
 

@@ -154,6 +154,95 @@ class TestMinHiddenActivitySummary:
             "calls [python_repl(abcdefgh)] results [python_repl(55556666)]"
         ) in rendered
 
+    def test_unmatched_results_keep_their_chronological_place_between_groups(self):
+        from egg.min_run_summary import MinHiddenActivitySummary, format_min_hidden_activity_summary
+
+        summary = MinHiddenActivitySummary()
+        summary.add_tool_execution(
+            name="answer_user_while_preserving_llm_turn",
+            arguments={"message": "Progress note"},
+            tool_call_id="call_note_12345678",
+            group_id="group-note",
+            activity_order=10,
+        )
+        summary.add_tool_result(
+            name="answer_user_while_preserving_llm_turn",
+            tool_call_id="call_note_12345678",
+            record_id="result_note_87654321",
+            activity_order=20,
+        )
+        summary.add_tool_result(
+            name="early_orphan",
+            tool_call_id="missing_early_call",
+            record_id="early_orphan_result_00001111",
+            activity_order=30,
+        )
+        summary.add_tool_execution(
+            name="bash",
+            arguments={"script": "pwd"},
+            tool_call_id="call_bash_abcdefgh",
+            group_id="group-bash",
+            activity_order=40,
+        )
+        summary.add_tool_result(
+            name="late_orphan",
+            tool_call_id="missing_late_call",
+            record_id="late_orphan_result_11112222",
+            activity_order=50,
+        )
+
+        rendered = format_min_hidden_activity_summary(summary)
+
+        assert rendered.index("results [answer_user_while_preserving_llm_turn(") < rendered.index(
+            "results [early_orphan("
+        ) < rendered.index(
+            "calls [bash("
+        ) < rendered.index("results [late_orphan(")
+
+    def test_reverse_collection_uses_event_order_not_insertion_order(self):
+        from egg.min_run_summary import MinHiddenActivitySummary, format_min_hidden_activity_summary
+
+        summary = MinHiddenActivitySummary()
+        summary.add_tool_execution(
+            name="bash",
+            arguments={"script": "pwd"},
+            tool_call_id="call_bash_12345678",
+            group_id="group-bash",
+            activity_order=200,
+        )
+        summary.add_tool_execution(
+            name="python_repl",
+            arguments={"code": "1"},
+            tool_call_id="call_python_abcdefgh",
+            group_id="group-python",
+            activity_order=300,
+        )
+        # Lazy scrollback records these newest-to-oldest, unlike forward text.
+        summary.add_tool_result(
+            name="bash",
+            tool_call_id="call_bash_12345678",
+            record_id="result_bash_11112222",
+            activity_order=500,
+        )
+        summary.add_tool_result(
+            name="answer_user_while_preserving_llm_turn",
+            tool_call_id="call_answer",
+            record_id="result_answer_33334444",
+            activity_order=150,
+        )
+        summary.add_tool_result(
+            name="python_repl",
+            tool_call_id="call_python_abcdefgh",
+            record_id="result_python_55556666",
+            activity_order=400,
+        )
+
+        rendered = format_min_hidden_activity_summary(summary)
+
+        assert rendered.index("results [answer_user_while_preserving_llm_turn(") < rendered.index(
+            "calls [bash("
+        ) < rendered.index("calls [python_repl(")
+
 
 class TestFormatThreadLine:
     """Tests for format_thread_line()."""
@@ -695,6 +784,126 @@ class TestFormatMessagesText:
             assert "Executed 1 tool" in text
             assert "answer_user_while_preserving_llm_turn" in text
         assert "Hidden details" not in text
+
+    @pytest.mark.parametrize(
+        ("tool_name", "note_extra", "result_text"),
+        [
+            (
+                "answer_user_while_preserving_llm_turn",
+                {"source_tool_name": "answer_user_while_preserving_llm_turn"},
+                "Interim answer shown to user.",
+            ),
+            (
+                "get_user_message_while_preserving_llm_turn",
+                {
+                    "source_tool_name": "get_user_message_while_preserving_llm_turn",
+                    "awaiting_user_message_tool_call_id": "call_note",
+                },
+                "The Practical Guide",
+            ),
+        ],
+    )
+    def test_min_preserve_turn_result_stays_beside_note_before_later_group(
+        self,
+        isolated_db,
+        tool_name,
+        note_extra,
+        result_text,
+    ):
+        """A preserve-turn result follows its note, not all later tool groups."""
+        from egg.formatting import FormattingMixin
+        from eggthreads import append_message, create_root_thread, create_snapshot
+
+        tid = create_root_thread(isolated_db, name="PreserveResultOrdering")
+        append_message(
+            isolated_db,
+            tid,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [{
+                    "id": "call_note",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": '{"message":"Progress note"}',
+                    },
+                }],
+            },
+        )
+        append_message(
+            isolated_db,
+            tid,
+            "assistant",
+            "Progress note",
+            extra={
+                "answer_user_preserve_turn": True,
+                "tool_call_id": "call_note",
+                **note_extra,
+            },
+        )
+        if tool_name == "get_user_message_while_preserving_llm_turn":
+            append_message(
+                isolated_db,
+                tid,
+                "user",
+                "The Practical Guide",
+                extra={
+                    "no_api": True,
+                    "keep_user_turn": True,
+                    "consumed_by_tool_name": tool_name,
+                    "consumed_by_tool_call_id": "call_note",
+                },
+            )
+        append_message(
+            isolated_db,
+            tid,
+            "tool",
+            result_text,
+            extra={
+                "name": tool_name,
+                "tool_call_id": "call_note",
+            },
+        )
+        append_message(
+            isolated_db,
+            tid,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [{
+                    "id": "call_bash",
+                    "function": {"name": "bash", "arguments": {"script": "pwd"}},
+                }],
+            },
+        )
+        append_message(
+            isolated_db,
+            tid,
+            "tool",
+            "/tmp/project",
+            extra={"name": "bash", "tool_call_id": "call_bash"},
+        )
+        create_snapshot(isolated_db, tid)
+
+        class MinimalApp:
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+                self._display_verbosity = "min"
+
+        class TestApp(FormattingMixin, MinimalApp):
+            pass
+
+        text = TestApp().format_messages_text(tid)
+
+        preserve_call_index = text.index(f"calls [{tool_name}(")
+        note_index = text.index("Progress note")
+        preserve_result_index = text.index(f"results [{tool_name}(")
+        later_call_index = text.index("calls [bash(")
+        assert preserve_call_index < note_index < preserve_result_index < later_call_index
+        if tool_name == "get_user_message_while_preserving_llm_turn":
+            reply_index = text.index("The Practical Guide", note_index)
+            assert note_index < reply_index < preserve_result_index
 
     def test_shows_compaction_marker_without_hiding_history(self, isolated_db):
         """Chat transcript text should include a divider and keep old messages."""

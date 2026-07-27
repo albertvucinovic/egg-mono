@@ -1420,6 +1420,58 @@ class TestConsolePrintMessage:
             assert 'answer_user_while_preserving_llm_turn' in joined_bodies
         assert not any('Assistant]' in title for title in titles)
 
+    @pytest.mark.parametrize(
+        ("tool_name", "note_extra"),
+        [
+            (
+                "answer_user_while_preserving_llm_turn",
+                {"source_tool_name": "answer_user_while_preserving_llm_turn"},
+            ),
+            (
+                "get_user_message_while_preserving_llm_turn",
+                {
+                    "source_tool_name": "get_user_message_while_preserving_llm_turn",
+                    "awaiting_user_message_tool_call_id": "call_note",
+                },
+            ),
+        ],
+    )
+    def test_min_preserve_turn_note_flushes_call_before_visible_note(
+        self, egg_app, tool_name, note_extra
+    ):
+        """The note remains a visible boundary after its declaration summary."""
+        egg_app._display_verbosity = "min"
+        state = egg_app._new_static_hidden_details_state()
+        call_message = {
+            'role': 'assistant',
+            'content': '',
+            'msg_id': 'call_message',
+            'tool_calls': [{
+                'id': 'call_note',
+                'function': {
+                    'name': tool_name,
+                    'arguments': '{"message":"Progress note"}',
+                },
+            }],
+        }
+        note_message = {
+            'role': 'assistant',
+            'content': 'Progress note',
+            'answer_user_preserve_turn': True,
+            'tool_call_id': 'call_note',
+            'msg_id': 'note_message',
+            **note_extra,
+        }
+
+        assert egg_app._static_transcript_message_renderables(call_message, state) == []
+        note_items = egg_app._static_transcript_message_renderables(note_message, state)
+
+        assert len(note_items) == 2
+        assert note_items[0].kind == 'min_summary'
+        assert 'Assistant Note' in str(getattr(note_items[1].renderable, 'title', ''))
+        summary = state['summary']
+        assert summary.has_activity() is False
+
     def test_display_verbosity_min_prints_conversation_and_hidden_summary(self, egg_app, monkeypatch):
         """Min static view should summarize hidden details between visible messages."""
         from eggthreads import append_message, create_snapshot
@@ -2249,6 +2301,12 @@ class TestTranscriptScrollbackSource:
     def _fallback_rows(item, _width):
         return [str(item.fallback)]
 
+    @staticmethod
+    def _rendered_rows(item, width):
+        console = Console(record=True, width=width)
+        console.print(item.renderable)
+        return console.export_text(styles=False).splitlines()
+
     def test_bottom_window_renders_only_enough_tail_blocks(self, egg_app, monkeypatch):
         """A bottom viewport request should not render the full transcript."""
         from egg.panels import TranscriptScrollbackSource, _StaticTranscriptRenderable
@@ -2526,6 +2584,118 @@ class TestTranscriptScrollbackSource:
         # Only one summary row
         summary_rows = [r for r in rows if "Executed" in r or "got" in r]
         assert len(summary_rows) == 1, f"Expected 1 aggregated summary row, got {len(summary_rows)}: {summary_rows}"
+
+    @pytest.mark.parametrize(
+        ("tool_name", "note_extra", "result_text"),
+        [
+            (
+                "answer_user_while_preserving_llm_turn",
+                {"source_tool_name": "answer_user_while_preserving_llm_turn"},
+                "Interim answer shown to user.",
+            ),
+            (
+                "get_user_message_while_preserving_llm_turn",
+                {
+                    "source_tool_name": "get_user_message_while_preserving_llm_turn",
+                    "awaiting_user_message_tool_call_id": "call-preserve",
+                },
+                "The Practical Guide",
+            ),
+        ],
+    )
+    def test_min_lazy_preserve_turn_result_stays_after_note_before_later_group(
+        self,
+        egg_app,
+        monkeypatch,
+        tool_name,
+        note_extra,
+        result_text,
+    ):
+        """Reverse paging preserves call → note → result → later-call ordering."""
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        egg_app._display_verbosity = "min"
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [{
+                    "id": "call-preserve",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": {"message": "Progress note"},
+                    },
+                }],
+            },
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "Progress note",
+            extra={
+                "answer_user_preserve_turn": True,
+                "tool_call_id": "call-preserve",
+                **note_extra,
+            },
+        )
+        if tool_name == "get_user_message_while_preserving_llm_turn":
+            append_message(
+                egg_app.db,
+                egg_app.current_thread,
+                "user",
+                "The Practical Guide",
+                extra={
+                    "no_api": True,
+                    "keep_user_turn": True,
+                    "consumed_by_tool_name": tool_name,
+                    "consumed_by_tool_call_id": "call-preserve",
+                },
+            )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            result_text,
+            extra={"name": tool_name, "tool_call_id": "call-preserve"},
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [{
+                    "id": "call-bash",
+                    "function": {"name": "bash", "arguments": {"script": "pwd"}},
+                }],
+            },
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            "/tmp/project",
+            extra={"name": "bash", "tool_call_id": "call-bash"},
+        )
+        create_snapshot(egg_app.db, egg_app.current_thread)
+        egg_app._show_record_ids = {}
+
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        monkeypatch.setattr(source, "_render_static_transcript_item_rows", self._rendered_rows)
+        text = "\n".join(source.rows_from_bottom(120, bottom_offset=0, height=1000))
+
+        preserve_call_index = text.index(f"calls [{tool_name}(")
+        note_index = text.index("Progress note", preserve_call_index)
+        preserve_result_index = text.index(f"results [{tool_name}(", note_index)
+        later_call_index = text.index("calls [bash(", preserve_result_index)
+        assert preserve_call_index < note_index < preserve_result_index < later_call_index
+        if tool_name == "get_user_message_while_preserving_llm_turn":
+            reply_index = text.index("The Practical Guide", note_index)
+            assert note_index < reply_index < preserve_result_index
 
     def test_min_lazy_render_loads_snapshot_token_stats_once(self, egg_app, monkeypatch):
         """Min scrollback rendering should not parse large snapshot JSON per block."""
