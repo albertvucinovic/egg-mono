@@ -553,7 +553,6 @@ EGGW_COMMAND_COMPLETIONS: List[str] = [
     '/imageGenerate',
     *FRONTEND_EDITOR_COMMAND_COMPLETIONS,
     # Web-only options.
-    '/rename',
     '/theme',
 ]
 

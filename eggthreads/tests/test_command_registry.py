@@ -694,6 +694,7 @@ def test_thread_ui_commands_are_registered_handlers(tmp_path, monkeypatch) -> No
 
     assert registry.get("thread").handler is thread_ui.thread_command
     assert registry.get("threads").handler is thread_ui.threads_command
+    assert registry.get("rename").handler is thread_ui.rename_thread_command
     assert registry.get("newThread").handler is thread_ui.new_thread_command
     assert registry.get("deleteThread").handler is thread_ui.delete_thread_command
     assert registry.get("duplicateThread").handler is thread_ui.duplicate_thread_command
@@ -706,6 +707,15 @@ def test_thread_ui_commands_are_registered_handlers(tmp_path, monkeypatch) -> No
 
     registry.execute("parentThread", make_context())
     assert current["thread_id"] == root
+
+    result = registry.execute("rename", make_context(), "  renamed root  ")
+    assert db.get_thread(root).name == "renamed root"
+    assert result.message == "Thread renamed to: renamed root"
+    assert result.data == {"name": "renamed root"}
+
+    result = registry.execute("rename", make_context())
+    assert result.clear_input is False
+    assert result.message == "Usage: /rename <new name>\nCurrent name: renamed root"
 
     registry.execute("listChildren", make_context())
     registry.execute("threads", make_context())
@@ -1087,6 +1097,7 @@ def test_default_help_groups_threads_agents_and_subagents() -> None:
     section = text.split("Threads/Agents/Subagents:", 1)[1].split("\n  Diagnostics:", 1)[0]
     for command in [
         "/threads",
+        "/rename <new name>",
         "/spawnChildThread <text>",
         "/spawnAutoApprovedChildThread <text>",
         "/waitForThreads <threads>",

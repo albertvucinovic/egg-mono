@@ -17,6 +17,7 @@ from eggthreads import (
     list_children_with_meta,
     get_parent,
     duplicate_thread,
+    rename_thread,
     current_thread_model,
     thread_state,
     parse_quick_start_args,
@@ -239,11 +240,7 @@ async def update_thread(thread_id: str, name: Optional[str] = None):
         raise HTTPException(status_code=404, detail="Thread not found")
 
     if name is not None:
-        core.db.conn.execute(
-            "UPDATE threads SET name = ? WHERE thread_id = ?",
-            (name, thread_id)
-        )
-        core.db.conn.commit()
+        rename_thread(core.db, thread_id, name)
 
     t = core.db.get_thread(thread_id)
     children = list_children_ids(core.db, t.thread_id)

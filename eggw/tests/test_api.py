@@ -3661,12 +3661,29 @@ class TestCommands:
         assert "EggW-only commands:" in data["message"]
         assert "/theme [name]" in data["message"]
         assert "/togglePanel <chat|threads|system>" in data["message"]
-        assert "/rename <name>" in data["message"]
+        assert "/rename <new name>" in data["message"]
         assert "/editAnswer [msg_id|suffix|text]" in data["message"]
         assert "/editor" in data["message"]
         assert "/spawn <context>" not in data["message"]
         assert "/redraw — No-op in EggW" in data["message"]
         assert "/displayMode — Terminal-only" in data["message"]
+
+    def test_execute_rename_command_uses_shared_thread_command(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Before"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/rename After"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["message"] == "Thread renamed to: After"
+        assert data["data"] == {"name": "After"}
+        assert data["command_name"] == "rename"
+        assert client.get(f"/api/threads/{thread_id}").json()["name"] == "After"
 
     def test_btw_command_uses_shared_preserve_turn_handler(self, client, monkeypatch):
         """EggW /btw queues the shared preserve-turn request for the assistant."""
@@ -4070,7 +4087,6 @@ class TestAutocomplete:
         from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, create_default_command_registry
 
         extra_eggw_commands = {
-            "rename",
             "theme",
             "attach",
             "attachments",
@@ -4203,6 +4219,7 @@ class TestAutocomplete:
         terminal_egg_commands = set(registry.names(include_aliases=True))
         eggw_commands = {command.removeprefix("/") for command in EGGW_COMMAND_COMPLETIONS}
 
+        assert "rename" in terminal_egg_commands
         assert terminal_egg_commands - eggw_commands == set()
 
     def test_session_command_autocomplete(self, client):

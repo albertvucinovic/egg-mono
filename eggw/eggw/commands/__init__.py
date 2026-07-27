@@ -12,7 +12,6 @@ from .thread import (
     cmd_delete_thread,
     cmd_duplicate_thread,
     cmd_continue,
-    cmd_rename,
     cmd_spawn_auto_approved,
 )
 from .model import cmd_model, cmd_update_all_models
@@ -89,6 +88,7 @@ _SHARED_COMMAND_ADAPTER_COMMANDS = {
     "outputOptimizerOn",
     "outputOptimizerOff",
     "outputOptimizerMode",
+    "rename",
 }
 
 
@@ -136,7 +136,6 @@ __all__ = [
     "cmd_delete_thread",
     "cmd_duplicate_thread",
     "cmd_continue",
-    "cmd_rename",
     "cmd_spawn_auto_approved",
     # Model commands
     "cmd_model",
@@ -279,7 +278,7 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
         elif command_name == "setAutoCompactThreshold":
             return await cmd_set_auto_compact_threshold(thread_id, command_arg)
         elif command_name == "rename":
-            return await cmd_rename(thread_id, command_arg)
+            return _execute_shared_command(thread_id, command_name, command_arg)
         elif command_name == "cost":
             return await cmd_cost(thread_id)
         elif command_name == "attach":

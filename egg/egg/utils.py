@@ -26,7 +26,7 @@ Commands:
   Threads/Agents/Subagents:
     /spawnChildThread <text>, /spawnAutoApprovedChildThread <text>, /waitForThreads <threads>
     /parentThread, /listChildren, /threads, /thread <selector>
-    /deleteThread <selector>, /newThread <name>, /duplicateThread <name>
+    /rename <new name>, /deleteThread <selector>, /newThread <name>, /duplicateThread <name>
     /continue [msg_id], /context, /compact [msg_id|last_user|last_llm]
     /compactWithSummary, /setAutoCompactThreshold <tokens>
     /setThreadPriority ..., /schedulers

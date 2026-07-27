@@ -96,6 +96,7 @@ from .autocomplete_manager import AutocompleteSidecarManager
 from .api import (
     validate_model_handle,
     create_root_thread,
+    rename_thread,
     create_child_thread,
     append_message,
     append_normal_user_message,
@@ -484,7 +485,7 @@ __all__ = [
     'ShowRecordCandidate', 'ShowRecordResolution', 'list_show_record_candidates',
     'compact_record_id_suffixes', 'resolve_show_record', 'shortest_unique_record_id_suffix', 'show_record_completion_items', 'show_record_target',
     'set_default_tool_timeout', 'get_default_tool_timeout',
-    'validate_model_handle', 'create_root_thread', 'create_child_thread', 'append_message', 'append_normal_user_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable', 'get_thread_status', 'get_thread_statuses_bulk', 'get_thread_auto_approval_status',
+    'validate_model_handle', 'create_root_thread', 'rename_thread', 'create_child_thread', 'append_message', 'append_normal_user_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable', 'get_thread_status', 'get_thread_statuses_bulk', 'get_thread_auto_approval_status',
     'list_threads', 'list_root_threads', 'get_parent', 'list_children_with_meta', 'list_children_ids', 'get_thread_tree', 'resolve_thread_tree_root', 'serialize_thread_tree', 'parse_thread_tree_request', 'thread_tree_response', 'serialize_thread_tree_response', 'current_open_invoke',
     'create_snapshot', 'create_snapshot_async',
     'current_thread_model', 'current_thread_model_info', 'duplicate_thread', 'duplicate_thread_up_to',

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -441,29 +440,6 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
         )
     else:
         return CommandResponse(success=False, message=result.message)
-
-
-async def cmd_rename(thread_id: str, new_name: str) -> CommandResponse:
-    """Handle /rename command."""
-    if not new_name:
-        t = core.db.get_thread(thread_id)
-        current_name = t.name if t and t.name else "(no name)"
-        return CommandResponse(
-            success=False,
-            message=f"Usage: /rename <new name>\nCurrent name: {current_name}",
-        )
-
-    core.db.conn.execute(
-        "UPDATE threads SET name = ? WHERE thread_id = ?",
-        (new_name, thread_id)
-    )
-    core.db.conn.commit()
-
-    return CommandResponse(
-        success=True,
-        message=f"Thread renamed to: {new_name}",
-        data={"name": new_name},
-    )
 
 
 async def cmd_spawn_auto_approved(thread_id: str, context: str) -> CommandResponse:

@@ -32,6 +32,25 @@ class TestNewThreadCommand:
         assert egg_app.current_thread is not None
 
 
+class TestRenameThreadCommand:
+    """Tests for /rename through CommandRegistry dispatch."""
+
+    def test_renames_current_thread(self, egg_app):
+        egg_app.handle_command("/rename My renamed thread")
+
+        assert egg_app.db.get_thread(egg_app.current_thread).name == "My renamed thread"
+        assert any("Thread renamed to: My renamed thread" in message for message in egg_app._system_log)
+
+    def test_without_name_shows_usage_and_current_name(self, egg_app):
+        egg_app.handle_command("/rename")
+
+        assert egg_app.db.get_thread(egg_app.current_thread).name == "Root"
+        assert any(
+            "Usage: /rename <new name>\nCurrent name: Root" in message
+            for message in egg_app._system_log
+        )
+
+
 class TestSpawnChildThreadCommand:
     """Tests for /spawnChildThread through CommandRegistry dispatch."""
 

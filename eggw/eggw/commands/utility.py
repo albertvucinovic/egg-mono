@@ -442,7 +442,6 @@ def cmd_help() -> CommandResponse:
     help_text += """
 
 EggW-only commands:
-    /rename <name> — Rename the current thread.
     /theme [name] — List or switch browser themes.
     /togglePanel <chat|threads|system> — Show or hide an EggW panel.
 

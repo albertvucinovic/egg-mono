@@ -318,6 +318,34 @@ def thread_command(context: Any, arg: str):
     return CommandResult(clear_input=True, switched_thread=new_thread, start_schedulers=(new_thread,))
 
 
+def rename_thread_command(context: Any, arg: str):
+    from ..api import rename_thread
+    from ..command_catalog import CommandResult
+
+    target = _target(context, "rename")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, current_thread = target
+    new_name = (arg or "").strip()
+    if not new_name:
+        thread = db.get_thread(current_thread)
+        current_name = thread.name if thread and thread.name else "(no name)"
+        return CommandResult(
+            clear_input=False,
+            message=f"Usage: /rename <new name>\nCurrent name: {current_name}",
+        )
+
+    try:
+        rename_thread(db, current_thread, new_name)
+    except Exception as exc:
+        return CommandResult(clear_input=False, message=f"/rename error: {exc}")
+    return CommandResult(
+        clear_input=True,
+        message=f"Thread renamed to: {new_name}",
+        data={"name": new_name},
+    )
+
+
 def delete_thread_command(context: Any, arg: str):
     from ..api import delete_thread, list_threads
     from ..command_catalog import CommandResult
@@ -496,6 +524,7 @@ def register_thread_ui_commands(registry: Any) -> None:
 
     registry.register(CommandSpec("threads", threads_command, category="threads", usage="/threads [selector] [status=fast|full]", description="List all threads or one selected subtree with real-time status."))
     registry.register(CommandSpec("thread", thread_command, category="threads", usage="/thread <selector>", description="Switch to a thread."))
+    registry.register(CommandSpec("rename", rename_thread_command, category="threads", usage="/rename <new name>", description="Rename the current thread."))
     registry.register(CommandSpec("newThread", new_thread_command, category="threads", usage="/newThread <name>", description="Create a new root thread."))
     registry.register(CommandSpec("deleteThread", delete_thread_command, category="threads", usage="/deleteThread <selector>", description="Delete a thread."))
     registry.register(CommandSpec("duplicateThread", duplicate_thread_command, category="threads", usage="/duplicateThread <name> [msg_id]", description="Duplicate the current thread."))
@@ -552,6 +581,7 @@ __all__ = [
     "list_children_command",
     "new_thread_command",
     "parent_thread_command",
+    "rename_thread_command",
     "register_thread_ui_commands",
     "register_threads_tool",
     "resolve_thread_selector",

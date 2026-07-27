@@ -344,6 +344,20 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
     return tid
 
 
+def rename_thread(db: ThreadsDB, thread_id: str, name: str) -> None:
+    """Set the human-readable name of an existing thread.
+
+    Raises:
+        ValueError: If ``thread_id`` does not identify an existing thread.
+    """
+    cursor = db.conn.execute(
+        "UPDATE threads SET name = ? WHERE thread_id = ?",
+        (name, thread_id),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError(f"Thread not found: {thread_id}")
+
+
 def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = None, initial_model_key: Optional[str] = None,
                         models_path: str = "models.json", all_models_path: str | None = None,
                         inherit_tools_config: bool = True) -> str:

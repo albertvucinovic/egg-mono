@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from eggthreads import ThreadsDB
+from eggthreads import ThreadsDB, rename_thread
 
 
 def _make_temp_db(tmp_path) -> tuple[ThreadsDB, Path]:
@@ -57,6 +57,22 @@ def test_create_and_get_thread_round_trip(tmp_path) -> None:
     assert row.status == "active"
     assert row.snapshot_json in (None, "")
     assert row.snapshot_last_event_seq == -1
+
+
+def test_rename_thread_updates_existing_thread(tmp_path) -> None:
+    db, _ = _make_temp_db(tmp_path)
+    db.create_thread(thread_id="thread-1", name="Before")
+
+    rename_thread(db, "thread-1", "After")
+
+    assert db.get_thread("thread-1").name == "After"
+
+
+def test_rename_thread_rejects_unknown_thread(tmp_path) -> None:
+    db, _ = _make_temp_db(tmp_path)
+
+    with pytest.raises(ValueError, match="Thread not found: missing"):
+        rename_thread(db, "missing", "After")
 
 
 def test_child_relationship_via_children_table(tmp_path) -> None:

@@ -124,6 +124,13 @@ Args:
 Returns:
     The new thread's unique ID (ULID format).
 
+### `rename_thread(db: 'ThreadsDB', thread_id: 'str', name: 'str') -> 'None'`
+
+Set the human-readable name of an existing thread.
+
+Raises:
+    ValueError: If `thread_id` does not identify an existing thread.
+
 ### `create_child_thread(db: 'ThreadsDB', parent_id: 'str', name: 'Optional[str]' = None, initial_model_key: 'Optional[str]' = None, models_path: 'str' = 'models.json', all_models_path: 'str | None' = None, inherit_tools_config: 'bool' = True) -> 'str'`
 
 Create a child thread branching from a parent thread.

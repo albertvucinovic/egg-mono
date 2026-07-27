@@ -661,7 +661,12 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
     except Exception:
         current_tid = None
 
-    def _finish(items: List[Dict[str, str]], *, include_filesystem: bool = True) -> List[Dict[str, str]]:
+    def _finish(
+        items: List[Dict[str, str]],
+        *,
+        include_filesystem: bool = True,
+        limit: int = 50,
+    ) -> List[Dict[str, str]]:
         return merge_completion_items(
             items,
             global_completion_items(
@@ -669,9 +674,9 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 current_tid,
                 prefix,
                 include_filesystem=include_filesystem,
-                limit=50,
+                limit=limit,
             ),
-            limit=50,
+            limit=limit,
         )
 
     def _last_token(s: str) -> str:
@@ -681,7 +686,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         m = re.search(r"([\w\-.:/~]+)$", s_stripped)
         return m.group(1) if m else ""
 
-    def _mk_items(cands: List[str], base: str) -> List[Dict[str, str]]:
+    def _mk_items(cands: List[str], base: str, *, limit: int = 50) -> List[Dict[str, str]]:
         items: List[Dict[str, str]] = []
         seen = set()
         base_l = base or ""
@@ -706,7 +711,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             if rep:
                 it["replace"] = str(rep)
             items.append(it)
-        return items[:50]
+        return items[:limit]
 
     def _fs_items(token: str) -> List[Dict[str, str]]:
         try:
@@ -739,13 +744,21 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         sp = prefix.find(' ')
         if sp == -1:
             # Complete command name
+            command_names = [
+                *command_completion_names(command_registry),
+                *FRONTEND_EDITOR_COMMAND_COMPLETIONS,
+            ]
+            # Do not silently drop registered commands merely because the
+            # command catalog grew beyond the generic completion result cap.
+            command_limit = max(50, len(command_names))
             return _finish(
                 _mk_items([
                     c
-                    for c in [*command_completion_names(command_registry), *FRONTEND_EDITOR_COMMAND_COMPLETIONS]
+                    for c in command_names
                     if c.startswith(prefix)
-                ], prefix),
+                ], prefix, limit=command_limit),
                 include_filesystem=False,
+                limit=command_limit,
             )
 
         cmd = prefix[:sp]
