@@ -835,6 +835,139 @@ def test_actor_critic_recovery_continues_interrupted_turn(tmp_path, monkeypatch)
     assert trigger_id in continuation[0]
 
 
+def test_actor_critic_recover_uses_current_evaluation_runtime(tmp_path):
+    from eggopt import ActorCritic, Agent
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+    from eggthreads import append_message, create_child_thread, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    evaluation_id = create_root_thread(db, name="Evaluation")
+    critic_id = create_child_thread(db, evaluation_id, name="Critic")
+    actor_id = create_child_thread(db, critic_id, name="Actor")
+    trigger_id = append_message(
+        db,
+        actor_id,
+        "user",
+        "Answer.",
+        extra={"eggopt_actor_critic_key": "turn-key"},
+    )
+    runtime_key = "actor-critic-recovery-runtime"
+    _bind_evaluation_runtime(runtime_key, db)
+    interaction = ActorCritic(
+        actor=Agent(object(), {"role": "actor"}),
+        critic=Agent(object(), {"role": "critic"}),
+        actor_prompt=lambda _round, _state: "Answer.",
+        critic_prompt=lambda _round, _state: "Review.",
+        max_rounds=1,
+    )
+    with _evaluation_scope(
+        {
+            "evaluation_thread_id": evaluation_id,
+            "_runtime_key": runtime_key,
+            "_evaluation_key": "evaluation-key",
+            "_context_limit": None,
+        }
+    ):
+        cache_key = interaction.get_cache_key()
+        assert interaction.recover() is True
+        assert interaction.get_cache_key() == cache_key
+
+    continuation = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='control.interrupt' "
+        "AND json_extract(payload_json, '$.purpose')='continue'",
+        (actor_id,),
+    ).fetchone()
+    assert continuation is not None
+    assert trigger_id in continuation[0]
+
+
+def test_actor_critic_recovery_recovers_actor_and_agent_critic(tmp_path):
+    from eggopt import ActorCritic, Agent
+    from eggthreads import append_message, create_child_thread, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    evaluation_id = create_root_thread(db, name="Evaluation")
+    critic_id = create_child_thread(db, evaluation_id, name="Critic")
+    actor_id = create_child_thread(db, critic_id, name="Actor")
+    actor_trigger = append_message(
+        db,
+        actor_id,
+        "user",
+        "Answer.",
+        extra={"eggopt_actor_critic_key": "actor-turn"},
+    )
+    critic_trigger = append_message(
+        db,
+        critic_id,
+        "user",
+        "Review.",
+        extra={"eggopt_actor_critic_key": "critic-turn"},
+    )
+    interaction = ActorCritic(
+        actor=Agent(object(), {"role": "actor"}),
+        critic=Agent(object(), {"role": "critic"}),
+        actor_prompt=lambda _round, _state: "Answer.",
+        critic_prompt=lambda _round, _state: "Review.",
+        max_rounds=1,
+    )
+
+    assert interaction.recover_interaction(db, evaluation_id, None) is True
+
+    continuations = db.conn.execute(
+        "SELECT thread_id, payload_json FROM events WHERE type='control.interrupt' "
+        "AND json_extract(payload_json, '$.purpose')='continue'"
+    ).fetchall()
+    assert {row[0] for row in continuations} == {actor_id, critic_id}
+    assert any(actor_trigger in row[1] for row in continuations)
+    assert any(critic_trigger in row[1] for row in continuations)
+
+
+def test_actor_critic_recovery_checks_both_agents_even_if_actor_refuses(
+    tmp_path, monkeypatch
+):
+    from eggopt import ActorCritic, Agent
+    from eggthreads import append_message, create_child_thread, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    evaluation_id = create_root_thread(db, name="Evaluation")
+    critic_id = create_child_thread(db, evaluation_id, name="Critic")
+    actor_id = create_child_thread(db, critic_id, name="Actor")
+    append_message(
+        db,
+        actor_id,
+        "user",
+        "Answer.",
+        extra={"eggopt_actor_critic_key": "actor-turn"},
+    )
+    append_message(
+        db,
+        critic_id,
+        "user",
+        "Review.",
+        extra={"eggopt_actor_critic_key": "critic-turn"},
+    )
+    recovered_threads = []
+
+    def recover(interaction):
+        recovered_threads.append(interaction.thread_id)
+        return interaction.thread_id != actor_id
+
+    monkeypatch.setattr("eggopt.actor_critic.InteractionRecovery.recover", recover)
+    interaction = ActorCritic(
+        actor=Agent(object(), {"role": "actor"}),
+        critic=Agent(object(), {"role": "critic"}),
+        actor_prompt=lambda _round, _state: "Answer.",
+        critic_prompt=lambda _round, _state: "Review.",
+        max_rounds=1,
+    )
+
+    assert interaction.recover_interaction(db, evaluation_id, None) is False
+    assert recovered_threads == [actor_id, critic_id]
+
+
 def test_actor_critic_recovery_repairs_structurally_unhealthy_turn(
     tmp_path, monkeypatch
 ):
@@ -917,10 +1050,13 @@ def test_actor_critic_recovery_does_not_continue_completed_turn(tmp_path):
     )
 
     assert interaction.recover_interaction(db, evaluation_id, None) is True
-    assert db.conn.execute(
-        "SELECT 1 FROM events WHERE thread_id=? AND type='control.interrupt'",
-        (actor_id,),
-    ).fetchone() is None
+    assert (
+        db.conn.execute(
+            "SELECT 1 FROM events WHERE thread_id=? AND type='control.interrupt'",
+            (actor_id,),
+        ).fetchone()
+        is None
+    )
 
 
 def test_actor_critic_recovery_keeps_context_limit_terminal(tmp_path, monkeypatch):
@@ -1467,6 +1603,108 @@ class ScriptedMutationLLM:
             "content": next(self.replies),
             "stop_reason": "end_turn",
         }
+
+
+class InterruptedMutationLLM(ScriptedMutationLLM):
+    async def astream_chat(self, *_args, **_kwargs):
+        self.calls += 1
+        self.models.append(self.current_model_key)
+        if self.calls == 1:
+            return
+        yield {
+            "type": "message",
+            "role": "assistant",
+            "content": next(self.replies),
+            "stop_reason": "end_turn",
+        }
+
+
+@pytest.mark.parametrize("failed_status", ["FAILED", "RUNNING"])
+def test_interrupted_mutation_recovers_same_actor_critic_interaction_on_restart(
+    tmp_path, monkeypatch, failed_status
+):
+    import json
+
+    from eggflow import TaskError
+    from eggopt import Mutator
+
+    monkeypatch.chdir(tmp_path)
+    llm = InterruptedMutationLLM([json.dumps({"mutations": [{"instruction": "1"}]})])
+    evaluator = Evaluator()
+    cfg = GEPAConfig(
+        run_dir=tmp_path / "mutation-recovery",
+        max_candidates=1,
+        max_evaluator_calls=4,
+        mutation_minibatch_size=1,
+        parents_per_candidate=1,
+        minibatch_acceptance="improvement_or_equal",
+        mutator=Mutator.eggthreads(
+            llm=llm,
+            identity={"model": "interrupted-mutation"},
+            instruction="Improve the instruction.",
+            model_key="mutation-model",
+            allowed_tools=set(),
+        ),
+        evaluator_identity={"name": "mutation-recovery-test"},
+        case_id=lambda case: case["id"],
+    )
+    arguments = {
+        "evaluator": evaluator,
+        "dataset": [{"id": "one", "target": 1}],
+        "objective": "Reach the target.",
+        "config": cfg,
+    }
+
+    with pytest.raises(TaskError, match="settled without a final answer"):
+        optimize_anything({"instruction": "0"}, **arguments)
+
+    if failed_status == "RUNNING":
+        import sqlite3
+
+        with sqlite3.connect(cfg.run_dir / ".egg" / "flow.db") as flow:
+            flow.execute(
+                "UPDATE tasks SET status='RUNNING' "
+                "WHERE cache_key LIKE 'eggopt.%' AND status='FAILED'"
+            )
+
+    db = ThreadsDB(cfg.run_dir / ".egg" / "threads.sqlite")
+    try:
+        mutation_id = next(
+            thread.thread_id for thread in list_threads(db) if thread.name == "Mutation"
+        )
+        original_prompt = db.conn.execute(
+            "SELECT msg_id FROM events WHERE thread_id=? AND type='msg.create' "
+            "AND json_extract(payload_json, '$.role')='user' "
+            "AND json_extract(payload_json, '$.eggopt_actor_critic_key') IS NOT NULL",
+            (mutation_id,),
+        ).fetchone()[0]
+    finally:
+        db.close()
+
+    result = optimize_anything({"instruction": "0"}, **arguments)
+
+    assert result.best_candidate == {"instruction": "1"}
+    assert llm.calls == 2
+    assert llm.models == ["mutation-model", "mutation-model"]
+    db = ThreadsDB(cfg.run_dir / ".egg" / "threads.sqlite")
+    try:
+        continuation = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? "
+            "AND type='control.interrupt' "
+            "AND json_extract(payload_json, '$.purpose')='continue'",
+            (mutation_id,),
+        ).fetchone()
+        assert continuation is not None
+        assert original_prompt in continuation[0]
+        prompts = db.conn.execute(
+            "SELECT count(*) FROM events WHERE thread_id=? AND type='msg.create' "
+            "AND json_extract(payload_json, '$.eggopt_actor_critic_key') IS NOT NULL "
+            "AND json_extract(payload_json, '$.role')='user'",
+            (mutation_id,),
+        ).fetchone()[0]
+        assert prompts == 1
+    finally:
+        db.close()
 
 
 def test_mutation_uses_actor_critic_with_deterministic_validation(

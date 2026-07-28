@@ -163,13 +163,30 @@ class ActorCritic(Task):
         names = self.names or ("Actor", "Critic")
         critic_id = _named_child(db, evaluation_id, names[1])
         actor_id = _named_child(db, critic_id, names[0]) if critic_id else None
-        if actor_id is None:
-            return True
-        return _recover_latest_interaction(
-            db,
-            actor_id,
-            self.actor.context_limit or context_limit,
-            f"ActorCritic {names[0]}",
+        recovered = True
+        if actor_id is not None:
+            recovered = _recover_latest_interaction(
+                db,
+                actor_id,
+                self.actor.context_limit or context_limit,
+                f"ActorCritic {names[0]}",
+            )
+        if isinstance(self.critic, Agent) and critic_id is not None:
+            critic_recovered = _recover_latest_interaction(
+                db,
+                critic_id,
+                self.critic.context_limit or context_limit,
+                f"ActorCritic {names[1]}",
+            )
+            recovered = recovered and critic_recovered
+        return recovered
+
+    def recover(self) -> bool:
+        context = _current_evaluation()
+        return self.recover_interaction(
+            _evaluation_runtime(str(context["_runtime_key"])),
+            str(context["evaluation_thread_id"]),
+            _current_evaluation_context_limit(),
         )
 
     def run(self):
