@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 authors = [{ name = "Entropy Gradient" }]
 license = { file = "LICENSE" }
 dependencies = [
+  "aiohttp>=3.9",
   "requests>=2.31",
 ]
 classifiers = [
