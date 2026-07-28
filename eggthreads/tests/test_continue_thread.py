@@ -271,6 +271,43 @@ class TestRA1BoundaryReset:
         assert ra.kind == "RA1_llm"
         assert ra.msg_id == user_msg_id
 
+    def test_noarg_manual_continue_ignores_broad_diagnosis_target(self, tmp_path, monkeypatch):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        old = append_message(db, tid, "user", "old boundary")
+        tail = append_message(db, tid, "assistant", "valuable tail")
+        before = db.max_event_seq(tid)
+
+        monkeypatch.setattr(
+            "eggthreads.api.diagnose_thread",
+            lambda *_args, **_kwargs: pytest.fail("plain manual continue used broad diagnosis"),
+        )
+
+        result = continue_thread_manually(db, tid)
+
+        assert result.success is False
+        assert result.continue_from_msg_id is None
+        assert result.skipped_msg_ids == []
+        assert "explicit message ID" in result.message
+        assert db.max_event_seq(tid) == before
+        assert [message["msg_id"] for message in create_snapshot(db, tid)["messages"]] == [old, tail]
+
+    def test_manual_continue_with_explicit_target_still_rewinds(self, tmp_path):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "discard me")
+
+        result = continue_thread_manually(db, tid, msg_id=anchor)
+
+        assert result.success is True
+        assert result.continue_from_msg_id == anchor
+        assert tail in result.skipped_msg_ids
+        messages = create_snapshot(db, tid)["messages"]
+        assert messages[0]["msg_id"] == anchor
+        assert messages[-1].get("recovery_notice") is True
+        assert not any(message["msg_id"] == tail for message in messages)
+
     def test_manual_continue_retries_user_after_cancel_with_recovery_notice(self, tmp_path):
         """A local recovery notice after a cancelled pending RA1 must not hide U1."""
         db, _ = _make_temp_db(tmp_path)
@@ -312,6 +349,7 @@ class TestRA1BoundaryReset:
         result = continue_thread(db, tid)
         assert result.success is True
         assert result.continue_from_msg_id is None
+
 
 
 class TestSkippedMessages:

@@ -1011,11 +1011,30 @@ def continue_thread_manually(
 ) -> ContinueResult:
     """Apply manual continue semantics and append the local recovery notice.
 
-    This is the user/tool-facing wrapper for explicit manual continuation.  It
-    keeps the core ``continue_thread`` mutation reusable while ensuring UI
-    ``/continue`` and tool-based continuation leave the same preserved audit
+    This is the user/tool-facing wrapper for manual continuation. With an
+    explicit message ID it performs the requested rewind. Without one it only
+    retries an unambiguous failed user/tool turn and otherwise fails closed.
+    Successful UI and tool-based continuation leave the same preserved audit
     notice summarizing skipped provider failures.
     """
+
+    if msg_id is None:
+        # Broad diagnosis also repairs historical protocol anomalies, but it is
+        # unsafe as an implicit rewind boundary: one old anomaly can select a
+        # months-old message and discard an unrelated suffix. Plain /continue
+        # only auto-selects the narrow failed user/tool turn recognized here.
+        retry = _manual_continue_retry_trigger(db, thread_id)
+        if retry is None:
+            return ContinueResult(
+                success=False,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message=(
+                    "No unambiguous failed user/tool turn was found. "
+                    "No messages were changed; pass an explicit message ID to rewind history."
+                ),
+            )
+        msg_id = str(retry['msg_id'])
 
     result = continue_thread(db, thread_id, msg_id=msg_id)
     if result.success:
