@@ -259,7 +259,7 @@ class TestRA1BoundaryReset:
 
         messages = create_snapshot(db, tid)["messages"]
         notices = [msg for msg in messages if msg.get("recovery_notice")]
-        assert any("auto-continue stopped" in msg.get("content", "") for msg in notices)
+        assert not any("auto-continue stopped" in msg.get("content", "") for msg in notices)
         assert any(
             "manual /continue" in msg.get("content", "")
             and "Previous error: LLM/runner error: HTTP 400 Bad Request" in msg.get("content", "")
@@ -395,8 +395,8 @@ class TestDiagnoseAndContinue:
         assert "system=1" in notice["content"]
         assert "Previous error: LLM/runner error: provider exploded" in notice["content"]
 
-    def test_recovery_notice_survives_later_continue(self, tmp_path):
-        """Local recovery notices are not skipped by subsequent continues."""
+    def test_recovery_notice_in_old_suffix_is_skipped_by_later_continue(self, tmp_path):
+        """A recovery notice is audit history, not an exception to rewind."""
         db, _ = _make_temp_db(tmp_path)
         tid = create_root_thread(db, name="test")
 
@@ -410,11 +410,28 @@ class TestDiagnoseAndContinue:
         append_message(db, tid, "assistant", "Second answer")
         second = continue_thread(db, tid, first_user)
         assert second.success is True
-        assert notice_id not in second.skipped_msg_ids
+        assert notice_id in second.skipped_msg_ids
         assert second_user in second.skipped_msg_ids
 
         messages = create_snapshot(db, tid)["messages"]
-        assert any(msg.get("msg_id") == notice_id for msg in messages)
+        assert not any(msg.get("msg_id") == notice_id for msg in messages)
+
+    def test_repeated_continue_skips_messages_appended_after_first_rewind(self, tmp_path):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        first_old = append_message(db, tid, "assistant", "first old answer")
+
+        first = continue_thread(db, tid, msg_id=anchor)
+        assert first.success is True
+        assert first_old in first.skipped_msg_ids
+
+        second_old = append_message(db, tid, "assistant", "second old answer")
+        second = continue_thread(db, tid, msg_id=anchor)
+
+        assert second.success is True
+        assert second_old in second.skipped_msg_ids
+        assert [message.get("msg_id") for message in create_snapshot(db, tid)["messages"]] == [anchor]
 
     def test_diagnose_ignores_recovery_notice_error_text(self, tmp_path):
         """Recovery notices are not interpreted as provider/system errors."""

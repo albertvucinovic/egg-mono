@@ -97,21 +97,6 @@ def _payload_from_json(value: Any) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def continuation_preserves_message(payload: Dict[str, Any]) -> bool:
-    """Return whether continuation leaves one message create effective."""
-
-    return bool(
-        isinstance(payload, dict)
-        and (payload.get("preserve_on_continue") or payload.get("recovery_notice"))
-    )
-
-
-def continuation_would_skip_message(payload: Dict[str, Any]) -> bool:
-    """Shared conservative predicate for continuation mutation and fences."""
-
-    return not continuation_preserves_message(payload)
-
-
 def continuation_message_rows_after(
     db: Any,
     thread_id: str,
@@ -708,7 +693,11 @@ def check_recovery_fence(
         if str(msg_id or "") == source_msg_id:
             continue
         payload = _payload_from_json(payload_json)
-        if not continuation_would_skip_message(payload):
+        # Recovery's own scheduled/status notices are expected between the
+        # failed source and the atomic continuation attempt. They are still
+        # part of the old suffix and will be skipped if continuation applies;
+        # they simply are not evidence of competing external activity.
+        if payload.get("recovery_notice"):
             continue
         role = payload.get("role")
         if role == "user":
@@ -789,8 +778,6 @@ __all__ = [
     "RecoverySource",
     "check_recovery_fence",
     "continuation_message_rows_after",
-    "continuation_preserves_message",
-    "continuation_would_skip_message",
     "classify_failure_payload",
     "classify_failure_text",
     "find_latest_recovery_source_after",

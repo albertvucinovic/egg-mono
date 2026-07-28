@@ -1138,7 +1138,6 @@ class AutoCompactionThresholdResolution:
 
 def _compaction_skipped_and_deleted_msg_ids(db: ThreadsDB, thread_id: str) -> tuple[set[str], set[str]]:
     skipped: set[str] = set()
-    preserved: set[str] = set()
     deleted: set[str] = set()
     cur = db.conn.execute(
         "SELECT type, msg_id, payload_json FROM events WHERE thread_id=? AND type IN ('msg.edit', 'msg.delete')",
@@ -1156,9 +1155,6 @@ def _compaction_skipped_and_deleted_msg_ids(db: ThreadsDB, thread_id: str) -> tu
             payload = {}
         if isinstance(payload, dict) and payload.get('skipped_on_continue'):
             skipped.add(str(msg_id))
-        if isinstance(payload, dict) and payload.get('preserve_on_continue'):
-            preserved.add(str(msg_id))
-    skipped.difference_update(preserved)
     return skipped, deleted
 
 
@@ -2989,10 +2985,7 @@ def _continue_thread_mutation(
 ) -> ContinueResult:
     """Apply validated continuation writes in the caller's transaction."""
 
-    from .runner_recovery import (
-        continuation_message_rows_after,
-        continuation_would_skip_message,
-    )
+    from .runner_recovery import continuation_message_rows_after
 
     continue_seq = _get_event_seq_for_msg_id(db, thread_id, str(msg_id))
     if continue_seq is None:
@@ -3003,16 +2996,7 @@ def _continue_thread_mutation(
             message=f"Message not found: {msg_id}",
         )
 
-    terminalize_superseded_get_user_waits(
-        db,
-        thread_id,
-        authoritative_tool_call_id=None,
-        content="Wait superseded by thread continuation.",
-        reason="Superseded by thread continuation",
-    )
-
     already_skipped: set = set()
-    preserve_on_continue: set = set()
     rows = db.conn.execute(
         "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
         (thread_id,),
@@ -3024,20 +3008,12 @@ def _continue_thread_mutation(
             edit_payload = {}
         if edit_payload.get('skipped_on_continue'):
             already_skipped.add(edit_msg_id)
-        if edit_payload.get('preserve_on_continue'):
-            preserve_on_continue.add(edit_msg_id)
 
     rows = continuation_message_rows_after(db, thread_id, int(continue_seq))
     skipped_msg_ids = []
     continue_event_id = _ulid_like()
-    for _event_seq, row_msg_id, payload_json in rows:
-        if row_msg_id is None or row_msg_id in already_skipped or row_msg_id in preserve_on_continue:
-            continue
-        try:
-            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
-        except Exception:
-            payload = {}
-        if not continuation_would_skip_message(payload):
+    for _event_seq, row_msg_id, _payload_json in rows:
+        if row_msg_id is None or row_msg_id in already_skipped:
             continue
         db.append_event(
             event_id=_ulid_like(),
@@ -4676,33 +4652,6 @@ def _get_user_wait_candidates(db: ThreadsDB, thread_id: str):
     return get_user_wait_candidates(db, thread_id)
 
 
-def _preserve_get_user_message_ids(
-    db: ThreadsDB,
-    thread_id: str,
-    msg_ids: set[str],
-) -> None:
-    """Lazily undo legacy continue skips for one exact lifecycle."""
-
-    for msg_id in sorted(value for value in msg_ids if value):
-        already_preserved = db.conn.execute(
-            """
-            SELECT 1 FROM events
-             WHERE thread_id=? AND msg_id=? AND type='msg.edit'
-               AND json_extract(payload_json, '$.preserve_on_continue')=1
-             LIMIT 1
-            """,
-            (thread_id, msg_id),
-        ).fetchone()
-        if already_preserved is None:
-            db.append_event(
-                event_id=_ulid_like(),
-                thread_id=thread_id,
-                type_="msg.edit",
-                msg_id=msg_id,
-                payload={"preserve_on_continue": True},
-            )
-
-
 def _append_get_user_terminal_result(
     db: ThreadsDB,
     thread_id: str,
@@ -4715,32 +4664,10 @@ def _append_get_user_terminal_result(
     """Terminalize one exact get-user call with normal durable lifecycle state."""
 
     from .tool_output import ToolOutputPublicationPlan, ToolOutputStateConflict, finalize_tool_output
-    from .tool_state import build_tool_call_states
 
     tool_call_id = str(tc.tool_call_id)
     if tc.name != GET_USER_MESSAGE_TOOL_NAME or tc.parent_role != "assistant":
         return False
-
-    legacy_hidden = bool(
-        tc.parent_skipped_on_continue
-        or tc.waiting_note_skipped_on_continue
-        or tc.result_skipped_on_continue
-    )
-    preserve_msg_ids = {
-        str(tc.parent_msg_id or ""),
-        str(tc.waiting_note_msg_id or ""),
-        str(tc.result_msg_id or ""),
-    }
-    _preserve_get_user_message_ids(db, thread_id, preserve_msg_ids)
-    if legacy_hidden:
-        # Preservation changes effective replay. Reload the same exact call so
-        # pre-repair lifecycle events/results become authoritative again.
-        refreshed = build_tool_call_states(db, thread_id).get(tool_call_id)
-        if refreshed is None:
-            return False
-        tc = refreshed
-        if tc.published:
-            return True
 
     if tc.published or tc.state not in {"TC2.1", "TC3", "TC4", "TC5"}:
         return False
@@ -4808,7 +4735,7 @@ def _append_get_user_terminal_result(
     # A result discovered during repair is exact-ID authority; never append a
     # duplicate even if malformed legacy ordering kept it unpublished.
     if tc.result_msg_id:
-        return legacy_hidden
+        return False
 
     payload: Dict[str, Any] = {
         "role": "tool",

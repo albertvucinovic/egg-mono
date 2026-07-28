@@ -152,7 +152,7 @@ def test_snapshot_seed_plus_tail_matches_full_replay_for_edit_delete_continue_an
 
     assert accelerated.started_from_snapshot_event_seq == snapshot_seq
     assert _message_signature(accelerated) == _message_signature(full)
-    assert [message.msg_id for message in accelerated.messages] == [keep, preserved]
+    assert [message.msg_id for message in accelerated.messages] == [keep]
     keep_view = accelerated.messages[0]
     assert keep_view.payload["content"] == "after"
     assert keep_view.payload["provider_specific"] == {"signature": "abc"}
@@ -161,7 +161,11 @@ def test_snapshot_seed_plus_tail_matches_full_replay_for_edit_delete_continue_an
     assert keep_view.last_event_seq > keep_view.created_event_seq
     assert next(message for message in accelerated.message_states if message.msg_id == deleted).deleted is True
     assert next(message for message in accelerated.message_states if message.msg_id == skipped).skipped_on_continue is True
-    assert accelerated.messages[1].payload["provider_blob"] == {"opaque": [1, 2]}
+    preserved_state = next(
+        message for message in accelerated.message_states if message.msg_id == preserved
+    )
+    assert preserved_state.skipped_on_continue is True
+    assert preserved_state.payload["provider_blob"] == {"opaque": [1, 2]}
 
 
 def test_invalid_or_stale_legacy_snapshot_is_optional_and_full_replay_repairs_it(tmp_path) -> None:
