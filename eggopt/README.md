@@ -64,3 +64,47 @@ available to each case evaluator. `Mutator.eggthreads(context_limit=...)` does t
 same for Mutation. Eggthreads provider-context compaction remains independent.
 
 Use `plan_optimization(...)` to estimate evaluator work before choosing limits.
+
+## PhysicsStrategy
+
+`PhysicsStrategy` is a durable observe → hypothesize → test → deliberate →
+execute loop. It prescribes no world-model, hypothesis, action, or evidence
+types: each role constructs an Eggflow `Task` and may be deterministic,
+ActorCritic-backed, GEPA-backed, or another Task graph.
+
+```python
+from eggopt import PhysicsStrategy
+
+physics = PhysicsStrategy(
+    observe=observe_task,
+    hypothesize=hypothesize_task,
+    test=test_task,
+    deliberate=deliberate_task,
+    execute=execute_task,
+    identity={"name": "my-physics", "version": 1},
+)
+
+result = physics.run(run_dir="runs/my-physics", max_actions=50)
+```
+
+The Timeline is append-only. A commitment is durably produced before its
+opaque intents execute one at a time. After each real transition, `test`
+returns `None` to keep the remaining queue or feedback to abort it and revise
+the hypotheses. Thus reality always outranks the model.
+
+Wrap domain effects in `PhysicsEffect` when their calls and results should also
+form one readable history on the shared Environment thread. The wrapped Task
+remains the cache/recovery boundary; no live environment handle is persisted.
+
+The default thread skeleton is deliberately small:
+
+```text
+Physics
+├── Environment
+├── Hypotheses
+└── Plan
+```
+
+Tasks, not threads, are the durable unit of work. A role may yield
+`ActorCritic`; its Critic/Actor children then live beneath the corresponding
+holding thread and retain conversation context across cached operations.

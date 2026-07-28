@@ -1,7 +1,7 @@
 """Small, durable optimization interfaces built on Eggflow and Eggthreads."""
 
 from .actor_critic import ActorCritic, ActorCriticResult, Agent
-from .context import current_evaluation
+from .context import current_evaluation, current_operation
 from .evaluation import Evaluation
 from .gepa import (
     GEPA,
@@ -12,10 +12,11 @@ from .gepa import (
     optimize_anything,
     plan_optimization,
 )
+from .physics import PhysicsEffect, PhysicsResult, PhysicsStrategy, run_physics
 from .recovery import InteractionRecovery, InteractionRecoveryError
 from .thread_tool import ThreadTool
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "ActorCritic",
     "ActorCriticResult",
     "Agent",
@@ -26,9 +27,14 @@ __all__ = [
     "InteractionRecovery",
     "InteractionRecoveryError",
     "Mutator",
+    "PhysicsEffect",
+    "PhysicsResult",
+    "PhysicsStrategy",
     "SelectParents",
     "ThreadTool",
     "current_evaluation",
+    "current_operation",
     "optimize_anything",
     "plan_optimization",
+    "run_physics",
 ]
