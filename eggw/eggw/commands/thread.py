@@ -18,14 +18,12 @@ from eggthreads import (
     current_thread_model,
     duplicate_thread,
     duplicate_thread_up_to,
-    continue_thread,
+    continue_thread_manually,
     validate_continue_target,
     is_thread_continuable,
     interrupt_thread,
     parse_args,
 )
-from eggthreads.api import append_continue_recovery_notice
-
 from ..models import CommandResponse
 from .. import core
 from ..core import ensure_scheduler_for
@@ -392,9 +390,8 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
     if delay_sec is not None and delay_sec > 0:
         async def delayed_continue():
             await asyncio.sleep(delay_sec)
-            result = continue_thread(core.db, thread_id, msg_id=msg_id)
+            result = continue_thread_manually(core.db, thread_id, msg_id=msg_id)
             if result.success:
-                append_continue_recovery_notice(core.db, thread_id, result)
                 ensure_scheduler_for(thread_id)
 
         asyncio.create_task(delayed_continue())
@@ -408,10 +405,9 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
         )
 
     # Execute continue immediately
-    result = continue_thread(core.db, thread_id, msg_id=msg_id)
+    result = continue_thread_manually(core.db, thread_id, msg_id=msg_id)
 
     if result.success:
-        append_continue_recovery_notice(core.db, thread_id, result)
         ensure_scheduler_for(thread_id)
         msg = result.message
         if was_interrupted:

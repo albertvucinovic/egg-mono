@@ -2494,8 +2494,8 @@ class TestMessageOperations:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["success"] is True
-        assert body["data"]["was_interrupted"] is False
+        assert body["success"] is False
+        assert "explicit message ID" in body["message"]
 
         interrupts = core_state.db.conn.execute(
             "SELECT payload_json FROM events WHERE thread_id=? AND type='control.interrupt'",
@@ -2506,6 +2506,39 @@ class TestMessageOperations:
         ra = discover_runner_actionable_cached(core_state.db, thread_id)
         assert ra is not None
         assert ra.kind == "RA1_llm"
+
+    def test_web_noarg_continue_refuses_ambiguous_diagnosis_rewind(self, client):
+        """EggW uses the same fail-closed no-arg manual semantics as Egg CLI."""
+        from eggthreads import append_message, create_snapshot
+
+        create_resp = client.post("/api/threads", json={"name": "Ambiguous Continue"})
+        thread_id = create_resp.json()["id"]
+        old = append_message(core_state.db, thread_id, "user", "old boundary")
+        tail = append_message(core_state.db, thread_id, "assistant", "valuable tail")
+        before = core_state.db.max_event_seq(thread_id)
+
+        with patch("eggw.commands.thread.ensure_scheduler_for", lambda tid: None):
+            response = client.post(
+                f"/api/threads/{thread_id}/command",
+                json={"command": "/continue"},
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is False
+        assert "explicit message ID" in body["message"]
+        mutation_types = [
+            row[0]
+            for row in core_state.db.conn.execute(
+                "SELECT type FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq",
+                (thread_id, before),
+            )
+        ]
+        assert mutation_types == ["user_command.started", "user_command.finished"]
+        message_ids = [
+            message["msg_id"] for message in create_snapshot(core_state.db, thread_id)["messages"]
+        ]
+        assert message_ids[-2:] == [old, tail]
 
     def test_eggw_restarts_stale_scheduler_entry(self, client, monkeypatch):
         """A stale process-local scheduler record must not orphan a root."""

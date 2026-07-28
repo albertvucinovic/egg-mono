@@ -784,6 +784,31 @@ def test_thread_ui_continue_appends_recovery_notice(tmp_path) -> None:
     assert result.start_schedulers == (thread_id,)
 
 
+def test_thread_ui_noarg_continue_refuses_ambiguous_rewind(tmp_path) -> None:
+    from eggthreads import ThreadsDB, append_message, create_root_thread, create_snapshot
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, "continue")
+    old = append_message(db, thread_id, "user", "old boundary")
+    tail = append_message(db, thread_id, "assistant", "valuable tail")
+    logs: list[str] = []
+    before = db.max_event_seq(thread_id)
+
+    result = create_default_command_registry().execute(
+        "continue",
+        CommandContext(db=db, current_thread=thread_id, log_system=logs.append),
+    )
+
+    assert result.clear_input is False
+    assert logs and "explicit message ID" in logs[-1]
+    assert db.max_event_seq(thread_id) == before
+    assert [message["msg_id"] for message in create_snapshot(db, thread_id)["messages"]] == [
+        old,
+        tail,
+    ]
+
+
 def test_thread_ui_delayed_continue_invalid_target_is_rejected_before_scheduling(tmp_path, monkeypatch) -> None:
     from eggthreads import ThreadsDB, append_message, create_root_thread
 
