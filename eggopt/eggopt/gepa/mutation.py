@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from eggflow import Task
 
 from ..actor_critic import ActorCritic, Agent
+from ..context import _current_evaluation
 from ..identity import canonical_candidate, canonical_json, digest_payload
 from .tools import gepa_safe_tools
 
@@ -111,6 +114,7 @@ class Mutate(Task):
                 ),
                 "objective": self.objective,
                 "generation": self.generation,
+                "feedback_transport": "file-v1",
                 "full_validation_scores": json.loads(
                     canonical_json(
                         self.full_validation_scores,
@@ -127,11 +131,12 @@ class Mutate(Task):
             self.objective,
             self.full_validation_scores,
         )
+        feedback_path = request.write(self.get_cache_key())
         result = yield ActorCritic(
             actor=self.mutator.agent,
             critic=ValidateMutation(tuple(self.parents[0])),
             actor_prompt=lambda round_number, state: (
-                request.prompt(self.mutator.instruction)
+                request.prompt(self.mutator.instruction, feedback_path.name)
                 if round_number == 1
                 else state["feedback"]
             ),
@@ -150,17 +155,46 @@ class MutationRequest:
     objective: str
     full_validation_scores: tuple[Mapping[str, Any], ...] = ()
 
-    def prompt(self, instruction: str) -> str:
-        body = {
+    def document(self) -> Mapping[str, Any]:
+        return {
             "objective": self.objective,
             "selected_parents": [dict(parent) for parent in self.parents],
             "evaluation_evidence": list(self.evidence),
             "full_validation_scores": list(self.full_validation_scores),
             "components_to_update": list(self.parents[0]),
         }
+
+    def write(self, mutation_key: str) -> Path:
+        context = _current_evaluation()
+        workspace = Path(str(context["inner_context"])).resolve()
+        workspace.mkdir(parents=True, exist_ok=True)
+        expected = Path(str(context["outer_context"])).resolve()
+        if workspace != expected:
+            raise RuntimeError("mutation feedback requires one shared workspace")
+        suffix = mutation_key.rsplit(":", 1)[-1][:16]
+        path = workspace / f"feedback-{suffix}.json"
+        content = json.dumps(self.document(), indent=2, sort_keys=True) + "\n"
+        if path.exists():
+            if path.read_text(encoding="utf-8") != content:
+                raise RuntimeError(
+                    f"persisted mutation feedback contradicts {path.name}"
+                )
+            return path
+        with NamedTemporaryFile(
+            "w", dir=workspace, delete=False, encoding="utf-8"
+        ) as temporary:
+            temporary.write(content)
+            temporary_path = Path(temporary.name)
+        temporary_path.replace(path)
+        return path
+
+    def prompt(self, instruction: str, feedback_file: str) -> str:
         return (
             f"{instruction}\n\n"
-            f"{json.dumps(body, indent=2, sort_keys=True)}\n\n"
+            f"Read the complete authoritative mutation request from {feedback_file} "
+            "in your current working directory before answering. It contains the "
+            "objective, selected parents, evaluation evidence, full-validation score "
+            "history, and components to update.\n\n"
             "Return only strict JSON with exactly the key 'mutations', containing "
             "one object that updates only the listed components."
         )

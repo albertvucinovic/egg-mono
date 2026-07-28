@@ -1582,7 +1582,7 @@ def test_mutator_receives_full_validation_scores_and_selection_reason(tmp_path):
     assert "full_validation_scores" not in first_evidence
 
 
-def test_native_mutation_prompt_includes_full_validation_scores(tmp_path, monkeypatch):
+def test_native_mutation_prompt_references_feedback_files(tmp_path, monkeypatch):
     import json
 
     from eggopt import Mutator
@@ -1629,15 +1629,24 @@ def test_native_mutation_prompt_includes_full_validation_scores(tmp_path, monkey
         mutation_id = next(
             thread.thread_id for thread in list_threads(db) if thread.name == "Mutation"
         )
-        requests = [
-            json.loads(message.payload["content"].split("\n\n")[-2])
+        prompts = [
+            message.payload["content"]
             for message in load_thread_projection(db, mutation_id).messages
             if message.payload.get("role") == "user"
             and message.payload.get("eggopt_actor_critic_key")
         ]
+        workspace = tmp_path / "mutation-validation-feedback" / "workspaces" / "mutation"
+        feedback_files = sorted(workspace.glob("feedback-*.json"))
+        by_name = {path.name: json.loads(path.read_text()) for path in feedback_files}
+        requests = [
+            next(value for name, value in by_name.items() if name in prompt)
+            for prompt in prompts
+        ]
     finally:
         db.close()
 
+    assert len(prompts) == len(feedback_files) == 2
+    assert all(len(prompt) < 1_000 for prompt in prompts)
     assert requests[0]["full_validation_scores"] == [
         {
             "aggregate_score": 0.0,
@@ -1703,6 +1712,34 @@ def test_full_validation_scores_change_native_mutation_key():
     )
 
     assert first.get_cache_key() != changed.get_cache_key()
+
+
+def test_mutation_feedback_file_is_semantic_and_immutable(tmp_path):
+    import json
+
+    from eggopt.context import _evaluation_scope
+    from eggopt.gepa.mutation import MutationRequest
+
+    request = MutationRequest(
+        ({"instruction": "parent"},),
+        ({"case": "one", "feedback": "large" * 1000},),
+        "Improve.",
+        ({"candidate_number": 1, "aggregate_score": 0.5},),
+    )
+    context = {"inner_context": str(tmp_path), "outer_context": str(tmp_path)}
+    with _evaluation_scope(context):
+        first = request.write("eggopt.gepa.mutate.v1:abcdef0123456789ffff")
+        second = request.write("eggopt.gepa.mutate.v1:abcdef0123456789ffff")
+
+    assert first == second == tmp_path / "feedback-abcdef0123456789.json"
+    assert json.loads(first.read_text()) == request.document()
+    prompt = request.prompt("Improve.", first.name)
+    assert first.name in prompt
+    assert "large" not in prompt
+
+    first.write_text("{}\n")
+    with _evaluation_scope(context), pytest.raises(RuntimeError, match="contradicts"):
+        request.write("eggopt.gepa.mutate.v1:abcdef0123456789ffff")
 
 
 def test_parent_selection_is_distinct_weighted_and_reproducible():
