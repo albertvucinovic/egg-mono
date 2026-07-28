@@ -13,7 +13,9 @@ from .tools import gepa_safe_tools
 
 DEFAULT_MUTATION_SYSTEM_PROMPT = (
     "You are the mutation agent in an optimization study. Follow each user "
-    "request, analyze its evidence, and return the requested candidate mutation."
+    "request, analyze its evidence and full-validation score history, use the "
+    "parent-selection rationale to understand why each parent was chosen, and "
+    "return the requested candidate mutation."
 )
 
 
@@ -96,6 +98,7 @@ class Mutate(Task):
     evidence: tuple[Mapping[str, Any], ...]
     objective: str
     generation: int
+    full_validation_scores: tuple[Mapping[str, Any], ...] = ()
 
     def get_cache_key(self) -> str:
         return digest_payload(
@@ -108,11 +111,22 @@ class Mutate(Task):
                 ),
                 "objective": self.objective,
                 "generation": self.generation,
+                "full_validation_scores": json.loads(
+                    canonical_json(
+                        self.full_validation_scores,
+                        what="full validation scores",
+                    )
+                ),
             },
         )
 
     def run(self):
-        request = MutationRequest(self.parents, self.evidence, self.objective)
+        request = MutationRequest(
+            self.parents,
+            self.evidence,
+            self.objective,
+            self.full_validation_scores,
+        )
         result = yield ActorCritic(
             actor=self.mutator.agent,
             critic=ValidateMutation(tuple(self.parents[0])),
@@ -134,12 +148,14 @@ class MutationRequest:
     parents: tuple[Mapping[str, str], ...]
     evidence: tuple[Mapping[str, Any], ...]
     objective: str
+    full_validation_scores: tuple[Mapping[str, Any], ...] = ()
 
     def prompt(self, instruction: str) -> str:
         body = {
             "objective": self.objective,
             "selected_parents": [dict(parent) for parent in self.parents],
             "evaluation_evidence": list(self.evidence),
+            "full_validation_scores": list(self.full_validation_scores),
             "components_to_update": list(self.parents[0]),
         }
         return (

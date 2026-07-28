@@ -226,8 +226,7 @@ class SelectParents(Task):
         )
 
     def run(self) -> tuple[int, ...]:
-        fronts = _case_fronts(self.scores)
-        frequencies = Counter(index for front in fronts for index in front)
+        frequencies = _case_front_frequencies(self.scores)
         available = sorted(frequencies)
         rng = random.Random(f"{self.seed}:{self.generation}")
         chosen: list[int] = []
@@ -251,15 +250,10 @@ class GenerateCandidate(Task):
     evidence: tuple[Mapping[str, Any], ...]
     objective: str
     generation: int
+    full_validation_scores: tuple[Mapping[str, Any], ...] = ()
 
     def get_cache_key(self) -> str:
-        return Mutate(
-            self.mutator,
-            self.parents,
-            self.evidence,
-            self.objective,
-            self.generation,
-        ).get_cache_key()
+        return self._mutation().get_cache_key()
 
     def run(self):
         lead = self.parents[0]
@@ -272,14 +266,18 @@ class GenerateCandidate(Task):
             "_context_limit": self.mutator.agent.context_limit,
         }
         with _evaluation_scope(context):
-            mutation = yield Mutate(
-                self.mutator,
-                self.parents,
-                self.evidence,
-                self.objective,
-                self.generation,
-            )
+            mutation = yield self._mutation()
         return _apply_mutation(lead, mutation.updates)
+
+    def _mutation(self) -> Mutate:
+        return Mutate(
+            self.mutator,
+            self.parents,
+            self.evidence,
+            self.objective,
+            self.generation,
+            self.full_validation_scores,
+        )
 
 
 @dataclass
@@ -358,6 +356,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
         outputs = [first.outputs]
         feedback = [first.feedback]
         parents: list[tuple[int, ...]] = [()]
+        candidate_generations: list[int | None] = [None]
         calls = _completed_evaluator_calls(self.flow)
         generated = 0
 
@@ -408,8 +407,16 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 calls = _completed_evaluator_calls(self.flow)
                 parent_evaluations.append(evaluated)
 
+            validation_scores = _full_validation_scores(
+                case_scores, candidate_generations
+            )
             evidence = tuple(
-                _generation_evidence(parent_id, result, batch_ids)
+                _generation_evidence(
+                    parent_id,
+                    result,
+                    batch_ids,
+                    _selection_reason(parent_id, case_scores),
+                )
                 for parent_id, result in zip(
                     parent_ids, parent_evaluations, strict=True
                 )
@@ -428,6 +435,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                     evidence,
                     self.objective,
                     generation,
+                    validation_scores,
                 )
             else:
                 generation_task = _CustomGenerateCandidate(
@@ -498,6 +506,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             outputs.append(full.outputs)
             feedback.append(full.feedback)
             parents.append(parent_ids)
+            candidate_generations.append(generation + 1)
 
         return _result(
             candidates, case_scores, parents, outputs, feedback, calls, generated
@@ -644,6 +653,10 @@ def _case_fronts(scores: Sequence[Sequence[float]]) -> tuple[tuple[int, ...], ..
     )
 
 
+def _case_front_frequencies(scores: Sequence[Sequence[float]]) -> Counter[int]:
+    return Counter(index for front in _case_fronts(scores) for index in front)
+
+
 def _pareto_candidates(scores: Sequence[Sequence[float]]) -> tuple[int, ...]:
     return tuple(sorted({index for front in _case_fronts(scores) for index in front}))
 
@@ -665,9 +678,34 @@ def _result(candidates, case_scores, parents, outputs, feedback, calls, generate
     )
 
 
-def _generation_evidence(parent_id, evaluation, case_ids):
+def _full_validation_scores(case_scores, candidate_generations):
+    return tuple(
+        {
+            "candidate_index": index,
+            "candidate_number": index + 1,
+            "mutation_generation": generation,
+            "aggregate_score": fmean(scores),
+            "case_count": len(scores),
+        }
+        for index, (scores, generation) in enumerate(
+            zip(case_scores, candidate_generations, strict=True)
+        )
+    )
+
+
+def _selection_reason(parent_id, case_scores):
+    frequency = _case_front_frequencies(case_scores)[parent_id]
+    return (
+        "Selected from the full-validation Pareto pool by deterministic weighted "
+        f"sampling; Candidate {parent_id + 1} was best or tied-best on "
+        f"{frequency} of {len(case_scores[0])} validation cases."
+    )
+
+
+def _generation_evidence(parent_id, evaluation, case_ids, selection_reason):
     return {
         "parent_index": parent_id,
+        "selection_reason": selection_reason,
         "candidate_evaluation_thread_id": evaluation.candidate_thread_id,
         "cases": [
             {

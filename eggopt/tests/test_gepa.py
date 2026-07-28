@@ -12,6 +12,7 @@ from eggthreads import (
     list_children_with_meta,
     list_root_threads,
     list_threads,
+    load_thread_projection,
 )
 
 from eggopt import (
@@ -136,6 +137,13 @@ def test_agent_can_opt_into_tool_auto_approval():
     )
 
     assert agent.auto_approve_tools is True
+
+
+def test_default_mutation_prompt_explains_validation_and_selection_feedback():
+    from eggopt.gepa import DEFAULT_MUTATION_SYSTEM_PROMPT
+
+    assert "full-validation score history" in DEFAULT_MUTATION_SYSTEM_PROMPT
+    assert "parent-selection rationale" in DEFAULT_MUTATION_SYSTEM_PROMPT
 
 
 def test_thread_tool_reuses_public_synthetic_tool_lifecycle(tmp_path, monkeypatch):
@@ -1532,6 +1540,169 @@ def test_valset_is_distinct_and_default_dataset_mode_matches_it(tmp_path):
         assert is_descendant_thread(db, mutation_id, reflection_id)
     finally:
         db.close()
+
+
+def test_mutator_receives_full_validation_scores_and_selection_reason(tmp_path):
+    evaluator = Evaluator()
+    generator = Increment()
+    dataset = [{"id": "train", "target": 1}]
+    valset = [
+        {"id": "validation-easy", "target": 1},
+        {"id": "validation-hard", "target": 2},
+    ]
+
+    result = optimize_anything(
+        {"instruction": "0"},
+        evaluator=evaluator,
+        dataset=dataset,
+        valset=valset,
+        objective="Reach validation targets.",
+        config=config(
+            tmp_path,
+            evaluator,
+            generator,
+            max_candidates=2,
+            max_evaluator_calls=30,
+            parents_per_candidate=1,
+            minibatch_acceptance="improvement_or_equal",
+        ),
+    )
+
+    assert result.case_scores == ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0))
+    first_evidence = generator.requests[0][1][0]
+    second_evidence = generator.requests[1][1][0]
+    assert first_evidence["selection_reason"] == (
+        "Selected from the full-validation Pareto pool by deterministic weighted "
+        "sampling; Candidate 1 was best or tied-best on 2 of 2 validation cases."
+    )
+    assert second_evidence["selection_reason"] == (
+        "Selected from the full-validation Pareto pool by deterministic weighted "
+        "sampling; Candidate 2 was best or tied-best on 2 of 2 validation cases."
+    )
+    assert "full_validation_scores" not in first_evidence
+
+
+def test_native_mutation_prompt_includes_full_validation_scores(tmp_path, monkeypatch):
+    import json
+
+    from eggopt import Mutator
+
+    monkeypatch.chdir(tmp_path)
+    llm = ScriptedMutationLLM(
+        [
+            json.dumps({"mutations": [{"instruction": "1"}]}),
+            json.dumps({"mutations": [{"instruction": "2"}]}),
+        ]
+    )
+    evaluator = Evaluator()
+    optimize_anything(
+        {"instruction": "0"},
+        evaluator=evaluator,
+        dataset=[{"id": "train", "target": 1}],
+        valset=[
+            {"id": "validation-easy", "target": 1},
+            {"id": "validation-hard", "target": 2},
+        ],
+        objective="Reach validation targets.",
+        config=GEPAConfig(
+            run_dir=tmp_path / "mutation-validation-feedback",
+            max_candidates=2,
+            max_evaluator_calls=30,
+            mutation_minibatch_size=1,
+            parents_per_candidate=1,
+            minibatch_acceptance="improvement_or_equal",
+            mutator=Mutator.eggthreads(
+                llm=llm,
+                identity={"model": "validation-feedback"},
+                instruction="Improve the instruction.",
+                allowed_tools=set(),
+            ),
+            evaluator_identity={"name": "mutation-validation-feedback-test"},
+            case_id=lambda case: case["id"],
+        ),
+    )
+
+    db = ThreadsDB(
+        tmp_path / "mutation-validation-feedback" / ".egg" / "threads.sqlite"
+    )
+    try:
+        mutation_id = next(
+            thread.thread_id for thread in list_threads(db) if thread.name == "Mutation"
+        )
+        requests = [
+            json.loads(message.payload["content"].split("\n\n")[-2])
+            for message in load_thread_projection(db, mutation_id).messages
+            if message.payload.get("role") == "user"
+            and message.payload.get("eggopt_actor_critic_key")
+        ]
+    finally:
+        db.close()
+
+    assert requests[0]["full_validation_scores"] == [
+        {
+            "aggregate_score": 0.0,
+            "candidate_index": 0,
+            "candidate_number": 1,
+            "case_count": 2,
+            "mutation_generation": None,
+        }
+    ]
+    assert requests[1]["full_validation_scores"] == [
+        requests[0]["full_validation_scores"][0],
+        {
+            "aggregate_score": 0.5,
+            "candidate_index": 1,
+            "candidate_number": 2,
+            "case_count": 2,
+            "mutation_generation": 1,
+        },
+    ]
+    assert "full_validation_score" not in requests[1]["evaluation_evidence"][0]
+    assert (
+        "best or tied-best" in requests[1]["evaluation_evidence"][0]["selection_reason"]
+    )
+
+
+def test_full_validation_scores_change_native_mutation_key():
+    from eggopt.gepa import Mutate, Mutator
+
+    mutator = Mutator(
+        Agent(object(), {"model": "mutation-key"}),
+        "Improve the candidate.",
+    )
+    arguments = (
+        mutator,
+        ({"instruction": "0"},),
+        ({"parent_index": 0, "cases": []},),
+        "Improve.",
+        0,
+    )
+    first = Mutate(
+        *arguments,
+        (
+            {
+                "candidate_index": 0,
+                "candidate_number": 1,
+                "mutation_generation": None,
+                "aggregate_score": 0.0,
+                "case_count": 2,
+            },
+        ),
+    )
+    changed = Mutate(
+        *arguments,
+        (
+            {
+                "candidate_index": 0,
+                "candidate_number": 1,
+                "mutation_generation": None,
+                "aggregate_score": 0.5,
+                "case_count": 2,
+            },
+        ),
+    )
+
+    assert first.get_cache_key() != changed.get_cache_key()
 
 
 def test_parent_selection_is_distinct_weighted_and_reproducible():
