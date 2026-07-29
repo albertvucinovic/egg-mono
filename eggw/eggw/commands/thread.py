@@ -388,9 +388,21 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
 
     # If delay requested, schedule the continue for later
     if delay_sec is not None and delay_sec > 0:
+        scheduled_max_event_seq = core.db.max_event_seq(thread_id)
+        if scheduled_max_event_seq < 0:
+            return CommandResponse(
+                success=False,
+                message="Could not capture thread state for delayed continuation",
+            )
+
         async def delayed_continue():
             await asyncio.sleep(delay_sec)
-            result = continue_thread_manually(core.db, thread_id, msg_id=msg_id)
+            result = continue_thread_manually(
+                core.db,
+                thread_id,
+                msg_id=msg_id,
+                expected_max_event_seq=scheduled_max_event_seq,
+            )
             if result.success:
                 ensure_scheduler_for(thread_id)
 

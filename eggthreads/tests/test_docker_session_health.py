@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import eggthreads as ts
+import pytest
 import eggthreads.session as session
 from eggthreads.builtin_plugins.session import format_session_status
 from eggthreads.session_runtime import sessiond
@@ -79,6 +80,10 @@ def test_daemon_status_snapshot_reports_generation_requests_channels_and_activit
         payload = json.loads(status_path.read_text())
         assert payload["daemon_generation"] == sessiond.DAEMON_GENERATION
         assert payload["channel_reaping"]["runtime_version"] == sessiond.CHANNEL_REAPER_RUNTIME_VERSION
+        assert payload["channel_reaping"]["child_subreaper_supported"] is (
+            sessiond.sys.platform == "linux"
+        )
+        assert payload["channel_reaping"]["child_subreaper_enabled"] is sessiond._SUBREAPER_ENABLED
         assert payload["active_requests"] == [{
             "request_id": "req-a",
             "language": "python",
@@ -716,3 +721,27 @@ def test_reap_failed_status_is_valid_but_session_is_unhealthy(tmp_path, monkeypa
     assert status.status == "unhealthy"
     assert status.reason == "channel_containment_failure"
     assert "python:unsafe" in status.message
+
+
+@pytest.mark.skipif(sessiond.sys.platform != "linux", reason="Linux subreaper semantics")
+def test_linux_status_rejects_unavailable_child_subreaper(tmp_path, monkeypatch):
+    db, thread_id, session_id = _configured_docker_session(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        session, "_docker_container_state",
+        lambda _name: session._DockerContainerState(True, True, "running"),
+    )
+    _write_health(
+        session_id,
+        channel_reaping={
+            "runtime_version": session._CHANNEL_REAPER_RUNTIME_VERSION,
+            "enabled": False,
+            "idle_timeout_sec": None,
+            "child_subreaper_supported": True,
+            "child_subreaper_enabled": False,
+        },
+    )
+
+    status = ts.get_thread_session_status(db, thread_id)
+
+    assert status.status == "unhealthy"
+    assert "subreaper" in status.message

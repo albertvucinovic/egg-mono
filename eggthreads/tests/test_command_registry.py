@@ -833,9 +833,53 @@ def test_thread_ui_delayed_continue_invalid_target_is_rejected_before_scheduling
     )
 
     assert result.clear_input is False
-    assert logs == ["/continue error: Message not found: missing"]
+    assert logs == ["/continue error: Message not found in effective thread history: missing"]
     assert scheduled == []
     assert db.max_event_seq(thread_id) == before
+
+
+def test_thread_ui_delayed_continue_cancels_after_newer_activity(tmp_path, monkeypatch) -> None:
+    from eggthreads import ThreadsDB, append_message, create_root_thread, create_snapshot
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, "root")
+    anchor = append_message(db, thread_id, "user", "anchor")
+    append_message(db, thread_id, "assistant", "old tail")
+    logs: list[str] = []
+    scheduled: list[object] = []
+
+    class Loop:
+        def create_task(self, coroutine):
+            scheduled.append(coroutine)
+
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: Loop())
+    result = create_default_command_registry().execute(
+        "continue",
+        CommandContext(db=db, current_thread=thread_id, log_system=logs.append),
+        f"{anchor} wait=1",
+    )
+    assert result.clear_input is True
+    assert len(scheduled) == 1
+
+    newer = append_message(db, thread_id, "user", "arrived after scheduling")
+
+    async def run_scheduled() -> None:
+        original_sleep = asyncio.sleep
+
+        async def immediate_sleep(_delay):
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", immediate_sleep)
+        try:
+            await scheduled[0]
+        finally:
+            monkeypatch.setattr(asyncio, "sleep", original_sleep)
+
+    asyncio.run(run_scheduled())
+
+    assert any("thread changed" in message for message in logs)
+    assert newer in [message["msg_id"] for message in create_snapshot(db, thread_id)["messages"]]
 
 
 def test_subagent_commands_are_registered_handlers(tmp_path, monkeypatch) -> None:

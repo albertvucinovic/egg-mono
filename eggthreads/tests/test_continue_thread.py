@@ -7,6 +7,7 @@ These tests verify that crash recovery works correctly:
 4. list_active_threads respects lease expiration
 """
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from eggthreads import (
     create_child_thread,
     append_message,
     create_snapshot,
+    delete_message,
     diagnose_thread,
     continue_thread,
     continue_thread_manually,
@@ -51,11 +53,19 @@ def _ulid_like() -> str:
 class TestLeaseExpiration:
     """Tests for lease expiration handling in recovery."""
 
+    def test_continue_missing_thread_returns_failure(self, tmp_path):
+        db, _ = _make_temp_db(tmp_path)
+
+        result = continue_thread(db, "missing-thread", "missing-message")
+
+        assert result.success is False
+        assert result.message == "Thread not found: missing-thread"
+
     def test_continue_thread_proceeds_with_expired_lease(self, tmp_path):
         """continue_thread should proceed if lease is expired."""
         db, _ = _make_temp_db(tmp_path)
         tid = create_root_thread(db, name="test")
-        append_message(db, tid, "user", "Hello")
+        anchor = append_message(db, tid, "user", "Hello")
 
         # Simulate a stale lease (expired 1 minute ago)
         expired_time = (_utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -65,9 +75,72 @@ class TestLeaseExpiration:
         )
 
         # continue_thread should succeed despite the stale lease
-        result = continue_thread(db, tid)
+        result = continue_thread(db, tid, anchor)
         assert result.success is True
-        assert "healthy" in result.message.lower() or result.success
+
+    def test_continue_thread_fails_closed_when_lease_authority_is_unreadable(
+        self, tmp_path,
+    ):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "keep me")
+        real_conn = db.conn
+
+        class FailingLeaseConnection:
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+            def execute(self, sql, params=()):
+                if "FROM open_streams" in sql:
+                    raise RuntimeError("lease state unavailable")
+                return real_conn.execute(sql, params)
+
+        db.conn = FailingLeaseConnection()
+
+        result = continue_thread(db, tid, anchor)
+
+        assert result.success is False
+        assert "Could not verify" in result.message
+        db.conn = real_conn
+        assert [message["msg_id"] for message in create_snapshot(db, tid)["messages"]] == [
+            anchor,
+            tail,
+        ]
+
+    def test_continue_rejects_deleted_or_already_skipped_targets(self, tmp_path):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        skipped = append_message(db, tid, "assistant", "skipped")
+        deleted = append_message(db, tid, "user", "deleted")
+        assert continue_thread(db, tid, anchor).success is True
+        delete_message(db, tid, deleted)
+
+        for target in (skipped, deleted):
+            result = continue_thread(db, tid, target)
+            assert result.success is False
+            assert "effective thread history" in result.message
+
+    def test_continue_rolls_back_when_skip_authority_is_malformed(
+        self, tmp_path,
+    ):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "keep me")
+        db.conn.execute(
+            "INSERT INTO events(event_id, thread_id, type, msg_id, payload_json) "
+            "VALUES (?, ?, 'msg.edit', ?, ?)",
+            (_ulid_like(), tid, tail, "{broken"),
+        )
+        before = db.max_event_seq(tid)
+
+        result = continue_thread(db, tid, anchor)
+
+        assert result.success is False
+        assert "validate continue target" in result.message
+        assert db.max_event_seq(tid) == before
 
     def test_continue_thread_blocks_with_active_lease(self, tmp_path):
         """continue_thread should fail if lease is still active."""
@@ -83,7 +156,7 @@ class TestLeaseExpiration:
         )
 
         # continue_thread should fail
-        result = continue_thread(db, tid)
+        result = continue_thread(db, tid, "missing")
         assert result.success is False
         assert "running" in result.message.lower()
 
@@ -186,7 +259,7 @@ class TestRA1BoundaryReset:
         assert diagnosis.suggested_continue_point == user_msg_id
         assert diagnosis.details["stuck_ra1_trigger_msg_id"] == user_msg_id
 
-        result = continue_thread(db, tid)
+        result = continue_thread_manually(db, tid)
         assert result.success is True
         assert result.continue_from_msg_id == user_msg_id
 
@@ -271,6 +344,90 @@ class TestRA1BoundaryReset:
         assert ra.kind == "RA1_llm"
         assert ra.msg_id == user_msg_id
 
+    def test_manual_continue_retries_after_auto_retry_exhausts_on_overload(self, tmp_path):
+        """A later overload supersedes the auto-continue reset that retried it."""
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        trigger = append_message(db, tid, "user", "Hello")
+        first_error = append_message(
+            db, tid, "system", "LLM/runner error: server_is_overloaded",
+            extra={"no_api": True, "runner_error": True},
+        )
+        scheduled = append_recovery_notice(
+            db, tid, "Recovery: auto-continue scheduled.",
+            extra={"auto_continue": True, "action": "scheduled", "trigger_msg_id": trigger},
+        )
+        automatic = continue_thread(db, tid, trigger)
+        retry_invoke = _ulid_like()
+        db.append_event(
+            _ulid_like(), tid, "stream.open", {"stream_kind": "llm"},
+            msg_id=_ulid_like(), invoke_id=retry_invoke,
+        )
+        applied = append_recovery_notice(
+            db, tid, "Recovery: auto-continue applied.",
+            extra={"auto_continue": True, "action": "applied", "trigger_msg_id": trigger},
+        )
+        second_error = append_message(
+            db, tid, "system", "LLM/runner error: server_is_overloaded",
+            extra={"no_api": True, "runner_error": True},
+        )
+        db.append_event(_ulid_like(), tid, "stream.close", {}, invoke_id=retry_invoke)
+        stopped = append_recovery_notice(
+            db, tid, "Recovery: auto-continue stopped; attempt cap reached.",
+            extra={"auto_continue": True, "action": "stopped", "trigger_msg_id": trigger},
+        )
+
+        result = continue_thread_manually(db, tid)
+
+        assert result.success is True
+        assert result.continue_from_msg_id == trigger
+        assert {first_error, scheduled} <= set(automatic.skipped_msg_ids)
+        assert {applied, second_error, stopped} <= set(result.skipped_msg_ids)
+        assert trigger not in result.skipped_msg_ids
+        ra = discover_runner_actionable(db, tid)
+        assert ra is not None and ra.kind == "RA1_llm" and ra.msg_id == trigger
+
+    def test_manual_continue_rolls_back_rewind_when_notice_fails(
+        self, tmp_path, monkeypatch,
+    ):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "keep me")
+        monkeypatch.setattr(
+            "eggthreads.api.append_message",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("notice failed")),
+        )
+
+        with pytest.raises(RuntimeError, match="notice failed"):
+            continue_thread_manually(db, tid, anchor)
+
+        assert [message["msg_id"] for message in create_snapshot(db, tid)["messages"]] == [
+            anchor,
+            tail,
+        ]
+
+    def test_continue_rolls_back_rewind_when_snapshot_fails(
+        self, tmp_path, monkeypatch,
+    ):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "keep me")
+        monkeypatch.setattr(
+            "eggthreads.api.create_snapshot",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("snapshot failed")),
+        )
+
+        with pytest.raises(RuntimeError, match="snapshot failed"):
+            continue_thread(db, tid, anchor)
+
+        monkeypatch.undo()
+        assert [message["msg_id"] for message in create_snapshot(db, tid)["messages"]] == [
+            anchor,
+            tail,
+        ]
+
     def test_noarg_manual_continue_ignores_broad_diagnosis_target(self, tmp_path, monkeypatch):
         db, _ = _make_temp_db(tmp_path)
         tid = create_root_thread(db, name="test")
@@ -291,6 +448,272 @@ class TestRA1BoundaryReset:
         assert "explicit message ID" in result.message
         assert db.max_event_seq(tid) == before
         assert [message["msg_id"] for message in create_snapshot(db, tid)["messages"]] == [old, tail]
+
+    @pytest.mark.parametrize(
+        "failed_authority",
+        [
+            "actionable",
+            "message_edits",
+            "malformed_message_edit",
+            "messages",
+            "malformed_message",
+            "interrupts",
+            "malformed_interrupt",
+        ],
+    )
+    def test_noarg_manual_continue_fails_closed_when_authority_is_unreadable(
+        self, tmp_path, monkeypatch, failed_authority,
+    ):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "retry me")
+        append_message(
+            db,
+            tid,
+            "system",
+            "LLM/runner error: server_is_overloaded",
+            extra={"no_api": True, "runner_error": True},
+        )
+        before = db.max_event_seq(tid)
+        real_conn = db.conn
+
+        if failed_authority == "actionable":
+            monkeypatch.setattr(
+                "eggthreads.tool_state.discover_runner_actionable_cached",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("RA unreadable")),
+            )
+        else:
+            class FailingInterruptConnection:
+                def __getattr__(self, name):
+                    return getattr(real_conn, name)
+
+                def execute(self, sql, params=()):
+                    should_fail = (
+                        failed_authority == "message_edits"
+                        and "type IN ('msg.edit', 'msg.delete')" in sql
+                    ) or (
+                        failed_authority == "messages"
+                        and "type='msg.create' ORDER BY event_seq ASC" in sql
+                    ) or (
+                        failed_authority == "interrupts"
+                        and "type='control.interrupt'" in sql
+                    )
+                    if should_fail:
+                        raise RuntimeError(f"{failed_authority} authority unreadable")
+                    cursor = real_conn.execute(sql, params)
+                    if (
+                        failed_authority == "malformed_message_edit"
+                        and "type IN ('msg.edit', 'msg.delete')" in sql
+                    ):
+                        rows = list(cursor.fetchall())
+                        rows.append(("msg.edit", anchor, "{broken"))
+                        return type("Rows", (), {"fetchall": lambda self: rows})()
+                    if (
+                        failed_authority == "malformed_message"
+                        and "type='msg.create' ORDER BY event_seq ASC" in sql
+                    ):
+                        rows = list(cursor.fetchall())
+                        event_seq, msg_id, _payload = rows[0]
+                        rows[0] = (event_seq, msg_id, "{broken")
+                        return type("Rows", (), {"fetchall": lambda self: rows})()
+                    if (
+                        failed_authority == "malformed_interrupt"
+                        and "type='control.interrupt'" in sql
+                    ):
+                        rows = list(cursor.fetchall())
+                        if not rows:
+                            rows = [(before + 1, "{broken")]
+                        else:
+                            event_seq, _payload = rows[0]
+                            rows[0] = (event_seq, "{broken")
+                        return type("Rows", (), {"fetchall": lambda self: rows})()
+                    return cursor
+
+            db.conn = FailingInterruptConnection()
+
+        try:
+            result = continue_thread_manually(db, tid)
+        finally:
+            db.conn = real_conn
+
+        assert result.success is False
+        assert result.continue_from_msg_id is None
+        assert result.skipped_msg_ids == []
+        assert db.max_event_seq(tid) == before
+        assert anchor in [message["msg_id"] for message in create_snapshot(db, tid)["messages"]]
+
+    def test_expected_event_fence_is_checked_inside_continue_savepoint(
+        self, tmp_path, monkeypatch,
+    ):
+        db, db_path = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "keep me")
+        expected = db.max_event_seq(tid)
+        other = ThreadsDB(db_path)
+        real_conn = db.conn
+        raced = {"msg_id": None}
+
+        class RacingConnection:
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+            def execute(self, sql, params=()):
+                if "UPDATE threads SET status=status" in sql and raced["msg_id"] is None:
+                    raced["msg_id"] = append_message(other, tid, "user", "raced activity")
+                return real_conn.execute(sql, params)
+
+        db.conn = RacingConnection()
+        try:
+            result = continue_thread_manually(
+                db,
+                tid,
+                anchor,
+                expected_max_event_seq=expected,
+            )
+        finally:
+            db.conn = real_conn
+            other.close()
+
+        assert result.success is False
+        assert result.message == "Thread changed after continuation was scheduled"
+        assert raced["msg_id"] is not None
+        assert [message["msg_id"] for message in create_snapshot(db, tid)["messages"]] == [
+            anchor,
+            tail,
+            raced["msg_id"],
+        ]
+
+    def test_immediate_manual_continue_fences_target_selection_race(
+        self, tmp_path, monkeypatch,
+    ):
+        db, db_path = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "keep me")
+        other = ThreadsDB(db_path)
+        real_conn = db.conn
+        raced = {"msg_id": None}
+
+        class RacingConnection:
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+            def execute(self, sql, params=()):
+                if "UPDATE threads SET status=status" in sql and raced["msg_id"] is None:
+                    raced["msg_id"] = append_message(other, tid, "user", "raced activity")
+                return real_conn.execute(sql, params)
+
+        db.conn = RacingConnection()
+        try:
+            result = continue_thread_manually(db, tid, anchor)
+        finally:
+            db.conn = real_conn
+            other.close()
+
+        assert result.success is False
+        assert result.message == "Thread changed after continuation was scheduled"
+        assert [message["msg_id"] for message in create_snapshot(db, tid)["messages"]] == [
+            anchor,
+            tail,
+            raced["msg_id"],
+        ]
+
+    def test_delayed_continue_uses_atomic_event_fence(self, tmp_path, monkeypatch):
+        from eggthreads import continue_thread_async
+
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "keep me")
+
+        async def append_while_waiting(_delay):
+            append_message(db, tid, "user", "new activity")
+
+        monkeypatch.setattr(asyncio, "sleep", append_while_waiting)
+        result = asyncio.run(continue_thread_async(db, tid, anchor, delay_sec=1))
+
+        assert result.success is False
+        assert result.message == "Thread changed after continuation was scheduled"
+        assert [message["msg_id"] for message in create_snapshot(db, tid)["messages"]][:2] == [
+            anchor,
+            tail,
+        ]
+
+    def test_low_level_continue_apis_require_explicit_target(self, tmp_path):
+        from eggthreads import continue_thread_async
+
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        append_message(db, tid, "user", "anchor")
+        before = db.max_event_seq(tid)
+
+        direct = continue_thread(db, tid)
+        delayed = asyncio.run(continue_thread_async(db, tid, delay_sec=0))
+
+        assert direct.success is False
+        assert delayed.success is False
+        assert "explicit message ID" in direct.message
+        assert "explicit message ID" in delayed.message
+        assert db.max_event_seq(tid) == before
+
+    def test_delayed_continue_allows_its_command_audit_completion(
+        self, tmp_path,
+    ):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "discard me")
+        command_id = "scheduled-continue"
+        db.append_event(
+            _ulid_like(),
+            tid,
+            "user_command.started",
+            {"command_id": command_id, "command_name": "continue"},
+        )
+        expected = db.max_event_seq(tid)
+        db.append_event(
+            _ulid_like(),
+            tid,
+            "user_command.finished",
+            {"command_id": command_id, "command_name": "continue", "success": True},
+        )
+
+        result = continue_thread_manually(
+            db,
+            tid,
+            anchor,
+            expected_max_event_seq=expected,
+        )
+
+        assert result.success is True
+        assert tail in result.skipped_msg_ids
+
+    def test_delayed_continue_rejects_unmatched_command_audit_completion(
+        self, tmp_path,
+    ):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+        anchor = append_message(db, tid, "user", "anchor")
+        tail = append_message(db, tid, "assistant", "keep me")
+        expected = db.max_event_seq(tid)
+        db.append_event(
+            _ulid_like(),
+            tid,
+            "user_command.finished",
+            {"command_id": "unmatched", "command_name": "other", "success": True},
+        )
+
+        result = continue_thread_manually(
+            db,
+            tid,
+            anchor,
+            expected_max_event_seq=expected,
+        )
+
+        assert result.success is False
+        assert result.message == "Thread changed after continuation was scheduled"
+        assert tail in [message["msg_id"] for message in create_snapshot(db, tid)["messages"]]
 
     def test_manual_continue_with_explicit_target_still_rewinds(self, tmp_path):
         db, _ = _make_temp_db(tmp_path)
@@ -346,8 +769,8 @@ class TestRA1BoundaryReset:
 
         diagnosis = diagnose_thread(db, tid)
         assert diagnosis.is_healthy is True
-        result = continue_thread(db, tid)
-        assert result.success is True
+        result = continue_thread_manually(db, tid)
+        assert result.success is False
         assert result.continue_from_msg_id is None
 
 
@@ -484,8 +907,8 @@ class TestDiagnoseAndContinue:
         assert diagnosis.is_healthy is True
         assert "last_error" not in diagnosis.details
 
-        result = continue_thread(db, tid)
-        assert result.success is True
+        result = continue_thread_manually(db, tid)
+        assert result.success is False
         assert result.skipped_msg_ids == []
 
     def test_diagnose_ignores_assistant_notes_for_consecutive_assistant_check(self, tmp_path):
@@ -533,8 +956,8 @@ class TestDiagnoseAndContinue:
         assert diagnosis.is_healthy is True
         assert "consecutive_assistants" not in diagnosis.details
 
-        result = continue_thread(db, tid)
-        assert result.success is True
+        result = continue_thread_manually(db, tid)
+        assert result.success is False
         assert result.skipped_msg_ids == []
 
         messages = create_snapshot(db, tid)["messages"]
@@ -837,14 +1260,14 @@ def test_validate_continue_target_is_side_effect_free_and_noarg_is_not_diagnosed
     assert valid.success is True
     assert valid.continue_from_msg_id == msg_id
     assert missing.success is False
-    assert missing.message == "Message not found: missing"
+    assert missing.message == "Message not found in effective thread history: missing"
     assert automatic.success is True
     assert automatic.continue_from_msg_id is None
     assert automatic.diagnosis is None
     assert db.max_event_seq(tid) == before
 
 
-def test_explicit_invalid_continue_preflight_beats_active_lease(tmp_path):
+def test_explicit_invalid_continue_core_preserves_active_lease(tmp_path):
     db, _ = _make_temp_db(tmp_path)
     tid = create_root_thread(db, name="validate-live")
     append_message(db, tid, "user", "anchor")
@@ -857,6 +1280,6 @@ def test_explicit_invalid_continue_preflight_beats_active_lease(tmp_path):
     result = continue_thread(db, tid, msg_id="missing")
 
     assert result.success is False
-    assert result.message == "Message not found: missing"
+    assert result.message == "Thread is currently running. Interrupt it first."
     assert db.max_event_seq(tid) == before
     assert dict(db.current_open(tid)) == lease

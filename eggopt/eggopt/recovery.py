@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from eggflow import ContextLimitExceededError
-from eggthreads import continue_thread, diagnose_thread, load_thread_projection
+from eggthreads import continue_thread, load_thread_projection
 
 from .context_limit import full_context_tokens
 
@@ -18,9 +18,9 @@ class InteractionRecovery:
     """Recover one trigger-anchored Eggthreads interaction before retry.
 
     This is the Eggopt equivalent of EvolveTropy's ``WaitForLLMResponse``
-    recovery policy: repair structural damage first; if the thread is structurally
-    healthy but the triggering message has no usable assistant response, use
-    Eggthreads' canonical ``continue_thread`` mutation to replay that turn.
+    recovery policy. If the operation's durable trigger has no usable assistant
+    response, Eggthreads' canonical explicit-target continuation replays exactly
+    that interaction; whole-thread diagnosis never chooses an older boundary.
     """
 
     db: Any
@@ -52,16 +52,12 @@ class InteractionRecovery:
                     f"operation terminated ({current} >= {self.context_limit})"
                 )
 
-        diagnosis = diagnose_thread(self.db, self.thread_id)
-        target = diagnosis.suggested_continue_point if not diagnosis.is_healthy else None
-        if target is None and not _has_usable_answer_after(
-            self.db, self.thread_id, self.trigger_msg_id
-        ):
-            target = self.trigger_msg_id
-        if target is None:
+        if _has_usable_answer_after(self.db, self.thread_id, self.trigger_msg_id):
             return True
 
-        result = continue_thread(self.db, self.thread_id, target)
+        # Recovery is scoped to this operation's durable trigger. Never convert
+        # broad whole-thread diagnosis into an older implicit rewind boundary.
+        result = continue_thread(self.db, self.thread_id, self.trigger_msg_id)
         if not result.success:
             raise InteractionRecoveryError(
                 f"Failed to recover {self.operation} on thread {self.thread_id}: "

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import eggthreads as ts
+import pytest
 from eggthreads.runner import ThreadRunner
 from eggthreads.tools import create_default_tools, create_tool_registry
 
@@ -275,6 +276,18 @@ def test_continue_child_thread_api_rejects_non_descendant(tmp_path):
     assert "descendant" in result.message
 
 
+def test_continue_child_thread_low_level_requires_explicit_target(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(db, child, "user", "initial")
+
+    result = ts.continue_child_thread(db, parent, child)
+
+    assert result.success is False
+    assert "explicit message ID" in result.message
+
+
 def test_continue_subthread_tool_uses_current_thread_context(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = ts.ThreadsDB()
@@ -319,13 +332,70 @@ def test_continue_subthread_invalid_explicit_target_is_side_effect_free(tmp_path
     payload = json.loads(out)
 
     assert payload["success"] is False
-    assert payload["message"] == "Message not found: missing"
+    assert payload["message"] == "Message not found in effective thread history: missing"
     assert db.max_event_seq(child) == before
     assert not [
         row for row in db.conn.execute(
             "SELECT 1 FROM events WHERE thread_id=? AND type='control.interrupt'",
             (child,),
         )
+    ]
+
+
+def test_continue_subthread_noarg_refuses_ambiguous_historical_rewind(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    old = ts.append_message(db, child, "user", "old boundary")
+    tail = ts.append_message(db, child, "assistant", "valuable tail")
+    before = db.max_event_seq(child)
+
+    out = create_default_tools().execute(
+        "continue_subthread",
+        {"child_thread_id": child},
+        thread_id=parent,
+    )
+    payload = json.loads(out)
+
+    assert payload["success"] is False
+    assert "explicit message ID" in payload["message"]
+    assert db.max_event_seq(child) == before
+    assert [message["msg_id"] for message in ts.create_snapshot(db, child)["messages"]] == [
+        old,
+        tail,
+    ]
+
+
+def test_continue_subthread_notice_and_rewind_roll_back_together(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    anchor = ts.append_message(db, child, "user", "anchor")
+    tail = ts.append_message(db, child, "assistant", "valuable tail")
+    monkeypatch.setattr(
+        "eggthreads.api.append_message",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("notice failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="notice failed"):
+        create_default_tools().execute(
+            "continue_subthread",
+            {"child_thread_id": child, "msg_id": anchor},
+            thread_id=parent,
+        )
+
+    # The core savepoint ensures that no partial suffix rewind survives the
+    # failed audit-notice write.
+    monkeypatch.undo()
+    assert [message["msg_id"] for message in ts.create_snapshot(db, child)["messages"]] == [
+        anchor,
+        tail,
     ]
 
 

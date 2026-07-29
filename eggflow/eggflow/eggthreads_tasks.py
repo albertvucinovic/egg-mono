@@ -114,9 +114,10 @@ class ContextLimitExceededError(Exception):
 class PICTask(Task):
     """Base class for eggthreads tasks with PIC (Persistable Interaction Closure) recovery.
 
-    This base class provides automatic thread health checking and recovery. When an
-    eggflow task is re-executed after a crash, the underlying eggthreads Thread may
-    be in an unhealthy state (unclosed streams, unpublished tool calls, etc.).
+    This base class provides automatic thread health checking. When an eggflow
+    task is re-executed after a crash, the underlying Egg thread may be in an
+    unhealthy state (unclosed streams, unpublished tool calls, etc.). Ambiguous
+    persisted-history repair fails closed instead of rewinding automatically.
 
     Subclasses should call `_ensure_thread_healthy(db, thread_id)` at the start of
     their `run()` method to automatically diagnose and recover the thread.
@@ -125,7 +126,7 @@ class PICTask(Task):
     """
 
     def _ensure_thread_healthy(self, db, thread_id: str) -> None:
-        """Diagnose and recover thread if needed.
+        """Diagnose thread health and fail closed when repair is ambiguous.
 
         This method should be called at the start of run() for any task that
         operates on an existing thread. It handles the case where eggflow is
@@ -136,7 +137,7 @@ class PICTask(Task):
             thread_id: The thread to check and potentially recover
 
         Raises:
-            PICRecoveryError: If the thread is unhealthy and recovery fails
+            PICRecoveryError: If the thread needs explicit persisted repair
             ContextLimitExceededError: If the thread failed due to context limit
                 (this is terminal and should NOT be recovered)
         """
@@ -172,19 +173,14 @@ class PICTask(Task):
                             f"Error: {msg.get('content')}"
                         )
 
-            # Use continue_thread to recover the thread state.
-            # continue_thread handles expired leases (from heartbeat timeout) automatically,
-            # so we don't need to call interrupt_thread first.
-            result = egg_api.continue_thread(
-                db,
-                thread_id,
-                diagnosis.suggested_continue_point
+            # Automatic PIC recovery must never convert broad historical
+            # diagnosis into an implicit destructive rewind. Existing runner
+            # recovery handles tail-local tool lifecycle faults without replaying
+            # uncertain side effects; anything else requires an explicit target.
+            raise PICRecoveryError(
+                f"Thread {thread_id} requires explicit recovery; no automatic "
+                f"history rewind was applied. Issues detected: {diagnosis.issues}"
             )
-            if not result.success:
-                raise PICRecoveryError(
-                    f"Failed to recover thread {thread_id}: {result.message}. "
-                    f"Issues detected: {diagnosis.issues}"
-                )
 
 
 # --- Result Types ---

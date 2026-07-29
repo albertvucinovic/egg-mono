@@ -162,7 +162,7 @@ class SessionProvider(Protocol):
 
 
 _DOCKER_MOUNT_POLICY = "thread-workdir-direct-mask-egg-v4"
-_CHANNEL_REAPER_RUNTIME_VERSION = 2
+_CHANNEL_REAPER_RUNTIME_VERSION = 3
 _SESSION_STORAGE_METADATA = "session_owner.json"
 _SESSION_STORAGE_METADATA_VERSION = 1
 _SESSION_ACTIVITY_LOCKS: Dict[str, threading.RLock] = {}
@@ -3365,6 +3365,10 @@ def _docker_daemon_status(bridge_dir: Path) -> tuple[Optional[Dict[str, Any]], s
             return payload, "Docker session daemon channel reaping runtime is incompatible"
         if channel_reaping_enabled and runtime_version != _CHANNEL_REAPER_RUNTIME_VERSION:
             return payload, "Docker session daemon channel reaping runtime is incompatible"
+        subreaper_supported = reaping_policy.get("child_subreaper_supported")
+        subreaper_enabled = reaping_policy.get("child_subreaper_enabled")
+        if subreaper_supported is True and subreaper_enabled is not True:
+            return payload, "Docker session daemon child subreaper is unavailable"
         policy_timeout = reaping_policy.get("idle_timeout_sec")
         if channel_reaping_enabled:
             if not isinstance(policy_timeout, (int, float)) or isinstance(policy_timeout, bool) or not math.isfinite(float(policy_timeout)) or float(policy_timeout) <= 0:

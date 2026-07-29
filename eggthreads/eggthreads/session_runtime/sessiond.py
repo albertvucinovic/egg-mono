@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import ctypes
 import io
 import json
 import multiprocessing as mp
@@ -38,12 +39,55 @@ CHANNEL_STARTING: Dict[str, int] = {}
 CHANNEL_PROCESS_META: Dict[str, Dict[str, int]] = {}
 CHANNEL_GENERATION_COUNTER = 0
 CHANNEL_IDLE_TIMEOUT_SEC: Optional[float] = None
-CHANNEL_REAPER_RUNTIME_VERSION = 2
+CHANNEL_REAPER_RUNTIME_VERSION = 3
 DAEMON_GENERATION = uuid.uuid4().hex
 DAEMON_STARTED_AT = time.time()
 LAST_ACTIVITY_AT = DAEMON_STARTED_AT
 STATUS_PATH: Optional[Path] = None
 STATUS_WRITE_LOCK = threading.Lock()
+_SUBREAPER_ENABLED = False
+_SUBREAPER_SUPPORTED = sys.platform == "linux"
+
+
+def _enable_child_subreaper() -> bool:
+    """Make sessiond adopt and reap descendants of killed REPL leaders."""
+
+    global _SUBREAPER_ENABLED
+    if _SUBREAPER_ENABLED:
+        return True
+    if sys.platform != "linux":
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+            return False
+    except Exception:
+        return False
+    _SUBREAPER_ENABLED = True
+    return True
+
+
+def _reap_exited_process_group(pgid: int) -> None:
+    """Reap exited adopted members of one contained process group only."""
+
+    if not _SUBREAPER_ENABLED:
+        return
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return
+    try:
+        stat_paths = tuple(proc_root.glob("[0-9]*/stat"))
+    except Exception:
+        return
+    for stat_path in stat_paths:
+        try:
+            pid = int(stat_path.parent.name)
+            state, process_pgid = _proc_stat_state_and_pgid(stat_path.read_text())
+            if process_pgid != pgid or state != "Z":
+                continue
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, FileNotFoundError, PermissionError, OSError, ValueError):
+            continue
 
 
 def parse_positive_timeout(value: Any) -> Optional[float]:
@@ -136,6 +180,8 @@ def _process_group_has_live_members(pgid: int) -> bool:
 
 
 def _kill_and_verify_process_group(pgid: int, proc: Any = None, timeout_sec: float = 1.0) -> tuple[bool, str]:
+    if _SUBREAPER_SUPPORTED and not _SUBREAPER_ENABLED:
+        return False, "child subreaper is unavailable"
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
@@ -150,9 +196,12 @@ def _kill_and_verify_process_group(pgid: int, proc: Any = None, timeout_sec: flo
                 proc.wait(timeout=min(timeout_sec, 1.0))
         except Exception:
             pass
+    _reap_exited_process_group(pgid)
     deadline = time.monotonic() + timeout_sec
     while _process_group_has_live_members(pgid) and time.monotonic() < deadline:
+        _reap_exited_process_group(pgid)
         time.sleep(0.01)
+    _reap_exited_process_group(pgid)
     if _process_group_has_live_members(pgid):
         return False, f"process group {pgid} is still alive after SIGKILL"
     return True, ""
@@ -556,6 +605,8 @@ def _daemon_status_payload(now: Optional[float] = None) -> Dict[str, Any]:
             "runtime_version": CHANNEL_REAPER_RUNTIME_VERSION,
             "enabled": CHANNEL_IDLE_TIMEOUT_SEC is not None,
             "idle_timeout_sec": CHANNEL_IDLE_TIMEOUT_SEC,
+            "child_subreaper_supported": _SUBREAPER_SUPPORTED,
+            "child_subreaper_enabled": _SUBREAPER_ENABLED,
         },
         "started_at": DAEMON_STARTED_AT,
         "heartbeat_at": heartbeat_at,
@@ -1497,6 +1548,7 @@ def main() -> int:
     bridge_dir = Path(args.bridge_dir)
     runtime_dir = Path(args.runtime_dir)
     bridge_dir.mkdir(parents=True, exist_ok=True)
+    _enable_child_subreaper()
     global STATUS_PATH, CHANNEL_IDLE_TIMEOUT_SEC
     STATUS_PATH = bridge_dir / "sessiond_status.json"
     CHANNEL_IDLE_TIMEOUT_SEC = parse_positive_timeout(args.channel_idle_timeout_sec)

@@ -2446,7 +2446,7 @@ class TestMessageOperations:
         assert response.status_code == 200
         payload = response.json()
         assert payload["success"] is False
-        assert payload["message"] == "Message not found: missing-id"
+        assert payload["message"] == "Message not found in effective thread history: missing-id"
         assert payload.get("data") is None
         assert core_state.db.max_event_seq(thread_id) == before_seq
         from eggw.commands.thread import cmd_continue

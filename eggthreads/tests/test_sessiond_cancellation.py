@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -40,6 +41,7 @@ def _reset_sessiond_state() -> None:
 
 @pytest.fixture(autouse=True)
 def reset_sessiond_state():
+    sessiond._enable_child_subreaper()
     _reset_sessiond_state()
     yield
     _reset_sessiond_state()
@@ -51,6 +53,40 @@ def _wait_until(predicate, timeout: float = 2.0) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError("condition not reached")
         time.sleep(0.005)
+
+
+@pytest.mark.skipif(sessiond.sys.platform != "linux", reason="Linux subreaper semantics")
+def test_group_reaper_does_not_consume_unrelated_child_status():
+    assert sessiond._enable_child_subreaper()
+    unrelated = subprocess.Popen(["sh", "-c", "exit 23"], start_new_session=True)
+    try:
+        _wait_until(
+            lambda: Path(f"/proc/{unrelated.pid}/stat").exists()
+            and Path(f"/proc/{unrelated.pid}/stat").read_text().split(")", 1)[1].strip().startswith("Z")
+        )
+        sessiond._reap_exited_process_group(unrelated.pid + 1_000_000)
+        assert unrelated.wait(timeout=1) == 23
+    finally:
+        if unrelated.poll() is None:
+            unrelated.kill()
+            unrelated.wait(timeout=1)
+
+
+def test_process_group_teardown_fails_closed_without_supported_subreaper(monkeypatch):
+    monkeypatch.setattr(sessiond, "_SUBREAPER_SUPPORTED", True)
+    monkeypatch.setattr(sessiond, "_SUBREAPER_ENABLED", False)
+    kill_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        sessiond.os,
+        "killpg",
+        lambda pgid, sig: kill_calls.append((pgid, sig)),
+    )
+
+    ok, error = sessiond._kill_and_verify_process_group(123456)
+
+    assert ok is False
+    assert error == "child subreaper is unavailable"
+    assert kill_calls == []
 
 
 def _request(bridge: Path, request_id: str, *, language: str, channel: str, code: str = "") -> Path:

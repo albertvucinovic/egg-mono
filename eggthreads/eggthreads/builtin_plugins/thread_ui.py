@@ -495,13 +495,25 @@ def continue_thread_command(context: Any, arg: str):
         return CommandResult(clear_input=False)
 
     if delay_sec is not None and delay_sec > 0:
+        scheduled_max_event_seq = db.max_event_seq(current_thread)
+        if scheduled_max_event_seq < 0:
+            _log(context, "/continue error: could not capture thread state for delayed continuation")
+            return CommandResult(clear_input=False)
+
         async def delayed_continue() -> None:
             await asyncio.sleep(delay_sec)
-            result = continue_thread_manually(db, current_thread, msg_id=msg_id)
+            result = continue_thread_manually(
+                db,
+                current_thread,
+                msg_id=msg_id,
+                expected_max_event_seq=scheduled_max_event_seq,
+            )
             if result.success:
                 _start_scheduler(context, current_thread)
                 _log(context, f"After {delay_sec}s delay: {result.message}")
                 _print_current_thread(context, heading=f"Continued thread: {current_thread}")
+            elif "changed after continuation was scheduled" in result.message:
+                _log(context, f"/continue cancelled: {result.message.lower()}")
             else:
                 _log(context, f"/continue error: {result.message}")
 

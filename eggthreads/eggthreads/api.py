@@ -800,12 +800,23 @@ def validate_continue_target(
             message="No explicit continue target to validate.",
         )
     normalized_msg_id = str(msg_id)
-    if _get_event_seq_for_msg_id(db, thread_id, normalized_msg_id) is None:
+    try:
+        from .projection import load_thread_projection
+
+        target = load_thread_projection(db, thread_id).message(normalized_msg_id)
+    except Exception as exc:
         return ContinueResult(
             success=False,
             continue_from_msg_id=None,
             skipped_msg_ids=[],
-            message=f"Message not found: {normalized_msg_id}",
+            message=f"Could not validate continue target: {exc}",
+        )
+    if target is None:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message=f"Message not found in effective thread history: {normalized_msg_id}",
         )
     return ContinueResult(
         success=True,
@@ -986,6 +997,34 @@ def _format_continue_recovery_notice(db: ThreadsDB, thread_id: str, result: Cont
     return '\n'.join(lines)
 
 
+def _format_continue_recovery_notice_for_target(
+    db: ThreadsDB,
+    thread_id: str,
+    msg_id: str,
+    *,
+    source: str,
+) -> str:
+    """Build the manual audit notice before the atomic rewind starts."""
+
+    from .runner_recovery import continuation_message_rows_after
+
+    event_seq = _get_event_seq_for_msg_id(db, thread_id, msg_id)
+    if event_seq is None:
+        return f"Recovery: {source} succeeded.\nContinue point: {msg_id[-8:]} ({msg_id}).\nSkipped: 0 messages."
+    already_skipped, _deleted = _compaction_skipped_and_deleted_msg_ids(
+        db, thread_id, fail_closed=True,
+    )
+    skipped = [
+        row_msg_id
+        for _seq, row_msg_id, _payload in continuation_message_rows_after(
+            db, thread_id, event_seq,
+        )
+        if row_msg_id is not None and row_msg_id not in already_skipped
+    ]
+    preview = ContinueResult(True, msg_id, skipped, "")
+    return _format_continue_recovery_notice(db, thread_id, preview, source=source)
+
+
 def append_continue_recovery_notice(
     db: ThreadsDB,
     thread_id: str,
@@ -1008,6 +1047,7 @@ def continue_thread_manually(
     msg_id: Optional[str] = None,
     *,
     source: str = 'manual /continue',
+    expected_max_event_seq: Optional[int] = None,
 ) -> ContinueResult:
     """Apply manual continue semantics and append the local recovery notice.
 
@@ -1017,6 +1057,16 @@ def continue_thread_manually(
     Successful UI and tool-based continuation leave the same preserved audit
     notice summarizing skipped provider failures.
     """
+
+    if expected_max_event_seq is None:
+        expected_max_event_seq = db.max_event_seq(thread_id)
+        if expected_max_event_seq < 0:
+            return ContinueResult(
+                success=False,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message="Could not capture thread state for manual continuation",
+            )
 
     if msg_id is None:
         # Broad diagnosis also repairs historical protocol anomalies, but it is
@@ -1036,10 +1086,13 @@ def continue_thread_manually(
             )
         msg_id = str(retry['msg_id'])
 
-    result = continue_thread(db, thread_id, msg_id=msg_id)
-    if result.success:
-        append_continue_recovery_notice(db, thread_id, result, source=source)
-    return result
+    return continue_thread(
+        db,
+        thread_id,
+        msg_id=msg_id,
+        recovery_notice_source=source,
+        expected_max_event_seq=expected_max_event_seq,
+    )
 
 
 # --------- Compaction API -----------------------------------------------------
@@ -1155,7 +1208,12 @@ class AutoCompactionThresholdResolution:
     message: str
 
 
-def _compaction_skipped_and_deleted_msg_ids(db: ThreadsDB, thread_id: str) -> tuple[set[str], set[str]]:
+def _compaction_skipped_and_deleted_msg_ids(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    fail_closed: bool = False,
+) -> tuple[set[str], set[str]]:
     skipped: set[str] = set()
     deleted: set[str] = set()
     cur = db.conn.execute(
@@ -1171,13 +1229,22 @@ def _compaction_skipped_and_deleted_msg_ids(db: ThreadsDB, thread_id: str) -> tu
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
         except Exception:
+            if fail_closed:
+                raise
             payload = {}
+        if fail_closed and not isinstance(payload, dict):
+            raise ValueError("invalid msg.edit recovery authority")
         if isinstance(payload, dict) and payload.get('skipped_on_continue'):
             skipped.add(str(msg_id))
     return skipped, deleted
 
 
-def _consumed_get_user_message_msg_ids(db: ThreadsDB, thread_id: str) -> set[str]:
+def _consumed_get_user_message_msg_ids(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    fail_closed: bool = False,
+) -> set[str]:
     from .tool_state import _is_consumed_get_user_message_edit
 
     consumed: set[str] = set()
@@ -1188,6 +1255,8 @@ def _consumed_get_user_message_msg_ids(db: ThreadsDB, thread_id: str) -> set[str
         )
         rows = cur.fetchall()
     except Exception:
+        if fail_closed:
+            raise
         rows = []
     for msg_id, payload_json in rows:
         if not msg_id:
@@ -1195,8 +1264,12 @@ def _consumed_get_user_message_msg_ids(db: ThreadsDB, thread_id: str) -> set[str
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
         except Exception:
+            if fail_closed:
+                raise
             payload = {}
         if not isinstance(payload, dict):
+            if fail_closed:
+                raise ValueError("invalid get-user message edit authority")
             continue
         if _is_consumed_get_user_message_edit(payload):
             consumed.add(str(msg_id))
@@ -2506,6 +2579,16 @@ def _payload_from_json(value: Any) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _payload_from_json_strict(value: Any) -> Optional[Dict[str, Any]]:
+    """Decode recovery authority without turning corruption into empty state."""
+
+    try:
+        payload = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        return None
+    return dict(payload) if isinstance(payload, dict) else None
+
+
 def _is_manual_continue_trigger_payload(payload: Dict[str, Any], msg_id: Optional[str], consumed_user_msg_ids: set) -> bool:
     role = payload.get('role')
     no_api = bool(payload.get('no_api'))
@@ -2536,27 +2619,34 @@ def _manual_continue_retry_trigger(db: ThreadsDB, thread_id: str) -> Optional[Di
         if discover_runner_actionable_cached(db, thread_id) is not None:
             return None
     except Exception:
-        # Diagnosis should remain best-effort.  If RA discovery itself fails,
-        # fall through to the event-log evidence below.
-        pass
+        # Implicit repair must not guess when the scheduler's current actionable
+        # authority cannot be read.
+        return None
 
-    skipped_msg_ids, deleted_msg_ids = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
-    consumed_user_msg_ids = _consumed_get_user_message_msg_ids(db, thread_id)
     try:
+        skipped_msg_ids, deleted_msg_ids = _compaction_skipped_and_deleted_msg_ids(
+            db, thread_id, fail_closed=True,
+        )
+        consumed_user_msg_ids = _consumed_get_user_message_msg_ids(
+            db, thread_id, fail_closed=True,
+        )
         rows = db.conn.execute(
             "SELECT event_seq, msg_id, payload_json FROM events "
             "WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
             (thread_id,),
         ).fetchall()
     except Exception:
-        rows = []
+        # Implicit repair must fail closed when its authority cannot be read.
+        return None
 
     messages: List[Dict[str, Any]] = []
     latest_trigger: Optional[Dict[str, Any]] = None
     for event_seq, msg_id, payload_json in rows:
         if msg_id and (str(msg_id) in skipped_msg_ids or str(msg_id) in deleted_msg_ids):
             continue
-        payload = _payload_from_json(payload_json)
+        payload = _payload_from_json_strict(payload_json)
+        if payload is None:
+            return None
         item = {
             'event_seq': int(event_seq),
             'msg_id': str(msg_id) if msg_id else None,
@@ -2635,19 +2725,25 @@ def _manual_continue_retry_trigger(db: ThreadsDB, thread_id: str) -> Optional[Di
             (thread_id, trigger_seq),
         ).fetchall()
     except Exception:
-        interrupt_rows = []
+        # Missing interrupt history can invert which failure/reset is newest.
+        # An explicit target remains available when this authority is unreadable.
+        return None
     for event_seq, payload_json in interrupt_rows:
-        payload = _payload_from_json(payload_json)
+        payload = _payload_from_json_strict(payload_json)
+        if payload is None:
+            return None
         if payload.get('purpose') == 'llm':
             evidence = {'reason': 'llm_interrupt_after_trigger'}
             evidence_seq = int(event_seq)
-        elif payload.get('purpose') == 'continue' and payload.get('continue_from_msg_id') == trigger_msg_id:
-            # If the latest manual reset is newer than the latest failure or
-            # cancellation evidence, repeating the same reset would be noisy
-            # and not helpful.  Older continue interrupts must not suppress a
-            # later failed retry of the same trigger.
-            if int(event_seq) > evidence_seq:
-                return None
+        elif (
+            payload.get('purpose') == 'continue'
+            and payload.get('continue_from_msg_id') == trigger_msg_id
+            and int(event_seq) > evidence_seq
+        ):
+            # A reset is superseded only by evidence that existed before it.
+            # A later failed retry of the same trigger is fresh authority for a
+            # new manual /continue, including after automatic retry exhaustion.
+            return None
 
     if evidence is None:
         return None
@@ -2967,15 +3063,11 @@ def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
 
 
 def is_thread_continuable(db: ThreadsDB, thread_id: str) -> bool:
-    """Check if a thread can be continued.
+    """Return whether a continuation attempt may safely inspect/mutate a thread.
 
-    A thread is continuable if:
-    - It exists
-    - It is not currently running (no active, non-expired open_streams lease)
-    - There are messages after the last RA1 boundary that can be skipped
-
-    Note: A thread in 'waiting_user' state is technically continuable,
-    but /continue would effectively be a no-op.
+    This is deliberately only an existence/live-lease gate. Explicit-target
+    validation and guarded implicit target selection happen at the atomic core
+    boundary, where they can still return a no-op or fail closed.
     """
     th = db.get_thread(thread_id)
     if not th:
@@ -2991,7 +3083,9 @@ def is_thread_continuable(db: ThreadsDB, thread_id: str) -> bool:
                 return False  # Thread is running (lease still valid)
             # Lease has expired - thread not actually running
     except Exception:
-        pass
+        # Destructive continuation must not proceed when lease authority is
+        # unreadable. A later retry can safely re-check it.
+        return False
 
     return True
 
@@ -3001,6 +3095,8 @@ def _continue_thread_mutation(
     thread_id: str,
     msg_id: Optional[str],
     diagnosis: Optional[ThreadDiagnosis],
+    *,
+    recovery_notice_content: Optional[str] = None,
 ) -> ContinueResult:
     """Apply validated continuation writes in the caller's transaction."""
 
@@ -3015,18 +3111,9 @@ def _continue_thread_mutation(
             message=f"Message not found: {msg_id}",
         )
 
-    already_skipped: set = set()
-    rows = db.conn.execute(
-        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
-        (thread_id,),
-    ).fetchall()
-    for edit_msg_id, payload_json in rows:
-        try:
-            edit_payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
-        except Exception:
-            edit_payload = {}
-        if edit_payload.get('skipped_on_continue'):
-            already_skipped.add(edit_msg_id)
+    already_skipped, _deleted = _compaction_skipped_and_deleted_msg_ids(
+        db, thread_id, fail_closed=True,
+    )
 
     rows = continuation_message_rows_after(db, thread_id, int(continue_seq))
     skipped_msg_ids = []
@@ -3059,6 +3146,14 @@ def _continue_thread_mutation(
             'skipped_count': len(skipped_msg_ids),
         },
     )
+    if recovery_notice_content is not None:
+        append_message(
+            db,
+            thread_id,
+            'system',
+            recovery_notice_content,
+            extra=RECOVERY_NOTICE_EXTRA,
+        )
     base_msg = f"Continued from message {msg_id[-8:] if msg_id else 'start'}, skipped {len(skipped_msg_ids)} messages."
     if diagnosis and diagnosis.issues:
         base_msg = f"Fixed {len(diagnosis.issues)} issue(s): {', '.join(diagnosis.issues)}. {base_msg}"
@@ -3071,50 +3166,79 @@ def _continue_thread_mutation(
     )
 
 
+def _continuation_fence_is_unchanged(
+    db: ThreadsDB,
+    thread_id: str,
+    expected_max_event_seq: int,
+) -> bool:
+    """Allow only audit completion for commands already started at the fence."""
+
+    current_max_event_seq = db.max_event_seq(thread_id)
+    if current_max_event_seq < 0 or current_max_event_seq < expected_max_event_seq:
+        return False
+    if current_max_event_seq == expected_max_event_seq:
+        return True
+    try:
+        newer_rows = db.conn.execute(
+            "SELECT type, payload_json FROM events "
+            "WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
+            (thread_id, int(expected_max_event_seq)),
+        ).fetchall()
+        if not newer_rows:
+            return False
+        finished_command_ids: set[str] = set()
+        for event_type, payload_json in newer_rows:
+            if event_type != 'user_command.finished':
+                return False
+            payload = _payload_from_json_strict(payload_json)
+            command_id = payload.get('command_id') if payload is not None else None
+            if not isinstance(command_id, str) or not command_id:
+                return False
+            finished_command_ids.add(command_id)
+        started_rows = db.conn.execute(
+            "SELECT payload_json FROM events "
+            "WHERE thread_id=? AND type='user_command.started' AND event_seq<=?",
+            (thread_id, int(expected_max_event_seq)),
+        ).fetchall()
+    except Exception:
+        return False
+
+    started_command_ids = set()
+    for (payload_json,) in started_rows:
+        payload = _payload_from_json_strict(payload_json)
+        command_id = payload.get('command_id') if payload is not None else None
+        if isinstance(command_id, str) and command_id:
+            started_command_ids.add(command_id)
+    return finished_command_ids <= started_command_ids
+
+
 def continue_thread(
     db: ThreadsDB,
     thread_id: str,
     msg_id: Optional[str] = None,
+    *,
+    recovery_notice_content: Optional[str] = None,
+    recovery_notice_source: Optional[str] = None,
+    expected_max_event_seq: Optional[int] = None,
 ) -> ContinueResult:
-    """Continue a thread from a specific point or auto-detected point."""
+    """Continue a thread from a specific point or internal diagnosis.
 
-    target_validation = validate_continue_target(db, thread_id, msg_id)
-    if not target_validation.success:
-        return target_validation
+    Public callers must pass an explicit target. User-facing no-argument
+    continuation uses :func:`continue_thread_manually`, whose implicit target
+    selection is deliberately narrow. ``expected_max_event_seq`` is checked
+    after taking SQLite write authority so delayed callers cannot race newer
+    thread events.
+    """
 
-    lease = db.conn.execute(
-        "SELECT 1 FROM open_streams WHERE thread_id=? "
-        "AND lease_until>datetime('now') LIMIT 1",
-        (thread_id,),
-    ).fetchone()
-    if lease is not None:
-        return ContinueResult(
-            success=False,
-            continue_from_msg_id=None,
-            skipped_msg_ids=[],
-            message="Thread is currently running. Interrupt it first.",
-        )
-
-    diagnosis = None
+    if recovery_notice_content is not None and recovery_notice_source is not None:
+        raise ValueError("Pass recovery_notice_content or recovery_notice_source, not both")
     if msg_id is None:
-        diagnosis = diagnose_thread(db, thread_id)
-        if diagnosis.is_healthy:
-            return ContinueResult(
-                success=True,
-                continue_from_msg_id=None,
-                skipped_msg_ids=[],
-                message="Thread is healthy. No changes needed.",
-                diagnosis=diagnosis,
-            )
-        msg_id = diagnosis.suggested_continue_point
-        if msg_id is None:
-            return ContinueResult(
-                success=True,
-                continue_from_msg_id=None,
-                skipped_msg_ids=[],
-                message="No messages to skip. Thread can continue from current state.",
-                diagnosis=diagnosis,
-            )
+        return ContinueResult(
+            False,
+            None,
+            [],
+            "An explicit message ID is required for low-level continuation",
+        )
 
     savepoint = f"continue_thread_{os.urandom(8).hex()}"
     db.conn.execute(f"SAVEPOINT {savepoint}")
@@ -3124,12 +3248,44 @@ def continue_thread(
             (thread_id,),
         )
         if locked.rowcount != 1:
-            raise ValueError(f"Thread not found: {thread_id}")
-        lease = db.conn.execute(
-            "SELECT 1 FROM open_streams WHERE thread_id=? "
-            "AND lease_until>datetime('now') LIMIT 1",
-            (thread_id,),
-        ).fetchone()
+            result = ContinueResult(
+                success=False,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message=f"Thread not found: {thread_id}",
+            )
+            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return result
+
+        if expected_max_event_seq is not None:
+            if not _continuation_fence_is_unchanged(
+                db, thread_id, int(expected_max_event_seq),
+            ):
+                result = ContinueResult(
+                    success=False,
+                    continue_from_msg_id=None,
+                    skipped_msg_ids=[],
+                    message="Thread changed after continuation was scheduled",
+                )
+                db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return result
+
+        try:
+            lease = db.conn.execute(
+                "SELECT 1 FROM open_streams WHERE thread_id=? "
+                "AND lease_until>datetime('now') LIMIT 1",
+                (thread_id,),
+            ).fetchone()
+        except Exception as exc:
+            result = ContinueResult(
+                success=False,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message=f"Could not verify whether the thread is running: {exc}",
+            )
+            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return result
+
         if lease is not None:
             result = ContinueResult(
                 success=False,
@@ -3138,15 +3294,35 @@ def continue_thread(
                 message="Thread is currently running. Interrupt it first.",
             )
         else:
-            result = _continue_thread_mutation(db, thread_id, msg_id, diagnosis)
+            target_validation = validate_continue_target(db, thread_id, msg_id)
+            if not target_validation.success:
+                db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return target_validation
+
+            diagnosis = None
+            notice_content = recovery_notice_content
+            if recovery_notice_source is not None:
+                notice_content = _format_continue_recovery_notice_for_target(
+                    db,
+                    thread_id,
+                    msg_id,
+                    source=recovery_notice_source,
+                )
+            result = _continue_thread_mutation(
+                db,
+                thread_id,
+                msg_id,
+                diagnosis,
+                recovery_notice_content=notice_content,
+            )
+        if result.success and result.continue_from_msg_id is not None:
+            create_snapshot(db, thread_id)
         db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
     except Exception:
         db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
         db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
         raise
 
-    if result.success and result.continue_from_msg_id is not None:
-        create_snapshot(db, thread_id)
     return result
 
 
@@ -3248,46 +3424,48 @@ def continue_child_thread(
     child_thread_id: str,
     msg_id: Optional[str] = None,
 ) -> ContinueResult:
-    """Continue/repair a descendant thread owned by a manager thread."""
+    """Continue a manager-owned descendant from an explicit message."""
+
+    child, access = _validate_child_continue_access(
+        db, manager_thread_id, child_thread_id,
+    )
+    if child is None:
+        return access
+    if msg_id is None:
+        return ContinueResult(
+            False,
+            None,
+            [],
+            "An explicit message ID is required for low-level descendant continuation",
+        )
+    return continue_thread(db, child, msg_id=msg_id)
+
+
+def _validate_child_continue_access(
+    db: ThreadsDB,
+    manager_thread_id: str,
+    child_thread_id: str,
+) -> tuple[Optional[str], ContinueResult]:
+    """Validate descendant-only continuation access without mutating history."""
 
     manager = (manager_thread_id or "").strip()
     child = (child_thread_id or "").strip()
     if not manager:
-        return ContinueResult(
-            success=False,
-            continue_from_msg_id=None,
-            skipped_msg_ids=[],
-            message="manager_thread_id is required",
-        )
+        return None, ContinueResult(False, None, [], "manager_thread_id is required")
     if not child:
-        return ContinueResult(
-            success=False,
-            continue_from_msg_id=None,
-            skipped_msg_ids=[],
-            message="child_thread_id is required",
-        )
+        return None, ContinueResult(False, None, [], "child_thread_id is required")
     if db.get_thread(manager) is None:
-        return ContinueResult(
-            success=False,
-            continue_from_msg_id=None,
-            skipped_msg_ids=[],
-            message=f"manager thread not found: {manager}",
-        )
+        return None, ContinueResult(False, None, [], f"manager thread not found: {manager}")
     if db.get_thread(child) is None:
-        return ContinueResult(
-            success=False,
-            continue_from_msg_id=None,
-            skipped_msg_ids=[],
-            message=f"child thread not found: {child}",
-        )
+        return None, ContinueResult(False, None, [], f"child thread not found: {child}")
     if not is_descendant_thread(db, manager, child):
-        return ContinueResult(
-            success=False,
-            continue_from_msg_id=None,
-            skipped_msg_ids=[],
-            message="target thread must be a child or descendant of the calling thread",
+        return None, ContinueResult(
+            False,
+            None,
+            [],
+            "target thread must be a child or descendant of the calling thread",
         )
-    return continue_thread(db, child, msg_id=msg_id)
+    return child, ContinueResult(True, child, [], "descendant access validated")
 
 
 def continue_child_thread_manually(
@@ -3298,12 +3476,14 @@ def continue_child_thread_manually(
     *,
     source: str = 'manual continue_subthread',
 ) -> ContinueResult:
-    """Manual-continue wrapper for descendant threads with recovery notice."""
+    """Guarded manual continuation for a manager-owned descendant."""
 
-    result = continue_child_thread(db, manager_thread_id, child_thread_id, msg_id=msg_id)
-    if result.success:
-        append_continue_recovery_notice(db, child_thread_id, result, source=source)
-    return result
+    child, access = _validate_child_continue_access(
+        db, manager_thread_id, child_thread_id,
+    )
+    if child is None:
+        return access
+    return continue_thread_manually(db, child, msg_id=msg_id, source=source)
 
 
 async def continue_thread_async(
@@ -3330,12 +3510,28 @@ async def continue_thread_async(
     """
     import asyncio
 
-    # If delay requested, wait before applying the continue
+    scheduled_max_event_seq: Optional[int] = None
+    # If delay requested, capture a fence and reject any intervening activity.
     if delay_sec is not None and delay_sec > 0:
+        scheduled_max_event_seq = db.max_event_seq(thread_id)
+        if scheduled_max_event_seq < 0:
+            return ContinueResult(False, None, [], "Could not capture thread state for delayed continuation")
         await asyncio.sleep(delay_sec)
 
-    # Now apply the continue
-    result = continue_thread(db, thread_id, msg_id)
+    if msg_id is None:
+        return ContinueResult(
+            False,
+            None,
+            [],
+            "An explicit message ID is required for low-level async continuation",
+        )
+
+    result = continue_thread(
+        db,
+        thread_id,
+        msg_id,
+        expected_max_event_seq=scheduled_max_event_seq,
+    )
     if result.success and delay_sec is not None and delay_sec > 0:
         result.message = f"After {delay_sec}s delay: {result.message}"
 
