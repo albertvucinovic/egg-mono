@@ -346,10 +346,30 @@ def test_optimize_anything_is_case_wise_pareto_search(tmp_path):
     assert result.parents[0] == ()
     assert result.generated_candidates == 2
     assert result.evaluator_calls == evaluator.calls
-    assert result.pareto_front == (1, 2)
+    assert result.per_validation_case_best_candidate_indices == (
+        ("easy", (1, 2)),
+        ("hard", (2,)),
+    )
     assert generator.calls == 2
     assert generator.requests[0][2] == "Reach every target."
     assert 1 <= len(generator.requests[1][0]) <= 2
+
+    evaluator_calls = evaluator.calls
+    replay = optimize_anything(
+        {"instruction": "0"},
+        evaluator=evaluator,
+        dataset=dataset,
+        objective="Reach every target.",
+        config=config(
+            tmp_path,
+            evaluator,
+            generator,
+            evaluator_context_limit=9_000,
+        ),
+    )
+    assert replay == result
+    assert evaluator.calls == evaluator_calls
+    assert generator.calls == 2
 
     from eggthreads import get_context_limit
 
@@ -366,6 +386,29 @@ def test_optimize_anything_is_case_wise_pareto_search(tmp_path):
         assert all(get_context_limit(db, thread_id) == 9_000 for thread_id in case_ids)
     finally:
         db.conn.close()
+
+
+def test_validation_case_identities_must_be_unique(tmp_path):
+    evaluator = Evaluator()
+
+    with pytest.raises(ValueError, match="valset case identities must be unique"):
+        optimize_anything(
+            {"instruction": "0"},
+            evaluator=evaluator,
+            dataset=[{"id": "train", "target": 0}],
+            valset=[
+                {"id": "duplicate", "target": 0},
+                {"id": "duplicate", "target": 1},
+            ],
+            objective="Reach every target.",
+            config=config(
+                tmp_path,
+                evaluator,
+                Increment(),
+                max_candidates=1,
+                parents_per_candidate=1,
+            ),
+        )
 
 
 def test_minibatch_acceptance_can_send_ties_to_full_validation(tmp_path):

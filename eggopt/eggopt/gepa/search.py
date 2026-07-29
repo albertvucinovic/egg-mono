@@ -100,7 +100,12 @@ class GEPAConfig:
 
 @dataclass(frozen=True)
 class GEPAResult(Generic[OutputT]):
-    """The winning candidate and the inspectable search that produced it."""
+    """The winning candidate and the inspectable search that produced it.
+
+    ``per_validation_case_best_candidate_indices`` preserves the valset order.
+    Each value contains every tied-best zero-based index into ``candidates`` for
+    that validation case.
+    """
 
     candidates: tuple[Candidate, ...]
     scores: tuple[float, ...]
@@ -111,7 +116,7 @@ class GEPAResult(Generic[OutputT]):
     evaluator_calls: int
     generated_candidates: int
     best_index: int
-    pareto_front: tuple[int, ...]
+    per_validation_case_best_candidate_indices: tuple[tuple[Any, tuple[int, ...]], ...]
 
     @property
     def best_candidate(self) -> Candidate:
@@ -403,6 +408,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                     return _result(
                         candidates,
                         case_scores,
+                        self.valset_ids,
                         parents,
                         outputs,
                         feedback,
@@ -482,6 +488,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 return _result(
                     candidates,
                     case_scores,
+                    self.valset_ids,
                     parents,
                     outputs,
                     feedback,
@@ -560,7 +567,14 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             }
 
         return _result(
-            candidates, case_scores, parents, outputs, feedback, calls, generated
+            candidates,
+            case_scores,
+            self.valset_ids,
+            parents,
+            outputs,
+            feedback,
+            calls,
+            generated,
         )
 
     def _evaluate(
@@ -664,6 +678,8 @@ def optimize_anything(
         raise TypeError("config.mutator or config.generator is required")
 
     case_id = config.case_id or _case_identity
+    dataset_ids = _case_ids(data, case_id, "dataset")
+    validation_ids = _case_ids(validation, case_id, "valset")
     evaluator_identity = config.evaluator_identity or _callable_identity(evaluator)
     with Runtime.open(config.run_dir) as runtime:
         return _sync(
@@ -676,9 +692,9 @@ def optimize_anything(
                     runtime.reflection_id,
                     _candidate(seed_candidate),
                     data,
-                    tuple(case_id(case) for case in data),
+                    dataset_ids,
                     validation,
-                    tuple(case_id(case) for case in validation),
+                    validation_ids,
                     evaluator,
                     evaluator_identity,
                     objective.strip(),
@@ -751,11 +767,16 @@ def _case_front_frequencies(scores: Sequence[Sequence[float]]) -> Counter[int]:
     return Counter(index for front in _case_fronts(scores) for index in front)
 
 
-def _pareto_candidates(scores: Sequence[Sequence[float]]) -> tuple[int, ...]:
-    return tuple(sorted({index for front in _case_fronts(scores) for index in front}))
-
-
-def _result(candidates, case_scores, parents, outputs, feedback, calls, generated):
+def _result(
+    candidates,
+    case_scores,
+    validation_case_ids,
+    parents,
+    outputs,
+    feedback,
+    calls,
+    generated,
+):
     aggregates = tuple(fmean(scores) for scores in case_scores)
     best = max(range(len(aggregates)), key=aggregates.__getitem__)
     return GEPAResult(
@@ -768,7 +789,9 @@ def _result(candidates, case_scores, parents, outputs, feedback, calls, generate
         evaluator_calls=calls,
         generated_candidates=generated,
         best_index=best,
-        pareto_front=_pareto_candidates(case_scores),
+        per_validation_case_best_candidate_indices=tuple(
+            zip(validation_case_ids, _case_fronts(case_scores), strict=True)
+        ),
     )
 
 
@@ -857,6 +880,17 @@ def _case_identity(case: Any) -> Any:
         raise TypeError("provide config.case_id for non-JSON cases") from None
 
 
+def _case_ids(cases: Sequence[Any], identify: Callable[[Any], Any], role: str):
+    identities = tuple(identify(case) for case in cases)
+    canonical = tuple(
+        canonical_json(identity, what=f"{role} case identity")
+        for identity in identities
+    )
+    if len(set(canonical)) != len(canonical):
+        raise ValueError(f"{role} case identities must be unique")
+    return identities
+
+
 def _sync(awaitable: Any) -> Any:
     try:
         asyncio.get_running_loop()
@@ -869,9 +903,9 @@ def _sync(awaitable: Any) -> Any:
 
 __all__ = [
     "GEPA",
-    "GenerateCandidate",
     "GEPAConfig",
     "GEPAResult",
+    "GenerateCandidate",
     "OptimizationPlan",
     "SelectParents",
     "optimize_anything",
