@@ -9,8 +9,12 @@ format compared to Chat Completions. Key differences:
 - Built-in tools: web_search, code_interpreter, file_search
 """
 
+import asyncio
+from contextlib import asynccontextmanager
 import json
 import os
+import random
+import time
 from typing import Dict, Any, Optional, List
 
 import requests
@@ -21,6 +25,201 @@ from .base import (
     attach_provider_usage,
     requests_timeout_arg,
 )
+
+
+# Match Codex's built-in OpenAI provider defaults. These values count retries
+# after the initial attempt, so requests can run 5 times and streams 6 times.
+DEFAULT_REQUEST_MAX_RETRIES = 4
+DEFAULT_STREAM_MAX_RETRIES = 5
+_RETRY_BASE_DELAY_SECONDS = 0.2
+
+
+class _RetryableStreamError(RuntimeError):
+    """A stream failure that is safe to replay before output is emitted."""
+
+
+class _HTTPResponseError(RuntimeError):
+    """A non-retryable HTTP response, or one whose retry budget is exhausted."""
+
+
+def _retry_delay_seconds(retry_number: int) -> float:
+    """Codex-style exponential backoff with 10% jitter."""
+
+    delay = _RETRY_BASE_DELAY_SECONDS * (2 ** max(0, retry_number - 1))
+    return delay * random.uniform(0.9, 1.1)
+
+
+def _sleep_sync(delay: float) -> None:
+    time.sleep(delay)
+
+
+async def _sleep_async(delay: float) -> None:
+    await asyncio.sleep(delay)
+
+
+def _close_sync_response(response: Any) -> None:
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+
+
+def _http_error_message(status: Any, body: Any) -> str:
+    body_text = body if isinstance(body, str) else str(body or "")
+    return f"HTTP {status}: {body_text}" if body_text else f"HTTP {status}"
+
+
+def _post_sync_with_retries(
+    session: Any,
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    timeout: int,
+) -> Any:
+    transport_errors = (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+    )
+
+    for request_retry in range(DEFAULT_REQUEST_MAX_RETRIES + 1):
+        try:
+            response = session.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=requests_timeout_arg(timeout),
+                stream=True,
+            )
+        except transport_errors as exc:
+            if request_retry >= DEFAULT_REQUEST_MAX_RETRIES:
+                raise RuntimeError(f"Responses API request failed: {exc}") from exc
+            _sleep_sync(_retry_delay_seconds(request_retry + 1))
+            continue
+
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and status >= 400:
+            error = _HTTPResponseError(
+                _http_error_message(status, getattr(response, "text", ""))
+            )
+            _close_sync_response(response)
+            if 500 <= status < 600 and request_retry < DEFAULT_REQUEST_MAX_RETRIES:
+                _sleep_sync(_retry_delay_seconds(request_retry + 1))
+                continue
+            raise error
+
+        # Preserve support for response-like test doubles without status_code.
+        response.raise_for_status()
+        return response
+
+    raise AssertionError("unreachable")
+
+
+def _iter_sync_stream_lines(response: Any):
+    try:
+        yield from response.iter_lines()
+    except requests.exceptions.RequestException as exc:
+        raise _RetryableStreamError(
+            f"Responses API stream transport error: {exc}"
+        ) from exc
+    finally:
+        _close_sync_response(response)
+
+
+def _aiohttp_transport_errors(aiohttp: Any) -> tuple[type[BaseException], ...]:
+    errors: tuple[type[BaseException], ...] = (TimeoutError,)
+    client_error = getattr(aiohttp, "ClientError", None)
+    if isinstance(client_error, type) and issubclass(client_error, BaseException):
+        errors += (client_error,)
+    return errors
+
+
+@asynccontextmanager
+async def _post_async_with_retries(
+    session: Any,
+    aiohttp: Any,
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+):
+    transport_errors = _aiohttp_transport_errors(aiohttp)
+
+    for request_retry in range(DEFAULT_REQUEST_MAX_RETRIES + 1):
+        response_context = None
+        try:
+            response_context = session.post(url, headers=headers, json=payload)
+            response = await response_context.__aenter__()
+        except transport_errors as exc:
+            if request_retry >= DEFAULT_REQUEST_MAX_RETRIES:
+                raise RuntimeError(f"Responses API request failed: {exc}") from exc
+            await _sleep_async(_retry_delay_seconds(request_retry + 1))
+            continue
+
+        status = getattr(response, "status", 0)
+        if isinstance(status, int) and status >= 400:
+            try:
+                body = await response.text()
+            except transport_errors:
+                body = ""
+            await response_context.__aexit__(None, None, None)
+            error = _HTTPResponseError(_http_error_message(status, body))
+            if 500 <= status < 600 and request_retry < DEFAULT_REQUEST_MAX_RETRIES:
+                await _sleep_async(_retry_delay_seconds(request_retry + 1))
+                continue
+            raise error
+
+        try:
+            yield response
+        finally:
+            await response_context.__aexit__(None, None, None)
+        return
+
+    raise AssertionError("unreachable")
+
+
+async def _read_async_stream_line(content: Any, aiohttp: Any) -> bytes:
+    try:
+        return await content.readline()
+    except _aiohttp_transport_errors(aiohttp) as exc:
+        raise _RetryableStreamError(
+            f"Responses API stream transport error: {exc}"
+        ) from exc
+
+
+def _responses_api_error(event_data: Dict[str, Any]) -> RuntimeError:
+    response = event_data.get("response")
+    response_error = response.get("error") if isinstance(response, dict) else None
+    error_info = event_data.get("error")
+    if not isinstance(error_info, dict):
+        error_info = response_error if isinstance(response_error, dict) else {}
+
+    code = error_info.get("code") or event_data.get("code") or "unknown"
+    message = error_info.get("message") or event_data.get("message") or str(event_data)
+    error_message = f"Responses API error ({code}): {message}"
+
+    normalized_code = str(code).lower()
+    normalized_message = str(message).lower()
+    transient_codes = {
+        "overloaded",
+        "rate_limit_exceeded",
+        "server_error",
+        "service_unavailable",
+        "timeout",
+    }
+    transient_phrases = (
+        "error occurred while processing your request",
+        "overload",
+        "rate limit",
+        "server error",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "too many requests",
+        "try again",
+    )
+    if normalized_code in transient_codes or any(
+        phrase in normalized_message for phrase in transient_phrases
+    ):
+        return _RetryableStreamError(error_message)
+    return RuntimeError(error_message)
 
 
 class OpenAIResponsesAdapter(ProviderAdapter):
@@ -242,16 +441,41 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                payload: Dict[str, Any],
                timeout: int = 600,
                session: Optional[requests.Session] = None):
+        for stream_retry in range(DEFAULT_STREAM_MAX_RETRIES + 1):
+            emitted_event = False
+            try:
+                for event in self._stream_once(
+                    url,
+                    headers,
+                    payload,
+                    timeout=timeout,
+                    session=session,
+                ):
+                    emitted_event = True
+                    yield event
+                return
+            except _RetryableStreamError:
+                # Replaying after deltas were emitted would duplicate persisted
+                # text or tool-call arguments in Egg's thread runner.
+                if emitted_event or stream_retry >= DEFAULT_STREAM_MAX_RETRIES:
+                    raise
+                _sleep_sync(_retry_delay_seconds(stream_retry + 1))
+
+    def _stream_once(self,
+                     url: str,
+                     headers: Dict[str, str],
+                     payload: Dict[str, Any],
+                     timeout: int = 600,
+                     session: Optional[requests.Session] = None):
         sess = session or requests
         api_payload = self._build_payload(payload)
-        resp = sess.post(
+        resp = _post_sync_with_retries(
+            sess,
             url,
-            headers=headers,
-            json=api_payload,
-            timeout=requests_timeout_arg(timeout),
-            stream=True,
+            headers,
+            api_payload,
+            timeout,
         )
-        resp.raise_for_status()
 
         assistant_text_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -263,7 +487,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         def tool_calls_values():
             return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
 
-        for line in resp.iter_lines():
+        stream_finished = False
+        for line in _iter_sync_stream_lines(resp):
             if not line:
                 continue
             line_str = line.decode('utf-8', errors='ignore')
@@ -271,6 +496,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 continue
             data_str = line_str[6:]
             if data_str.strip() == '[DONE]':
+                stream_finished = True
                 break
             try:
                 event_data = json.loads(data_str)
@@ -394,18 +620,22 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 # Still yield whatever was accumulated — reasoning-only responses
                 # are valid for reasoning models.
                 incomplete_metadata = self._response_incomplete_metadata(event_data)
+                stream_finished = True
                 break
 
             elif event_type in ("response.failed", "error"):
                 # Surface API/stream errors instead of silently ignoring them
-                error_info = event_data.get("error", {}) if isinstance(event_data.get("error"), dict) else {}
-                code = error_info.get("code") or event_data.get("code") or "unknown"
-                message = error_info.get("message") or event_data.get("message") or str(event_data)
-                raise RuntimeError(f"Responses API error ({code}): {message}")
+                raise _responses_api_error(event_data)
 
             elif event_type in ("response.completed", "response.done"):
                 # Stream complete
+                stream_finished = True
                 break
+
+        if not stream_finished:
+            raise _RetryableStreamError(
+                "Responses API stream closed before response.completed"
+            )
 
         # Build final message
         final_message: Dict[str, Any] = {"role": "assistant"}
@@ -428,6 +658,41 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                            payload: Dict[str, Any],
                            timeout: int = 600,
                            session: Optional[Any] = None):
+        if os.environ.get("EGG_FORCE_WITHOUT_AIOHTTP"):
+            async for event in self._stream_async_once(
+                url,
+                headers,
+                payload,
+                timeout=timeout,
+                session=session,
+            ):
+                yield event
+            return
+
+        for stream_retry in range(DEFAULT_STREAM_MAX_RETRIES + 1):
+            emitted_event = False
+            try:
+                async for event in self._stream_async_once(
+                    url,
+                    headers,
+                    payload,
+                    timeout=timeout,
+                    session=session,
+                ):
+                    emitted_event = True
+                    yield event
+                return
+            except _RetryableStreamError:
+                if emitted_event or stream_retry >= DEFAULT_STREAM_MAX_RETRIES:
+                    raise
+                await _sleep_async(_retry_delay_seconds(stream_retry + 1))
+
+    async def _stream_async_once(self,
+                                 url: str,
+                                 headers: Dict[str, str],
+                                 payload: Dict[str, Any],
+                                 timeout: int = 600,
+                                 session: Optional[Any] = None):
         """Async streaming for Responses API.
 
         Similar to OpenAICompatAdapter, uses aiohttp for proper HTTP cancellation.
@@ -469,13 +734,16 @@ class OpenAIResponsesAdapter(ProviderAdapter):
 
         client_timeout = aiohttp_stream_timeout(aiohttp, timeout)
         async with aiohttp.ClientSession(timeout=client_timeout) as sess:
-            async with sess.post(url, headers=headers, json=api_payload) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"HTTP {resp.status}: {text}")
-
+            async with _post_async_with_retries(
+                sess,
+                aiohttp,
+                url,
+                headers,
+                api_payload,
+            ) as resp:
+                stream_finished = False
                 while True:
-                    line = await resp.content.readline()
+                    line = await _read_async_stream_line(resp.content, aiohttp)
                     if not line:
                         break
                     line_str = line.decode('utf-8', errors='ignore')
@@ -483,6 +751,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         continue
                     data_str = line_str[6:]
                     if data_str.strip() == '[DONE]':
+                        stream_finished = True
                         break
                     try:
                         event_data = json.loads(data_str)
@@ -599,17 +868,21 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         # Still yield whatever was accumulated — reasoning-only responses
                         # are valid for reasoning models.
                         incomplete_metadata = self._response_incomplete_metadata(event_data)
+                        stream_finished = True
                         break
 
                     elif event_type in ("response.failed", "error"):
                         # Surface API/stream errors instead of silently ignoring them
-                        error_info = event_data.get("error", {}) if isinstance(event_data.get("error"), dict) else {}
-                        code = error_info.get("code") or event_data.get("code") or "unknown"
-                        message = error_info.get("message") or event_data.get("message") or str(event_data)
-                        raise RuntimeError(f"Responses API error ({code}): {message}")
+                        raise _responses_api_error(event_data)
 
                     elif event_type in ("response.completed", "response.done"):
+                        stream_finished = True
                         break
+
+                if not stream_finished:
+                    raise _RetryableStreamError(
+                        "Responses API stream closed before response.completed"
+                    )
 
         final_message: Dict[str, Any] = {"role": "assistant"}
         content = "".join(assistant_text_parts)
