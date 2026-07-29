@@ -19,19 +19,19 @@ from eggthreads import (
     list_children_with_meta,
     load_thread_projection,
     set_thread_model,
+    set_thread_sandbox_config,
     set_thread_tool_allowlist,
     set_thread_tools_enabled,
-    set_thread_sandbox_config,
     set_thread_working_directory,
     thread_state,
 )
 
-from .context_limit import run_with_full_context_limit
 from .context import (
     _current_evaluation,
     _current_evaluation_context_limit,
     _evaluation_runtime,
 )
+from .context_limit import run_with_full_context_limit
 from .identity import canonical_json, digest_payload
 from .recovery import InteractionRecovery
 from .tools import default_safe_tools, safe_tools
@@ -106,14 +106,20 @@ class ActorCriticResult:
 
 @dataclass
 class ActorCritic(Task):
-    """Bounded, recoverable Actor → Critic → revision loop."""
+    """Bounded, recoverable Actor → Critic → revision loop.
+
+    Prompt factories may return text directly or a Task whose result is text.
+    Task prompts run after the persistent Actor/Critic pair is assigned, so they
+    can prepare thread-bound inputs before an agent turn. The returned Task must
+    include those inputs in its own durable identity.
+    """
 
     actor: Agent = field(repr=False, compare=False)
     critic: Agent | Task = field(repr=False, compare=False)
-    actor_prompt: Callable[[int, Mapping[str, Any]], str] = field(
+    actor_prompt: Callable[[int, Mapping[str, Any]], str | Task] = field(
         repr=False, compare=False
     )
-    critic_prompt: Callable[[int, Mapping[str, Any]], str] | None = field(
+    critic_prompt: Callable[[int, Mapping[str, Any]], str | Task] | None = field(
         default=None, repr=False, compare=False
     )
     max_rounds: int = 3
@@ -214,22 +220,28 @@ class ActorCritic(Task):
                 "critic_thread_id": critic_id,
                 "workspace": workspace,
             }
+            prompt = yield from _resolve_prompt(
+                self.actor_prompt(round_number, state), "actor"
+            )
             answer = yield _AgentTurn(
                 runtime_key,
                 actor_id,
                 self.actor,
-                self.actor_prompt(round_number, state),
+                prompt,
                 "actor",
                 round_number,
                 self.actor.context_limit or context_limit,
             )
             state = {**state, "answer": answer}
             if isinstance(self.critic, Agent):
+                prompt = yield from _resolve_prompt(
+                    self.critic_prompt(round_number, state), "critic"
+                )
                 raw = yield _AgentTurn(
                     runtime_key,
                     critic_id,
                     self.critic,
-                    self.critic_prompt(round_number, state),
+                    prompt,
                     "critic",
                     round_number,
                     self.critic.context_limit or context_limit,
@@ -581,7 +593,7 @@ def _critic_decision(value: Any) -> dict[str, str]:
     if isinstance(value, Mapping):
         decision = dict(value)
     elif not isinstance(value, str):
-        raise ValueError("Critic answer must be strict JSON text")
+        raise ValueError("Critic answer must be strict JSON text")  # noqa: TRY004
     else:
         try:
             decision = json.loads(value)
@@ -592,11 +604,21 @@ def _critic_decision(value: Any) -> dict[str, str]:
     if decision["decision"] not in {"accept", "revise"}:
         raise ValueError("Critic decision must be accept or revise")
     if not isinstance(decision["feedback"], str):
-        raise ValueError("Critic feedback must be a string")
+        raise ValueError("Critic feedback must be a string")  # noqa: TRY004
     return {
         "decision": str(decision["decision"]),
         "feedback": decision["feedback"],
     }
+
+
+def _resolve_prompt(value: Any, role: str):
+    """Resolve one post-assignment prompt without hiding its Eggflow dependency."""
+
+    if isinstance(value, Task):
+        value = yield value
+    if not isinstance(value, str):
+        raise TypeError(f"ActorCritic {role} prompt must resolve to a string")
+    return value
 
 
 def _prompt_message_id(db: Any, thread_id: str, semantic_key: str) -> str | None:

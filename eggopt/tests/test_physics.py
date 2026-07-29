@@ -312,3 +312,111 @@ def test_physics_role_can_compose_actor_critic_on_persistent_thread(
 
     assert replay.hypotheses == result.hypotheses
     assert replay_modeler.calls == 0
+
+
+def test_actor_critic_prompt_task_runs_after_actor_thread_assignment(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    actor = ScriptedLLM(["ready"])
+    observed = []
+
+    @dataclass
+    class PreparePrompt(Task):
+        actor_thread_id: str
+
+        def run(self):
+            observed.append(self.actor_thread_id)
+            return "Inspect the prepared data."
+
+    @dataclass
+    class Hypothesize(Task):
+        def run(self):
+            result = yield ActorCritic(
+                actor=Agent(actor, {"role": "prepared-physics-modeler"}),
+                critic=Accept(),
+                actor_prompt=lambda _round, state: PreparePrompt(
+                    state["actor_thread_id"]
+                ),
+                max_rounds=1,
+                names=("Modeler", "Backtest"),
+            )
+            return result.answer
+
+    result = PhysicsStrategy(
+        observe=lambda **_: Value("observe", {"position": 0}, Calls()),
+        hypothesize=lambda **_: Hypothesize(),
+        test=lambda **_: Value("test", None, Calls()),
+        deliberate=lambda **_: Value("deliberate", None, Calls()),
+        execute=lambda **_: Value("execute", {}, Calls()),
+        identity={"test": "actor-critic-prompt-task"},
+    ).run(run_dir="run", max_cycles=1)
+
+    db = ThreadsDB(tmp_path / "run" / ".egg" / "threads.sqlite")
+    try:
+        backtest_id = list_children_with_meta(db, result.hypotheses_thread_id)[0][0]
+        modeler_id = list_children_with_meta(db, backtest_id)[0][0]
+        assert observed == [modeler_id]
+    finally:
+        db.close()
+
+    replay_actor = ScriptedLLM([])
+
+    @dataclass
+    class ReplayHypothesize(Task):
+        def run(self):
+            result = yield ActorCritic(
+                actor=Agent(replay_actor, {"role": "prepared-physics-modeler"}),
+                critic=Accept(),
+                actor_prompt=lambda _round, state: PreparePrompt(
+                    state["actor_thread_id"]
+                ),
+                max_rounds=1,
+                names=("Modeler", "Backtest"),
+            )
+            return result.answer
+
+    PhysicsStrategy(
+        observe=lambda **_: Value("observe", {"position": 0}, Calls()),
+        hypothesize=lambda **_: ReplayHypothesize(),
+        test=lambda **_: Value("test", None, Calls()),
+        deliberate=lambda **_: Value("deliberate", None, Calls()),
+        execute=lambda **_: Value("execute", {}, Calls()),
+        identity={"test": "actor-critic-prompt-task"},
+    ).run(run_dir="run", max_cycles=1)
+
+    assert observed == [modeler_id]
+    assert replay_actor.calls == 0
+
+
+def test_actor_critic_rejects_prompt_task_with_non_text_result(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    @dataclass
+    class NotText(Task):
+        def run(self):
+            return {"prompt": "wrong type"}
+
+    @dataclass
+    class Hypothesize(Task):
+        def run(self):
+            return (
+                yield ActorCritic(
+                    actor=Agent(ScriptedLLM([]), {"role": "invalid-prompt"}),
+                    critic=Accept(),
+                    actor_prompt=lambda _round, _state: NotText(),
+                    max_rounds=1,
+                )
+            )
+
+    strategy = PhysicsStrategy(
+        observe=lambda **_: Value("observe", {"position": 0}, Calls()),
+        hypothesize=lambda **_: Hypothesize(),
+        test=lambda **_: Value("test", None, Calls()),
+        deliberate=lambda **_: Value("deliberate", None, Calls()),
+        execute=lambda **_: Value("execute", {}, Calls()),
+        identity={"test": "invalid-actor-critic-prompt-task"},
+    )
+
+    with pytest.raises(Exception, match="actor prompt must resolve to a string"):
+        strategy.run(run_dir="run", max_cycles=1)
