@@ -14,7 +14,7 @@ from eggthreads import (
     ThreadsDB,
     create_child_thread,
     get_context_limit,
-    list_children_with_meta,
+    rename_thread,
     set_context_limit,
     set_thread_working_directory,
 )
@@ -60,6 +60,7 @@ class _EnsureCandidateEvaluation(Task):
     parent_id: str
     candidate: Candidate
     scope: str
+    label: str | None = None
 
     def get_cache_key(self) -> str:
         return digest_payload(
@@ -72,18 +73,30 @@ class _EnsureCandidateEvaluation(Task):
         )
 
     def run(self) -> str:
-        number = 1 + sum(
-            name.startswith("Candidate ") and name.endswith(" Evaluation")
-            for _thread_id, name, *_rest in list_children_with_meta(
-                self.threads, self.parent_id
-            )
-        )
+        name = self.label or "Candidate Evaluation"
         return create_child_thread(
             self.threads,
             self.parent_id,
-            name=f"Candidate {number} Evaluation",
+            name=name,
             inherit_tools_config=False,
         )
+
+
+@dataclass
+class _NameCandidateEvaluation(Task):
+    threads: ThreadsDB = field(repr=False, compare=False)
+    thread_id: str
+    name: str
+
+    def get_cache_key(self) -> str:
+        return digest_payload(
+            "eggopt.gepa.name-candidate-evaluation.v1",
+            {"thread": self.thread_id, "name": self.name},
+        )
+
+    def run(self) -> None:
+        if self.threads.get_thread(self.thread_id).name != self.name:
+            rename_thread(self.threads, self.thread_id, self.name)
 
 
 @dataclass
@@ -249,6 +262,10 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
         default=None, repr=False, compare=False
     )
     stage: str = "evaluation"
+    label: str | None = None
+    proposal_number: int | None = None
+    candidate_number: int | None = None
+    evaluation_role: str = "evaluation"
 
     def get_cache_key(self) -> str:
         return digest_payload(
@@ -267,7 +284,12 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
             self.parent_id,
             self.candidate,
             self.stage,
+            self.label,
         )
+        if self.label is not None:
+            yield _NameCandidateEvaluation(
+                self.threads, candidate_thread_id, self.label
+            )
         case_nodes = yield [
             _EnsureCaseEvaluation(
                 self.threads,
@@ -307,6 +329,11 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
             )
         ]
         candidate_thread_name = self.threads.get_thread(candidate_thread_id).name
+        identity = {
+            "proposal_number": self.proposal_number,
+            "candidate_number": self.candidate_number,
+            "evaluation_role": self.evaluation_role,
+        }
         if self.progress is not None:
             self.progress(
                 {
@@ -316,6 +343,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                     "candidate_thread_name": candidate_thread_name,
                     "candidate": dict(self.candidate),
                     "case_count": len(tasks),
+                    **identity,
                 }
             )
         values: list[Any] = []
@@ -339,6 +367,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                             "score": evaluation.score,
                             "feedback": _feedback(evaluation),
                             "evaluation_thread_id": case_nodes[index][0],
+                            **identity,
                         }
                     )
         evaluations = tuple(_as_native_evaluation(value) for value in values)
@@ -352,6 +381,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                     "candidate": dict(self.candidate),
                     "aggregate_score": fmean(item.score for item in evaluations),
                     "case_count": len(evaluations),
+                    **identity,
                 }
             )
         return _CandidateEvaluation(

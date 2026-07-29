@@ -5,7 +5,7 @@ import inspect
 import random
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from operator import ge, gt
 from pathlib import Path
 from statistics import fmean
@@ -14,12 +14,12 @@ from typing import Any, Generic, Literal, TypeVar
 from eggflow import FlowExecutor, Task
 from eggthreads import ThreadsDB
 
-from ..identity import canonical_candidate, canonical_json, digest_payload
 from ..context import _evaluation_scope
+from ..identity import canonical_candidate, canonical_json, digest_payload
 from .evaluation import (
     _Await,
-    _EvaluateCandidate,
     _completed_evaluator_calls,
+    _EvaluateCandidate,
     _feedback,
     _json_value,
     _new_call_count,
@@ -251,6 +251,7 @@ class GenerateCandidate(Task):
     objective: str
     generation: int
     full_validation_scores: tuple[Mapping[str, Any], ...] = ()
+    last_candidate_result: Mapping[str, Any] | None = None
 
     def get_cache_key(self) -> str:
         return self._mutation().get_cache_key()
@@ -277,6 +278,7 @@ class GenerateCandidate(Task):
             self.objective,
             self.generation,
             self.full_validation_scores,
+            self.last_candidate_result,
         )
 
 
@@ -350,7 +352,15 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             raise ValueError(
                 "max_evaluator_calls must cover the seed's full valset evaluation"
             )
-        first = yield self._evaluate(seed, self.valset, self.valset_ids, stage="full")
+        first = yield self._evaluate(
+            seed,
+            self.valset,
+            self.valset_ids,
+            stage="full",
+            label="Candidate 1 Evaluation",
+            candidate_number=1,
+            evaluation_role="candidate_validation",
+        )
         candidates = [seed]
         case_scores = [first.scores]
         outputs = [first.outputs]
@@ -359,6 +369,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
         candidate_generations: list[int | None] = [None]
         calls = _completed_evaluator_calls(self.flow)
         generated = 0
+        last_candidate_result = None
 
         while generated < self.config.max_candidates:
             generation = generated
@@ -403,6 +414,10 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                     batch,
                     batch_ids,
                     stage="minibatch",
+                    label=f"Candidate {parent_id + 1} Reflection for Proposal {generation + 1}",
+                    proposal_number=generation + 1,
+                    candidate_number=parent_id + 1,
+                    evaluation_role="parent_reflection",
                 )
                 calls = _completed_evaluator_calls(self.flow)
                 parent_evaluations.append(evaluated)
@@ -436,7 +451,13 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                     self.objective,
                     generation,
                     validation_scores,
+                    last_candidate_result,
                 )
+                if last_candidate_result is not None:
+                    legacy_task = replace(generation_task, last_candidate_result=None)
+                    row = self.flow.store.get(legacy_task.get_cache_key())
+                    if row is not None and row["status"] == "COMPLETED":
+                        generation_task = legacy_task
             else:
                 generation_task = _CustomGenerateCandidate(
                     self.config.generator,
@@ -472,15 +493,26 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 batch,
                 batch_ids,
                 stage="minibatch",
+                label=f"Proposal {generated} Minibatch",
+                proposal_number=generated,
+                evaluation_role="proposal_minibatch",
             )
             calls = _completed_evaluator_calls(self.flow)
             # Multiple selected parents may specialize on different cases;
             # compare the child with the strongest per-case parent envelope.
-            if not _accept_minibatch(
+            accepted = _accept_minibatch(
                 child_batch.scores,
                 parent_evaluations,
                 self.config.minibatch_acceptance,
-            ):
+            )
+            last_candidate_result = _minibatch_candidate_result(
+                generation,
+                child_batch.scores,
+                parent_evaluations,
+                self.config.minibatch_acceptance,
+                accepted,
+            )
+            if not accepted:
                 continue
 
             full_needed = _new_call_count(
@@ -493,12 +525,21 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 "full",
             )
             if calls + full_needed > self.config.max_evaluator_calls:
+                last_candidate_result = {
+                    **last_candidate_result,
+                    "outcome": "full_validation_not_run_evaluator_budget",
+                }
                 continue
+            candidate_number = len(candidates) + 1
             full = yield self._evaluate(
                 child,
                 self.valset,
                 self.valset_ids,
                 stage="full",
+                label=f"Proposal {generated} → Candidate {candidate_number} Validation",
+                proposal_number=generated,
+                candidate_number=candidate_number,
+                evaluation_role="candidate_validation",
             )
             calls = _completed_evaluator_calls(self.flow)
             candidates.append(child)
@@ -507,12 +548,33 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             feedback.append(full.feedback)
             parents.append(parent_ids)
             candidate_generations.append(generation + 1)
+            last_candidate_result = {
+                **last_candidate_result,
+                "outcome": "full_validation_completed_and_added",
+                "full_validation": {
+                    "candidate_index": len(candidates) - 1,
+                    "candidate_number": len(candidates),
+                    "aggregate_score": fmean(full.scores),
+                    "case_count": len(full.scores),
+                },
+            }
 
         return _result(
             candidates, case_scores, parents, outputs, feedback, calls, generated
         )
 
-    def _evaluate(self, candidate, cases, case_ids, *, stage):
+    def _evaluate(
+        self,
+        candidate,
+        cases,
+        case_ids,
+        *,
+        stage,
+        label,
+        proposal_number=None,
+        candidate_number=None,
+        evaluation_role,
+    ):
         parent_id = self.validation_id if stage == "full" else self.reflection_id
         return _EvaluateCandidate(
             self.flow,
@@ -528,6 +590,10 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             self.config.evaluator_context_limit,
             self.config.progress,
             stage,
+            label,
+            proposal_number,
+            candidate_number,
+            evaluation_role,
         )
 
 
@@ -635,12 +701,40 @@ def _minibatch_indices(size: int, batch_size: int, seed: int, generation: int):
 
 
 def _accept_minibatch(child_scores, parent_evaluations, criterion):
-    parent_total = sum(
-        max(item.scores[case] for item in parent_evaluations)
-        for case in range(len(child_scores))
-    )
+    parent_total = sum(_parent_envelope_scores(parent_evaluations, len(child_scores)))
     child_total = sum(child_scores)
     return _MINIBATCH_ACCEPTANCE[criterion](child_total, parent_total)
+
+
+def _parent_envelope_scores(parent_evaluations, case_count):
+    return tuple(
+        max(item.scores[case] for item in parent_evaluations)
+        for case in range(case_count)
+    )
+
+
+def _minibatch_candidate_result(
+    generation,
+    child_scores,
+    parent_evaluations,
+    acceptance_policy,
+    accepted,
+):
+    parent_scores = _parent_envelope_scores(parent_evaluations, len(child_scores))
+    return {
+        "mutation_generation": generation + 1,
+        "outcome": (
+            "advanced_to_full_validation" if accepted else "rejected_on_minibatch"
+        ),
+        "minibatch": {
+            "aggregate_score": fmean(child_scores),
+            "case_count": len(child_scores),
+            "parent_envelope_aggregate_score": fmean(parent_scores),
+            "acceptance_policy": acceptance_policy,
+            "accepted": accepted,
+        },
+        "full_validation": None,
+    }
 
 
 def _case_fronts(scores: Sequence[Sequence[float]]) -> tuple[tuple[int, ...], ...]:

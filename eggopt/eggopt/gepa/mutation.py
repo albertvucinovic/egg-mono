@@ -102,27 +102,33 @@ class Mutate(Task):
     objective: str
     generation: int
     full_validation_scores: tuple[Mapping[str, Any], ...] = ()
+    last_candidate_result: Mapping[str, Any] | None = None
 
     def get_cache_key(self) -> str:
-        return digest_payload(
-            "eggopt.gepa.mutate.v1",
-            {
-                "mutator": self.mutator.identity,
-                "parents": [canonical_candidate(parent) for parent in self.parents],
-                "evidence": json.loads(
-                    canonical_json(self.evidence, what="mutation evidence")
-                ),
-                "objective": self.objective,
-                "generation": self.generation,
-                "feedback_transport": "file-v1",
-                "full_validation_scores": json.loads(
-                    canonical_json(
-                        self.full_validation_scores,
-                        what="full validation scores",
-                    )
-                ),
-            },
-        )
+        identity = {
+            "mutator": self.mutator.identity,
+            "parents": [canonical_candidate(parent) for parent in self.parents],
+            "evidence": json.loads(
+                canonical_json(self.evidence, what="mutation evidence")
+            ),
+            "objective": self.objective,
+            "generation": self.generation,
+            "feedback_transport": "file-v1",
+            "full_validation_scores": json.loads(
+                canonical_json(
+                    self.full_validation_scores,
+                    what="full validation scores",
+                )
+            ),
+        }
+        if self.last_candidate_result is not None:
+            identity["last_candidate_result"] = json.loads(
+                canonical_json(
+                    self.last_candidate_result,
+                    what="last candidate result",
+                )
+            )
+        return digest_payload("eggopt.gepa.mutate.v1", identity)
 
     def run(self):
         request = MutationRequest(
@@ -130,6 +136,7 @@ class Mutate(Task):
             self.evidence,
             self.objective,
             self.full_validation_scores,
+            self.last_candidate_result,
         )
         feedback_path = request.write(self.get_cache_key())
         result = yield ActorCritic(
@@ -154,15 +161,19 @@ class MutationRequest:
     evidence: tuple[Mapping[str, Any], ...]
     objective: str
     full_validation_scores: tuple[Mapping[str, Any], ...] = ()
+    last_candidate_result: Mapping[str, Any] | None = None
 
     def document(self) -> Mapping[str, Any]:
-        return {
+        document = {
             "objective": self.objective,
             "selected_parents": [dict(parent) for parent in self.parents],
             "evaluation_evidence": list(self.evidence),
             "full_validation_scores": list(self.full_validation_scores),
             "components_to_update": list(self.parents[0]),
         }
+        if self.last_candidate_result is not None:
+            document["last_candidate_result"] = self.last_candidate_result
+        return document
 
     def write(self, mutation_key: str) -> Path:
         context = _current_evaluation()
@@ -189,12 +200,23 @@ class MutationRequest:
         return path
 
     def prompt(self, instruction: str, feedback_file: str) -> str:
+        if self.last_candidate_result is None:
+            last_result = (
+                "This is the first mutation; there is no last candidate result yet."
+            )
+        else:
+            last_result = (
+                "Your last candidate performed as follows:\n"
+                f"{json.dumps(self.last_candidate_result, sort_keys=True)}"
+            )
         return (
             f"{instruction}\n\n"
+            f"{last_result}\n\n"
+            "Now use the selected Pareto parents to create a new candidate. "
             f"Read the complete authoritative mutation request from {feedback_file} "
             "in your current working directory before answering. It contains the "
-            "objective, selected parents, evaluation evidence, full-validation score "
-            "history, and components to update.\n\n"
+            "objective, your last candidate result, selected parents, evaluation "
+            "evidence, full-validation score history, and components to update.\n\n"
             "Return only strict JSON with exactly the key 'mutations', containing "
             "one object that updates only the listed components."
         )

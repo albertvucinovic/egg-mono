@@ -406,6 +406,65 @@ def test_minibatch_acceptance_can_send_ties_to_full_validation(tmp_path):
     )
 
 
+def test_next_mutation_reports_last_candidate_rejected_on_minibatch(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from eggopt import Mutator
+
+    monkeypatch.chdir(tmp_path)
+    llm = ScriptedMutationLLM(
+        [
+            json.dumps({"mutations": [{"instruction": "-1"}]}),
+            json.dumps({"mutations": [{"instruction": "1"}]}),
+        ]
+    )
+    optimize_anything(
+        {"instruction": "0"},
+        evaluator=Evaluator(),
+        dataset=[{"id": "train", "target": 1}],
+        objective="Reach the target.",
+        config=GEPAConfig(
+            run_dir=tmp_path / "rejected-candidate-feedback",
+            max_candidates=2,
+            max_evaluator_calls=10,
+            mutation_minibatch_size=1,
+            parents_per_candidate=1,
+            mutator=Mutator.eggthreads(
+                llm=llm,
+                identity={"model": "rejected-candidate-feedback"},
+                instruction="Improve the instruction.",
+                allowed_tools=set(),
+            ),
+            evaluator_identity={"name": "rejected-candidate-feedback"},
+            case_id=lambda case: case["id"],
+        ),
+    )
+
+    workspace = tmp_path / "rejected-candidate-feedback" / "workspaces" / "mutation"
+    requests = [
+        json.loads(path.read_text())
+        for path in sorted(workspace.glob("feedback-*.json"))
+    ]
+    last_results = [request.get("last_candidate_result") for request in requests]
+    rejected = next(result for result in last_results if result is not None)
+    assert len(requests) == 2
+
+    assert rejected == {
+        "full_validation": None,
+        "minibatch": {
+            "acceptance_policy": "strict_improvement",
+            "accepted": False,
+            "aggregate_score": 0.0,
+            "case_count": 1,
+            "parent_envelope_aggregate_score": 0.0,
+        },
+        "mutation_generation": 1,
+        "outcome": "rejected_on_minibatch",
+    }
+
+
 def test_minibatch_acceptance_rejects_unknown_policy():
     with pytest.raises(ValueError, match="minibatch_acceptance"):
         GEPAConfig(minibatch_acceptance="unknown")
@@ -451,8 +510,12 @@ def test_progress_callback_reports_each_case_and_candidate(tmp_path):
         )
     ]
     assert replay_events == events
+    assert evaluator.calls == 4
     assert events[0]["case_count"] == 1
     assert events[0]["candidate_thread_name"] == "Candidate 1 Evaluation"
+    assert events[0]["candidate_number"] == 1
+    assert events[0]["proposal_number"] is None
+    assert events[0]["evaluation_role"] == "candidate_validation"
     assert events[1]["case"] == "easy"
     names_by_thread = {}
     for event in events:
@@ -464,6 +527,42 @@ def test_progress_callback_reports_each_case_and_candidate(tmp_path):
     assert events[-1]["kind"] == "candidate_evaluation"
     assert events[-1]["stage"] == "full"
     assert replay.best_candidate == {"instruction": "1"}
+
+
+def test_progress_distinguishes_proposals_from_admitted_candidates(tmp_path):
+    events = []
+    evaluator = Evaluator()
+    result = optimize_anything(
+        {"instruction": "0"},
+        evaluator=evaluator,
+        dataset=[{"id": "easy", "target": 1}],
+        objective="Reach the target.",
+        config=config(
+            tmp_path,
+            evaluator,
+            Increment(),
+            max_candidates=1,
+            parents_per_candidate=1,
+            progress=events.append,
+        ),
+    )
+
+    starts = [event for event in events if event["kind"] == "candidate_evaluation_started"]
+    assert [event["evaluation_role"] for event in starts] == [
+        "candidate_validation",
+        "parent_reflection",
+        "proposal_minibatch",
+        "candidate_validation",
+    ]
+    assert starts[1]["candidate_number"] == 1
+    assert starts[1]["proposal_number"] == 1
+    assert starts[2]["candidate_number"] is None
+    assert starts[2]["proposal_number"] == 1
+    assert starts[2]["candidate_thread_name"] == "Proposal 1 Minibatch"
+    assert starts[3]["candidate_number"] == 2
+    assert starts[3]["proposal_number"] == 1
+    assert result.generated_candidates == 1
+    assert len(result.candidates) == 2
 
 
 def test_progress_projects_cached_results_on_resume(tmp_path):
@@ -710,7 +809,7 @@ def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(
         assert not is_descendant_thread(db, mutation[0], validation_candidates[0][0])
 
         reflection_candidates = list_children_with_meta(db, reflection[0])
-        assert reflection_candidates[0][1] == "Candidate 1 Evaluation"
+        assert reflection_candidates[0][1] == "Candidate 1 Reflection for Proposal 1"
         assert is_descendant_thread(db, mutation[0], reflection_candidates[0][0])
         assert get_thread_tools_config(db, reflection_candidates[0][0]).is_tool_allowed(
             "send_message_to_child"
@@ -1635,7 +1734,9 @@ def test_native_mutation_prompt_references_feedback_files(tmp_path, monkeypatch)
             if message.payload.get("role") == "user"
             and message.payload.get("eggopt_actor_critic_key")
         ]
-        workspace = tmp_path / "mutation-validation-feedback" / "workspaces" / "mutation"
+        workspace = (
+            tmp_path / "mutation-validation-feedback" / "workspaces" / "mutation"
+        )
         feedback_files = sorted(workspace.glob("feedback-*.json"))
         by_name = {path.name: json.loads(path.read_text()) for path in feedback_files}
         requests = [
@@ -1656,6 +1757,7 @@ def test_native_mutation_prompt_references_feedback_files(tmp_path, monkeypatch)
             "mutation_generation": None,
         }
     ]
+    assert "last_candidate_result" not in requests[0]
     assert requests[1]["full_validation_scores"] == [
         requests[0]["full_validation_scores"][0],
         {
@@ -1666,6 +1768,26 @@ def test_native_mutation_prompt_references_feedback_files(tmp_path, monkeypatch)
             "mutation_generation": 1,
         },
     ]
+    assert requests[1]["last_candidate_result"] == {
+        "full_validation": {
+            "aggregate_score": 0.5,
+            "candidate_index": 1,
+            "candidate_number": 2,
+            "case_count": 2,
+        },
+        "minibatch": {
+            "acceptance_policy": "improvement_or_equal",
+            "accepted": True,
+            "aggregate_score": 1.0,
+            "case_count": 1,
+            "parent_envelope_aggregate_score": 0.0,
+        },
+        "mutation_generation": 1,
+        "outcome": "full_validation_completed_and_added",
+    }
+    assert "Your last candidate performed as follows" in prompts[1]
+    assert "Now use the selected Pareto parents" in prompts[1]
+    assert '"aggregate_score": 0.5' in prompts[1]
     assert "full_validation_score" not in requests[1]["evaluation_evidence"][0]
     assert (
         "best or tied-best" in requests[1]["evaluation_evidence"][0]["selection_reason"]
@@ -1712,6 +1834,56 @@ def test_full_validation_scores_change_native_mutation_key():
     )
 
     assert first.get_cache_key() != changed.get_cache_key()
+
+
+def test_last_candidate_result_changes_native_mutation_key():
+    from eggopt.gepa import Mutate, Mutator
+
+    mutator = Mutator(
+        Agent(object(), {"model": "last-candidate-key"}),
+        "Improve the candidate.",
+    )
+    arguments = (
+        mutator,
+        ({"instruction": "0"},),
+        ({"parent_index": 0, "cases": []},),
+        "Improve.",
+        1,
+        ({"candidate_number": 1, "aggregate_score": 0.0},),
+    )
+
+    first = Mutate(
+        *arguments,
+        {"mutation_generation": 1, "outcome": "rejected_on_minibatch"},
+    )
+    changed = Mutate(
+        *arguments,
+        {"mutation_generation": 1, "outcome": "full_validation_completed_and_added"},
+    )
+
+    assert first.get_cache_key() != changed.get_cache_key()
+
+
+def test_last_candidate_result_preserves_first_mutation_cache_identity():
+    from eggopt.gepa import Mutate, Mutator
+
+    mutator = Mutator(
+        Agent(object(), {"model": "first-mutation-key"}),
+        "Improve the candidate.",
+    )
+    arguments = (
+        mutator,
+        ({"instruction": "0"},),
+        ({"parent_index": 0, "cases": []},),
+        "Improve.",
+        0,
+        ({"candidate_number": 1, "aggregate_score": 0.0},),
+    )
+
+    assert (
+        Mutate(*arguments).get_cache_key()
+        == Mutate(*arguments, last_candidate_result=None).get_cache_key()
+    )
 
 
 def test_mutation_feedback_file_is_semantic_and_immutable(tmp_path):
