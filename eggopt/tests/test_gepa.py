@@ -646,7 +646,7 @@ def test_study_identity_is_cached_without_an_eggthreads_marker(tmp_path):
 
 
 def test_async_custom_generator_uses_shared_await_task(tmp_path):
-    async def generate(_parents, _evidence, _objective):
+    async def generate(_context):
         return {"instruction": "1"}
 
     result = optimize_anything(

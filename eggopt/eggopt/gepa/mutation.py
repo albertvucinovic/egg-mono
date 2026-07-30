@@ -65,16 +65,7 @@ class Mutate(Task):
         if isinstance(self.mutator, Task):
             value = self.mutator
         else:
-            parameters = inspect.signature(self.mutator).parameters
-            value = (
-                self.mutator(self.context)
-                if len(parameters) == 1
-                else self.mutator(
-                    self.context.parents,
-                    self.context.evidence,
-                    self.context.objective,
-                )
-            )
+            value = self.mutator(self.context)
         if isinstance(value, Task):
             value = yield value
         elif inspect.isawaitable(value):
