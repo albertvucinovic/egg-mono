@@ -42,7 +42,11 @@ use(result.best_candidate)
   after Actor/Critic assignment and before the corresponding model turn.
 - `ThreadTool` is the reusable Eggflow task for durable synthetic tool calls on
   assigned Eggthreads threads; domain code never queries Eggthreads storage.
-- GEPA mutation uses `ActorCritic(actor=Mutation Agent, critic=ValidateMutation Task)`.
+- GEPA mutation uses `ActorCritic(actor=Mutation Agent, critic=Critic Task)`.
+- Its default Critic validates the mutation envelope. Domains may supply a
+  parent-aware Critic Task factory to validate the actual generated artifact
+  (for example: required change, file materialization, compilation, or a smoke
+  execution) before GEPA spends evaluator calls.
 - The deterministic Critic returns `revise` with a precise schema error; ActorCritic
   continues the same Mutation thread with that feedback.
 - Full valset evaluations live under `GEPA → Validation`, outside Mutation's

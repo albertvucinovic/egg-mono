@@ -1929,6 +1929,126 @@ def test_last_candidate_result_preserves_first_mutation_cache_identity():
     )
 
 
+def test_native_mutator_accepts_a_domain_critic_and_keys_its_identity():
+    from eggflow import Task
+    from eggopt import Mutator
+    from eggopt.gepa import Mutate
+
+    @dataclass
+    class DomainCritic(Task):
+        version: str
+        answer: str | None = None
+
+        def get_cache_key(self):
+            return f"domain-critic:{self.version}"
+
+        def run(self):
+            return {"decision": "accept", "feedback": "Valid domain artifact."}
+
+    base = {
+        "llm": object(),
+        "identity": {"model": "domain-critic"},
+        "instruction": "Improve.",
+        "allowed_tools": set(),
+    }
+    first = Mutator.eggthreads(**base, critic=DomainCritic("v1"))
+    changed = Mutator.eggthreads(**base, critic=DomainCritic("v2"))
+    arguments = (
+        ({"instruction": "0"},),
+        ({"parent_index": 0, "cases": []},),
+        "Improve.",
+        0,
+    )
+
+    assert first.critic is not None
+    assert first.identity["critic"] == {
+        "module": DomainCritic.__module__,
+        "name": DomainCritic.__qualname__,
+        "key": "domain-critic:v1",
+    }
+    assert (
+        Mutate(first, *arguments).get_cache_key()
+        != Mutate(changed, *arguments).get_cache_key()
+    )
+
+
+def test_native_mutator_domain_critic_factory_receives_selected_parent():
+    from eggflow import Task
+    from eggopt import Mutator
+    from eggopt.gepa.mutation import Mutate
+
+    @dataclass
+    class Review(Task):
+        parent: dict[str, str]
+
+        def run(self):
+            return {"decision": "accept", "feedback": "Valid."}
+
+    def critic(parent):
+        return Review(parent)
+
+    mutator = Mutator.eggthreads(
+        llm=object(),
+        identity={"model": "critic-factory"},
+        instruction="Improve.",
+        allowed_tools=set(),
+        critic=critic,
+    )
+    task = Mutate(
+        mutator,
+        ({"instruction": "selected"},),
+        ({"parent_index": 0, "cases": []},),
+        "Improve.",
+        0,
+    )
+
+    assert mutator.identity["critic"] == {
+        "module": critic.__module__,
+        "name": critic.__qualname__,
+    }
+    assert task.mutator.critic({"instruction": "selected"}).parent == {
+        "instruction": "selected"
+    }
+
+
+def test_native_mutation_key_includes_factory_produced_critic_task():
+    from eggflow import Task
+    from eggopt import Mutator
+    from eggopt.gepa import Mutate
+
+    @dataclass
+    class Review(Task):
+        version: str
+
+        def get_cache_key(self):
+            return f"review:{self.version}"
+
+    @dataclass
+    class Factory:
+        version: str
+
+        def __call__(self, _parent):
+            return Review(self.version)
+
+    base = {
+        "llm": object(),
+        "identity": {"model": "factory-key"},
+        "instruction": "Improve.",
+        "allowed_tools": set(),
+    }
+    arguments = (
+        ({"instruction": "0"},),
+        ({"parent_index": 0, "cases": []},),
+        "Improve.",
+        0,
+    )
+    first = Mutate(Mutator.eggthreads(**base, critic=Factory("v1")), *arguments)
+    changed = Mutate(Mutator.eggthreads(**base, critic=Factory("v2")), *arguments)
+
+    assert first.mutator.identity == changed.mutator.identity
+    assert first.get_cache_key() != changed.get_cache_key()
+
+
 def test_mutation_feedback_file_is_semantic_and_immutable(tmp_path):
     import json
 

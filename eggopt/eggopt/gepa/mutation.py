@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -21,6 +21,8 @@ DEFAULT_MUTATION_SYSTEM_PROMPT = (
     "return the requested candidate mutation."
 )
 
+MutationCritic = Task | Callable[[Mapping[str, str]], Task]
+
 
 @dataclass(frozen=True)
 class Mutation:
@@ -39,6 +41,7 @@ class Mutator:
     agent: Agent
     instruction: str
     max_correction_turns: int = 0
+    critic: MutationCritic | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.instruction, str) or not self.instruction.strip():
@@ -49,6 +52,10 @@ class Mutator:
             or self.max_correction_turns < 0
         ):
             raise ValueError("max_correction_turns must be a non-negative integer")
+        if self.critic is not None and not (
+            isinstance(self.critic, Task) or callable(self.critic)
+        ):
+            raise TypeError("critic must be an Eggflow Task, task factory, or None")
 
     @classmethod
     def eggthreads(
@@ -66,6 +73,7 @@ class Mutator:
         max_correction_turns: int = 0,
         context_limit: int | None = None,
         system_prompt: str = DEFAULT_MUTATION_SYSTEM_PROMPT,
+        critic: MutationCritic | None = None,
     ) -> Mutator:
         kwargs = {
             "model_key": model_key,
@@ -83,6 +91,7 @@ class Mutator:
             Agent(llm, identity, **kwargs),
             instruction.strip(),
             max_correction_turns,
+            critic,
         )
 
     @property
@@ -91,6 +100,9 @@ class Mutator:
             "agent": self.agent.task_identity,
             "instruction": self.instruction,
             "max_correction_turns": self.max_correction_turns,
+            "critic": (
+                _critic_identity(self.critic) if self.critic is not None else None
+            ),
         }
 
 
@@ -121,6 +133,10 @@ class Mutate(Task):
                 )
             ),
         }
+        if self.mutator.critic is not None:
+            identity["critic_task"] = _task_identity(
+                _critic(self.mutator.critic, self.parents[0])
+            )
         if self.last_candidate_result is not None:
             identity["last_candidate_result"] = json.loads(
                 canonical_json(
@@ -141,7 +157,7 @@ class Mutate(Task):
         feedback_path = request.write(self.get_cache_key())
         result = yield ActorCritic(
             actor=self.mutator.agent,
-            critic=ValidateMutation(tuple(self.parents[0])),
+            critic=_critic(self.mutator.critic, self.parents[0]),
             actor_prompt=lambda round_number, state: (
                 request.prompt(self.mutator.instruction, feedback_path.name)
                 if round_number == 1
@@ -270,6 +286,36 @@ def _mutation(answer: Any, components: Sequence[str]) -> Mutation:
             f"mutation updated unrequested components: {sorted(unexpected)}"
         )
     return mutation
+
+
+def _task_identity(task: Task) -> Mapping[str, str]:
+    return {
+        "module": task.__class__.__module__,
+        "name": task.__class__.__qualname__,
+        "key": task.get_cache_key(),
+    }
+
+
+def _critic(critic: MutationCritic | None, parent: Mapping[str, str]) -> Task:
+    if critic is None:
+        return ValidateMutation(tuple(parent))
+    task = (
+        critic(dict(parent))
+        if callable(critic) and not isinstance(critic, Task)
+        else critic
+    )
+    if not isinstance(task, Task):
+        raise TypeError("mutation critic factory must return an Eggflow Task")
+    return task
+
+
+def _critic_identity(critic: MutationCritic) -> Mapping[str, str]:
+    if isinstance(critic, Task):
+        return _task_identity(critic)
+    return {
+        "module": getattr(critic, "__module__", critic.__class__.__module__),
+        "name": getattr(critic, "__qualname__", critic.__class__.__qualname__),
+    }
 
 
 __all__ = [
