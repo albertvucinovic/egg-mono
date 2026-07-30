@@ -54,7 +54,7 @@ class MutatorInput:
 
 
 @dataclass
-class Mutate(Task):
+class RunMutator(Task):
     """Resolve a domain Mutator into one complete, durable candidate value."""
 
     mutator: Task | Callable[[MutatorInput], Any] = field(repr=False, compare=False)
@@ -122,4 +122,4 @@ def _mutator_identity(
     return identity
 
 
-__all__ = ["Mutate", "MutatorInput"]
+__all__ = ["MutatorInput", "RunMutator"]

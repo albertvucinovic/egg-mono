@@ -22,7 +22,7 @@ from .evaluation import (
     _feedback,
     _new_call_count,
 )
-from .mutation import Mutate, MutatorInput
+from .mutator import MutatorInput, RunMutator
 from .runtime import Runtime
 
 CaseT = TypeVar("CaseT")
@@ -272,8 +272,8 @@ class GenerateCandidate(Task):
         with _evaluation_scope(scope):
             return (yield self._mutation())
 
-    def _mutation(self) -> Mutate:
-        return Mutate(self.mutator, self.context)
+    def _mutation(self) -> RunMutator:
+        return RunMutator(self.mutator, self.context)
 
 
 @dataclass

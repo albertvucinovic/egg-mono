@@ -78,3 +78,6 @@ accepted candidate returned to GEPA.
   ARC Physics 15. Ruff and format checks pass in every touched client. No
   mutation schema, component name, response format, or artifact transport
   remains in Eggopt GEPA.
+- 2026-07-30: Renamed the remaining internal executor from `Mutate` in
+  `mutation.py` to `RunMutator` in `mutator.py`; even Eggopt's implementation
+  vocabulary now reflects orchestration rather than a mutation data model.

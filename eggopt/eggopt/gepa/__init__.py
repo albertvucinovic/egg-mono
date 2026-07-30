@@ -1,8 +1,8 @@
-"""Eggflow-backed GEPA search and mutation composition."""
+"""Eggflow-backed GEPA search and domain Mutator composition."""
 
-from .mutation import (
-    Mutate,
+from .mutator import (
     MutatorInput,
+    RunMutator,
 )
 from .search import (
     GEPA,
@@ -20,9 +20,9 @@ __all__ = [
     "GEPAConfig",
     "GEPAResult",
     "GenerateCandidate",
-    "Mutate",
     "MutatorInput",
     "OptimizationPlan",
+    "RunMutator",
     "SelectParents",
     "optimize_anything",
     "plan_optimization",
