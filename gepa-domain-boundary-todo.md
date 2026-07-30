@@ -28,11 +28,11 @@ accepted candidate returned to GEPA.
       task boundary that returns a complete candidate.
 - [x] Generalize search/evaluation identity and results from string mappings to
       opaque finite JSON candidate values.
-- [ ] Move simpletrade request/prompt/envelope extraction and source validation
+- [x] Move simpletrade request/prompt/envelope extraction and source validation
       into its domain Mutator/Critic implementation.
 - [x] Add regressions for response extraction and filesystem extraction without
       GEPA knowing either transport.
-- [ ] Run focused/full Eggopt and simpletrade tests, Ruff, update docs, and commit
+- [x] Run focused/full Eggopt and simpletrade tests, Ruff, update docs, and commit
       coherent changes with tracked working trees clean.
 
 ## Status notes
@@ -46,3 +46,9 @@ accepted candidate returned to GEPA.
   values, and ActorCritic can pass a Critic-extracted accepted value. Eggopt
   tests pass (56). Next: migrate the three client domains and validate their
   minimal adapters before committing the implementation.
+- 2026-07-30: Migrated all three concrete client shapes. Simpletrade owns its
+  source-response parser and compile/smoke Critic; src-agile owns its complete
+  system-prompt extractor/validator; ARC-AGI-3's existing file-backed Modeler
+  Critic now returns the accepted `world_model.py` snapshot through
+  `ActorCriticResult.value`. Tests: Eggopt 56, simpletrade 19, trading GEPA 64,
+  ARC Physics 15; Ruff passes all touched implementation/tests.
