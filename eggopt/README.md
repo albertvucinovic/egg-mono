@@ -1,10 +1,24 @@
 # eggopt
 
-Eggopt has one GEPA implementation, built from reusable Eggflow Tasks and
-Eggthreads agents.
+Eggopt GEPA searches over opaque finite-JSON candidate values. A domain supplies
+one Mutator and one Evaluator; GEPA knows only when to call them.
 
 ```python
-from eggopt import GEPAConfig, Mutator, optimize_anything
+from eggflow import Task
+from eggopt import GEPAConfig, optimize_anything
+
+
+class Improve(Task):
+    context: object
+
+    def run(self):
+        # A domain may compose ActorCritic here, extract a response or file,
+        # validate it, and return the complete next candidate.
+        return improve(self.context)
+
+
+def mutate(context):
+    return Improve(context)
 
 
 def evaluate(candidate, case):
@@ -13,21 +27,16 @@ def evaluate(candidate, case):
 
 
 result = optimize_anything(
-    {"system_prompt": seed_prompt},
+    seed_candidate,
     evaluator=evaluate,
     dataset=trainset,
     valset=valset,
-    objective="Improve accuracy while preserving strict JSON output.",
+    objective="Improve accuracy while preserving the output contract.",
     config=GEPAConfig(
         run_dir="runs/my-gepa",
         max_evaluator_calls=150,
-        max_candidates=10,
-        mutator=Mutator.eggthreads(
-            llm=mutation_llm,
-            identity={"model": "mutation-model"},
-            instruction="Improve the complete system prompt.",
-            max_correction_turns=2,
-        ),
+        max_candidates=20,
+        mutator=mutate,
     ),
 )
 
@@ -37,26 +46,28 @@ use(result.best_candidate)
 ## Composition
 
 - Eggflow owns task caching, retry, and restart recovery.
-- `ActorCritic` is the reusable checked-generation loop.
-- Its prompt factories may return Tasks, so thread-bound preparation can finish
-  after Actor/Critic assignment and before the corresponding model turn.
+- GEPA owns Pareto parent selection, minibatches, acceptance, evaluator budgets,
+  and result assembly.
+- The domain Mutator receives a `MutationContext` with selected complete parents,
+  evaluator evidence, objective, generation, validation-score history, and the
+  last proposal outcome. It returns one complete candidate, directly or as a
+  Task/awaitable.
+- Candidate values are opaque to GEPA. Finite JSON is the only representation
+  contract required for stable cache identity and durable results.
+- `ActorCritic` is the reusable checked-generation loop a Mutator may compose.
+  A deterministic Critic may return `{"decision": "accept", "feedback": "...",
+  "value": candidate}`; `result.value` is that extracted candidate. Without
+  `value`, it defaults to the Actor answer. Extraction may therefore come from
+  the response, a workspace file, or any other domain-owned transport.
+- ActorCritic prompt factories may return Tasks, so thread-bound preparation can
+  finish after Actor/Critic assignment and before the corresponding model turn.
 - `ThreadTool` is the reusable Eggflow task for durable synthetic tool calls on
   assigned Eggthreads threads; domain code never queries Eggthreads storage.
-- GEPA mutation uses `ActorCritic(actor=Mutation Agent, critic=Critic Task)`.
-- Its default Critic validates the mutation envelope. Domains may supply a
-  parent-aware Critic Task factory to validate the actual generated artifact
-  (for example: required change, file materialization, compilation, or a smoke
-  execution) before GEPA spends evaluator calls.
-- The deterministic Critic returns `revise` with a precise schema error; ActorCritic
-  continues the same Mutation thread with that feedback.
-- Full valset evaluations live under `GEPA → Validation`, outside Mutation's
-  descendant tree. Dataset minibatch evaluations live under
-  `GEPA → Mutation Review → Mutation → Reflection`, so Mutation may inspect only
-  reflection evidence and transcripts. The deterministic controller alone uses
-  valset scores for Pareto selection.
-- GEPA owns Pareto parent selection, minibatches, mutation requests, acceptance,
-  evaluator budgets, and result assembly.
-- Domain code owns prompts, cases, evaluators, and model selection.
+- Full valset evaluations live under `GEPA → Validation`. Dataset reflection
+  evaluations live under `GEPA → Mutation Review → Reflection`; the
+  deterministic controller alone uses valset scores for Pareto selection.
+- Domain code owns Actors, prompts, extraction, validation, candidate shape,
+  cases, evaluators, and model selection.
 
 All GEPA implementation modules live in `eggopt/gepa/`. Top-level `eggopt`
 contains only reusable primitives and deliberate public re-exports.
@@ -66,8 +77,8 @@ Each study stores its durable Eggflow and Eggthreads state under one run-owned
 `max_evaluator_calls` and `max_candidates` are not primitive cache-key inputs.
 
 `GEPAConfig(evaluator_context_limit=...)` controls the full Eggthreads history
-available to each case evaluator. `Mutator.eggthreads(context_limit=...)` does the
-same for Mutation. Eggthreads provider-context compaction remains independent.
+available to each case evaluator. Domain ActorCritic agents control their own
+full-history limits. Eggthreads provider-context compaction remains independent.
 
 Use `plan_optimization(...)` to estimate evaluator work before choosing limits.
 

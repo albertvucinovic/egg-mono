@@ -20,11 +20,11 @@ from eggthreads import (
 )
 
 from ..context import _bind_evaluation_runtime, _evaluation_scope
-from ..identity import canonical_candidate, canonical_json, digest_payload
+from ..identity import canonical_json, canonical_value, digest_payload
 
 CaseT = TypeVar("CaseT")
 OutputT = TypeVar("OutputT")
-Candidate = dict[str, str]
+Candidate = Any
 
 _EVALUATION = "eggopt.gepa.evaluate.v3"
 
@@ -50,8 +50,14 @@ def _json_value(value: Any, what: str) -> Any:
     return json.loads(canonical_json(value, what=what))
 
 
+def _candidate(candidate: Candidate) -> Candidate:
+    return canonical_value(candidate, what="candidate")
+
+
 def _candidate_identity(candidate: Candidate) -> str:
-    return digest_payload("eggopt.gepa.candidate.v1", canonical_candidate(candidate))
+    return digest_payload(
+        "eggopt.gepa.candidate.v1", canonical_value(candidate, what="candidate")
+    )
 
 
 @dataclass
@@ -67,7 +73,7 @@ class _EnsureCandidateEvaluation(Task):
             "eggopt.gepa.ensure-candidate-evaluation.v2",
             {
                 "parent": self.parent_id,
-                "candidate": canonical_candidate(self.candidate),
+                "candidate": canonical_value(self.candidate, what="candidate"),
                 "scope": self.scope,
             },
         )
@@ -113,7 +119,7 @@ class _EnsureCaseEvaluation(Task):
             "eggopt.gepa.ensure-case-evaluation.v2",
             {
                 "candidate_thread": self.candidate_thread_id,
-                "candidate": canonical_candidate(self.candidate),
+                "candidate": canonical_value(self.candidate, what="candidate"),
                 "case": self.case_identity,
                 "scope": self.scope,
             },
@@ -166,7 +172,7 @@ class _EvaluateCase(Task):
                 "evaluator": canonical_json(
                     self.evaluator_identity, what="evaluator identity"
                 ),
-                "candidate": canonical_candidate(self.candidate),
+                "candidate": canonical_value(self.candidate, what="candidate"),
                 "example": canonical_json(self.case_identity, what="case identity"),
                 "scope": self.scope,
             },
@@ -187,7 +193,7 @@ class _EvaluateCase(Task):
             "context_limit": self.context_limit,
         }
         value = factory(
-            dict(self.candidate),
+            _candidate(self.candidate),
             self.case,
             **{name: item for name, item in context.items() if name in parameters},
         )
@@ -205,9 +211,9 @@ class _EvaluateCase(Task):
         with _evaluation_scope(context):
             factory = getattr(self.evaluator, "task", None)
             if callable(factory):
-                value = yield factory(dict(self.candidate), self.case)
+                value = yield factory(_candidate(self.candidate), self.case)
             else:
-                value = self.evaluator(dict(self.candidate), self.case)
+                value = self.evaluator(_candidate(self.candidate), self.case)
                 if isinstance(value, Task):
                     value = yield value
                 elif inspect.isawaitable(value):
@@ -271,7 +277,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
         return digest_payload(
             "eggopt.gepa.evaluate-batch.v1",
             {
-                "candidate": canonical_candidate(self.candidate),
+                "candidate": canonical_value(self.candidate, what="candidate"),
                 "cases": self.case_identities,
                 "evaluator": self.evaluator_identity,
                 "context_limit": self.context_limit,
@@ -341,7 +347,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                     "stage": self.stage,
                     "candidate_thread_id": candidate_thread_id,
                     "candidate_thread_name": candidate_thread_name,
-                    "candidate": dict(self.candidate),
+                    "candidate": _candidate(self.candidate),
                     "case_count": len(tasks),
                     **identity,
                 }
@@ -360,7 +366,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                             "stage": self.stage,
                             "candidate_thread_id": candidate_thread_id,
                             "candidate_thread_name": candidate_thread_name,
-                            "candidate": dict(self.candidate),
+                            "candidate": _candidate(self.candidate),
                             "case": self.case_identities[index],
                             "case_number": index + 1,
                             "case_count": len(tasks),
@@ -378,7 +384,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                     "stage": self.stage,
                     "candidate_thread_id": candidate_thread_id,
                     "candidate_thread_name": candidate_thread_name,
-                    "candidate": dict(self.candidate),
+                    "candidate": _candidate(self.candidate),
                     "aggregate_score": fmean(item.score for item in evaluations),
                     "case_count": len(evaluations),
                     **identity,
@@ -413,7 +419,10 @@ def _feedback(evaluation: _EvaluationValue) -> Any:
 def _case_evaluation_identity(candidate: Candidate, case_identity: Any) -> str:
     return digest_payload(
         "eggopt.gepa.case.v1",
-        {"candidate": canonical_candidate(candidate), "case": case_identity},
+        {
+            "candidate": canonical_value(candidate, what="candidate"),
+            "case": case_identity,
+        },
     )
 
 

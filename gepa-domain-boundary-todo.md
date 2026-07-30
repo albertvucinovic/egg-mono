@@ -23,14 +23,14 @@ accepted candidate returned to GEPA.
 
 ## Plan
 
-- [ ] Generalize `ActorCritic` accepted decisions with an optional opaque value.
-- [ ] Replace GEPA's built-in Mutation machinery with a domain Mutator/generator
+- [x] Generalize `ActorCritic` accepted decisions with an optional opaque value.
+- [x] Replace GEPA's built-in Mutation machinery with a domain Mutator/generator
       task boundary that returns a complete candidate.
-- [ ] Generalize search/evaluation identity and results from string mappings to
+- [x] Generalize search/evaluation identity and results from string mappings to
       opaque finite JSON candidate values.
 - [ ] Move simpletrade request/prompt/envelope extraction and source validation
       into its domain Mutator/Critic implementation.
-- [ ] Add regressions for response extraction and filesystem extraction without
+- [x] Add regressions for response extraction and filesystem extraction without
       GEPA knowing either transport.
 - [ ] Run focused/full Eggopt and simpletrade tests, Ruff, update docs, and commit
       coherent changes with tracked working trees clean.
@@ -41,3 +41,8 @@ accepted candidate returned to GEPA.
   allowing a domain Critic is insufficient while GEPA still owns `Mutation`,
   strict JSON parsing, component updates, and Actor prompts. Refactor started at
   the stronger opaque-candidate/complete-domain-Mutator boundary.
+- 2026-07-30: Core boundary implemented. `MutationContext` is the sole domain
+  input; a Mutator returns a complete candidate. GEPA candidates are finite JSON
+  values, and ActorCritic can pass a Critic-extracted accepted value. Eggopt
+  tests pass (56). Next: migrate the three client domains and validate their
+  minimal adapters before committing the implementation.

@@ -102,6 +102,11 @@ class ActorCriticResult:
     critic_thread_id: str
     workspace: str
     rounds: int
+    value: Any = _NO_ANSWER
+
+    def __post_init__(self) -> None:
+        if self.value is _NO_ANSWER:
+            object.__setattr__(self, "value", self.answer)
 
 
 @dataclass
@@ -158,7 +163,7 @@ class ActorCritic(Task):
         }
         if self.names is not None:
             identity["names"] = self.names
-        return digest_payload("eggopt.actor-critic.v2", identity)
+        return digest_payload("eggopt.actor-critic.v3", identity)
 
     def recover_interaction(
         self,
@@ -260,6 +265,7 @@ class ActorCritic(Task):
                     critic_id,
                     workspace,
                     round_number,
+                    decision.get("value", answer),
                 )
         return ActorCriticResult(
             answer,
@@ -589,7 +595,7 @@ async def _run_until_waiting(
             raise RuntimeError("ActorCritic agent stalled")
 
 
-def _critic_decision(value: Any) -> dict[str, str]:
+def _critic_decision(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         decision = dict(value)
     elif not isinstance(value, str):
@@ -599,16 +605,26 @@ def _critic_decision(value: Any) -> dict[str, str]:
             decision = json.loads(value)
         except json.JSONDecodeError as exc:
             raise ValueError("Critic answer must be strict JSON") from exc
-    if not isinstance(decision, dict) or set(decision) != {"decision", "feedback"}:
-        raise ValueError("Critic JSON must contain only decision and feedback")
+    expected = {"decision", "feedback"}
+    if (
+        not isinstance(decision, dict)
+        or not expected <= set(decision)
+        or set(decision) - (expected | {"value"})
+    ):
+        raise ValueError(
+            "Critic JSON must contain decision, feedback, and optional value"
+        )
     if decision["decision"] not in {"accept", "revise"}:
         raise ValueError("Critic decision must be accept or revise")
     if not isinstance(decision["feedback"], str):
         raise ValueError("Critic feedback must be a string")  # noqa: TRY004
-    return {
+    result = {
         "decision": str(decision["decision"]),
         "feedback": decision["feedback"],
     }
+    if "value" in decision:
+        result["value"] = decision["value"]
+    return result
 
 
 def _resolve_prompt(value: Any, role: str):

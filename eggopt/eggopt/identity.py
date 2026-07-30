@@ -21,6 +21,12 @@ def canonical_json(value: Any, *, what: str) -> str:
         raise TypeError(f"{what} must contain only finite JSON values") from exc
 
 
+def canonical_value(value: Any, *, what: str) -> Any:
+    """Return an immutable-by-copy, finite JSON value with stable key order."""
+
+    return json.loads(canonical_json(value, what=what))
+
+
 def canonical_candidate(candidate: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
     if not isinstance(candidate, Mapping) or not candidate:
         raise TypeError("candidate must be a non-empty mapping of strings to strings")

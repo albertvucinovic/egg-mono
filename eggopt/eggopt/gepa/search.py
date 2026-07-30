@@ -5,7 +5,7 @@ import inspect
 import random
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from operator import ge, gt
 from pathlib import Path
 from statistics import fmean
@@ -15,24 +15,21 @@ from eggflow import FlowExecutor, Task
 from eggthreads import ThreadsDB
 
 from ..context import _evaluation_scope
-from ..identity import canonical_candidate, canonical_json, digest_payload
+from ..identity import canonical_json, canonical_value, digest_payload
 from .evaluation import (
-    _Await,
     _completed_evaluator_calls,
     _EvaluateCandidate,
     _feedback,
-    _json_value,
     _new_call_count,
 )
-from .mutation import Mutate, Mutation, Mutator
+from .mutation import Mutate, MutationContext, Mutator
 from .runtime import Runtime
 
 CaseT = TypeVar("CaseT")
 OutputT = TypeVar("OutputT")
-Candidate = dict[str, str]
+Candidate = Any
 MinibatchAcceptance = Literal["strict_improvement", "improvement_or_equal"]
 ProgressCallback = Callable[[Mapping[str, Any]], None]
-_GENERATION = "eggopt.gepa.generate.v1"
 
 _MINIBATCH_ACCEPTANCE = {
     "strict_improvement": gt,
@@ -52,7 +49,6 @@ class GEPAConfig:
     seed: int = 0
     run_dir: str | Path = ".eggopt/gepa"
     mutator: Mutator | None = None
-    generator: Any | None = None
     evaluator_identity: Any | None = None
     case_id: Callable[[Any], Any] | None = field(
         default=None, repr=False, compare=False
@@ -90,10 +86,6 @@ class GEPAConfig:
             )
         if self.evaluator_identity is not None:
             canonical_json(self.evaluator_identity, what="evaluator identity")
-        if self.generator is not None and not (
-            callable(self.generator) or isinstance(self.generator, Task)
-        ):
-            raise TypeError("generator must be callable, an Eggflow Task, or None")
         if self.progress is not None and not callable(self.progress):
             raise TypeError("progress must be callable or None")
 
@@ -120,7 +112,7 @@ class GEPAResult(Generic[OutputT]):
 
     @property
     def best_candidate(self) -> Candidate:
-        return dict(self.candidates[self.best_index])
+        return _candidate(self.candidates[self.best_index])
 
     @property
     def best_score(self) -> float:
@@ -245,78 +237,32 @@ class SelectParents(Task):
 
 @dataclass
 class GenerateCandidate(Task):
-    """Generate one checked candidate through the configured Mutator."""
+    """Invoke one domain Mutator inside its durable mutation workspace."""
 
     runtime_key: str
     study_id: str
     workspace: str
     mutator: Mutator = field(repr=False, compare=False)
-    parents: tuple[Candidate, ...]
-    evidence: tuple[Mapping[str, Any], ...]
-    objective: str
-    generation: int
-    full_validation_scores: tuple[Mapping[str, Any], ...] = ()
-    last_candidate_result: Mapping[str, Any] | None = None
+    context: MutationContext
+    context_limit: int | None = None
 
     def get_cache_key(self) -> str:
         return self._mutation().get_cache_key()
 
     def run(self):
-        lead = self.parents[0]
-        context = {
+        scope = {
             "evaluation_thread_id": self.study_id,
             "outer_context": self.workspace,
             "inner_context": self.workspace,
             "_runtime_key": self.runtime_key,
             "_evaluation_key": self.get_cache_key(),
-            "_context_limit": self.mutator.agent.context_limit,
+            "_context_limit": self.context_limit,
         }
-        with _evaluation_scope(context):
-            mutation = yield self._mutation()
-        return _apply_mutation(lead, mutation.updates)
+        with _evaluation_scope(scope):
+            return (yield self._mutation())
 
     def _mutation(self) -> Mutate:
-        return Mutate(
-            self.mutator,
-            self.parents,
-            self.evidence,
-            self.objective,
-            self.generation,
-            self.full_validation_scores,
-            self.last_candidate_result,
-        )
-
-
-@dataclass
-class _CustomGenerateCandidate(Task):
-    generator: Any = field(repr=False, compare=False)
-    parents: tuple[Candidate, ...]
-    evidence: tuple[Mapping[str, Any], ...]
-    objective: str
-    generation: int
-
-    def get_cache_key(self) -> str:
-        return digest_payload(
-            _GENERATION,
-            {
-                "generator": _callable_identity(self.generator),
-                "parents": [canonical_candidate(parent) for parent in self.parents],
-                "evidence": _json_value(self.evidence, "generation evidence"),
-                "objective": self.objective,
-                "generation": self.generation,
-            },
-        )
-
-    def run(self):
-        if isinstance(self.generator, Task):
-            value = yield self.generator
-        else:
-            value = self.generator(self.parents, self.evidence, self.objective)
-        if isinstance(value, Task):
-            value = yield value
-        elif inspect.isawaitable(value):
-            value = yield _Await(value)
-        return _candidate(value)
+        return Mutate(self.mutator, self.context)
 
 
 @dataclass
@@ -340,7 +286,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
     runtime_key: str
 
     def run(self):
-        seed = dict(canonical_candidate(self.seed_candidate))
+        seed = _candidate(self.seed_candidate)
         seed_needed = _new_call_count(
             self.flow,
             seed,
@@ -443,35 +389,20 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 )
             )
             selected = tuple(candidates[index] for index in parent_ids)
-            generation_task: Task
-            if self.config.generator is None:
-                generation_task = GenerateCandidate(
-                    self.runtime_key,
-                    self.study_id,
-                    str(
-                        Path(self.config.run_dir).resolve() / "workspaces" / "mutation"
-                    ),
-                    self.config.mutator,
+            generation_task = GenerateCandidate(
+                self.runtime_key,
+                self.study_id,
+                str(Path(self.config.run_dir).resolve() / "workspaces" / "mutation"),
+                self.config.mutator,
+                MutationContext(
                     selected,
                     evidence,
                     self.objective,
                     generation,
                     validation_scores,
                     last_candidate_result,
-                )
-                if last_candidate_result is not None:
-                    legacy_task = replace(generation_task, last_candidate_result=None)
-                    row = self.flow.store.get(legacy_task.get_cache_key())
-                    if row is not None and row["status"] == "COMPLETED":
-                        generation_task = legacy_task
-            else:
-                generation_task = _CustomGenerateCandidate(
-                    self.config.generator,
-                    selected,
-                    evidence,
-                    self.objective,
-                    generation,
-                )
+                ),
+            )
             child = yield generation_task
             generated = generation + 1
 
@@ -632,7 +563,7 @@ class GEPA(Generic[CaseT, OutputT]):
                 max_candidates=int(legacy.pop("generations", 3)),
                 max_evaluator_calls=legacy.pop("max_metric_calls", 100),
                 run_dir=legacy.pop("run_dir", ".eggopt/gepa"),
-                mutator=legacy.pop("mutator", None),
+                mutator=legacy.pop("mutator", legacy.pop("generator", None)),
                 evaluator_identity=legacy.pop("metric_identity", None),
                 case_id=legacy.pop("example_id", None),
                 max_concurrent_evaluations=legacy.pop("max_concurrent_evaluations", 1),
@@ -653,7 +584,7 @@ class GEPA(Generic[CaseT, OutputT]):
 
 
 def optimize_anything(
-    seed_candidate: str | Mapping[str, str],
+    seed_candidate: Any,
     *,
     evaluator: Any,
     dataset: Sequence[CaseT],
@@ -661,7 +592,7 @@ def optimize_anything(
     objective: str,
     config: GEPAConfig | None = None,
 ) -> GEPAResult[Any]:
-    """Optimize a text candidate with Eggflow-backed, case-wise Pareto search."""
+    """Optimize an opaque finite-JSON candidate with case-wise Pareto search."""
 
     if not isinstance(objective, str) or not objective.strip():
         raise ValueError("objective must be a non-empty string")
@@ -674,8 +605,8 @@ def optimize_anything(
     if not validation:
         raise ValueError("valset must not be empty")
     config = config or GEPAConfig()
-    if config.mutator is None and config.generator is None:
-        raise TypeError("config.mutator or config.generator is required")
+    if config.mutator is None:
+        raise TypeError("config.mutator is required")
 
     case_id = config.case_id or _case_identity
     dataset_ids = _case_ids(data, case_id, "dataset")
@@ -780,7 +711,7 @@ def _result(
     aggregates = tuple(fmean(scores) for scores in case_scores)
     best = max(range(len(aggregates)), key=aggregates.__getitem__)
     return GEPAResult(
-        candidates=tuple(dict(candidate) for candidate in candidates),
+        candidates=tuple(_candidate(candidate) for candidate in candidates),
         scores=aggregates,
         case_scores=tuple(tuple(scores) for scores in case_scores),
         parents=tuple(parents),
@@ -841,23 +772,8 @@ def _generation_evidence(parent_id, evaluation, case_ids, selection_reason):
     }
 
 
-def _apply_mutation(parent: Candidate, updates: Mapping[str, str]) -> Candidate:
-    unknown = set(updates) - set(parent)
-    if unknown:
-        raise ValueError(
-            f"generator added unknown candidate components: {sorted(unknown)}"
-        )
-    return dict(canonical_candidate({**parent, **updates}))
-
-
 def _candidate(value: Any) -> Candidate:
-    if isinstance(value, Mutation):
-        value = value.updates
-    if isinstance(value, str):
-        return {"prompt": value}
-    if not isinstance(value, Mapping):
-        raise TypeError("candidate must be a string or mapping of strings")
-    return dict(canonical_candidate(value))
+    return canonical_value(value, what="candidate")
 
 
 def _callable_identity(function: Any) -> Mapping[str, str]:

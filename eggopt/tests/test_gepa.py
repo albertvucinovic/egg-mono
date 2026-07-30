@@ -4,16 +4,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
-
-from eggthreads import (
-    ThreadsDB,
-    get_thread_tools_config,
-    is_descendant_thread,
-    list_children_with_meta,
-    list_root_threads,
-    list_threads,
-    load_thread_projection,
-)
+from eggopt.tools import SAFE_TOOLS
 
 from eggopt import (
     Agent,
@@ -23,7 +14,15 @@ from eggopt import (
     optimize_anything,
     plan_optimization,
 )
-from eggopt.tools import SAFE_TOOLS
+from eggthreads import (
+    ThreadsDB,
+    get_thread_tools_config,
+    is_descendant_thread,
+    list_children_with_meta,
+    list_root_threads,
+    list_threads,
+    load_thread_projection,
+)
 
 
 class Evaluator:
@@ -42,10 +41,10 @@ class Increment:
         self.calls = 0
         self.requests = []
 
-    def __call__(self, parents, evidence, objective):
+    def __call__(self, context):
         self.calls += 1
-        self.requests.append((parents, evidence, objective))
-        level = max(int(parent["instruction"]) for parent in parents) + 1
+        self.requests.append((context.parents, context.evidence, context.objective))
+        level = max(int(parent["instruction"]) for parent in context.parents) + 1
         return {"instruction": str(level)}
 
 
@@ -139,13 +138,6 @@ def test_agent_can_opt_into_tool_auto_approval():
     assert agent.auto_approve_tools is True
 
 
-def test_default_mutation_prompt_explains_validation_and_selection_feedback():
-    from eggopt.gepa import DEFAULT_MUTATION_SYSTEM_PROMPT
-
-    assert "full-validation score history" in DEFAULT_MUTATION_SYSTEM_PROMPT
-    assert "parent-selection rationale" in DEFAULT_MUTATION_SYSTEM_PROMPT
-
-
 def test_thread_tool_reuses_public_synthetic_tool_lifecycle(tmp_path, monkeypatch):
     import json
 
@@ -181,7 +173,7 @@ def test_thread_tool_reuses_public_synthetic_tool_lifecycle(tmp_path, monkeypatc
         run_dir=tmp_path / "thread-tool",
         max_candidates=1,
         max_evaluator_calls=1,
-        generator=Increment(),
+        mutator=Increment(),
         evaluator_identity={"name": "thread-tool-test"},
         case_id=lambda case: case["id"],
     )
@@ -273,7 +265,7 @@ def test_thread_tool_recovers_existing_recorded_call(tmp_path, monkeypatch):
             run_dir=tmp_path / "thread-tool-recovery",
             max_candidates=1,
             max_evaluator_calls=1,
-            generator=Increment(),
+            mutator=Increment(),
             evaluator_identity={"name": "thread-tool-recovery-test"},
             case_id=lambda case: case["id"],
         ),
@@ -314,7 +306,7 @@ def config(tmp_path, evaluator, generator, **changes):
         seed=1,
         evaluator_identity={"name": "threshold", "version": 1},
         case_id=lambda case: case["id"],
-        generator=generator,
+        mutator=generator,
     )
     return replace(base, **changes)
 
@@ -449,65 +441,6 @@ def test_minibatch_acceptance_can_send_ties_to_full_validation(tmp_path):
     )
 
 
-def test_next_mutation_reports_last_candidate_rejected_on_minibatch(
-    tmp_path, monkeypatch
-):
-    import json
-
-    from eggopt import Mutator
-
-    monkeypatch.chdir(tmp_path)
-    llm = ScriptedMutationLLM(
-        [
-            json.dumps({"mutations": [{"instruction": "-1"}]}),
-            json.dumps({"mutations": [{"instruction": "1"}]}),
-        ]
-    )
-    optimize_anything(
-        {"instruction": "0"},
-        evaluator=Evaluator(),
-        dataset=[{"id": "train", "target": 1}],
-        objective="Reach the target.",
-        config=GEPAConfig(
-            run_dir=tmp_path / "rejected-candidate-feedback",
-            max_candidates=2,
-            max_evaluator_calls=10,
-            mutation_minibatch_size=1,
-            parents_per_candidate=1,
-            mutator=Mutator.eggthreads(
-                llm=llm,
-                identity={"model": "rejected-candidate-feedback"},
-                instruction="Improve the instruction.",
-                allowed_tools=set(),
-            ),
-            evaluator_identity={"name": "rejected-candidate-feedback"},
-            case_id=lambda case: case["id"],
-        ),
-    )
-
-    workspace = tmp_path / "rejected-candidate-feedback" / "workspaces" / "mutation"
-    requests = [
-        json.loads(path.read_text())
-        for path in sorted(workspace.glob("feedback-*.json"))
-    ]
-    last_results = [request.get("last_candidate_result") for request in requests]
-    rejected = next(result for result in last_results if result is not None)
-    assert len(requests) == 2
-
-    assert rejected == {
-        "full_validation": None,
-        "minibatch": {
-            "acceptance_policy": "strict_improvement",
-            "accepted": False,
-            "aggregate_score": 0.0,
-            "case_count": 1,
-            "parent_envelope_aggregate_score": 0.0,
-        },
-        "mutation_generation": 1,
-        "outcome": "rejected_on_minibatch",
-    }
-
-
 def test_minibatch_acceptance_rejects_unknown_policy():
     with pytest.raises(ValueError, match="minibatch_acceptance"):
         GEPAConfig(minibatch_acceptance="unknown")
@@ -590,7 +523,9 @@ def test_progress_distinguishes_proposals_from_admitted_candidates(tmp_path):
         ),
     )
 
-    starts = [event for event in events if event["kind"] == "candidate_evaluation_started"]
+    starts = [
+        event for event in events if event["kind"] == "candidate_evaluation_started"
+    ]
     assert [event["evaluation_role"] for event in starts] == [
         "candidate_validation",
         "parent_reflection",
@@ -842,18 +777,18 @@ def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(
         mutation_review = next(
             child for child in study_children if child[1] == "Mutation Review"
         )
-        mutation = list_children_with_meta(db, mutation_review[0])[0]
-        assert mutation[1] == "Mutation"
-        reflection = list_children_with_meta(db, mutation[0])[0]
+        reflection = list_children_with_meta(db, mutation_review[0])[0]
         assert reflection[1] == "Reflection"
 
         validation_candidates = list_children_with_meta(db, validation[0])
         assert validation_candidates[0][1] == "Candidate 1 Evaluation"
-        assert not is_descendant_thread(db, mutation[0], validation_candidates[0][0])
+        assert not is_descendant_thread(
+            db, mutation_review[0], validation_candidates[0][0]
+        )
 
         reflection_candidates = list_children_with_meta(db, reflection[0])
         assert reflection_candidates[0][1] == "Candidate 1 Reflection for Proposal 1"
-        assert is_descendant_thread(db, mutation[0], reflection_candidates[0][0])
+        assert is_descendant_thread(db, mutation_review[0], reflection_candidates[0][0])
         assert get_thread_tools_config(db, reflection_candidates[0][0]).is_tool_allowed(
             "send_message_to_child"
         )
@@ -986,8 +921,9 @@ def test_actor_critic_recovery_continues_interrupted_turn(tmp_path, monkeypatch)
 
 
 def test_actor_critic_recover_uses_current_evaluation_runtime(tmp_path):
-    from eggopt import ActorCritic, Agent
     from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+
+    from eggopt import ActorCritic, Agent
     from eggthreads import append_message, create_child_thread, create_root_thread
 
     db = ThreadsDB(tmp_path / "threads.sqlite")
@@ -1250,6 +1186,7 @@ def test_case_evaluation_delegates_failed_retry_recovery(tmp_path):
     import asyncio
 
     from eggopt.gepa.evaluation import _EvaluateCase
+
     from eggthreads import ThreadsDB
 
     calls = []
@@ -1316,7 +1253,7 @@ def test_actor_critic_sends_empty_final_answer_to_task_critic(tmp_path, monkeypa
             run_dir=tmp_path / "reasoning-only",
             max_candidates=1,
             max_evaluator_calls=1,
-            generator=Increment(),
+            mutator=Increment(),
             evaluator_identity={"name": "reasoning-only-test"},
             case_id=lambda case: case["id"],
         ),
@@ -1379,7 +1316,7 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
             run_dir=run_dir,
             max_candidates=1,
             max_evaluator_calls=1,
-            generator=Increment(),
+            mutator=Increment(),
             evaluator_identity={"name": "actor-critic-test"},
             case_id=lambda case: case["id"],
             evaluator_context_limit=9_000,
@@ -1437,7 +1374,7 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
             run_dir=run_dir,
             max_candidates=1,
             max_evaluator_calls=1,
-            generator=Increment(),
+            mutator=Increment(),
             evaluator_identity={"name": "actor-critic-test"},
             case_id=lambda case: case["id"],
         ),
@@ -1460,8 +1397,9 @@ def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatc
 def test_actor_critic_context_limit_is_typed_from_full_history(monkeypatch):
     import asyncio
 
-    from eggflow import ContextLimitExceededError
     from eggopt.context_limit import run_with_full_context_limit
+
+    from eggflow import ContextLimitExceededError
 
     class Runner:
         async def run_once(self):
@@ -1537,7 +1475,7 @@ def test_actor_critic_accepts_a_task_as_critic(tmp_path, monkeypatch):
         run_dir=run_dir,
         max_candidates=1,
         max_evaluator_calls=1,
-        generator=Increment(),
+        mutator=Increment(),
         evaluator_identity={"name": "task-critic-test"},
         case_id=lambda case: case["id"],
     )
@@ -1652,16 +1590,11 @@ def test_valset_is_distinct_and_default_dataset_mode_matches_it(tmp_path):
             for child_id, name, *_rest in study_children
             if name == "Mutation Review"
         )
-        mutation_id = next(
+        reflection_id = next(
             child_id
             for child_id, name, *_rest in list_children_with_meta(
                 db, mutation_review_id
             )
-            if name == "Mutation"
-        )
-        reflection_id = next(
-            child_id
-            for child_id, name, *_rest in list_children_with_meta(db, mutation_id)
             if name == "Reflection"
         )
 
@@ -1678,8 +1611,8 @@ def test_valset_is_distinct_and_default_dataset_mode_matches_it(tmp_path):
 
         assert validation_cases == {"validation Evaluation"}
         assert reflection_cases == {"train Evaluation"}
-        assert not is_descendant_thread(db, mutation_id, validation_id)
-        assert is_descendant_thread(db, mutation_id, reflection_id)
+        assert not is_descendant_thread(db, mutation_review_id, validation_id)
+        assert is_descendant_thread(db, mutation_review_id, reflection_id)
     finally:
         db.close()
 
@@ -1724,359 +1657,6 @@ def test_mutator_receives_full_validation_scores_and_selection_reason(tmp_path):
     assert "full_validation_scores" not in first_evidence
 
 
-def test_native_mutation_prompt_references_feedback_files(tmp_path, monkeypatch):
-    import json
-
-    from eggopt import Mutator
-
-    monkeypatch.chdir(tmp_path)
-    llm = ScriptedMutationLLM(
-        [
-            json.dumps({"mutations": [{"instruction": "1"}]}),
-            json.dumps({"mutations": [{"instruction": "2"}]}),
-        ]
-    )
-    evaluator = Evaluator()
-    optimize_anything(
-        {"instruction": "0"},
-        evaluator=evaluator,
-        dataset=[{"id": "train", "target": 1}],
-        valset=[
-            {"id": "validation-easy", "target": 1},
-            {"id": "validation-hard", "target": 2},
-        ],
-        objective="Reach validation targets.",
-        config=GEPAConfig(
-            run_dir=tmp_path / "mutation-validation-feedback",
-            max_candidates=2,
-            max_evaluator_calls=30,
-            mutation_minibatch_size=1,
-            parents_per_candidate=1,
-            minibatch_acceptance="improvement_or_equal",
-            mutator=Mutator.eggthreads(
-                llm=llm,
-                identity={"model": "validation-feedback"},
-                instruction="Improve the instruction.",
-                allowed_tools=set(),
-            ),
-            evaluator_identity={"name": "mutation-validation-feedback-test"},
-            case_id=lambda case: case["id"],
-        ),
-    )
-
-    db = ThreadsDB(
-        tmp_path / "mutation-validation-feedback" / ".egg" / "threads.sqlite"
-    )
-    try:
-        mutation_id = next(
-            thread.thread_id for thread in list_threads(db) if thread.name == "Mutation"
-        )
-        prompts = [
-            message.payload["content"]
-            for message in load_thread_projection(db, mutation_id).messages
-            if message.payload.get("role") == "user"
-            and message.payload.get("eggopt_actor_critic_key")
-        ]
-        workspace = (
-            tmp_path / "mutation-validation-feedback" / "workspaces" / "mutation"
-        )
-        feedback_files = sorted(workspace.glob("feedback-*.json"))
-        by_name = {path.name: json.loads(path.read_text()) for path in feedback_files}
-        requests = [
-            next(value for name, value in by_name.items() if name in prompt)
-            for prompt in prompts
-        ]
-    finally:
-        db.close()
-
-    assert len(prompts) == len(feedback_files) == 2
-    assert all(len(prompt) < 1_000 for prompt in prompts)
-    assert requests[0]["full_validation_scores"] == [
-        {
-            "aggregate_score": 0.0,
-            "candidate_index": 0,
-            "candidate_number": 1,
-            "case_count": 2,
-            "mutation_generation": None,
-        }
-    ]
-    assert "last_candidate_result" not in requests[0]
-    assert requests[1]["full_validation_scores"] == [
-        requests[0]["full_validation_scores"][0],
-        {
-            "aggregate_score": 0.5,
-            "candidate_index": 1,
-            "candidate_number": 2,
-            "case_count": 2,
-            "mutation_generation": 1,
-        },
-    ]
-    assert requests[1]["last_candidate_result"] == {
-        "full_validation": {
-            "aggregate_score": 0.5,
-            "candidate_index": 1,
-            "candidate_number": 2,
-            "case_count": 2,
-        },
-        "minibatch": {
-            "acceptance_policy": "improvement_or_equal",
-            "accepted": True,
-            "aggregate_score": 1.0,
-            "case_count": 1,
-            "parent_envelope_aggregate_score": 0.0,
-        },
-        "mutation_generation": 1,
-        "outcome": "full_validation_completed_and_added",
-    }
-    assert "Your last candidate performed as follows" in prompts[1]
-    assert "Now use the selected Pareto parents" in prompts[1]
-    assert '"aggregate_score": 0.5' in prompts[1]
-    assert "full_validation_score" not in requests[1]["evaluation_evidence"][0]
-    assert (
-        "best or tied-best" in requests[1]["evaluation_evidence"][0]["selection_reason"]
-    )
-
-
-def test_full_validation_scores_change_native_mutation_key():
-    from eggopt.gepa import Mutate, Mutator
-
-    mutator = Mutator(
-        Agent(object(), {"model": "mutation-key"}),
-        "Improve the candidate.",
-    )
-    arguments = (
-        mutator,
-        ({"instruction": "0"},),
-        ({"parent_index": 0, "cases": []},),
-        "Improve.",
-        0,
-    )
-    first = Mutate(
-        *arguments,
-        (
-            {
-                "candidate_index": 0,
-                "candidate_number": 1,
-                "mutation_generation": None,
-                "aggregate_score": 0.0,
-                "case_count": 2,
-            },
-        ),
-    )
-    changed = Mutate(
-        *arguments,
-        (
-            {
-                "candidate_index": 0,
-                "candidate_number": 1,
-                "mutation_generation": None,
-                "aggregate_score": 0.5,
-                "case_count": 2,
-            },
-        ),
-    )
-
-    assert first.get_cache_key() != changed.get_cache_key()
-
-
-def test_last_candidate_result_changes_native_mutation_key():
-    from eggopt.gepa import Mutate, Mutator
-
-    mutator = Mutator(
-        Agent(object(), {"model": "last-candidate-key"}),
-        "Improve the candidate.",
-    )
-    arguments = (
-        mutator,
-        ({"instruction": "0"},),
-        ({"parent_index": 0, "cases": []},),
-        "Improve.",
-        1,
-        ({"candidate_number": 1, "aggregate_score": 0.0},),
-    )
-
-    first = Mutate(
-        *arguments,
-        {"mutation_generation": 1, "outcome": "rejected_on_minibatch"},
-    )
-    changed = Mutate(
-        *arguments,
-        {"mutation_generation": 1, "outcome": "full_validation_completed_and_added"},
-    )
-
-    assert first.get_cache_key() != changed.get_cache_key()
-
-
-def test_last_candidate_result_preserves_first_mutation_cache_identity():
-    from eggopt.gepa import Mutate, Mutator
-
-    mutator = Mutator(
-        Agent(object(), {"model": "first-mutation-key"}),
-        "Improve the candidate.",
-    )
-    arguments = (
-        mutator,
-        ({"instruction": "0"},),
-        ({"parent_index": 0, "cases": []},),
-        "Improve.",
-        0,
-        ({"candidate_number": 1, "aggregate_score": 0.0},),
-    )
-
-    assert (
-        Mutate(*arguments).get_cache_key()
-        == Mutate(*arguments, last_candidate_result=None).get_cache_key()
-    )
-
-
-def test_native_mutator_accepts_a_domain_critic_and_keys_its_identity():
-    from eggflow import Task
-    from eggopt import Mutator
-    from eggopt.gepa import Mutate
-
-    @dataclass
-    class DomainCritic(Task):
-        version: str
-        answer: str | None = None
-
-        def get_cache_key(self):
-            return f"domain-critic:{self.version}"
-
-        def run(self):
-            return {"decision": "accept", "feedback": "Valid domain artifact."}
-
-    base = {
-        "llm": object(),
-        "identity": {"model": "domain-critic"},
-        "instruction": "Improve.",
-        "allowed_tools": set(),
-    }
-    first = Mutator.eggthreads(**base, critic=DomainCritic("v1"))
-    changed = Mutator.eggthreads(**base, critic=DomainCritic("v2"))
-    arguments = (
-        ({"instruction": "0"},),
-        ({"parent_index": 0, "cases": []},),
-        "Improve.",
-        0,
-    )
-
-    assert first.critic is not None
-    assert first.identity["critic"] == {
-        "module": DomainCritic.__module__,
-        "name": DomainCritic.__qualname__,
-        "key": "domain-critic:v1",
-    }
-    assert (
-        Mutate(first, *arguments).get_cache_key()
-        != Mutate(changed, *arguments).get_cache_key()
-    )
-
-
-def test_native_mutator_domain_critic_factory_receives_selected_parent():
-    from eggflow import Task
-    from eggopt import Mutator
-    from eggopt.gepa.mutation import Mutate
-
-    @dataclass
-    class Review(Task):
-        parent: dict[str, str]
-
-        def run(self):
-            return {"decision": "accept", "feedback": "Valid."}
-
-    def critic(parent):
-        return Review(parent)
-
-    mutator = Mutator.eggthreads(
-        llm=object(),
-        identity={"model": "critic-factory"},
-        instruction="Improve.",
-        allowed_tools=set(),
-        critic=critic,
-    )
-    task = Mutate(
-        mutator,
-        ({"instruction": "selected"},),
-        ({"parent_index": 0, "cases": []},),
-        "Improve.",
-        0,
-    )
-
-    assert mutator.identity["critic"] == {
-        "module": critic.__module__,
-        "name": critic.__qualname__,
-    }
-    assert task.mutator.critic({"instruction": "selected"}).parent == {
-        "instruction": "selected"
-    }
-
-
-def test_native_mutation_key_includes_factory_produced_critic_task():
-    from eggflow import Task
-    from eggopt import Mutator
-    from eggopt.gepa import Mutate
-
-    @dataclass
-    class Review(Task):
-        version: str
-
-        def get_cache_key(self):
-            return f"review:{self.version}"
-
-    @dataclass
-    class Factory:
-        version: str
-
-        def __call__(self, _parent):
-            return Review(self.version)
-
-    base = {
-        "llm": object(),
-        "identity": {"model": "factory-key"},
-        "instruction": "Improve.",
-        "allowed_tools": set(),
-    }
-    arguments = (
-        ({"instruction": "0"},),
-        ({"parent_index": 0, "cases": []},),
-        "Improve.",
-        0,
-    )
-    first = Mutate(Mutator.eggthreads(**base, critic=Factory("v1")), *arguments)
-    changed = Mutate(Mutator.eggthreads(**base, critic=Factory("v2")), *arguments)
-
-    assert first.mutator.identity == changed.mutator.identity
-    assert first.get_cache_key() != changed.get_cache_key()
-
-
-def test_mutation_feedback_file_is_semantic_and_immutable(tmp_path):
-    import json
-
-    from eggopt.context import _evaluation_scope
-    from eggopt.gepa.mutation import MutationRequest
-
-    request = MutationRequest(
-        ({"instruction": "parent"},),
-        ({"case": "one", "feedback": "large" * 1000},),
-        "Improve.",
-        ({"candidate_number": 1, "aggregate_score": 0.5},),
-    )
-    context = {"inner_context": str(tmp_path), "outer_context": str(tmp_path)}
-    with _evaluation_scope(context):
-        first = request.write("eggopt.gepa.mutate.v1:abcdef0123456789ffff")
-        second = request.write("eggopt.gepa.mutate.v1:abcdef0123456789ffff")
-
-    assert first == second == tmp_path / "feedback-abcdef0123456789.json"
-    assert json.loads(first.read_text()) == request.document()
-    prompt = request.prompt("Improve.", first.name)
-    assert first.name in prompt
-    assert "large" not in prompt
-
-    first.write_text("{}\n")
-    with _evaluation_scope(context), pytest.raises(RuntimeError, match="contradicts"):
-        request.write("eggopt.gepa.mutate.v1:abcdef0123456789ffff")
-
-
 def test_parent_selection_is_distinct_weighted_and_reproducible():
     import asyncio
 
@@ -2105,7 +1685,7 @@ def test_async_evaluator_is_cached_without_extra_api_types(tmp_path):
         run_dir=tmp_path / "async",
         max_candidates=1,
         max_evaluator_calls=1,
-        generator=generator,
+        mutator=generator,
         evaluator_identity={"name": "async-test"},
         case_id=lambda case: case["id"],
     )
@@ -2162,164 +1742,9 @@ class InterruptedMutationLLM(ScriptedMutationLLM):
         }
 
 
-@pytest.mark.parametrize("failed_status", ["FAILED", "RUNNING"])
-def test_interrupted_mutation_recovers_same_actor_critic_interaction_on_restart(
-    tmp_path, monkeypatch, failed_status
-):
-    import json
-
-    from eggflow import TaskError
-    from eggopt import Mutator
-
-    monkeypatch.chdir(tmp_path)
-    llm = InterruptedMutationLLM([json.dumps({"mutations": [{"instruction": "1"}]})])
-    evaluator = Evaluator()
-    cfg = GEPAConfig(
-        run_dir=tmp_path / "mutation-recovery",
-        max_candidates=1,
-        max_evaluator_calls=4,
-        mutation_minibatch_size=1,
-        parents_per_candidate=1,
-        minibatch_acceptance="improvement_or_equal",
-        mutator=Mutator.eggthreads(
-            llm=llm,
-            identity={"model": "interrupted-mutation"},
-            instruction="Improve the instruction.",
-            model_key="mutation-model",
-            allowed_tools=set(),
-        ),
-        evaluator_identity={"name": "mutation-recovery-test"},
-        case_id=lambda case: case["id"],
-    )
-    arguments = {
-        "evaluator": evaluator,
-        "dataset": [{"id": "one", "target": 1}],
-        "objective": "Reach the target.",
-        "config": cfg,
-    }
-
-    with pytest.raises(TaskError, match="settled without a final answer"):
-        optimize_anything({"instruction": "0"}, **arguments)
-
-    if failed_status == "RUNNING":
-        import sqlite3
-
-        with sqlite3.connect(cfg.run_dir / ".egg" / "flow.db") as flow:
-            flow.execute(
-                "UPDATE tasks SET status='RUNNING' "
-                "WHERE cache_key LIKE 'eggopt.%' AND status='FAILED'"
-            )
-
-    db = ThreadsDB(cfg.run_dir / ".egg" / "threads.sqlite")
-    try:
-        mutation_id = next(
-            thread.thread_id for thread in list_threads(db) if thread.name == "Mutation"
-        )
-        original_prompt = db.conn.execute(
-            "SELECT msg_id FROM events WHERE thread_id=? AND type='msg.create' "
-            "AND json_extract(payload_json, '$.role')='user' "
-            "AND json_extract(payload_json, '$.eggopt_actor_critic_key') IS NOT NULL",
-            (mutation_id,),
-        ).fetchone()[0]
-    finally:
-        db.close()
-
-    result = optimize_anything({"instruction": "0"}, **arguments)
-
-    assert result.best_candidate == {"instruction": "1"}
-    assert llm.calls == 2
-    assert llm.models == ["mutation-model", "mutation-model"]
-    db = ThreadsDB(cfg.run_dir / ".egg" / "threads.sqlite")
-    try:
-        continuation = db.conn.execute(
-            "SELECT payload_json FROM events WHERE thread_id=? "
-            "AND type='control.interrupt' "
-            "AND json_extract(payload_json, '$.purpose')='continue'",
-            (mutation_id,),
-        ).fetchone()
-        assert continuation is not None
-        assert original_prompt in continuation[0]
-        prompts = db.conn.execute(
-            "SELECT count(*) FROM events WHERE thread_id=? AND type='msg.create' "
-            "AND json_extract(payload_json, '$.eggopt_actor_critic_key') IS NOT NULL "
-            "AND json_extract(payload_json, '$.role')='user'",
-            (mutation_id,),
-        ).fetchone()[0]
-        assert prompts == 1
-    finally:
-        db.close()
-
-
-def test_mutation_uses_actor_critic_with_deterministic_validation(
-    tmp_path, monkeypatch
-):
-    import json
-
-    from eggopt import Mutator
-
-    monkeypatch.chdir(tmp_path)
-    llm = ScriptedMutationLLM(
-        [
-            "not json",
-            json.dumps({"mutations": [{"instruction": "1"}]}),
-        ]
-    )
-    llm.current_model_key = "prediction-model"
-    evaluator = Evaluator()
-    result = optimize_anything(
-        {"instruction": "0"},
-        evaluator=evaluator,
-        dataset=[{"id": "one", "target": 1}],
-        objective="Reach the target.",
-        config=GEPAConfig(
-            run_dir=tmp_path / "mutation",
-            max_candidates=1,
-            max_evaluator_calls=4,
-            mutation_minibatch_size=1,
-            parents_per_candidate=1,
-            minibatch_acceptance="improvement_or_equal",
-            mutator=Mutator.eggthreads(
-                llm=llm,
-                identity={"model": "scripted-mutation"},
-                instruction="Improve the instruction.",
-                model_key="mutation-model",
-                allowed_tools=set(),
-                max_correction_turns=1,
-            ),
-            evaluator_identity={"name": "mutation-critic-test"},
-            case_id=lambda case: case["id"],
-        ),
-    )
-
-    assert result.best_candidate == {"instruction": "1"}
-    assert llm.calls == 2
-    assert llm.models == ["mutation-model", "mutation-model"]
-    db = ThreadsDB(tmp_path / "mutation" / ".egg" / "threads.sqlite")
-    try:
-        from eggthreads import current_thread_model
-
-        mutation_review = db.conn.execute(
-            "SELECT thread_id FROM threads WHERE name='Mutation Review'"
-        ).fetchone()
-        mutation = db.conn.execute(
-            "SELECT thread_id FROM threads WHERE name='Mutation'"
-        ).fetchone()
-        validation = db.conn.execute(
-            "SELECT thread_id FROM threads WHERE name='Validation'"
-        ).fetchone()
-        assert mutation_review and mutation and validation
-        assert current_thread_model(db, mutation[0]) == "mutation-model"
-        parent = db.conn.execute(
-            "SELECT parent_id FROM children WHERE child_id=?", (mutation[0],)
-        ).fetchone()
-        assert tuple(parent) == (mutation_review[0],)
-        assert not is_descendant_thread(db, mutation[0], validation[0])
-    finally:
-        db.conn.close()
-
-
 def test_actor_critic_answer_is_bounded_by_the_next_user_turn(tmp_path):
     from eggopt.actor_critic import _answer_after_message
+
     from eggthreads import append_message, create_root_thread
 
     db = ThreadsDB(tmp_path / "threads.sqlite")
@@ -2368,6 +1793,7 @@ def test_actor_critic_answer_is_bounded_by_the_next_user_turn(tmp_path):
 
 def test_actor_critic_open_turn_uses_its_latest_answer(tmp_path):
     from eggopt.actor_critic import _answer_after_message
+
     from eggthreads import append_message, create_root_thread
 
     db = ThreadsDB(tmp_path / "threads.sqlite")
@@ -2398,101 +1824,97 @@ def test_actor_critic_open_turn_uses_its_latest_answer(tmp_path):
     db.close()
 
 
-def test_mutation_replay_keeps_answer_before_compaction_checkpoint(
-    tmp_path, monkeypatch
-):
-    import json
-    import pickle
+def test_gepa_uses_opaque_domain_mutator_result(tmp_path):
+    from eggflow import Task
 
-    from eggflow import TaskError
-    from eggopt import ActorCriticResult, Mutator
-    from eggthreads import append_message
+    calls = []
+
+    class Extract(Task):
+        def run(self):
+            calls.append("extract")
+            return ["complete", "candidate"]
+
+    class DomainMutator:
+        def __call__(self, context):
+            assert context.parents == ({"seed": True},)
+            assert context.evidence[0]["cases"][0]["score"] == 0.0
+            return Extract()
+
+    def evaluate(candidate, _case):
+        return float(candidate == ["complete", "candidate"]), {"candidate": candidate}
+
+    result = optimize_anything(
+        {"seed": True},
+        evaluator=evaluate,
+        dataset=[{"id": "one"}],
+        objective="Improve.",
+        config=GEPAConfig(
+            run_dir=tmp_path / "opaque",
+            max_candidates=1,
+            max_evaluator_calls=4,
+            mutation_minibatch_size=1,
+            mutator=DomainMutator(),
+            evaluator_identity={"name": "opaque"},
+            case_id=lambda case: case["id"],
+        ),
+    )
+
+    assert calls == ["extract"]
+    assert result.candidates == ({"seed": True}, ["complete", "candidate"])
+    assert result.best_candidate == ["complete", "candidate"]
+
+
+def test_actor_critic_accepts_critic_extracted_value(tmp_path, monkeypatch):
+    import asyncio
+
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+
+    from eggflow import FlowExecutor, Task, TaskStore
+    from eggopt import ActorCritic, Agent
+    from eggthreads import ThreadsDB, create_root_thread
 
     monkeypatch.chdir(tmp_path)
-    mutation = json.dumps({"mutations": [{"instruction": "1"}]})
-    llm = ScriptedMutationLLM([mutation])
-    evaluator = Evaluator()
-    cfg = GEPAConfig(
-        run_dir=tmp_path / "mutation-compaction-replay",
-        max_candidates=1,
-        max_evaluator_calls=4,
-        mutation_minibatch_size=1,
-        parents_per_candidate=1,
-        minibatch_acceptance="improvement_or_equal",
-        mutator=Mutator.eggthreads(
-            llm=llm,
-            identity={"model": "mutation-compaction-replay"},
-            instruction="Improve the instruction.",
-            model_key="mutation-model",
-            allowed_tools=set(),
-        ),
-        evaluator_identity={"name": "mutation-compaction-replay"},
-        case_id=lambda case: case["id"],
-    )
-    arguments = {
-        "evaluator": evaluator,
-        "dataset": [{"id": "one", "target": 1}],
-        "objective": "Reach the target.",
-        "config": cfg,
-    }
+    llm = ScriptedAgentLLM(["chat completion only"])
 
-    first = optimize_anything({"instruction": "0"}, **arguments)
-    assert first.best_candidate == {"instruction": "1"}
+    @dataclass
+    class Extract(Task):
+        answer: object = None
 
-    db = ThreadsDB(cfg.run_dir / ".egg" / "threads.sqlite")
-    mutation_id = next(
-        thread.thread_id for thread in list_threads(db) if thread.name == "Mutation"
-    )
-    append_message(
-        db,
-        mutation_id,
-        "user",
-        "Use the `compaction-checkpoint` skill. Mode: `summary_only`.",
-        extra={"compaction_summary_request": True},
-    )
-    append_message(db, mutation_id, "assistant", "# Compaction checkpoint")
+        def run(self):
+            assert self.answer == "chat completion only"
+            return {
+                "decision": "accept",
+                "feedback": "artifact is valid",
+                "value": {"source": "extracted from disk"},
+            }
+
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    root = create_root_thread(db, name="Domain operation")
+    runtime_key = "extracted-value"
+    _bind_evaluation_runtime(runtime_key, db)
+    flow = FlowExecutor(TaskStore(tmp_path / ".egg" / "flow.db"))
+    with _evaluation_scope(
+        {
+            "evaluation_thread_id": root,
+            "outer_context": str(tmp_path),
+            "inner_context": str(tmp_path),
+            "_runtime_key": runtime_key,
+            "_evaluation_key": "domain-operation",
+            "_context_limit": None,
+        }
+    ):
+        result = asyncio.run(
+            flow.run(
+                ActorCritic(
+                    actor=Agent(llm, {"role": "writer"}, allowed_tools=set()),
+                    critic=Extract(),
+                    actor_prompt=lambda _round, _state: "Write the artifact.",
+                    max_rounds=1,
+                )
+            )
+        )
     db.close()
 
-    from eggflow import Result, TaskStore
-
-    flow = TaskStore(str(cfg.run_dir / ".egg" / "flow.db"))
-    actor_row = flow.conn.execute(
-        "SELECT cache_key, result_blob FROM tasks "
-        "WHERE cache_key LIKE 'eggopt.actor-critic.v2:%'"
-    ).fetchone()
-    actor_result = pickle.loads(actor_row["result_blob"]).value
-    legacy_key = actor_row["cache_key"].replace(
-        "eggopt.actor-critic.v2:", "eggopt.actor-critic.v1:", 1
-    )
-    legacy_result = replace(actor_result, answer="# Compaction checkpoint")
-    flow.conn.execute(
-        "INSERT OR REPLACE INTO tasks(cache_key, status, result_blob) VALUES (?, ?, ?)",
-        (legacy_key, "COMPLETED", pickle.dumps(Result(value=legacy_result))),
-    )
-    flow.conn.commit()
-    for row in flow.conn.execute("SELECT cache_key FROM tasks"):
-        key = row["cache_key"]
-        if key.startswith(("eggopt.actor-critic.v2:", "eggopt.gepa.mutate.v")):
-            flow.update(key, "FAILED")
-    assert flow.get(legacy_key)["status"] == "COMPLETED"
-    assert isinstance(legacy_result, ActorCriticResult)
-    flow.close()
-
-    replay_llm = ScriptedMutationLLM([])
-    arguments["config"] = replace(
-        cfg,
-        mutator=Mutator.eggthreads(
-            llm=replay_llm,
-            identity={"model": "mutation-compaction-replay"},
-            instruction="Improve the instruction.",
-            model_key="mutation-model",
-            allowed_tools=set(),
-        ),
-    )
-    try:
-        replay = optimize_anything({"instruction": "0"}, **arguments)
-    except TaskError as error:  # pragma: no cover - gives the regression clear context
-        raise AssertionError(str(error)) from error
-
-    assert replay.best_candidate == {"instruction": "1"}
-    assert replay_llm.calls == 0
+    assert result.answer == "chat completion only"
+    assert result.value == {"source": "extracted from disk"}
