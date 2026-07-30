@@ -296,7 +296,7 @@ def test_gepa_progress_must_be_callable():
         GEPAConfig(progress="verbose")
 
 
-def config(tmp_path, evaluator, generator, **changes):
+def config(tmp_path, evaluator, mutator, **changes):
     base = GEPAConfig(
         run_dir=tmp_path / "native",
         max_candidates=2,
@@ -306,7 +306,7 @@ def config(tmp_path, evaluator, generator, **changes):
         seed=1,
         evaluator_identity={"name": "threshold", "version": 1},
         case_id=lambda case: case["id"],
-        mutator=generator,
+        mutator=mutator,
     )
     return replace(base, **changes)
 
@@ -645,7 +645,7 @@ def test_study_identity_is_cached_without_an_eggthreads_marker(tmp_path):
         db.conn.close()
 
 
-def test_async_custom_generator_uses_shared_await_task(tmp_path):
+def test_async_mutator_uses_shared_await_task(tmp_path):
     async def generate(_context):
         return {"instruction": "1"}
 

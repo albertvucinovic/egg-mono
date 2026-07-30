@@ -566,7 +566,7 @@ class GEPA(Generic[CaseT, OutputT]):
                 max_candidates=int(legacy.pop("generations", 3)),
                 max_evaluator_calls=legacy.pop("max_metric_calls", 100),
                 run_dir=legacy.pop("run_dir", ".eggopt/gepa"),
-                mutator=legacy.pop("mutator", legacy.pop("generator", None)),
+                mutator=legacy.pop("mutator", None),
                 evaluator_identity=legacy.pop("metric_identity", None),
                 case_id=legacy.pop("example_id", None),
                 max_concurrent_evaluations=legacy.pop("max_concurrent_evaluations", 1),
