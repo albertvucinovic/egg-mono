@@ -22,13 +22,23 @@ class MutatorInput:
     last_candidate_result: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "parents",
-            tuple(
-                canonical_value(value, what="mutation parent") for value in self.parents
-            ),
-        )
+        for name in ("parents", "evidence", "full_validation_scores"):
+            object.__setattr__(
+                self,
+                name,
+                tuple(
+                    canonical_value(value, what=f"mutator {name}")
+                    for value in getattr(self, name)
+                ),
+            )
+        if self.last_candidate_result is not None:
+            object.__setattr__(
+                self,
+                "last_candidate_result",
+                canonical_value(
+                    self.last_candidate_result, what="last candidate result"
+                ),
+            )
 
     def identity(self) -> Mapping[str, Any]:
         value = {
