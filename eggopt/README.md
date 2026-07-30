@@ -64,7 +64,7 @@ use(result.best_candidate)
 - `ThreadTool` is the reusable Eggflow task for durable synthetic tool calls on
   assigned Eggthreads threads; domain code never queries Eggthreads storage.
 - Full valset evaluations live under `GEPA → Validation`. Dataset reflection
-  evaluations live under `GEPA → Mutation Review → Reflection`; the
+  evaluations live under `GEPA → Mutation Review → Mutation → Reflection`; the
   deterministic controller alone uses valset scores for Pareto selection.
 - Domain code owns Actors, prompts, extraction, validation, candidate shape,
   cases, evaluators, and model selection.
