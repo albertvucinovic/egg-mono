@@ -305,6 +305,11 @@ def test_gepa_progress_must_be_callable():
         GEPAConfig(progress="verbose")
 
 
+def test_gepa_mutator_must_be_callable_or_task():
+    with pytest.raises(TypeError, match="mutator"):
+        GEPAConfig(mutator=object())
+
+
 def config(tmp_path, evaluator, mutator, **changes):
     base = GEPAConfig(
         run_dir=tmp_path / "native",
