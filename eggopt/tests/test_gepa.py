@@ -1994,7 +1994,8 @@ def test_actor_critic_task_critic_extracts_workspace_file(tmp_path, monkeypatch)
 
 
 def test_callable_mutator_state_changes_cache_identity():
-    from eggopt.gepa import MutatorInput, RunMutator
+    from eggopt.gepa import MutatorInput
+    from eggopt.gepa.mutator import RunMutator
 
     class StatefulMutator:
         def __init__(self, version):

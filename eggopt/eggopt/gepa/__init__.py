@@ -2,7 +2,6 @@
 
 from .mutator import (
     MutatorInput,
-    RunMutator,
 )
 from .search import (
     GEPA,
@@ -22,7 +21,6 @@ __all__ = [
     "GenerateCandidate",
     "MutatorInput",
     "OptimizationPlan",
-    "RunMutator",
     "SelectParents",
     "optimize_anything",
     "plan_optimization",
