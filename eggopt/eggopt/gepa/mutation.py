@@ -92,7 +92,7 @@ class _Await(Task):
 
 def _mutator_identity(
     mutator: Task | Callable[[MutatorInput], Any],
-) -> Mapping[str, str]:
+) -> Mapping[str, Any]:
     if isinstance(mutator, Task):
         return {
             "module": mutator.__class__.__module__,
@@ -109,6 +109,16 @@ def _mutator_identity(
     cache_key = getattr(mutator, "get_cache_key", None)
     if callable(cache_key):
         identity["key"] = cache_key()
+    else:
+        attributes = getattr(mutator, "__dict__", None)
+        if attributes:
+            try:
+                identity["state"] = canonical_value(attributes, what="mutator state")
+            except TypeError as exc:
+                raise TypeError(
+                    "stateful mutator must implement get_cache_key() with its "
+                    "configuration identity"
+                ) from exc
     return identity
 
 

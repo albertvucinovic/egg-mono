@@ -47,6 +47,9 @@ class Increment:
         level = max(int(parent["instruction"]) for parent in context.parents) + 1
         return {"instruction": str(level)}
 
+    def get_cache_key(self):
+        return "test.increment.v1"
+
 
 class ContextEvaluator(Evaluator):
     def __init__(self) -> None:
@@ -1983,3 +1986,21 @@ def test_actor_critic_task_critic_extracts_workspace_file(tmp_path, monkeypatch)
 
     assert result.answer == "file saved"
     assert result.value == {"source": "answer = 42\n"}
+
+
+def test_callable_mutator_state_changes_cache_identity():
+    from eggopt.gepa import Mutate, MutatorInput
+
+    class StatefulMutator:
+        def __init__(self, version):
+            self.version = version
+
+        def __call__(self, _context):
+            return {"version": self.version}
+
+    context = MutatorInput(({"seed": True},), (), "Improve.", 0)
+
+    assert (
+        Mutate(StatefulMutator("v1"), context).get_cache_key()
+        != Mutate(StatefulMutator("v2"), context).get_cache_key()
+    )

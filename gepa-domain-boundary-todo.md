@@ -69,3 +69,6 @@ accepted candidate returned to GEPA.
 - 2026-07-30: Added typed `Critique.accept(value, feedback)` and
   `Critique.revise(feedback)` helpers, keeping domain Critics concise while
   preserving plain decision mappings for compatibility.
+- 2026-07-30: Hardened callable Mutator identity: immutable configuration state
+  participates automatically when JSON-safe; stateful/runtime-mutating
+  callables must expose `get_cache_key()`. Both trading client factories now do.
