@@ -1918,3 +1918,61 @@ def test_actor_critic_accepts_critic_extracted_value(tmp_path, monkeypatch):
 
     assert result.answer == "chat completion only"
     assert result.value == {"source": "extracted from disk"}
+
+
+def test_actor_critic_task_critic_extracts_workspace_file(tmp_path, monkeypatch):
+    import asyncio
+
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+
+    from eggflow import FlowExecutor, Task, TaskStore
+    from eggopt import ActorCritic, Agent
+    from eggthreads import ThreadsDB, create_root_thread
+
+    monkeypatch.chdir(tmp_path)
+    llm = ScriptedAgentLLM(["file saved"])
+
+    @dataclass
+    class ExtractFile(Task):
+        workspace: str | None = None
+
+        def run(self):
+            path = Path(self.workspace) / "candidate.py"
+            assert path.read_text() == "answer = 42\n"
+            return {
+                "decision": "accept",
+                "feedback": "file is valid",
+                "value": {"source": path.read_text()},
+            }
+
+    (tmp_path / "candidate.py").write_text("answer = 42\n")
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    root = create_root_thread(db, name="Domain operation")
+    runtime_key = "file-value"
+    _bind_evaluation_runtime(runtime_key, db)
+    flow = FlowExecutor(TaskStore(tmp_path / ".egg" / "flow.db"))
+    with _evaluation_scope(
+        {
+            "evaluation_thread_id": root,
+            "outer_context": str(tmp_path),
+            "inner_context": str(tmp_path),
+            "_runtime_key": runtime_key,
+            "_evaluation_key": "file-operation",
+            "_context_limit": None,
+        }
+    ):
+        result = asyncio.run(
+            flow.run(
+                ActorCritic(
+                    actor=Agent(llm, {"role": "writer"}, allowed_tools=set()),
+                    critic=ExtractFile(),
+                    actor_prompt=lambda _round, _state: "Write candidate.py.",
+                    max_rounds=1,
+                )
+            )
+        )
+    db.close()
+
+    assert result.answer == "file saved"
+    assert result.value == {"source": "answer = 42\n"}

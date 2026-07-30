@@ -30,7 +30,7 @@ accepted candidate returned to GEPA.
       opaque finite JSON candidate values.
 - [x] Move simpletrade request/prompt/envelope extraction and source validation
       into its domain Mutator/Critic implementation.
-- [x] Add regressions for response extraction and filesystem extraction without
+- [x] Add regressions for response extraction and real workspace-file extraction without
       GEPA knowing either transport.
 - [x] Run focused/full Eggopt and simpletrade tests, Ruff, update docs, and commit
       coherent changes with tracked working trees clean.
@@ -55,3 +55,7 @@ accepted candidate returned to GEPA.
 - 2026-07-30: Removed the transitional three-positional-argument generator
   compatibility branch. Every Mutator now has the single haiku signature
   `mutator(context)`.
+- 2026-07-30: Added a literal file-backed ActorCritic regression: the Actor's
+  chat answer is only a completion signal, while the Task Critic reads
+  `candidate.py` from the shared workspace and returns its extracted source as
+  the accepted value.
