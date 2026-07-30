@@ -48,7 +48,9 @@ class GEPAConfig:
     minibatch_acceptance: MinibatchAcceptance = "strict_improvement"
     seed: int = 0
     run_dir: str | Path = ".eggopt/gepa"
-    mutator: Any | None = None
+    mutator: Callable[[MutatorInput], Any] | Task | None = field(
+        default=None, repr=False, compare=False
+    )
     mutator_context_limit: int | None = None
     evaluator_identity: Any | None = None
     case_id: Callable[[Any], Any] | None = field(
