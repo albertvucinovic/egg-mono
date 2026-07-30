@@ -10,7 +10,14 @@ VENV_DIR="$MONO_ROOT/venv"
 # Configuration - can be overridden via environment variables
 BACKEND_PORT="${EGGW_BACKEND_PORT:-8000}"
 FRONTEND_PORT="${EGGW_FRONTEND_PORT:-3000}"
+SKIP_DEPENDENCY_INSTALL="${EGGW_SKIP_DEPENDENCY_INSTALL:-0}"
 RELOAD_EXIT_CODE=75
+
+if [ "$SKIP_DEPENDENCY_INSTALL" != "0" ] && [ "$SKIP_DEPENDENCY_INSTALL" != "1" ]; then
+    echo "Error: EGGW_SKIP_DEPENDENCY_INSTALL must be 0 or 1" >&2
+    exit 1
+fi
+
 RELOAD_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/eggw-reload.XXXXXX")"
 export EGGW_RELOAD_EXIT_CODE="$RELOAD_EXIT_CODE"
 export EGGW_RELOAD_STATE_FILE="$RELOAD_STATE_FILE"
@@ -291,15 +298,17 @@ trap on_sigint SIGINT
 trap on_sigterm SIGTERM
 trap cleanup EXIT
 
-# Create venv and install monorepo packages on first run
-if [ ! -f "$VENV_DIR/bin/activate" ]; then
+# Create venv and install monorepo packages on first run. Pre-provisioned
+# environments (including launcher behavior tests) can explicitly suppress
+# installation while continuing to exercise the real startup path.
+if [ -f "$VENV_DIR/bin/activate" ]; then
+    source "$VENV_DIR/bin/activate"
+elif [ "$SKIP_DEPENDENCY_INSTALL" != "1" ]; then
     echo "First run — creating virtual environment..."
     python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
     echo "Installing egg-mono packages..."
     make -C "$MONO_ROOT" install
-else
-    source "$VENV_DIR/bin/activate"
 fi
 
 # Load .env if present (API keys, etc.)
@@ -419,7 +428,8 @@ echo "Starting frontend on port $FRONTEND_PORT..."
 cd "$SCRIPT_DIR/frontend"
 
 # Ensure node_modules exists and is up to date
-if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules" ]; then
+if [ "$SKIP_DEPENDENCY_INSTALL" != "1" ] && \
+   { [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules" ]; }; then
     echo "Installing frontend dependencies..."
     npm install
     touch node_modules  # Update timestamp

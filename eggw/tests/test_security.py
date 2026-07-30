@@ -232,6 +232,7 @@ def _run_launcher(
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "EGGW_HYPERCORN_BIN": str(fake_bin / "fake-hypercorn"),
         "EGGW_NPM_BIN": str(fake_bin / "fake-npm"),
+        "EGGW_SKIP_DEPENDENCY_INSTALL": "1",
         "EGGW_SKIP_FRONTEND_WARMUP": "1",
         "EGGW_BACKEND_STARTUP_TIMEOUT": "1",
         "EGGW_NO_BROWSER": "1",
@@ -341,6 +342,13 @@ def test_launcher_rejects_invalid_backend_startup_timeout(tmp_path: Path):
     assert result.returncode != 0
     assert "EGGW_BACKEND_STARTUP_TIMEOUT must be a positive integer" in result.stderr
     assert not (tmp_path / "capture" / "frontend-args").exists()
+
+
+def test_launcher_rejects_invalid_dependency_install_override(tmp_path: Path):
+    result = _run_launcher(tmp_path, EGGW_SKIP_DEPENDENCY_INSTALL="invalid")
+
+    assert result.returncode != 0
+    assert "EGGW_SKIP_DEPENDENCY_INSTALL must be 0 or 1" in result.stderr
 
 
 @pytest.mark.skipif(not (Path(__file__).resolve().parents[1] / "frontend" / "node_modules").is_dir(), reason="frontend dependencies not installed")

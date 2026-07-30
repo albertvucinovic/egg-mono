@@ -749,6 +749,7 @@ def test_phase10_scheduler_bounds_unchanged_persistent_policy_failure(
 
     attempts = 0
     runner_calls = 0
+    retry_budget_consumed = asyncio.Event()
     real_run_once = runner_module.ThreadRunner.run_once
 
     def fail_policy(*_args, **_kwargs):
@@ -764,7 +765,16 @@ def test_phase10_scheduler_bounds_unchanged_persistent_policy_failure(
     async def counted_run_once(self):  # type: ignore[no-untyped-def]
         nonlocal runner_calls
         runner_calls += 1
-        return await real_run_once(self)
+        result = await real_run_once(self)
+        recovery_key = runner_module._tool_output_recovery_key_for_call(
+            db, thread_id, tool_call_id
+        )
+        if (
+            recovery_key is not None
+            and retries.disposition(recovery_key).exhausted
+        ):
+            retry_budget_consumed.set()
+        return result
 
     monkeypatch.setattr(
         runner_module.ThreadRunner,
@@ -781,7 +791,7 @@ def test_phase10_scheduler_bounds_unchanged_persistent_policy_failure(
         scheduler._output_recovery_retries = retries
         task = asyncio.create_task(scheduler.run_forever(poll_sec=0.001))
         try:
-            await asyncio.sleep(0.08)
+            await asyncio.wait_for(retry_budget_consumed.wait(), timeout=5)
         finally:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
