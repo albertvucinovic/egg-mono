@@ -2196,3 +2196,183 @@ def test_mutation_uses_actor_critic_with_deterministic_validation(
         assert not is_descendant_thread(db, mutation[0], validation[0])
     finally:
         db.conn.close()
+
+
+def test_actor_critic_answer_is_bounded_by_the_next_user_turn(tmp_path):
+    from eggopt.actor_critic import _answer_after_message
+    from eggthreads import append_message, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    actor_id = create_root_thread(db, name="Actor")
+    prompt_id = append_message(
+        db,
+        actor_id,
+        "user",
+        "Produce the mutation.",
+        extra={"eggopt_actor_critic_key": "turn-key"},
+    )
+    append_message(
+        db,
+        actor_id,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": "inspect-request",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                }
+            ]
+        },
+    )
+    append_message(db, actor_id, "tool", "Inspection complete.")
+    append_message(db, actor_id, "assistant", '{"mutations":[{"instruction":"1"}]}')
+    append_message(
+        db,
+        actor_id,
+        "user",
+        "Use the `compaction-checkpoint` skill. Mode: `summary_only`.",
+        extra={"compaction_summary_request": True},
+    )
+    append_message(db, actor_id, "assistant", "# Compaction checkpoint")
+
+    projection = load_thread_projection(db, actor_id)
+    prompt_seq = projection.message(prompt_id).created_event_seq
+    assert _answer_after_message(db, actor_id, prompt_seq) == (
+        '{"mutations":[{"instruction":"1"}]}'
+    )
+    db.close()
+
+
+def test_actor_critic_open_turn_uses_its_latest_answer(tmp_path):
+    from eggopt.actor_critic import _answer_after_message
+    from eggthreads import append_message, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    actor_id = create_root_thread(db, name="Actor")
+    append_message(
+        db,
+        actor_id,
+        "user",
+        "Produce the initial mutation.",
+        extra={"eggopt_actor_critic_key": "initial-key"},
+    )
+    append_message(db, actor_id, "assistant", "not json")
+    prompt_id = append_message(
+        db,
+        actor_id,
+        "user",
+        "Revise the mutation.",
+        extra={"eggopt_actor_critic_key": "revision-key"},
+    )
+    append_message(db, actor_id, "assistant", '{"mutations":[{"instruction":"2"}]}')
+
+    projection = load_thread_projection(db, actor_id)
+    prompt_seq = projection.message(prompt_id).created_event_seq
+    assert _answer_after_message(db, actor_id, prompt_seq) == (
+        '{"mutations":[{"instruction":"2"}]}'
+    )
+    db.close()
+
+
+def test_mutation_replay_keeps_answer_before_compaction_checkpoint(
+    tmp_path, monkeypatch
+):
+    import json
+    import pickle
+
+    from eggflow import TaskError
+    from eggopt import ActorCriticResult, Mutator
+    from eggthreads import append_message
+
+    monkeypatch.chdir(tmp_path)
+    mutation = json.dumps({"mutations": [{"instruction": "1"}]})
+    llm = ScriptedMutationLLM([mutation])
+    evaluator = Evaluator()
+    cfg = GEPAConfig(
+        run_dir=tmp_path / "mutation-compaction-replay",
+        max_candidates=1,
+        max_evaluator_calls=4,
+        mutation_minibatch_size=1,
+        parents_per_candidate=1,
+        minibatch_acceptance="improvement_or_equal",
+        mutator=Mutator.eggthreads(
+            llm=llm,
+            identity={"model": "mutation-compaction-replay"},
+            instruction="Improve the instruction.",
+            model_key="mutation-model",
+            allowed_tools=set(),
+        ),
+        evaluator_identity={"name": "mutation-compaction-replay"},
+        case_id=lambda case: case["id"],
+    )
+    arguments = {
+        "evaluator": evaluator,
+        "dataset": [{"id": "one", "target": 1}],
+        "objective": "Reach the target.",
+        "config": cfg,
+    }
+
+    first = optimize_anything({"instruction": "0"}, **arguments)
+    assert first.best_candidate == {"instruction": "1"}
+
+    db = ThreadsDB(cfg.run_dir / ".egg" / "threads.sqlite")
+    mutation_id = next(
+        thread.thread_id for thread in list_threads(db) if thread.name == "Mutation"
+    )
+    append_message(
+        db,
+        mutation_id,
+        "user",
+        "Use the `compaction-checkpoint` skill. Mode: `summary_only`.",
+        extra={"compaction_summary_request": True},
+    )
+    append_message(db, mutation_id, "assistant", "# Compaction checkpoint")
+    db.close()
+
+    from eggflow import Result, TaskStore
+
+    flow = TaskStore(str(cfg.run_dir / ".egg" / "flow.db"))
+    actor_row = flow.conn.execute(
+        "SELECT cache_key, result_blob FROM tasks "
+        "WHERE cache_key LIKE 'eggopt.actor-critic.v2:%'"
+    ).fetchone()
+    actor_result = pickle.loads(actor_row["result_blob"]).value
+    legacy_key = actor_row["cache_key"].replace(
+        "eggopt.actor-critic.v2:", "eggopt.actor-critic.v1:", 1
+    )
+    legacy_result = replace(actor_result, answer="# Compaction checkpoint")
+    flow.conn.execute(
+        "INSERT OR REPLACE INTO tasks(cache_key, status, result_blob) VALUES (?, ?, ?)",
+        (legacy_key, "COMPLETED", pickle.dumps(Result(value=legacy_result))),
+    )
+    flow.conn.commit()
+    for row in flow.conn.execute("SELECT cache_key FROM tasks"):
+        key = row["cache_key"]
+        if key.startswith(("eggopt.actor-critic.v2:", "eggopt.gepa.mutate.v")):
+            flow.update(key, "FAILED")
+    assert flow.get(legacy_key)["status"] == "COMPLETED"
+    assert isinstance(legacy_result, ActorCriticResult)
+    flow.close()
+
+    replay_llm = ScriptedMutationLLM([])
+    arguments["config"] = replace(
+        cfg,
+        mutator=Mutator.eggthreads(
+            llm=replay_llm,
+            identity={"model": "mutation-compaction-replay"},
+            instruction="Improve the instruction.",
+            model_key="mutation-model",
+            allowed_tools=set(),
+        ),
+    )
+    try:
+        replay = optimize_anything({"instruction": "0"}, **arguments)
+    except TaskError as error:  # pragma: no cover - gives the regression clear context
+        raise AssertionError(str(error)) from error
+
+    assert replay.best_candidate == {"instruction": "1"}
+    assert replay_llm.calls == 0

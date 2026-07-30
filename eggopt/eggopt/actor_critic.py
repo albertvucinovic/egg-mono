@@ -158,7 +158,7 @@ class ActorCritic(Task):
         }
         if self.names is not None:
             identity["names"] = self.names
-        return digest_payload("eggopt.actor-critic.v1", identity)
+        return digest_payload("eggopt.actor-critic.v2", identity)
 
     def recover_interaction(
         self,
@@ -676,11 +676,23 @@ def _answer_after_message(db: Any, thread_id: str, after_seq: int) -> Any:
 
 
 def _latest_answer(db: Any, thread_id: str, after_seq: int) -> Any:
+    """Return this user turn's answer, never a later turn's response."""
+
     projection = load_thread_projection(db, thread_id)
+    next_user_seq = next(
+        (
+            message.created_event_seq
+            for message in projection.messages
+            if message.created_event_seq > after_seq
+            and message.payload.get("role") == "user"
+        ),
+        None,
+    )
     answers = [
         message
         for message in projection.messages
         if message.created_event_seq > after_seq
+        and (next_user_seq is None or message.created_event_seq < next_user_seq)
         and message.payload.get("role") == "assistant"
         and not message.payload.get("tool_calls")
     ]
