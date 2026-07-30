@@ -15,13 +15,14 @@ from ..runtime import sync
 class Runtime(BaseRuntime):
     study_id: str
     validation_id: str
+    mutation_id: str
     reflection_id: str
 
     @classmethod
     def open(cls, root: str | Path) -> Runtime:
         base = BaseRuntime.open(root)
         try:
-            study_id, validation_id, reflection_id = sync(
+            study_id, validation_id, mutation_id, reflection_id = sync(
                 base.flow.run(_CreateStudy(base.threads)), operation="GEPA"
             )
         except BaseException:
@@ -35,6 +36,7 @@ class Runtime(BaseRuntime):
             base.runtime_key,
             study_id,
             validation_id,
+            mutation_id,
             reflection_id,
         )
 
@@ -46,7 +48,7 @@ class _CreateStudy(Task):
     def get_cache_key(self) -> str:
         return digest_payload("eggopt.gepa.create-study.v2", {})
 
-    def run(self) -> tuple[str, str, str]:
+    def run(self) -> tuple[str, str, str, str]:
         study_id = create_root_thread(self.threads, name="GEPA")
         validation_id = create_child_thread(
             self.threads,
@@ -60,13 +62,19 @@ class _CreateStudy(Task):
             name="Mutation Review",
             inherit_tools_config=False,
         )
-        reflection_id = create_child_thread(
+        mutation_id = create_child_thread(
             self.threads,
             mutation_review_id,
+            name="Mutation",
+            inherit_tools_config=False,
+        )
+        reflection_id = create_child_thread(
+            self.threads,
+            mutation_id,
             name="Reflection",
             inherit_tools_config=False,
         )
-        return study_id, validation_id, reflection_id
+        return study_id, validation_id, mutation_id, reflection_id
 
 
 __all__ = ["Runtime"]

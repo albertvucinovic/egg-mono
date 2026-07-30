@@ -59,3 +59,6 @@ accepted candidate returned to GEPA.
   chat answer is only a completion signal, while the Task Critic reads
   `candidate.py` from the shared workspace and returns its extracted source as
   the accepted value.
+- 2026-07-30: Preserved `GEPA → Mutation Review → Mutation → Reflection` as an
+  authorization topology only. The generic Mutation thread is the execution
+  parent for the opaque domain Mutator; it carries no mutation schema or parser.

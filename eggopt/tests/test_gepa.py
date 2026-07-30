@@ -777,18 +777,18 @@ def test_evaluation_hierarchy_and_outer_inner_context_are_automatic(
         mutation_review = next(
             child for child in study_children if child[1] == "Mutation Review"
         )
-        reflection = list_children_with_meta(db, mutation_review[0])[0]
+        mutation = list_children_with_meta(db, mutation_review[0])[0]
+        assert mutation[1] == "Mutation"
+        reflection = list_children_with_meta(db, mutation[0])[0]
         assert reflection[1] == "Reflection"
 
         validation_candidates = list_children_with_meta(db, validation[0])
         assert validation_candidates[0][1] == "Candidate 1 Evaluation"
-        assert not is_descendant_thread(
-            db, mutation_review[0], validation_candidates[0][0]
-        )
+        assert not is_descendant_thread(db, mutation[0], validation_candidates[0][0])
 
         reflection_candidates = list_children_with_meta(db, reflection[0])
         assert reflection_candidates[0][1] == "Candidate 1 Reflection for Proposal 1"
-        assert is_descendant_thread(db, mutation_review[0], reflection_candidates[0][0])
+        assert is_descendant_thread(db, mutation[0], reflection_candidates[0][0])
         assert get_thread_tools_config(db, reflection_candidates[0][0]).is_tool_allowed(
             "send_message_to_child"
         )
@@ -1590,11 +1590,16 @@ def test_valset_is_distinct_and_default_dataset_mode_matches_it(tmp_path):
             for child_id, name, *_rest in study_children
             if name == "Mutation Review"
         )
-        reflection_id = next(
+        mutation_id = next(
             child_id
             for child_id, name, *_rest in list_children_with_meta(
                 db, mutation_review_id
             )
+            if name == "Mutation"
+        )
+        reflection_id = next(
+            child_id
+            for child_id, name, *_rest in list_children_with_meta(db, mutation_id)
             if name == "Reflection"
         )
 
@@ -1611,8 +1616,8 @@ def test_valset_is_distinct_and_default_dataset_mode_matches_it(tmp_path):
 
         assert validation_cases == {"validation Evaluation"}
         assert reflection_cases == {"train Evaluation"}
-        assert not is_descendant_thread(db, mutation_review_id, validation_id)
-        assert is_descendant_thread(db, mutation_review_id, reflection_id)
+        assert not is_descendant_thread(db, mutation_id, validation_id)
+        assert is_descendant_thread(db, mutation_id, reflection_id)
     finally:
         db.close()
 
