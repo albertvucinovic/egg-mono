@@ -93,6 +93,10 @@ class GEPAConfig:
             )
         if self.evaluator_identity is not None:
             canonical_json(self.evaluator_identity, what="evaluator identity")
+        if self.mutator is not None and not (
+            callable(self.mutator) or isinstance(self.mutator, Task)
+        ):
+            raise TypeError("mutator must be callable or an Eggflow Task")
         if self.progress is not None and not callable(self.progress):
             raise TypeError("progress must be callable or None")
 
