@@ -41,7 +41,7 @@ accepted candidate returned to GEPA.
   allowing a domain Critic is insufficient while GEPA still owns `Mutation`,
   strict JSON parsing, component updates, and Actor prompts. Refactor started at
   the stronger opaque-candidate/complete-domain-Mutator boundary.
-- 2026-07-30: Core boundary implemented. `MutationContext` is the sole domain
+- 2026-07-30: Core boundary implemented. `MutatorInput` is the sole domain
   input; a Mutator returns a complete candidate. GEPA candidates are finite JSON
   values, and ActorCritic can pass a Critic-extracted accepted value. Eggopt
   tests pass (56). Next: migrate the three client domains and validate their

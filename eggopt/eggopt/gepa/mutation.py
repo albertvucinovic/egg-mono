@@ -9,11 +9,9 @@ from eggflow import Task
 
 from ..identity import canonical_value, digest_payload
 
-Mutator = Task | Callable[["MutationContext"], Any]
-
 
 @dataclass(frozen=True)
-class MutationContext:
+class MutatorInput:
     """Domain input for producing one complete candidate."""
 
     parents: tuple[Any, ...]
@@ -49,8 +47,8 @@ class MutationContext:
 class Mutate(Task):
     """Resolve a domain Mutator into one complete, durable candidate value."""
 
-    mutator: Mutator = field(repr=False, compare=False)
-    context: MutationContext
+    mutator: Task | Callable[[MutatorInput], Any] = field(repr=False, compare=False)
+    context: MutatorInput
 
     def get_cache_key(self) -> str:
         return digest_payload(
@@ -82,7 +80,9 @@ class _Await(Task):
         return await self.value
 
 
-def _mutator_identity(mutator: Mutator) -> Mapping[str, str]:
+def _mutator_identity(
+    mutator: Task | Callable[[MutatorInput], Any],
+) -> Mapping[str, str]:
     if isinstance(mutator, Task):
         return {
             "module": mutator.__class__.__module__,
@@ -102,4 +102,4 @@ def _mutator_identity(mutator: Mutator) -> Mapping[str, str]:
     return identity
 
 
-__all__ = ["Mutate", "MutationContext", "Mutator"]
+__all__ = ["Mutate", "MutatorInput"]

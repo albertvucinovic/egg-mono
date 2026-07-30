@@ -22,7 +22,7 @@ from .evaluation import (
     _feedback,
     _new_call_count,
 )
-from .mutation import Mutate, MutationContext, Mutator
+from .mutation import Mutate, MutatorInput
 from .runtime import Runtime
 
 CaseT = TypeVar("CaseT")
@@ -48,7 +48,7 @@ class GEPAConfig:
     minibatch_acceptance: MinibatchAcceptance = "strict_improvement"
     seed: int = 0
     run_dir: str | Path = ".eggopt/gepa"
-    mutator: Mutator | None = None
+    mutator: Any | None = None
     evaluator_identity: Any | None = None
     case_id: Callable[[Any], Any] | None = field(
         default=None, repr=False, compare=False
@@ -242,8 +242,8 @@ class GenerateCandidate(Task):
     runtime_key: str
     study_id: str
     workspace: str
-    mutator: Mutator = field(repr=False, compare=False)
-    context: MutationContext
+    mutator: Any = field(repr=False, compare=False)
+    context: MutatorInput
     context_limit: int | None = None
 
     def get_cache_key(self) -> str:
@@ -394,7 +394,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 self.study_id,
                 str(Path(self.config.run_dir).resolve() / "workspaces" / "mutation"),
                 self.config.mutator,
-                MutationContext(
+                MutatorInput(
                     selected,
                     evidence,
                     self.objective,

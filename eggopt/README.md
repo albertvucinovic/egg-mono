@@ -48,7 +48,7 @@ use(result.best_candidate)
 - Eggflow owns task caching, retry, and restart recovery.
 - GEPA owns Pareto parent selection, minibatches, acceptance, evaluator budgets,
   and result assembly.
-- The domain Mutator receives a `MutationContext` with selected complete parents,
+- The domain Mutator receives a `MutatorInput` with selected complete parents,
   evaluator evidence, objective, generation, validation-score history, and the
   last proposal outcome. It returns one complete candidate, directly or as a
   Task/awaitable.

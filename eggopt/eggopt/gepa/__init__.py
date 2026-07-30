@@ -2,8 +2,7 @@
 
 from .mutation import (
     Mutate,
-    MutationContext,
-    Mutator,
+    MutatorInput,
 )
 from .search import (
     GEPA,
@@ -22,8 +21,7 @@ __all__ = [
     "GEPAResult",
     "GenerateCandidate",
     "Mutate",
-    "MutationContext",
-    "Mutator",
+    "MutatorInput",
     "OptimizationPlan",
     "SelectParents",
     "optimize_anything",
