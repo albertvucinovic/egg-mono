@@ -16,6 +16,7 @@ from eggthreads import (
     approve_tool_calls_for_thread,
     create_child_thread,
     current_thread_model,
+    get_thread_auto_approval_status,
     list_children_with_meta,
     load_thread_projection,
     set_thread_model,
@@ -88,6 +89,7 @@ class Agent:
             "model_key": self.model_key,
             "models_path": self.models_path,
             "allowed_tools": sorted(self.allowed_tools),
+            "auto_approve_tools": self.auto_approve_tools,
             "system_prompt": self.system_prompt,
         }
 
@@ -447,6 +449,18 @@ class _ConfigureAgent(Task):
         )
         set_thread_tools_enabled(db, self.thread_id, True)
         set_thread_tool_allowlist(db, self.thread_id, set(self.agent.allowed_tools))
+        approved = get_thread_auto_approval_status(db, self.thread_id)
+        if self.agent.auto_approve_tools != approved:
+            approve_tool_calls_for_thread(
+                db,
+                self.thread_id,
+                decision=(
+                    "global_approval"
+                    if self.agent.auto_approve_tools
+                    else "revoke_global_approval"
+                ),
+                reason=f"ActorCritic {self.role} agent configuration",
+            )
         set_thread_sandbox_config(
             db,
             self.thread_id,
@@ -564,13 +578,6 @@ class _AgentTurn(Task):
             if persisted_answer is not _NO_ANSWER:
                 return persisted_answer
         after_seq = _prompt_event_seq(db, self.thread_id, semantic_key)
-        if self.agent.auto_approve_tools:
-            approve_tool_calls_for_thread(
-                db,
-                self.thread_id,
-                decision="global_approval",
-                reason="Application opted into auto-approval for this agent",
-            )
         runner = ThreadRunner(
             db,
             self.thread_id,

@@ -16,6 +16,7 @@ from eggopt import (
 )
 from eggthreads import (
     ThreadsDB,
+    get_thread_auto_approval_status,
     get_thread_tools_config,
     is_descendant_thread,
     list_children_with_meta,
@@ -139,6 +140,44 @@ def test_agent_can_opt_into_tool_auto_approval():
     )
 
     assert agent.auto_approve_tools is True
+    assert agent.task_identity["auto_approve_tools"] is True
+    assert agent.task_identity != replace(agent, auto_approve_tools=False).task_identity
+
+
+def test_agent_thread_configuration_installs_auto_approval_before_a_turn(
+    tmp_path, monkeypatch
+):
+    from eggopt.actor_critic import _ConfigureAgent
+    from eggopt.context import _bind_evaluation_runtime
+
+    monkeypatch.chdir(tmp_path)
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    try:
+        db.init_schema()
+        db.create_thread(thread_id="actor", name="Actor", parent_id=None, depth=0)
+        _bind_evaluation_runtime("runtime", db)
+
+        _ConfigureAgent(
+            "runtime",
+            "actor",
+            str(tmp_path / "workspace"),
+            Agent(object(), {"role": "actor"}, auto_approve_tools=True),
+            "Actor",
+        ).run()
+
+        assert get_thread_auto_approval_status(db, "actor") is True
+        assert load_thread_projection(db, "actor").messages == ()
+
+        _ConfigureAgent(
+            "runtime",
+            "actor",
+            str(tmp_path / "workspace"),
+            Agent(object(), {"role": "actor"}),
+            "Actor",
+        ).run()
+        assert get_thread_auto_approval_status(db, "actor") is False
+    finally:
+        db.close()
 
 
 def test_thread_tool_reuses_public_synthetic_tool_lifecycle(tmp_path, monkeypatch):
@@ -1281,7 +1320,7 @@ def test_actor_critic_sends_empty_final_answer_to_task_critic(tmp_path, monkeypa
 def test_actor_critic_reuses_pair_and_returns_latest_answer(tmp_path, monkeypatch):
     from eggflow import Task
     from eggopt import ActorCritic, Agent
-    from eggthreads import get_context_limit, get_thread_auto_approval_status
+    from eggthreads import get_context_limit
 
     monkeypatch.chdir(tmp_path)
     run_dir = Path("run") / "actor-critic"
