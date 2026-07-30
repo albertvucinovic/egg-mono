@@ -291,6 +291,12 @@ def test_gepa_evaluator_context_limit_must_be_positive(limit):
         GEPAConfig(evaluator_context_limit=limit)
 
 
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_gepa_mutator_context_limit_must_be_positive(limit):
+    with pytest.raises(ValueError, match="mutator_context_limit"):
+        GEPAConfig(mutator_context_limit=limit)
+
+
 def test_gepa_progress_must_be_callable():
     with pytest.raises(TypeError, match="progress"):
         GEPAConfig(progress="verbose")

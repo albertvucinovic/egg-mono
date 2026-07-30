@@ -77,8 +77,9 @@ Each study stores its durable Eggflow and Eggthreads state under one run-owned
 `max_evaluator_calls` and `max_candidates` are not primitive cache-key inputs.
 
 `GEPAConfig(evaluator_context_limit=...)` controls the full Eggthreads history
-available to each case evaluator. Domain ActorCritic agents control their own
-full-history limits. Eggthreads provider-context compaction remains independent.
+available to each case evaluator. `mutator_context_limit` supplies the domain
+Mutator operation's inherited limit; a domain ActorCritic agent may override it.
+Eggthreads provider-context compaction remains independent.
 
 Use `plan_optimization(...)` to estimate evaluator work before choosing limits.
 

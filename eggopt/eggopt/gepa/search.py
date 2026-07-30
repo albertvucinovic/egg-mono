@@ -49,6 +49,7 @@ class GEPAConfig:
     seed: int = 0
     run_dir: str | Path = ".eggopt/gepa"
     mutator: Any | None = None
+    mutator_context_limit: int | None = None
     evaluator_identity: Any | None = None
     case_id: Callable[[Any], Any] | None = field(
         default=None, repr=False, compare=False
@@ -79,6 +80,12 @@ class GEPAConfig:
             or self.evaluator_context_limit < 1
         ):
             raise ValueError("evaluator_context_limit must be positive or None")
+        if self.mutator_context_limit is not None and (
+            isinstance(self.mutator_context_limit, bool)
+            or not isinstance(self.mutator_context_limit, int)
+            or self.mutator_context_limit < 1
+        ):
+            raise ValueError("mutator_context_limit must be positive or None")
         if self.minibatch_acceptance not in _MINIBATCH_ACCEPTANCE:
             raise ValueError(
                 "minibatch_acceptance must be 'strict_improvement' or "
@@ -405,6 +412,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                     validation_scores,
                     last_candidate_result,
                 ),
+                self.config.mutator_context_limit,
             )
             child = yield generation_task
             generated = generation + 1

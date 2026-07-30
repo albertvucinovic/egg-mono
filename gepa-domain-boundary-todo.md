@@ -50,7 +50,7 @@ accepted candidate returned to GEPA.
   source-response parser and compile/smoke Critic; src-agile owns its complete
   system-prompt extractor/validator; ARC-AGI-3's existing file-backed Modeler
   Critic now returns the accepted `world_model.py` snapshot through
-  `ActorCriticResult.value`. Tests: Eggopt 57, simpletrade 19, trading GEPA 64,
+  `ActorCriticResult.value`. Tests: Eggopt 61, simpletrade 19, trading GEPA 64,
   ARC Physics 15; Ruff passes all touched implementation/tests.
 - 2026-07-30: Removed the transitional three-positional-argument generator
   compatibility branch. Every Mutator now has the single haiku signature
@@ -62,3 +62,7 @@ accepted candidate returned to GEPA.
 - 2026-07-30: Preserved `GEPA → Mutation Review → Mutation → Reflection` as an
   authorization topology only. The generic Mutation thread is the execution
   parent for the opaque domain Mutator; it carries no mutation schema or parser.
+- 2026-07-30: Added the one generic operation-level knob
+  `mutator_context_limit`; domain ActorCritic agents can still override it. This
+  preserves the existing clients' explicit mutation budgets without GEPA
+  inspecting a Mutator's implementation.
