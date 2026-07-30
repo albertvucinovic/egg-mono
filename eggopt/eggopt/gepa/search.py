@@ -252,7 +252,6 @@ class GenerateCandidate(Task):
 
     runtime_key: str
     study_id: str
-    mutation_id: str
     workspace: str
     mutator: Any = field(repr=False, compare=False)
     context: MutatorInput
@@ -263,7 +262,7 @@ class GenerateCandidate(Task):
 
     def run(self):
         scope = {
-            "evaluation_thread_id": self.mutation_id,
+            "evaluation_thread_id": self.study_id,
             "outer_context": self.workspace,
             "inner_context": self.workspace,
             "_runtime_key": self.runtime_key,
@@ -285,7 +284,6 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
     threads: ThreadsDB = field(repr=False, compare=False)
     study_id: str
     validation_id: str
-    mutation_id: str
     reflection_id: str
     seed_candidate: Candidate
     dataset: list[CaseT] = field(repr=False, compare=False)
@@ -405,7 +403,6 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             generation_task = GenerateCandidate(
                 self.runtime_key,
                 self.study_id,
-                self.mutation_id,
                 str(Path(self.config.run_dir).resolve() / "workspaces" / "mutation"),
                 self.config.mutator,
                 MutatorInput(
@@ -635,7 +632,6 @@ def optimize_anything(
                     runtime.threads,
                     runtime.study_id,
                     runtime.validation_id,
-                    runtime.mutation_id,
                     runtime.reflection_id,
                     _candidate(seed_candidate),
                     data,

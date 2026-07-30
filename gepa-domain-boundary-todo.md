@@ -61,7 +61,9 @@ accepted candidate returned to GEPA.
   the accepted value.
 - 2026-07-30: Preserved `GEPA → Mutation Review → Mutation → Reflection` as an
   authorization topology only. The generic Mutation thread is the execution
-  parent for the opaque domain Mutator; it carries no mutation schema or parser.
+  anchor for domain Actor/Critic tasks, while the opaque Mutator executes from
+  GEPA's study scope and carries no mutation schema or parser. This preserves
+  existing run topology and domain-chosen Actor/Critic child names.
 - 2026-07-30: Added the one generic operation-level knob
   `mutator_context_limit`; domain ActorCritic agents can still override it. This
   preserves the existing clients' explicit mutation budgets without GEPA
