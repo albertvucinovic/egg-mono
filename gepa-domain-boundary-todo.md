@@ -24,14 +24,14 @@ accepted candidate returned to GEPA.
 ## Plan
 
 - [x] Generalize `ActorCritic` accepted decisions with an optional opaque value.
-- [x] Replace GEPA's built-in Mutation machinery with a domain Mutator/generator
+- [x] Replace GEPA's built-in Mutation machinery with a domain Mutator
       task boundary that returns a complete candidate.
 - [x] Generalize search/evaluation identity and results from string mappings to
       opaque finite JSON candidate values.
 - [x] Move simpletrade request/prompt/envelope extraction and source validation
       into its domain Mutator/Critic implementation.
-- [x] Add regressions for response extraction and real workspace-file extraction without
-      GEPA knowing either transport.
+- [x] Add regressions for response extraction and real workspace-file
+      extraction without GEPA knowing either transport.
 - [x] Run focused/full Eggopt and simpletrade tests, Ruff, update docs, and commit
       coherent changes with tracked working trees clean.
 
@@ -44,13 +44,13 @@ accepted candidate returned to GEPA.
 - 2026-07-30: Core boundary implemented. `MutatorInput` is the sole domain
   input; a Mutator returns a complete candidate. GEPA candidates are finite JSON
   values, and ActorCritic can pass a Critic-extracted accepted value. Eggopt
-  tests pass (56). Next: migrate the three client domains and validate their
+  tests pass (63). Next: migrate the three client domains and validate their
   minimal adapters before committing the implementation.
 - 2026-07-30: Migrated all three concrete client shapes. Simpletrade owns its
   source-response parser and compile/smoke Critic; src-agile owns its complete
   system-prompt extractor/validator; ARC-AGI-3's existing file-backed Modeler
   Critic now returns the accepted `world_model.py` snapshot through
-  `ActorCriticResult.value`. Tests: Eggopt 61, simpletrade 19, trading GEPA 64,
+  `ActorCriticResult.value`. Tests: Eggopt 63, simpletrade 19, trading GEPA 64,
   ARC Physics 15; Ruff passes all touched implementation/tests.
 - 2026-07-30: Removed the transitional three-positional-argument generator
   compatibility branch. Every Mutator now has the single haiku signature
