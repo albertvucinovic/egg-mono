@@ -1937,7 +1937,7 @@ def test_actor_critic_task_critic_extracts_workspace_file(tmp_path, monkeypatch)
     from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
 
     from eggflow import FlowExecutor, Task, TaskStore
-    from eggopt import ActorCritic, Agent
+    from eggopt import ActorCritic, Agent, Critique
     from eggthreads import ThreadsDB, create_root_thread
 
     monkeypatch.chdir(tmp_path)
@@ -1950,11 +1950,7 @@ def test_actor_critic_task_critic_extracts_workspace_file(tmp_path, monkeypatch)
         def run(self):
             path = Path(self.workspace) / "candidate.py"
             assert path.read_text() == "answer = 42\n"
-            return {
-                "decision": "accept",
-                "feedback": "file is valid",
-                "value": {"source": path.read_text()},
-            }
+            return Critique.accept({"source": path.read_text()}, "file is valid")
 
     (tmp_path / "candidate.py").write_text("answer = 42\n")
     db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")

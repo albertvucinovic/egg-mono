@@ -55,10 +55,11 @@ use(result.best_candidate)
 - Candidate values are opaque to GEPA. Finite JSON is the only representation
   contract required for stable cache identity and durable results.
 - `ActorCritic` is the reusable checked-generation loop a Mutator may compose.
-  A deterministic Critic may return `{"decision": "accept", "feedback": "...",
-  "value": candidate}`; `result.value` is that extracted candidate. Without
-  `value`, it defaults to the Actor answer. Extraction may therefore come from
-  the response, a workspace file, or any other domain-owned transport.
+  A deterministic Critic may return `Critique.accept(candidate, feedback)`;
+  `result.value` is that extracted candidate. Without an extracted value, it
+  defaults to the Actor answer. Extraction may therefore come from the response,
+  a workspace file, or any other domain-owned transport. Plain decision mappings
+  remain valid for simple critics.
 - ActorCritic prompt factories may return Tasks, so thread-bound preparation can
   finish after Actor/Critic assignment and before the corresponding model turn.
 - `ThreadTool` is the reusable Eggflow task for durable synthetic tool calls on

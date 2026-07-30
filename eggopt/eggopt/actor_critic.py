@@ -109,6 +109,29 @@ class ActorCriticResult:
             object.__setattr__(self, "value", self.answer)
 
 
+@dataclass(frozen=True)
+class Critique:
+    """Typed deterministic-Critic result with an optional extracted value."""
+
+    decision: str
+    feedback: str
+    value: Any = _NO_ANSWER
+
+    def __post_init__(self) -> None:
+        if self.decision not in {"accept", "revise"}:
+            raise ValueError("Critique decision must be accept or revise")
+        if not isinstance(self.feedback, str):
+            raise TypeError("Critique feedback must be a string")
+
+    @classmethod
+    def accept(cls, value: Any, feedback: str = "Accepted.") -> Critique:
+        return cls("accept", feedback, value)
+
+    @classmethod
+    def revise(cls, feedback: str) -> Critique:
+        return cls("revise", feedback)
+
+
 @dataclass
 class ActorCritic(Task):
     """Bounded, recoverable Actor → Critic → revision loop.
@@ -596,7 +619,11 @@ async def _run_until_waiting(
 
 
 def _critic_decision(value: Any) -> dict[str, Any]:
-    if isinstance(value, Mapping):
+    if isinstance(value, Critique):
+        decision = {"decision": value.decision, "feedback": value.feedback}
+        if value.value is not _NO_ANSWER:
+            decision["value"] = value.value
+    elif isinstance(value, Mapping):
         decision = dict(value)
     elif not isinstance(value, str):
         raise ValueError("Critic answer must be strict JSON text")  # noqa: TRY004
@@ -746,4 +773,4 @@ def _bind_critic(task: Task, state: Mapping[str, Any]) -> Task:
     return task
 
 
-__all__ = ["ActorCritic", "ActorCriticResult", "Agent"]
+__all__ = ["ActorCritic", "ActorCriticResult", "Agent", "Critique"]

@@ -1,6 +1,6 @@
 """Small, durable optimization interfaces built on Eggflow and Eggthreads."""
 
-from .actor_critic import ActorCritic, ActorCriticResult, Agent
+from .actor_critic import ActorCritic, ActorCriticResult, Agent, Critique
 from .context import current_evaluation, current_operation
 from .evaluation import Evaluation
 from .gepa import (
@@ -20,6 +20,7 @@ __all__ = [  # noqa: RUF022
     "ActorCritic",
     "ActorCriticResult",
     "Agent",
+    "Critique",
     "Evaluation",
     "GEPA",
     "GEPAConfig",

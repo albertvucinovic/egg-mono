@@ -66,3 +66,6 @@ accepted candidate returned to GEPA.
   `mutator_context_limit`; domain ActorCritic agents can still override it. This
   preserves the existing clients' explicit mutation budgets without GEPA
   inspecting a Mutator's implementation.
+- 2026-07-30: Added typed `Critique.accept(value, feedback)` and
+  `Critique.revise(feedback)` helpers, keeping domain Critics concise while
+  preserving plain decision mappings for compatibility.
