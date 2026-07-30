@@ -564,7 +564,7 @@ class _AgentTurn(Task):
         semantic_key = self.get_cache_key()
         prompt_id = _prompt_message_id(db, self.thread_id, semantic_key)
         if prompt_id is None:
-            append_message(
+            prompt_id = append_message(
                 db,
                 self.thread_id,
                 "user",
@@ -577,6 +577,14 @@ class _AgentTurn(Task):
             )
             if persisted_answer is not _NO_ANSWER:
                 return persisted_answer
+            if thread_state(db, self.thread_id) == "waiting_user":
+                InteractionRecovery(
+                    db,
+                    self.thread_id,
+                    prompt_id,
+                    self.context_limit,
+                    f"ActorCritic {self.role}",
+                ).recover()
         after_seq = _prompt_event_seq(db, self.thread_id, semantic_key)
         runner = ThreadRunner(
             db,
@@ -590,6 +598,7 @@ class _AgentTurn(Task):
             runner,
             db,
             self.thread_id,
+            prompt_id,
             after_seq,
             self.context_limit,
         )
@@ -603,6 +612,7 @@ async def _run_until_waiting(
     runner: ThreadRunner,
     db: Any,
     thread_id: str,
+    trigger_msg_id: str,
     after_seq: int,
     context_limit: int | None,
 ) -> None:
@@ -611,7 +621,14 @@ async def _run_until_waiting(
         if state == "waiting_user":
             if _latest_answer(db, thread_id, after_seq) is not _NO_ANSWER:
                 return
-            raise RuntimeError("ActorCritic agent settled without a final answer")
+            InteractionRecovery(
+                db,
+                thread_id,
+                trigger_msg_id,
+                context_limit,
+                "ActorCritic agent",
+            ).recover()
+            continue
         progressed = await run_with_full_context_limit(
             runner,
             db,

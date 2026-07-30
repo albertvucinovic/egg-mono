@@ -1800,6 +1800,90 @@ class InterruptedMutationLLM(ScriptedMutationLLM):
         }
 
 
+class ToolThenInterruptedLLM(ScriptedAgentLLM):
+    async def astream_chat(self, _messages, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            yield {
+                "type": "tool_calls_delta",
+                "delta": [
+                    {
+                        "id": "inspect-context",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": "{}"},
+                    }
+                ],
+            }
+        elif self.calls == 2:
+            return
+        else:
+            yield {
+                "type": "message",
+                "role": "assistant",
+                "content": next(self.replies),
+                "stop_reason": "end_turn",
+            }
+
+
+def test_actor_critic_continues_when_restart_finds_interrupted_tool_turn(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+
+    from eggflow import FlowExecutor, Task, TaskStore
+    from eggopt import ActorCritic, Agent
+    from eggthreads import ThreadsDB, ToolRegistry, create_root_thread
+
+    monkeypatch.chdir(tmp_path)
+    tools = ToolRegistry()
+    tools.register("inspect", "Inspect.", {"type": "object"}, lambda _args: "context")
+    llm = ToolThenInterruptedLLM(["complete answer"])
+
+    @dataclass
+    class Review(Task):
+        def run(self):
+            return {"decision": "accept", "feedback": "Valid."}
+
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    root = create_root_thread(db, name="Domain operation")
+    runtime_key = "interrupted-tool-turn"
+    _bind_evaluation_runtime(runtime_key, db)
+    flow = FlowExecutor(TaskStore(tmp_path / ".egg" / "flow.db"))
+    with _evaluation_scope(
+        {
+            "evaluation_thread_id": root,
+            "outer_context": str(tmp_path),
+            "inner_context": str(tmp_path),
+            "_runtime_key": runtime_key,
+            "_evaluation_key": "domain-operation",
+            "_context_limit": None,
+        }
+    ):
+        result = asyncio.run(
+            flow.run(
+                ActorCritic(
+                    actor=Agent(
+                        llm,
+                        {"role": "writer"},
+                        tools=tools,
+                        allowed_tools={"inspect"},
+                        auto_approve_tools=True,
+                    ),
+                    critic=Review(),
+                    actor_prompt=lambda _round, _state: "Write the artifact.",
+                    max_rounds=1,
+                )
+            )
+        )
+    db.close()
+
+    assert result.answer == "complete answer"
+    assert llm.calls == 3
+
+
 def test_actor_critic_answer_is_bounded_by_the_next_user_turn(tmp_path):
     from eggopt.actor_critic import _answer_after_message
 
