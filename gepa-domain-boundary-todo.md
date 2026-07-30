@@ -74,3 +74,7 @@ accepted candidate returned to GEPA.
 - 2026-07-30: Hardened callable Mutator identity: immutable configuration state
   participates automatically when JSON-safe; stateful/runtime-mutating
   callables must expose `get_cache_key()`. Both trading client factories now do.
+- 2026-07-30: Final verification: Eggopt 63, simpletrade 19, trading GEPA 64,
+  ARC Physics 15. Ruff and format checks pass in every touched client. No
+  mutation schema, component name, response format, or artifact transport
+  remains in Eggopt GEPA.
