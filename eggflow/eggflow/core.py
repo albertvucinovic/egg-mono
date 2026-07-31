@@ -801,7 +801,14 @@ class FlowExecutor:
         result = pickle.loads(row['result_blob'])
       except Exception as e:
         return Result(error=f"Completed Task but the result not unpickeling, error: {str(e)}", metadata={"corrupt": True})
-      result.value = task.restore(result.value)
+      try:
+        result.value = task.restore(result.value)
+      except Exception as e:
+        return Result(
+          error=f"Completed Task restore failed: {e}",
+          metadata={"restore_failed": True},
+          terminal=_is_terminal_exception(e),
+        )
       return result
 
     # A stale RUNNING row means the prior process stopped before it could persist

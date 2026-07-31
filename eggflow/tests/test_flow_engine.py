@@ -163,7 +163,9 @@ def test_cached_restore_failure_is_not_misreported_as_pickle_corruption(executor
 
     async def scenario():
         assert await executor.run(Materialized()) == "value"
-        with pytest.raises(RuntimeError, match="durable bytes are missing"):
+        with pytest.raises(
+            TaskError, match="Completed Task restore failed.*durable bytes are missing"
+        ):
             await executor.run(Materialized(fail_restore=True))
 
     asyncio.run(scenario())
