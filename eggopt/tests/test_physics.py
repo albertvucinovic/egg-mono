@@ -109,6 +109,7 @@ def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
             identity={"domain": "toy"},
             domain_information="State has position and legal_actions.",
             max_depth=4,
+            evaluator_timeout_sec=17,
         ),
         llm,
     )
@@ -280,7 +281,7 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
     tools = ToolRegistry()
 
     def python_exec(arguments, context):
-        calls.append(context.thread_id)
+        calls.append((context.thread_id, context.timeout_sec))
         completed = subprocess.run(
             ["python", "-c", arguments["script"]],
             cwd=Path(context.db.path).parent.parent / "workspace" / "critic-repository",
@@ -318,7 +319,7 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
     assert result.accepted is False
     assert len(observed) == 2
     assert "resolution=models_discriminated" in result.feedback
-    assert calls == [result.critic_thread_id]
+    assert calls == [(result.critic_thread_id, 17)]
     request_path = (
         tmp_path
         / "run"

@@ -24,3 +24,20 @@ def test_interaction_recovery_never_uses_older_diagnosis_boundary(tmp_path, monk
     messages = create_snapshot(db, thread_id)["messages"]
     assert [message["msg_id"] for message in messages] == [old, trigger]
     assert tail not in [message["msg_id"] for message in messages]
+
+
+def test_interaction_recovery_does_not_claim_a_later_turns_answer(tmp_path):
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="interaction")
+    trigger = append_message(db, thread_id, "user", "interrupted turn")
+    later = append_message(db, thread_id, "user", "newer turn")
+    answer = append_message(db, thread_id, "assistant", "newer answer")
+
+    assert InteractionRecovery(db, thread_id, trigger).recover() is True
+
+    projection = create_snapshot(db, thread_id)
+    visible_ids = [message["msg_id"] for message in projection["messages"]]
+    assert visible_ids == [trigger]
+    assert later not in visible_ids
+    assert answer not in visible_ids

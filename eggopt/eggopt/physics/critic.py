@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from eggflow import Task
+from eggflow import Task, TaskError
 
 from ..actor_critic import Critique
 from ..identity import digest_payload
@@ -27,6 +27,7 @@ class PhysicsCritic(Task):
     legal_actions_key: str = "legal_actions"
     max_depth: int = 8
     max_nodes: int = 10_000
+    evaluator_timeout_sec: float = 300.0
     workspace: str | None = None
     outer_context: str | None = None
     head: str | None = None
@@ -42,6 +43,7 @@ class PhysicsCritic(Task):
                 "max_actions": self.max_actions,
                 "max_depth": self.max_depth,
                 "max_nodes": self.max_nodes,
+                "evaluator_timeout_sec": self.evaluator_timeout_sec,
                 "legal_actions_key": self.legal_actions_key,
             },
         )
@@ -83,7 +85,10 @@ class PhysicsCritic(Task):
                 self.tools,
                 self.critic_thread_id,
                 "python_exec",
-                {"script": evaluator_file_script(request_path)},
+                {
+                    "script": evaluator_file_script(request_path),
+                    "timeout": self.evaluator_timeout_sec,
+                },
                 origin="eggopt.physics.trusted-evaluator",
                 input_files=(request_path, "world_model.py", "canonical-input.json"),
                 output_files=(report_path,),
@@ -95,7 +100,7 @@ class PhysicsCritic(Task):
             evaluation = _evaluation_report(repository / report_path)
             committed = load_committed_plan(repository)
             committed = canonical_plan(committed)
-        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        except (OSError, TaskError, TypeError, ValueError, RuntimeError) as exc:
             return self._revise(repository, state_root, timeline, actions, str(exc))
 
         backtest = evaluation["backtest"]

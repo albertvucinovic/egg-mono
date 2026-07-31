@@ -268,6 +268,49 @@ def test_thread_tool_without_files_keeps_legacy_cache_identity():
     assert with_output.get_cache_key().startswith("eggopt.thread-tool.v2:")
 
 
+def test_thread_tool_rejects_a_timed_out_tool_result(tmp_path, monkeypatch):
+    import asyncio
+
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+    from eggthreads import (
+        ThreadsDB,
+        ToolExecutionResult,
+        ToolRegistry,
+        create_root_thread,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    registry = ToolRegistry()
+    registry.register(
+        "hang",
+        "Hang",
+        {"type": "object", "properties": {}},
+        lambda _arguments: ToolExecutionResult("timed out", reason="timeout"),
+    )
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Critic")
+    _bind_evaluation_runtime("runtime", db)
+    context = {
+        "evaluation_thread_id": thread_id,
+        "outer_context": str(tmp_path),
+        "inner_context": str(tmp_path),
+        "_runtime_key": "runtime",
+        "_evaluation_key": "test",
+        "_context_limit": None,
+    }
+    task = ThreadTool(registry, thread_id, "hang", {"timeout": 1})
+
+    try:
+        with (
+            _evaluation_scope(context),
+            pytest.raises(RuntimeError, match="tool call failed: timeout"),
+        ):
+            asyncio.run(task.run())
+    finally:
+        db.close()
+
+
 def test_thread_tool_input_file_content_is_part_of_cache_identity(
     tmp_path, monkeypatch
 ):

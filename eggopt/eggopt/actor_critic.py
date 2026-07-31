@@ -36,7 +36,7 @@ from .context import (
 )
 from .context_limit import run_with_full_context_limit
 from .identity import canonical_json, digest_payload
-from .recovery import InteractionRecovery
+from .recovery import InteractionRecovery, _turn_answers_after
 from .tools import default_safe_tools, safe_tools
 
 _NO_ANSWER = object()
@@ -692,7 +692,6 @@ async def _run_until_waiting(
                 context_limit,
                 "ActorCritic agent",
             ).recover()
-            continue
         progressed = await run_with_full_context_limit(
             runner,
             db,
@@ -810,23 +809,7 @@ def _latest_answer(db: Any, thread_id: str, after_seq: int) -> Any:
     """Return this user turn's answer, never a later turn's response."""
 
     projection = load_thread_projection(db, thread_id)
-    next_user_seq = next(
-        (
-            message.created_event_seq
-            for message in projection.messages
-            if message.created_event_seq > after_seq
-            and message.payload.get("role") == "user"
-        ),
-        None,
-    )
-    answers = [
-        message
-        for message in projection.messages
-        if message.created_event_seq > after_seq
-        and (next_user_seq is None or message.created_event_seq < next_user_seq)
-        and message.payload.get("role") == "assistant"
-        and not message.payload.get("tool_calls")
-    ]
+    answers = _turn_answers_after(projection, after_seq)
     return answers[-1].payload.get("content") if answers else _NO_ANSWER
 
 

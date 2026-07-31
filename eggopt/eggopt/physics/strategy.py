@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
@@ -112,11 +113,19 @@ class PhysicsStrategy:
     legal_actions_key: str = "legal_actions"
     max_depth: int = 8
     max_nodes: int = 10_000
+    evaluator_timeout_sec: float = 300.0
 
     def __post_init__(self) -> None:
         for name in ("observe", "execute", "is_goal"):
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name} must be callable")
+        if (
+            isinstance(self.evaluator_timeout_sec, bool)
+            or not isinstance(self.evaluator_timeout_sec, (int, float))
+            or not math.isfinite(self.evaluator_timeout_sec)
+            or self.evaluator_timeout_sec <= 0
+        ):
+            raise ValueError("evaluator_timeout_sec must be positive")
         digest_payload("eggopt.physics.identity.v2", self.identity)
 
     def run(
@@ -251,7 +260,11 @@ class _PhysicsRun(Task):
             "inner_context": workspace,
             "_runtime_key": self.runtime_key,
             "_evaluation_key": digest_payload(
-                "eggopt.physics.study.v2", self.strategy.identity
+                "eggopt.physics.study.v3",
+                {
+                    "identity": self.strategy.identity,
+                    "evaluator_timeout_sec": self.strategy.evaluator_timeout_sec,
+                },
             ),
             "_context_limit": None,
         }
@@ -277,6 +290,7 @@ class _PhysicsRun(Task):
                         legal_actions_key=self.strategy.legal_actions_key,
                         max_depth=self.strategy.max_depth,
                         max_nodes=self.strategy.max_nodes,
+                        evaluator_timeout_sec=self.strategy.evaluator_timeout_sec,
                     ),
                     outer,
                     self.max_actions,

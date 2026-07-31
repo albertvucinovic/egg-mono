@@ -111,6 +111,7 @@ physics = PhysicsStrategy(
     is_goal=trusted_goal_predicate,
     identity={"domain": "my-world", "version": 1},
     domain_information="Explain the public state and action formats.",
+    evaluator_timeout_sec=300,
 )
 ```
 
@@ -136,7 +137,8 @@ sandbox evaluator reads that manifest, committed `world_model.py`, and
 `canonical-input.json` as declared `ThreadTool` file inputs. Only the small fixed
 runner and paths travel through `python_exec`. Eggthreads therefore applies the
 Critic thread's working directory and Docker sandbox to untrusted execution while
-file hashes keep caching content-addressed. The evaluator writes
+the evaluator timeout terminates runaway submitted code and file hashes keep
+caching content-addressed. The evaluator writes
 `.trusted/evaluations/<ACTOR_HEAD>.json`; `ThreadTool` snapshots those bytes by
 SHA-256 and records only a compact receipt. Cached replay verifies or
 rematerializes the report before the Critic consumes it.

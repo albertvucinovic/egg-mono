@@ -19,6 +19,7 @@ from eggthreads.sandbox import authorize_thread_path_read, authorize_thread_path
 
 from eggflow import Task
 from eggthreads import (
+    ToolExecutionResult,
     ToolRegistry,
     build_tool_call_states,
     get_thread_working_directory,
@@ -129,13 +130,25 @@ class ThreadTool(Task):
         call_id = self._call_id()
         call = build_tool_call_states(db, self.thread_id).get(call_id)
         if call is None:
+            # Keep the structured reason until after the tool has returned. A
+            # plain timeout string is not a successful result and must never be
+            # snapshotted as though the declared output file had been produced.
             output = await self.tools.execute_async(
                 self.name,
                 self.arguments,
                 thread_id=self.thread_id,
                 db=db,
                 initial_model_key=None,
+                preserve_tool_result=True,
             )
+            if isinstance(output, ToolExecutionResult):
+                reason = output.reason or "success"
+                rendered_output = output.presented_output()
+            else:
+                reason = "success"
+                rendered_output = str(output)
+            if reason != "success":
+                raise RuntimeError(f"{self.name} tool call failed: {reason}")
             try:
                 files = tuple(
                     _snapshot_output_file(db, self.thread_id, key, path)
@@ -144,7 +157,7 @@ class ThreadTool(Task):
             except Exception as exc:
                 failure = {
                     "schema": "eggopt.thread-tool-file-error.v1",
-                    "output": str(output),
+                    "output": rendered_output,
                     "error": f"{type(exc).__name__}: {exc}",
                     "expected_files": self.output_files,
                 }
@@ -166,7 +179,7 @@ class ThreadTool(Task):
                 self.thread_id,
                 self.name,
                 self.arguments,
-                _receipt(str(output), files),
+                _receipt(rendered_output, files),
                 origin=self.origin,
                 tool_call_id=call_id,
             )
