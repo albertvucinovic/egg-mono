@@ -138,17 +138,50 @@ class PhysicsStrategy:
             )
             return sync(
                 runtime.flow.run(
-                    _PhysicsRun(
-                        self,
-                        runtime.runtime_key,
-                        str(runtime.root),
-                        physics_id,
-                        max_actions,
-                        max_cycles,
+                    self.task(
+                        runtime_key=runtime.runtime_key,
+                        run_dir=runtime.root,
+                        physics_thread_id=physics_id,
+                        max_actions=max_actions,
+                        max_cycles=max_cycles,
                     )
                 ),
                 operation="PhysicsStrategy",
             )
+
+    def task(
+        self,
+        *,
+        runtime_key: str,
+        run_dir: str | Path,
+        physics_thread_id: str,
+        max_actions: int = 100,
+        max_cycles: int = 100,
+    ) -> Task:
+        """Build this study inside an already-open Eggopt runtime and thread tree.
+
+        This is the composition boundary for a batch/root runner. The caller owns
+        the shared :class:`Runtime`, creates the Physics child, and may run one
+        :class:`~eggthreads.SubtreeScheduler` across all sibling studies. Set the
+        Actor's ``scheduler_managed`` flag when that scheduler, rather than the
+        ActorCritic task itself, should drive model turns.
+        """
+
+        for name, value in (("max_actions", max_actions), ("max_cycles", max_cycles)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(runtime_key, str) or not runtime_key:
+            raise ValueError("runtime_key must be a non-empty string")
+        if not isinstance(physics_thread_id, str) or not physics_thread_id:
+            raise ValueError("physics_thread_id must be a non-empty string")
+        return _PhysicsRun(
+            self,
+            runtime_key,
+            str(Path(run_dir).resolve()),
+            physics_thread_id,
+            max_actions,
+            max_cycles,
+        )
 
 
 def run_physics(
@@ -267,6 +300,7 @@ class _PhysicsRun(Task):
             actor_thread_id=result.actor_thread_id,
             workspace=workspace,
         )
+
 
 def _stopping_reason(value: Any, accepted: bool) -> str:
     if isinstance(value, Mapping):

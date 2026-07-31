@@ -114,6 +114,13 @@ physics = PhysicsStrategy(
 )
 ```
 
+`PhysicsStrategy.task(...)` composes the same study into an already-open Eggopt
+runtime and an existing Physics thread. Batch applications can therefore place
+related studies below one root, give each study its own workspace, and drive all
+Actor turns through one bounded Eggthreads `SubtreeScheduler`. An Agent with
+`scheduler_managed=True` waits for that shared scheduler instead of constructing
+its own `ThreadRunner`; ordinary standalone Physics runs remain unchanged.
+
 Eggopt owns the Timeline, `step_<suffix>` / `reward_<suffix>` theory convention,
 all-model backtesting, goal and subset-discrimination planning, Actor instruments,
 non-empty committed-plan validation, execute-until-resolution loop, and Git

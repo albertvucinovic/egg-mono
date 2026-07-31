@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from collections.abc import Callable, Mapping
@@ -7,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from eggflow import Task, keyed
+from eggflow import ContextLimitExceededError, Task, keyed
 from eggthreads import (
     RunnerConfig,
     ThreadRunner,
@@ -17,6 +18,7 @@ from eggthreads import (
     create_child_thread,
     current_thread_model,
     get_thread_auto_approval_status,
+    interrupt_thread,
     list_children_with_meta,
     load_thread_projection,
     set_thread_model,
@@ -58,6 +60,7 @@ class Agent:
     auto_approve_tools: bool = False
     allowed_tools: frozenset[str] | None = None
     system_prompt: str | None = None
+    scheduler_managed: bool = False
 
     def __post_init__(self) -> None:
         canonical_json(self.identity, what="agent identity")
@@ -79,12 +82,14 @@ class Agent:
         object.__setattr__(self, "allowed_tools", allowed)
         if self.system_prompt is not None and not self.system_prompt:
             raise ValueError("agent system_prompt must be non-empty or None")
+        if not isinstance(self.scheduler_managed, bool):
+            raise TypeError("agent scheduler_managed must be boolean")
 
     @property
     def task_identity(self) -> Mapping[str, Any]:
         """Return the durable identity of this agent's execution semantics."""
 
-        return {
+        identity = {
             "identity": self.identity,
             "model_key": self.model_key,
             "models_path": self.models_path,
@@ -92,6 +97,9 @@ class Agent:
             "auto_approve_tools": self.auto_approve_tools,
             "system_prompt": self.system_prompt,
         }
+        if self.scheduler_managed:
+            identity["scheduler_managed"] = True
+        return identity
 
 
 @dataclass(frozen=True)
@@ -577,7 +585,10 @@ class _AgentTurn(Task):
             )
             if persisted_answer is not _NO_ANSWER:
                 return persisted_answer
-            if thread_state(db, self.thread_id) == "waiting_user":
+            if (
+                not self.agent.scheduler_managed
+                and thread_state(db, self.thread_id) == "waiting_user"
+            ):
                 InteractionRecovery(
                     db,
                     self.thread_id,
@@ -586,6 +597,18 @@ class _AgentTurn(Task):
                     f"ActorCritic {self.role}",
                 ).recover()
         after_seq = _prompt_event_seq(db, self.thread_id, semantic_key)
+        if self.agent.scheduler_managed:
+            await _wait_until_waiting(
+                db,
+                self.thread_id,
+                prompt_id,
+                after_seq,
+                self.context_limit,
+            )
+            response = _latest_answer(db, self.thread_id, after_seq)
+            if response is _NO_ANSWER:
+                raise RuntimeError(f"{self.role} produced no final answer")
+            return response
         runner = ThreadRunner(
             db,
             self.thread_id,
@@ -606,6 +629,47 @@ class _AgentTurn(Task):
         if response is _NO_ANSWER:
             raise RuntimeError(f"{self.role} produced no final answer")
         return response
+
+
+async def _wait_until_waiting(
+    db: Any,
+    thread_id: str,
+    trigger_msg_id: str,
+    after_seq: int,
+    context_limit: int | None,
+) -> None:
+    """Wait while a shared subtree scheduler drives this ActorCritic turn."""
+
+    from .context_limit import full_context_tokens
+
+    while True:
+        if (
+            context_limit is not None
+            and full_context_tokens(db, thread_id) >= context_limit
+        ):
+            interrupt_thread(
+                db,
+                thread_id,
+                reason="ActorCritic agent full context limit reached",
+            )
+            raise ContextLimitExceededError(
+                "ActorCritic agent full context limit reached; operation terminated"
+            )
+        state = thread_state(db, thread_id)
+        response = _latest_answer(db, thread_id, after_seq)
+        if response is not _NO_ANSWER and state != "running":
+            return
+        if state == "waiting_user":
+            InteractionRecovery(
+                db,
+                thread_id,
+                trigger_msg_id,
+                context_limit,
+                "ActorCritic agent",
+            ).recover()
+        elif state == "waiting_tool_approval":
+            raise RuntimeError("ActorCritic tool call requires approval")
+        await asyncio.sleep(0.1)
 
 
 async def _run_until_waiting(

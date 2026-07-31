@@ -30,6 +30,7 @@ from eggopt import (
     physics_actor_system_prompt,
 )
 from eggthreads import (
+    RunnerConfig,
     ThreadsDB,
     ToolRegistry,
     list_children_with_meta,
@@ -537,3 +538,102 @@ def test_physics_requires_domain_ports():
             is_goal=lambda _: False,
             identity={},
         )
+
+
+def test_physics_task_reuses_an_existing_runtime_thread(tmp_path, monkeypatch):
+    import asyncio
+
+    from eggopt.runtime import Runtime
+
+    from eggthreads import create_child_thread, create_root_thread
+
+    monkeypatch.chdir(tmp_path)
+    workspace = (
+        tmp_path / "benchmark" / "environments" / "toy" / "workspace" / "innerContext"
+    )
+    plan = canonical_plan(
+        {
+            "purpose": "goal",
+            "models": ["a"],
+            "intents": [
+                {
+                    "action": 1,
+                    "prediction": {"a": {"position": 2, "legal_actions": [1]}},
+                }
+            ],
+        }
+    )
+
+    def edit(_call):
+        write_plan(workspace, plan)
+
+    physics, _actor = strategy(workspace, edit)
+    with Runtime.open("benchmark") as runtime:
+        root = create_root_thread(runtime.threads, name="Benchmark")
+        physics_id = create_child_thread(runtime.threads, root, name="Physics toy")
+        result = asyncio.run(
+            runtime.flow.run(
+                physics.task(
+                    runtime_key=runtime.runtime_key,
+                    run_dir=tmp_path / "benchmark" / "environments" / "toy",
+                    physics_thread_id=physics_id,
+                    max_cycles=1,
+                )
+            )
+        )
+
+        assert result.physics_thread_id == physics_id
+        assert list_root_threads(runtime.threads) == [root]
+        assert [
+            name for _, name, *_ in list_children_with_meta(runtime.threads, root)
+        ] == ["Physics toy"]
+
+
+def test_scheduler_managed_agent_is_part_of_task_identity():
+    ordinary = Agent(object(), {"role": "actor"})
+    managed = Agent(object(), {"role": "actor"}, scheduler_managed=True)
+
+    assert "scheduler_managed" not in ordinary.task_identity
+    assert managed.task_identity["scheduler_managed"] is True
+    assert ordinary.task_identity != managed.task_identity
+    assert managed.runner_config == RunnerConfig()
+
+
+def test_scheduler_managed_turn_waits_for_shared_scheduler(tmp_path, monkeypatch):
+    import asyncio
+
+    from eggopt.actor_critic import _AgentTurn
+    from eggopt.context import _bind_evaluation_runtime
+
+    from eggthreads import (
+        append_message,
+        create_root_thread,
+        load_thread_projection,
+    )
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Actor")
+    agent = Agent(object(), {"role": "actor"}, scheduler_managed=True)
+    task = _AgentTurn("runtime", thread_id, agent, "go", "actor", 1)
+    _bind_evaluation_runtime("runtime", db)
+
+    async def answer_after_scheduler_started():
+        while not any(
+            message.payload.get("role") == "user"
+            for message in load_thread_projection(db, thread_id).messages
+        ):
+            await asyncio.sleep(0)
+        append_message(db, thread_id, "assistant", "done")
+
+    async def exercise():
+        responder = asyncio.create_task(answer_after_scheduler_started())
+        try:
+            return await task.run()
+        finally:
+            await responder
+
+    try:
+        assert asyncio.run(exercise()) == "done"
+    finally:
+        db.close()
