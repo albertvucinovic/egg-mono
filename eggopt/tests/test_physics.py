@@ -7,8 +7,17 @@ from pathlib import Path
 
 import pytest
 from eggopt.physics import canonical_plan
+from eggopt.physics.critic import (
+    _evaluation_report,
+    _evaluation_report_path,
+    _execution_feedback,
+)
 from eggopt.physics.strategy import _actor_turn_prompt
-from eggopt.physics.theory import evaluator_script, parse_evaluator_output
+from eggopt.physics.theory import (
+    evaluator_script,
+    parse_evaluator_output,
+    parse_evaluator_receipt,
+)
 
 from eggflow import Task
 from eggopt import (
@@ -133,6 +142,29 @@ def run_evaluator(request):
     return parse_evaluator_output(completed.stdout)
 
 
+def test_generic_evaluator_can_write_a_compactly_receipted_report(tmp_path):
+    report = tmp_path / "trusted" / "report.json"
+    request = {
+        "source": MODEL,
+        "timeline": [{"position": 0, "legal_actions": [1]}],
+        "legal_actions_key": "legal_actions",
+        "max_depth": 4,
+        "max_nodes": 100,
+        "work_dir": str(tmp_path / "work"),
+        "output_path": str(report),
+    }
+    completed = subprocess.run(
+        ["python", "-c", evaluator_script(request)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert parse_evaluator_receipt(completed.stdout) == str(report)
+    assert set(json.loads(report.read_text())["backtest"]["models"]) == {"a", "b"}
+    assert "models" not in completed.stdout
+
+
 def test_generic_evaluator_reports_all_models_and_multistep_discrimination():
     result = run_evaluator(
         {
@@ -227,8 +259,19 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
 
     assert result.accepted is False
     assert len(observed) == 2
-    assert result.feedback.endswith("models_discriminated.")
+    assert "resolution=models_discriminated" in result.feedback
     assert calls == [result.critic_thread_id]
+    report_path = (
+        tmp_path
+        / "run"
+        / "workspace"
+        / "critic-repository"
+        / ".trusted"
+        / "evaluations"
+        / f"{git(workspace, 'log', '--format=%H', '--grep=actor theory and plan', '-1')}.json"
+    )
+    assert report_path.is_file()
+    assert set(json.loads(report_path.read_text())["backtest"]["models"]) == {"a", "b"}
     db = ThreadsDB(tmp_path / "run" / ".egg" / "threads.sqlite")
     try:
         root = list_root_threads(db)[0]
@@ -277,6 +320,27 @@ def test_dirty_repository_rejected_then_fixed(tmp_path, monkeypatch):
     assert result.accepted is True
     assert actor.calls == 2
     assert not git(workspace, "status", "--short")
+
+
+def test_dirty_repository_feedback_says_what_happened_and_how_to_fix_it(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+    plan = experiment_plan()
+
+    def edit(_call):
+        write_plan(workspace, plan)
+        (workspace / "uncommitted-notes.txt").write_text("scratch")
+
+    physics, _actor = strategy(workspace, edit)
+    result = physics.run(run_dir="run", max_cycles=1)
+
+    assert result.accepted is False
+    assert "evaluates only a clean committed HEAD" in result.feedback
+    assert "No real action was attempted" in result.feedback
+    assert "git status --short" in result.feedback
+    assert "uncommitted-notes.txt" in result.feedback
 
 
 def test_deleted_repo_restores_history_and_authoritative_state(tmp_path, monkeypatch):
@@ -363,6 +427,32 @@ def test_actor_turn_prompts_require_the_full_runbook():
     assert "trusted-report.json" in revision
     assert "one new clean commit" in revision
     assert revision.endswith("Prediction contradicted.")
+
+
+def test_critic_feedback_explains_each_execution_resolution():
+    mismatch = _execution_feedback("wrong_prediction")
+    assert "permanently appended" in mismatch
+    assert "state grounding" in mismatch
+    discriminated = _execution_feedback("models_discriminated")
+    assert "compatible_models" in discriminated
+    assert "first intent" in discriminated
+    exhausted = _execution_feedback("plan_exhausted")
+    assert "did not report the goal" in exhausted
+    assert "reward/goal inference" in exhausted
+
+
+def test_evaluation_report_path_requires_full_git_head():
+    head = "a" * 40
+    assert _evaluation_report_path(head) == f".trusted/evaluations/{head}.json"
+    with pytest.raises(ValueError, match="full hexadecimal"):
+        _evaluation_report_path("../escape")
+
+
+def test_evaluation_report_rejects_incomplete_json(tmp_path):
+    path = tmp_path / "report.json"
+    path.write_text('{"backtest": {}}')
+    with pytest.raises(TypeError, match="backtest or planning"):
+        _evaluation_report(path)
 
 
 def test_physics_requires_domain_ports():

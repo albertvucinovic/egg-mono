@@ -30,7 +30,7 @@ from .physics import (
     write_actor_files,
 )
 from .recovery import InteractionRecovery, InteractionRecoveryError
-from .thread_tool import ThreadTool
+from .thread_tool import ThreadTool, ThreadToolFile, ThreadToolResult
 
 __all__ = [  # noqa: RUF022
     "ActorCritic",
@@ -53,6 +53,8 @@ __all__ = [  # noqa: RUF022
     "PhysicsStrategy",
     "SelectParents",
     "ThreadTool",
+    "ThreadToolFile",
+    "ThreadToolResult",
     "actor_backtest",
     "actor_commit",
     "actor_plan",

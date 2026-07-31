@@ -252,6 +252,22 @@ def test_thread_tool_reuses_public_synthetic_tool_lifecycle(tmp_path, monkeypatc
         db.conn.close()
 
 
+def test_thread_tool_without_files_keeps_legacy_cache_identity():
+    from eggthreads import ToolRegistry
+
+    legacy = ThreadTool(ToolRegistry(), "thread", "echo", {"value": "ok"})
+    with_files = ThreadTool(
+        ToolRegistry(),
+        "thread",
+        "echo",
+        {"value": "ok"},
+        output_files=("report.json",),
+    )
+
+    assert legacy.get_cache_key().startswith("eggopt.thread-tool.v1:")
+    assert with_files.get_cache_key().startswith("eggopt.thread-tool.v2:")
+
+
 def test_thread_tool_recovers_existing_recorded_call(tmp_path, monkeypatch):
     from eggflow import Task
     from eggthreads import ToolRegistry, list_tool_calls_for_thread
@@ -325,6 +341,232 @@ def test_thread_tool_recovers_existing_recorded_call(tmp_path, monkeypatch):
         assert len(list_tool_calls_for_thread(db, thread_id)) == 1
     finally:
         db.conn.close()
+
+
+def test_thread_tool_snapshots_and_rematerializes_hashed_output_file(
+    tmp_path, monkeypatch
+):
+    import asyncio
+    import json
+
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+    from eggthreads.provider_output_artifacts import resolve_provider_output_bytes
+
+    from eggflow import FlowExecutor, TaskStore
+    from eggopt import ThreadToolResult
+    from eggthreads import (
+        ThreadsDB,
+        ToolRegistry,
+        create_root_thread,
+        list_tool_calls_for_thread,
+        set_thread_working_directory,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Evaluation")
+    set_thread_working_directory(db, thread_id, str(workspace), reason="test")
+    runtime_key = "runtime"
+    _bind_evaluation_runtime(runtime_key, db)
+    registry = ToolRegistry()
+    calls = []
+
+    def write_report(_arguments):
+        (workspace / "report.json").write_text('{"score": 1}\n')
+        calls.append("write")
+        return "report ready"
+
+    registry.register(
+        "write_report",
+        "Write report",
+        {"type": "object", "properties": {}},
+        write_report,
+    )
+    task = ThreadTool(
+        registry,
+        thread_id,
+        "write_report",
+        {},
+        output_files=("report.json",),
+    )
+    flow = FlowExecutor(TaskStore(tmp_path / ".egg" / "flow.db"))
+    context = {
+        "evaluation_thread_id": thread_id,
+        "outer_context": str(workspace),
+        "inner_context": str(workspace),
+        "_runtime_key": runtime_key,
+        "_evaluation_key": "test",
+        "_context_limit": None,
+    }
+    try:
+        with _evaluation_scope(context):
+            first = asyncio.run(flow.run(task))
+            assert isinstance(first, ThreadToolResult)
+            file = first.files[0]
+            assert (workspace / file.path).read_bytes() == b'{"score": 1}\n'
+            (workspace / file.path).write_text("corrupt")
+            second = asyncio.run(flow.run(task))
+
+        assert first == second
+        assert calls == ["write"]
+        assert (workspace / file.path).read_bytes() == b'{"score": 1}\n'
+        assert len(file.sha256) == 64
+        assert file.size_bytes == len(b'{"score": 1}\n')
+        calls_recorded = list_tool_calls_for_thread(db, thread_id)
+        assert len(calls_recorded) == 1
+        receipt = json.loads(calls_recorded[0].finished_output)
+        assert receipt["schema"] == "eggopt.thread-tool-result.v1"
+        assert "score" not in calls_recorded[0].finished_output
+        metadata, data = resolve_provider_output_bytes(
+            tmp_path, db, thread_id, file.artifact_id
+        )
+        assert metadata["sha256"] == file.sha256
+        assert data == b'{"score": 1}\n'
+    finally:
+        flow.store.close()
+        db.close()
+
+
+@pytest.mark.parametrize(
+    "path", ["/absolute.json", "../escape.json", ".egg/private.json", "a/../b.json"]
+)
+def test_thread_tool_rejects_unsafe_output_file_paths(path):
+    from eggthreads import ToolRegistry
+
+    with pytest.raises(ValueError, match="workspace-relative"):
+        ThreadTool(ToolRegistry(), "thread", "tool", {}, output_files=(path,))
+
+
+def test_thread_tool_requires_every_declared_output_file(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+
+    from eggflow import FlowExecutor, TaskError, TaskStore
+    from eggthreads import (
+        ThreadsDB,
+        ToolRegistry,
+        create_root_thread,
+        list_tool_calls_for_thread,
+        set_thread_working_directory,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Evaluation")
+    set_thread_working_directory(db, thread_id, str(workspace), reason="test")
+    _bind_evaluation_runtime("runtime", db)
+    registry = ToolRegistry()
+    registry.register(
+        "no_file",
+        "Does not write",
+        {"type": "object", "properties": {}},
+        lambda _arguments: "done",
+    )
+    flow = FlowExecutor(TaskStore(tmp_path / ".egg" / "flow.db"))
+    context = {
+        "evaluation_thread_id": thread_id,
+        "outer_context": str(workspace),
+        "inner_context": str(workspace),
+        "_runtime_key": "runtime",
+        "_evaluation_key": "test",
+        "_context_limit": None,
+    }
+    try:
+        with _evaluation_scope(context), pytest.raises(TaskError, match="missing.json"):
+            asyncio.run(
+                flow.run(
+                    ThreadTool(
+                        registry,
+                        thread_id,
+                        "no_file",
+                        {},
+                        output_files=("missing.json",),
+                    )
+                )
+            )
+        calls = list_tool_calls_for_thread(db, thread_id)
+        assert len(calls) == 1
+        failure = json.loads(calls[0].finished_output)
+        assert failure["schema"] == "eggopt.thread-tool-file-error.v1"
+        assert failure["expected_files"] == ["missing.json"]
+    finally:
+        flow.store.close()
+        db.close()
+
+
+def test_thread_tool_recovery_reuses_receipted_file_after_outer_task_failure(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+
+    from eggflow import FlowExecutor, Task, TaskError, TaskStore
+    from eggthreads import (
+        ThreadsDB,
+        ToolRegistry,
+        create_root_thread,
+        set_thread_working_directory,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Evaluation")
+    set_thread_working_directory(db, thread_id, str(workspace), reason="test")
+    _bind_evaluation_runtime("runtime", db)
+    registry = ToolRegistry()
+    calls = []
+
+    def write(_arguments):
+        calls.append("write")
+        (workspace / "report.json").write_text("durable")
+        return "ready"
+
+    registry.register("write", "Write", {"type": "object", "properties": {}}, write)
+
+    class FailsAfterTool(Task):
+        def run(self):
+            yield ThreadTool(
+                registry,
+                thread_id,
+                "write",
+                {},
+                output_files=("report.json",),
+            )
+            raise RuntimeError("later stage failed")
+
+    flow = FlowExecutor(TaskStore(tmp_path / ".egg" / "flow.db"))
+    context = {
+        "evaluation_thread_id": thread_id,
+        "outer_context": str(workspace),
+        "inner_context": str(workspace),
+        "_runtime_key": "runtime",
+        "_evaluation_key": "test",
+        "_context_limit": None,
+    }
+    try:
+        with _evaluation_scope(context):
+            with pytest.raises(TaskError, match="later stage failed"):
+                asyncio.run(flow.run(FailsAfterTool()))
+            (workspace / "report.json").unlink()
+            with pytest.raises(TaskError, match="later stage failed"):
+                asyncio.run(flow.run(FailsAfterTool()))
+        assert calls == ["write"]
+        assert (workspace / "report.json").read_text() == "durable"
+    finally:
+        flow.store.close()
+        db.close()
 
 
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5])

@@ -9,15 +9,17 @@ import importlib.util
 import itertools
 import json
 import math
+import os
 import sys
+import tempfile
 from collections import deque
 from pathlib import Path
 
 request = json.loads(sys.stdin.read())
 source = request["source"]
 timeline = request["timeline"]
-work = Path(".physics-evaluation")
-work.mkdir(exist_ok=True)
+work = Path(request.get("work_dir", ".physics-evaluation"))
+work.mkdir(parents=True, exist_ok=True)
 path = work / ("world_model_" + hashlib.sha256(source.encode()).hexdigest()[:12] + ".py")
 path.write_text(source)
 spec = importlib.util.spec_from_file_location("physics_world_model", path)
@@ -138,7 +140,30 @@ result = {
         "plans": plans,
     },
 }
-print("__EGG_PHYSICS_RESULT__" + json.dumps(result, separators=(",", ":"), sort_keys=True))
+output_path = request.get("output_path")
+if output_path:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(prefix="." + output.name + ".", dir=output.parent)
+    try:
+        with os.fdopen(handle, "w") as stream:
+            handle = -1
+            json.dump(result, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+    except Exception:
+        if handle >= 0:
+            os.close(handle)
+        try:
+            Path(temporary).unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    print("__EGG_PHYSICS_REPORT__" + json.dumps({"path": str(output)}, separators=(",", ":"), sort_keys=True))
+else:
+    print("__EGG_PHYSICS_RESULT__" + json.dumps(result, separators=(",", ":"), sort_keys=True))
 """
 
 
@@ -164,4 +189,22 @@ def parse_evaluator_output(output: str) -> dict[str, Any]:
         raise ValueError("trusted model evaluator returned invalid JSON") from exc
 
 
-__all__ = ["evaluator_script", "parse_evaluator_output"]
+def parse_evaluator_receipt(output: str) -> str:
+    """Return the report path from a compact trusted-evaluator receipt."""
+
+    marker = "__EGG_PHYSICS_REPORT__"
+    line = next(
+        (line for line in reversed(str(output).splitlines()) if marker in line), None
+    )
+    if line is None:
+        raise ValueError(f"trusted model evaluator did not write its report:\n{output}")
+    try:
+        path = json.loads(line.split(marker, 1)[1])["path"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ValueError("trusted model evaluator returned an invalid receipt") from exc
+    if not isinstance(path, str) or not path:
+        raise ValueError("trusted model evaluator returned an invalid report path")
+    return path
+
+
+__all__ = ["evaluator_script", "parse_evaluator_output", "parse_evaluator_receipt"]

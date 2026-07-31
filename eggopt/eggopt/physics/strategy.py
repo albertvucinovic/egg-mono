@@ -366,8 +366,10 @@ class _GitCritic(Task):
         if not _valid_repository(critic_repo):
             if not _valid_repository(actor):
                 return Critique.revise(
-                    "Neither the Actor repository nor the Critic history copy is valid. "
-                    "Recreate the Git repository and commit the current theory and plan."
+                    "Neither the Actor workspace nor the Critic's trusted history copy "
+                    "is a valid Git repository. No real action was attempted. Recreate "
+                    "the Actor repository from the canonical files, run backtest.py and "
+                    "plan.py, then submit one clean commit using commit.py plan-N."
                 )
             _clone_repository(actor, critic_repo)
 
@@ -387,8 +389,10 @@ class _GitCritic(Task):
                 _pull(critic_repo, actor)
             return Critique.revise(
                 "The Actor repository was missing or corrupt, so the Critic restored its "
-                "last pulled history and latest canonical world state. Start again from "
-                "the restored files and create a new clean commit."
+                "last pulled history and overlaid the latest irreversible canonical "
+                "state. No real action was attempted for this proposal. Read the restored "
+                "canonical-input.json and trusted-report.json, rebuild the proposal, and "
+                "finish with python commit.py plan-N."
             )
 
         dirty = _git_status(actor)
@@ -399,8 +403,11 @@ class _GitCritic(Task):
         )
         if meaningful_dirty:
             return Critique.revise(
-                "The Actor repository is dirty. Commit every intended non-ignored file "
-                "or add scratch files to .gitignore, then answer again.\n\n"
+                "The Critic evaluates only a clean committed HEAD, but the Actor "
+                "workspace contains the non-ignored changes listed below. No real action "
+                "was attempted. Commit intended theory/plan changes (normally with "
+                "python commit.py plan-N) or move disposable work under scratch/ or "
+                "ignore it, verify `git status --short` is empty, then answer again.\n\n"
                 + meaningful_dirty
             )
 
@@ -408,8 +415,10 @@ class _GitCritic(Task):
         critic_head = _git_head(critic_repo)
         if actor_head == critic_head:
             return Critique.revise(
-                "No new Actor Git commit was created for this turn. Commit the current "
-                "theory and a non-empty committed plan, then answer again."
+                "This turn did not create a new Actor Git HEAD, so there is no proposal "
+                "for the Critic to validate and no real action was attempted. Revise the "
+                "theory as needed, run both instruments, select a non-empty returned plan "
+                "with python commit.py plan-N, verify a clean new HEAD, then answer."
             )
 
         try:
@@ -417,8 +426,10 @@ class _GitCritic(Task):
         except RuntimeError as exc:
             _restore_repository(actor, critic_repo)
             return Critique.revise(
-                "The Actor history could not be pulled by the Critic and was restored "
-                f"from the last trusted copy. Create a new commit on that history. {exc}"
+                "The submitted Actor history was not a fast-forward continuation of the "
+                "Critic's trusted copy. No real action was attempted. The Actor workspace "
+                "was restored to trusted history; recreate the proposal as a new commit "
+                f"on that history. Git detail: {exc}"
             )
 
         self._configure_critic_workspace(critic_repo)
@@ -470,8 +481,11 @@ class _GitCritic(Task):
             )
             if actor_dirty:
                 return Critique.revise(
-                    "The Actor repository changed during Critic evaluation. Restore or "
-                    "commit a clean state before the trusted result can be synchronized."
+                    "The Actor workspace changed after it submitted HEAD while the Critic "
+                    "was independently evaluating that commit. The trusted result cannot "
+                    "be synchronized over those edits. Preserve intended work separately, "
+                    "restore a clean synchronized repository, and submit it in a new "
+                    "Actor commit; do not edit files after commit.py."
                 )
             _git(actor, "reset", "--hard", "HEAD")
             _git(actor, "clean", "-fd")

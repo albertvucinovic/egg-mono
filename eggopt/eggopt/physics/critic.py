@@ -9,10 +9,10 @@ from eggflow import Task
 
 from ..actor_critic import Critique
 from ..identity import digest_payload
-from ..thread_tool import ThreadTool
+from ..thread_tool import ThreadTool, ThreadToolResult
 from .instruments import write_actor_files
 from .planning import canonical_plan, freeze, load_committed_plan
-from .theory import evaluator_script, parse_evaluator_output
+from .theory import evaluator_script, parse_evaluator_receipt
 
 
 @dataclass
@@ -59,25 +59,37 @@ class PhysicsCritic(Task):
         source_path = repository / "world_model.py"
         if not source_path.is_file():
             return self._revise(
-                repository, state_root, timeline, actions, "world_model.py is missing"
+                repository,
+                state_root,
+                timeline,
+                actions,
+                "world_model.py is missing from the submitted Git HEAD",
             )
 
-        request = {
-            "source": source_path.read_text(),
-            "timeline": timeline,
-            "legal_actions_key": self.legal_actions_key,
-            "max_depth": self.max_depth,
-            "max_nodes": self.max_nodes,
-        }
         try:
-            output = yield ThreadTool(
+            report_path = _evaluation_report_path(self.head)
+            request = {
+                "source": source_path.read_text(),
+                "timeline": timeline,
+                "legal_actions_key": self.legal_actions_key,
+                "max_depth": self.max_depth,
+                "max_nodes": self.max_nodes,
+                "work_dir": ".trusted/evaluator-work",
+                "output_path": report_path,
+            }
+            result = yield ThreadTool(
                 self.tools,
                 self.critic_thread_id,
                 "python_exec",
                 {"script": evaluator_script(request)},
                 origin="eggopt.physics.trusted-evaluator",
+                output_files=(report_path,),
             )
-            evaluation = parse_evaluator_output(output)
+            if not isinstance(result, ThreadToolResult):
+                raise TypeError("trusted evaluator returned no durable file result")
+            if parse_evaluator_receipt(result.output) != report_path:
+                raise ValueError("trusted evaluator receipt named an unexpected report")
+            evaluation = _evaluation_report(repository / report_path)
             committed = load_committed_plan(repository)
             committed = canonical_plan(committed)
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
@@ -92,7 +104,8 @@ class PhysicsCritic(Task):
                 state_root,
                 timeline,
                 actions,
-                "committed-plan.json is not one of the trusted planner results",
+                "committed-plan.json does not exactly match any plan independently "
+                "generated from the submitted world_model.py and canonical Timeline",
                 evaluation,
             )
         if not set(committed["models"]) <= set(backtest["surviving_models"]):
@@ -101,8 +114,10 @@ class PhysicsCritic(Task):
                 state_root,
                 timeline,
                 actions,
-                "The plan references a model that already contradicts the Timeline. "
-                "The all-model planning report remains available for theory repair.",
+                "The committed plan references a model with one or more Timeline "
+                "mismatches. Inspect trusted-report.json under "
+                "evaluation.backtest.models, repair or remove the contradicted model, "
+                "then rerun backtest.py and plan.py.",
                 evaluation,
             )
 
@@ -114,7 +129,9 @@ class PhysicsCritic(Task):
                 state_root,
                 timeline,
                 actions,
-                "The first committed action is not legal in the canonical current state",
+                "The first committed action is not listed in the canonical current "
+                "state's legal actions. Rerun plan.py from the latest "
+                "canonical-input.json and choose a newly returned plan",
                 evaluation,
             )
 
@@ -177,13 +194,16 @@ class PhysicsCritic(Task):
                     "actions": actions,
                     "report": report,
                 },
-                "Goal reached." if resolution == "won" else "Action budget exhausted.",
+                (
+                    "The trusted application detected the goal after executing the "
+                    "committed plan. The Physics run is complete."
+                    if resolution == "won"
+                    else "The trusted real-action budget is exhausted. No further Actor "
+                    "proposal can execute; inspect trusted-report.json for the final "
+                    "Timeline and execution report."
+                ),
             )
-        return Critique.revise(
-            "The trusted plan executed until resolution. Read trusted-report.json and "
-            "canonical-input.json, revise the theory, and commit another trusted plan. "
-            f"Resolution: {resolution}."
-        )
+        return Critique.revise(_execution_feedback(resolution))
 
     def _revise(
         self, repository, state_root, timeline, actions, error, evaluation=None
@@ -198,9 +218,68 @@ class PhysicsCritic(Task):
             repository, state_root, timeline, actions, report, self.domain_information
         )
         return Critique.revise(
-            f"Trusted Physics validation failed: {error}. Read trusted-report.json, "
-            "fix the current theory or plan, make a clean Git commit, and answer again."
+            "The trusted Critic rejected the submitted Git HEAD before executing any "
+            f"real action. Reason: {error}. Read trusted-report.json (stage=validation) "
+            "and canonical-input.json. Correct world_model.py or select a plan newly "
+            "returned by plan.py, run the local checks, then finish this turn with "
+            "python commit.py plan-N and an otherwise clean repository."
         )
+
+
+def _execution_feedback(resolution: str) -> str:
+    guidance = {
+        "wrong_prediction": (
+            "No selected model predicted the observed next public state. The mismatched "
+            "transition is now permanently appended to canonical-input.json. Inspect "
+            "trusted-report.json.executed, revise state grounding and/or transition "
+            "mechanisms so the full Timeline backtests exactly, then generate and "
+            "commit a new plan."
+        ),
+        "models_discriminated": (
+            "The Critic executed through the first intent where the selected models "
+            "disagreed, then stopped after observing reality. Inspect "
+            "trusted-report.json.compatible_models and .executed, retain or revise the "
+            "hypotheses supported by that observation, rerun both instruments, and "
+            "commit the next goal plan or experiment."
+        ),
+        "plan_exhausted": (
+            "Every committed intent ran without a prediction mismatch, but the trusted "
+            "application did not report the goal. Treat that outcome as evidence about "
+            "reward/goal inference. Inspect trusted-report.json and the appended "
+            "Timeline, revise the utility or mechanism if needed, and commit another "
+            "planner-returned plan."
+        ),
+    }
+    return (
+        f"Trusted execution stopped with resolution={resolution}. "
+        + guidance.get(
+            resolution,
+            "Inspect trusted-report.json and canonical-input.json, revise the theory, "
+            "rerun backtest.py and plan.py, and commit another planner-returned plan.",
+        )
+    )
+
+
+def _evaluation_report_path(head: str | None) -> str:
+    value = str(head or "").strip().lower()
+    if len(value) != 40 or any(ch not in "0123456789abcdef" for ch in value):
+        raise ValueError("Physics Critic requires a full hexadecimal submitted Git HEAD")
+    return f".trusted/evaluations/{value}.json"
+
+
+def _evaluation_report(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise TypeError("trusted evaluator report must be a JSON object")
+    backtest = value.get("backtest")
+    planning = value.get("planning")
+    if not isinstance(backtest, dict) or not isinstance(planning, dict):
+        raise TypeError("trusted evaluator report is missing backtest or planning")
+    if not isinstance(backtest.get("surviving_models"), list):
+        raise TypeError("trusted evaluator report has invalid surviving_models")
+    if not isinstance(planning.get("plans"), list):
+        raise TypeError("trusted evaluator report has invalid plans")
+    return value
 
 
 def read_state(repository: Path) -> dict[str, Any]:

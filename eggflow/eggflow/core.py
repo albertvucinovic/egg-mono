@@ -116,6 +116,16 @@ class Task:
     """
     return True
 
+  def restore(self, value: Any) -> Any:
+    """Restore external materializations associated with a cached value.
+
+    Eggflow calls this hook whenever it reuses a completed task result. Pure
+    tasks simply return the value unchanged. Tasks whose value references a
+    durable file or another external materialization may verify or recreate it
+    here without repeating the task's semantic effect.
+    """
+    return value
+
   async def execute(self, cached: bool = True, raw: bool = False) -> Union['Result', Any]:
     """Execute this task through the current executor.
 
@@ -265,6 +275,9 @@ class Keyed(Task):
       return result
     return True
 
+  def restore(self, value: Any) -> Any:
+    return self.task.restore(value)
+
 def keyed(task: Task, *keys) -> Keyed:
   """Extend a task's cache key with additional dependency context.
 
@@ -310,6 +323,9 @@ class Rekeyed(Task):
         return await result
       return result
     return True
+
+  def restore(self, value: Any) -> Any:
+    return self.task.restore(value)
 
 def rekeyed(task: Task, *keys) -> Rekeyed:
   """Completely replace a task's cache key with custom keys.
@@ -782,9 +798,11 @@ class FlowExecutor:
 
     if row and row['status'] == "COMPLETED":
       try:
-        return pickle.loads(row['result_blob'])
+        result = pickle.loads(row['result_blob'])
       except Exception as e:
         return Result(error=f"Completed Task but the result not unpickeling, error: {str(e)}", metadata={"corrupt": True})
+      result.value = task.restore(result.value)
+      return result
 
     # A stale RUNNING row means the prior process stopped before it could persist
     # a result. Recover it through the same task-owned hook as an explicit

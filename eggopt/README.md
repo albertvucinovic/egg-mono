@@ -64,6 +64,9 @@ use(result.best_candidate)
   finish after Actor/Critic assignment and before the corresponding model turn.
 - `ThreadTool` is the reusable Eggflow task for durable synthetic tool calls on
   assigned Eggthreads threads; domain code never queries Eggthreads storage.
+  Its optional `output_files=(...)` contract snapshots sandbox-written files into
+  content-addressed storage and verifies/rematerializes them on recovery while
+  returning a compact `ThreadToolResult` receipt.
 - Full valset evaluations live under `GEPA → Validation`. Dataset reflection
   evaluations live under `GEPA → Mutation Review → Mutation → Reflection`; the
   deterministic controller alone uses valset scores for Pareto selection.
@@ -121,7 +124,9 @@ Committed world-model code is never imported into the controller. The generic
 Critic serializes canonical evidence into a self-contained evaluator and invokes
 `python_exec` through its assigned Critic Eggthread. Eggthreads therefore applies
 the Critic thread's working directory and Docker sandbox to untrusted execution.
-The result is a durable synthetic tool call tied to Git HEAD.
+The evaluator writes `.trusted/evaluations/<ACTOR_HEAD>.json`; `ThreadTool`
+snapshots those bytes by SHA-256 and records only a compact receipt. Cached replay
+verifies or rematerializes the report before the Critic consumes it.
 
 Actor-facing `backtest.py` and `plan.py` use the same generic algorithm for local
 advice; they are untrusted workspace copies. `commit.py PLAN_ID` selects a

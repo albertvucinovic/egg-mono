@@ -95,3 +95,75 @@ def test_mock_fork_thread(executor):
         assert "fork" in value.thread_id
         assert "Mock Reply" in value.content
     asyncio.run(run())
+
+
+def test_cached_task_restore_hook_runs_without_reexecuting(executor):
+    events = []
+
+    @dataclass
+    class Materialized(Task):
+        name: str
+
+        def run(self):
+            events.append("run")
+            return "durable-value"
+
+        def restore(self, value):
+            events.append(("restore", value))
+            return value
+
+    async def scenario():
+        assert await executor.run(Materialized("same")) == "durable-value"
+        assert await executor.run(Materialized("same")) == "durable-value"
+
+    asyncio.run(scenario())
+    assert events == ["run", ("restore", "durable-value")]
+
+
+def test_keyed_cached_task_delegates_restore_hook(executor):
+    from eggflow import keyed
+
+    events = []
+
+    @dataclass
+    class Materialized(Task):
+        def run(self):
+            events.append("run")
+            return "value"
+
+        def restore(self, value):
+            events.append(("restore", value))
+            return value
+
+    async def scenario():
+        assert await executor.run(keyed(Materialized(), "scope")) == "value"
+        assert await executor.run(keyed(Materialized(), "scope")) == "value"
+
+    asyncio.run(scenario())
+    assert events == ["run", ("restore", "value")]
+
+
+def test_cached_restore_failure_is_not_misreported_as_pickle_corruption(executor):
+    import pytest
+
+    @dataclass
+    class Materialized(Task):
+        fail_restore: bool = False
+
+        def get_cache_key(self):
+            return "same-materialization"
+
+        def run(self):
+            return "value"
+
+        def restore(self, value):
+            if self.fail_restore:
+                raise RuntimeError("durable bytes are missing")
+            return value
+
+    async def scenario():
+        assert await executor.run(Materialized()) == "value"
+        with pytest.raises(RuntimeError, match="durable bytes are missing"):
+            await executor.run(Materialized(fail_restore=True))
+
+    asyncio.run(scenario())
