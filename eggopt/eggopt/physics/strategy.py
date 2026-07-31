@@ -24,38 +24,31 @@ from ..context import _current_operation, _operation_runtime, _operation_scope
 from ..identity import digest_payload
 from ..runtime import Runtime, sync
 from .critic import PhysicsCritic, write_state
-from .instruments import write_actor_files
+from .instruments import ACTOR_INSTRUCTIONS, write_actor_files
 
 TaskFactory = Callable[..., Task]
 
-PHYSICS_ACTOR_SYSTEM_PROMPT = """You are the Actor in a scientific discovery loop.
-Your working directory is a Git repository containing the current theory, trusted
-copies of the latest evidence, domain instruments, and a committed plan.
+PHYSICS_ACTOR_SYSTEM_PROMPT = ACTOR_INSTRUCTIONS
 
-Work like a physicist:
-1. Read the domain instructions and current evidence.
-2. Improve the current world model. It may contain several competing hypotheses.
-3. Use the supplied local backtest and planning instruments as often as useful.
-4. Select a non-empty plan returned by the planning instrument.
-5. Commit that plan with the supplied commit helper.
-6. Make no non-ignored edits after the commit, then answer briefly.
 
-An intent freezes one real action together with each relevant model's prediction.
-A plan with diverging model predictions is an experiment; it may contain a shared
-multi-action setup prefix before the first prediction branch. You propose plans,
-but only the trusted Critic may execute real actions.
-
-The Critic evaluates only committed Git HEAD, never your live working tree. It
-independently reruns the original backtest and planner against canonical evidence.
-A dirty repository, a missing turn commit, an empty plan, or a plan not returned
-by the trusted planner is rejected with a fix request. Scratch files should be
-.gitignored if they should not be committed.
-
-The Critic keeps a pulled copy of repository history. If you want to abandon the
-current theory workspace completely, delete .git and answer; the Critic will
-restore its last copy and rehydrate the latest irreversible world state. Reality
-always moves forward and cannot be reset by this mechanism.
-"""
+def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
+    if round_number == 1:
+        return (
+            "Begin one Physics Actor turn now. Follow the complete runbook in your "
+            "system instructions and INSTRUCTIONS.md: inspect Git and canonical "
+            "evidence, revise and backtest world_model.py, generate and inspect "
+            "plans, select one plan with commit.py, verify a new clean HEAD, then "
+            "answer briefly. Do not merely describe the procedure and do not execute "
+            "the real environment yourself."
+        )
+    return (
+        "The trusted Critic completed the previous proposal and requested another "
+        "Physics Actor turn. Read the synchronized canonical-input.json and "
+        "trusted-report.json before editing. Follow the complete runbook again, "
+        "address the Critic evidence below, and finish with one new clean commit "
+        "created through commit.py.\n\nTrusted Critic feedback:\n"
+        + state["feedback"]
+    )
 
 
 def physics_actor_system_prompt(domain_information: str = "") -> str:
@@ -255,7 +248,7 @@ class _PhysicsRun(Task):
                     outer,
                     self.max_actions,
                 ),
-                actor_prompt=self._prompt,
+                actor_prompt=_actor_turn_prompt,
                 max_rounds=self.max_cycles,
                 names=("Actor", "Critic"),
             )
@@ -274,17 +267,6 @@ class _PhysicsRun(Task):
             actor_thread_id=result.actor_thread_id,
             workspace=workspace,
         )
-
-    @staticmethod
-    def _prompt(round_number: int, state: Mapping[str, Any]) -> str:
-        if round_number == 1:
-            return (
-                "Inspect the committed repository and domain instructions. Improve the "
-                "current theory, use the supplied instruments, commit a non-empty plan, "
-                "and leave the repository clean before answering briefly."
-            )
-        return state["feedback"]
-
 
 def _stopping_reason(value: Any, accepted: bool) -> str:
     if isinstance(value, Mapping):

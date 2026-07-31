@@ -7,10 +7,17 @@ from pathlib import Path
 
 import pytest
 from eggopt.physics import canonical_plan
+from eggopt.physics.strategy import _actor_turn_prompt
 from eggopt.physics.theory import evaluator_script, parse_evaluator_output
 
 from eggflow import Task
-from eggopt import Agent, PhysicsStrategy, physics_actor_system_prompt
+from eggopt import (
+    ACTOR_INSTRUCTIONS,
+    PHYSICS_ACTOR_SYSTEM_PROMPT,
+    Agent,
+    PhysicsStrategy,
+    physics_actor_system_prompt,
+)
 from eggthreads import (
     ThreadsDB,
     ToolRegistry,
@@ -303,11 +310,59 @@ def test_deleted_repo_restores_history_and_authoritative_state(tmp_path, monkeyp
     assert "[physics]" in git(workspace, "log", "--format=%s", "-2")
 
 
-def test_actor_system_prompt_is_domain_extensible():
+def test_actor_system_prompt_is_detailed_and_domain_extensible():
     prompt = physics_actor_system_prompt("Color grids and ARC actions.")
-    assert "Git repository" in prompt
-    assert "non-empty plan" in prompt
+    assert PHYSICS_ACTOR_SYSTEM_PROMPT == ACTOR_INSTRUCTIONS
+    for required in (
+        "Ground the state",
+        "Discover mechanisms",
+        "Infer utility",
+        "canonical-input.json",
+        "trusted-report.json",
+        "step_<suffix>",
+        "reward_<suffix>",
+        "python backtest.py",
+        "python plan.py",
+        "python commit.py plan-N",
+        "What happens after you answer",
+        "wrong_prediction",
+        "models_discriminated",
+        "plan_exhausted",
+        "max_actions",
+        "Git, caching, and recovery",
+    ):
+        assert required in prompt
     assert "Color grids" in prompt
+
+
+def test_actor_files_publish_the_same_complete_runbook(tmp_path):
+    from eggopt import write_actor_files
+
+    write_actor_files(tmp_path, ({"legal_actions": [1]},), "Toy domain details.")
+
+    instructions = (tmp_path / "INSTRUCTIONS.md").read_text()
+    assert instructions.startswith(ACTOR_INSTRUCTIONS)
+    assert "Required procedure for every turn" in instructions
+    assert "The trusted Critic operates on committed Git history" in instructions
+    assert instructions.endswith("Toy domain details.\n")
+
+    (tmp_path / "INSTRUCTIONS.md").write_text("obsolete generic instructions")
+    write_actor_files(tmp_path, ({"legal_actions": [1]},), "Updated details.")
+    refreshed = (tmp_path / "INSTRUCTIONS.md").read_text()
+    assert refreshed.startswith(ACTOR_INSTRUCTIONS)
+    assert refreshed.endswith("Updated details.\n")
+
+
+def test_actor_turn_prompts_require_the_full_runbook():
+    first = _actor_turn_prompt(1, {})
+    revision = _actor_turn_prompt(2, {"feedback": "Prediction contradicted."})
+
+    assert "complete runbook" in first
+    assert "commit.py" in first
+    assert "do not execute the real environment" in first
+    assert "trusted-report.json" in revision
+    assert "one new clean commit" in revision
+    assert revision.endswith("Prediction contradicted.")
 
 
 def test_physics_requires_domain_ports():
