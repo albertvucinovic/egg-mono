@@ -52,11 +52,13 @@ class ThreadToolResult:
 class ThreadTool(Task):
     """Run one durable synthetic tool call on an assigned Eggthreads thread.
 
-    ``output_files`` are workspace-relative regular files produced by the tool.
-    On first execution they are authorized, read, and snapshotted into Eggthreads'
-    content-addressed provider-output store. Recovery verifies the workspace copy
-    and atomically rematerializes it from the snapshot when absent or corrupt.
-    The transcript stores only a compact receipt, never the file bytes.
+    ``input_files`` are authorized workspace-relative files whose content hashes
+    become part of the cache identity without copying their bytes into tool
+    arguments. ``output_files`` are workspace-relative regular files produced by
+    the tool. On first execution outputs are authorized, read, and snapshotted into
+    Eggthreads' content-addressed provider-output store. Recovery verifies the
+    workspace copy and atomically rematerializes it from the snapshot when absent
+    or corrupt. The transcript stores only a compact receipt, never the file bytes.
     """
 
     tools: ToolRegistry = field(repr=False, compare=False)
@@ -66,12 +68,19 @@ class ThreadTool(Task):
     occurrence: int | None = None
     origin: str = "eggopt"
     output_files: tuple[str, ...] = ()
+    input_files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        self.input_files = _file_paths(self.input_files, name="input_files")
         self.output_files = _output_paths(self.output_files)
 
     def get_cache_key(self) -> str:
-        version = "eggopt.thread-tool.v2" if self.output_files else "eggopt.thread-tool.v1"
+        version = (
+            "eggopt.thread-tool.v2"
+            if self.input_files or self.output_files
+            else "eggopt.thread-tool.v1"
+        )
+        input_files = _input_file_identities(self.thread_id, self.input_files)
         return digest_payload(
             version,
             {
@@ -82,14 +91,21 @@ class ThreadTool(Task):
                 ),
                 "occurrence": self.occurrence,
                 "origin": self.origin,
+                **({"input_files": input_files} if input_files else {}),
                 **({"output_files": self.output_files} if self.output_files else {}),
             },
         )
+
+    def input_file_identities(self) -> tuple[dict[str, Any], ...]:
+        """Return authorized path/hash identities for declared file inputs."""
+
+        return _input_file_identities(self.thread_id, self.input_files)
 
     def _call_id(self) -> str:
         return self.get_cache_key().rsplit(":", 1)[-1]
 
     async def recover(self) -> bool:
+        self.input_file_identities()
         if not self.output_files:
             return True
         runtime_key = str(_current_evaluation()["_runtime_key"])
@@ -108,6 +124,7 @@ class ThreadTool(Task):
     async def run(self) -> str | ThreadToolResult:
         runtime_key = str(_current_evaluation()["_runtime_key"])
         db = _evaluation_runtime(runtime_key)
+        self.input_file_identities()
         key = self.get_cache_key()
         call_id = self._call_id()
         call = build_tool_call_states(db, self.thread_id).get(call_id)
@@ -183,9 +200,9 @@ class ThreadTool(Task):
         return value
 
 
-def _output_paths(values: Any) -> tuple[str, ...]:
+def _file_paths(values: Any, *, name: str) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)):
-        raise TypeError("ThreadTool output_files must be an iterable of relative paths")
+        raise TypeError(f"ThreadTool {name} must be an iterable of relative paths")
     paths: list[str] = []
     for value in values or ():
         text = str(value or "").replace("\\", "/")
@@ -198,13 +215,33 @@ def _output_paths(values: Any) -> tuple[str, ...]:
             or path.parts[0] == ".egg"
         ):
             raise ValueError(
-                "ThreadTool output_files must be normalized workspace-relative paths "
+                f"ThreadTool {name} must be normalized workspace-relative paths "
                 "outside .egg"
             )
         if text in paths:
-            raise ValueError(f"duplicate ThreadTool output file: {text}")
+            raise ValueError(f"duplicate ThreadTool {name[:-1]}: {text}")
         paths.append(text)
     return tuple(paths)
+
+
+def _output_paths(values: Any) -> tuple[str, ...]:
+    return _file_paths(values, name="output_files")
+
+
+def _input_file_identities(
+    thread_id: str, paths: tuple[str, ...]
+) -> tuple[dict[str, Any], ...]:
+    if not paths:
+        return ()
+    runtime_key = str(_current_evaluation()["_runtime_key"])
+    db = _evaluation_runtime(runtime_key)
+    identities = []
+    for path in paths:
+        data = authorize_thread_path_read(db, thread_id, path).read_bytes()
+        identities.append(
+            {"path": path, "sha256": _sha256(data), "size_bytes": len(data)}
+        )
+    return tuple(identities)
 
 
 def _sha256(data: bytes) -> str:
@@ -256,12 +293,16 @@ def _parse_receipt(output: str, expected_paths: tuple[str, ...]) -> ThreadToolRe
     try:
         value = json.loads(output)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("persisted ThreadTool output has no durable file receipt") from exc
+        raise RuntimeError(
+            "persisted ThreadTool output has no durable file receipt"
+        ) from exc
     if (
         not isinstance(value, Mapping)
         or value.get("schema") != "eggopt.thread-tool-result.v1"
     ):
-        raise RuntimeError("persisted ThreadTool file receipt has an unsupported schema")
+        raise RuntimeError(
+            "persisted ThreadTool file receipt has an unsupported schema"
+        )
     raw_files = value.get("files")
     if not isinstance(raw_files, list):
         raise TypeError("persisted ThreadTool file receipt has invalid files")
@@ -285,7 +326,9 @@ def _parse_receipt(output: str, expected_paths: tuple[str, ...]) -> ThreadToolRe
         or any(ch not in "0123456789abcdef" for ch in file.sha256)
         or file.size_bytes < 0
         or len(file.artifact_id) != 8
-        or any(ch not in "0123456789abcdefghijklmnopqrstuvwxyz" for ch in file.artifact_id)
+        or any(
+            ch not in "0123456789abcdefghijklmnopqrstuvwxyz" for ch in file.artifact_id
+        )
         or not file.mime_type
         for file in files
     ):
@@ -318,7 +361,9 @@ def _materialize_output_file(db: Any, thread_id: str, file: ThreadToolFile) -> N
     _atomic_write(target, data)
     materialized = target.read_bytes()
     if len(materialized) != file.size_bytes or _sha256(materialized) != file.sha256:
-        raise RuntimeError(f"rematerialized ThreadTool file failed verification: {file.path}")
+        raise RuntimeError(
+            f"rematerialized ThreadTool file failed verification: {file.path}"
+        )
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

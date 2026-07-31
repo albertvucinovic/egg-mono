@@ -347,7 +347,7 @@ class _GitCritic(Task):
         actor = Path(self.workspace) if self.workspace else None
         head = _git_head(actor) if actor is not None else None
         return digest_payload(
-            "eggopt.physics.git-critic.v1",
+            "eggopt.physics.git-critic.v1.file-inputs",
             {
                 "critic": _task_identity(self.critic),
                 "outer_context": self.outer_context,

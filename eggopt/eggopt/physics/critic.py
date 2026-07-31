@@ -12,7 +12,7 @@ from ..identity import digest_payload
 from ..thread_tool import ThreadTool, ThreadToolResult
 from .instruments import write_actor_files
 from .planning import canonical_plan, freeze, load_committed_plan
-from .theory import evaluator_script, parse_evaluator_receipt
+from .theory import evaluator_file_script, parse_evaluator_receipt
 
 
 @dataclass
@@ -35,7 +35,7 @@ class PhysicsCritic(Task):
 
     def get_cache_key(self):
         return digest_payload(
-            "eggopt.physics.domain-critic.v1",
+            "eggopt.physics.domain-critic.v1.file-inputs",
             {
                 "identity": self.identity,
                 "head": self.head,
@@ -68,21 +68,24 @@ class PhysicsCritic(Task):
 
         try:
             report_path = _evaluation_report_path(self.head)
+            request_path = _evaluation_request_path(self.head)
             request = {
-                "source": source_path.read_text(),
-                "timeline": timeline,
+                "source_path": "world_model.py",
+                "timeline_path": "canonical-input.json",
                 "legal_actions_key": self.legal_actions_key,
                 "max_depth": self.max_depth,
                 "max_nodes": self.max_nodes,
                 "work_dir": ".trusted/evaluator-work",
                 "output_path": report_path,
             }
+            _write_json(repository / request_path, request)
             result = yield ThreadTool(
                 self.tools,
                 self.critic_thread_id,
                 "python_exec",
-                {"script": evaluator_script(request)},
+                {"script": evaluator_file_script(request_path)},
                 origin="eggopt.physics.trusted-evaluator",
+                input_files=(request_path, "world_model.py", "canonical-input.json"),
                 output_files=(report_path,),
             )
             if not isinstance(result, ThreadToolResult):
@@ -250,21 +253,25 @@ def _execution_feedback(resolution: str) -> str:
             "planner-returned plan."
         ),
     }
-    return (
-        f"Trusted execution stopped with resolution={resolution}. "
-        + guidance.get(
-            resolution,
-            "Inspect trusted-report.json and canonical-input.json, revise the theory, "
-            "rerun backtest.py and plan.py, and commit another planner-returned plan.",
-        )
+    return f"Trusted execution stopped with resolution={resolution}. " + guidance.get(
+        resolution,
+        "Inspect trusted-report.json and canonical-input.json, revise the theory, "
+        "rerun backtest.py and plan.py, and commit another planner-returned plan.",
     )
 
 
 def _evaluation_report_path(head: str | None) -> str:
     value = str(head or "").strip().lower()
     if len(value) != 40 or any(ch not in "0123456789abcdef" for ch in value):
-        raise ValueError("Physics Critic requires a full hexadecimal submitted Git HEAD")
+        raise ValueError(
+            "Physics Critic requires a full hexadecimal submitted Git HEAD"
+        )
     return f".trusted/evaluations/{value}.json"
+
+
+def _evaluation_request_path(head: str | None) -> str:
+    value = _evaluation_report_path(head).rsplit("/", 1)[-1]
+    return f".trusted/requests/{value}"
 
 
 def _evaluation_report(path: Path) -> dict[str, Any]:

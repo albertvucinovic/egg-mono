@@ -176,6 +176,23 @@ def evaluator_script(request: dict[str, Any]) -> str:
     return f"import io, sys\nsys.stdin = io.StringIO({payload!r})\n" + MODEL_RUNNER
 
 
+def evaluator_file_script(request_path: str) -> str:
+    """Return a compact evaluator that loads its potentially large inputs from files."""
+
+    request_literal = repr(str(request_path))
+    loader = (
+        "import io, json, sys\n"
+        "from pathlib import Path\n"
+        f"request = json.loads(Path({request_literal}).read_text())\n"
+        'request["source"] = Path(request.pop("source_path")).read_text()\n'
+        'timeline = json.loads(Path(request.pop("timeline_path")).read_text())\n'
+        'request["timeline"] = timeline["timeline"]\n'
+        "sys.stdin = io.StringIO(json.dumps(request, allow_nan=False, "
+        'separators=(",", ":"), sort_keys=True))\n'
+    )
+    return loader + MODEL_RUNNER
+
+
 def parse_evaluator_output(output: str) -> dict[str, Any]:
     marker = "__EGG_PHYSICS_RESULT__"
     line = next(
@@ -207,4 +224,9 @@ def parse_evaluator_receipt(output: str) -> str:
     return path
 
 
-__all__ = ["evaluator_script", "parse_evaluator_output", "parse_evaluator_receipt"]
+__all__ = [
+    "evaluator_file_script",
+    "evaluator_script",
+    "parse_evaluator_output",
+    "parse_evaluator_receipt",
+]

@@ -10,10 +10,12 @@ from eggopt.physics import canonical_plan
 from eggopt.physics.critic import (
     _evaluation_report,
     _evaluation_report_path,
+    _evaluation_request_path,
     _execution_feedback,
 )
 from eggopt.physics.strategy import _actor_turn_prompt
 from eggopt.physics.theory import (
+    evaluator_file_script,
     evaluator_script,
     parse_evaluator_output,
     parse_evaluator_receipt,
@@ -165,6 +167,61 @@ def test_generic_evaluator_can_write_a_compactly_receipted_report(tmp_path):
     assert "models" not in completed.stdout
 
 
+def test_generic_evaluator_loads_large_inputs_from_workspace_files(tmp_path):
+    report = tmp_path / "trusted" / "report.json"
+    canonical = tmp_path / "canonical-input.json"
+    canonical.write_text(
+        json.dumps(
+            {
+                "timeline": [
+                    {
+                        "position": 0,
+                        "legal_actions": [1],
+                        "irrelevant": "x" * 200_000,
+                    }
+                ]
+            }
+        )
+    )
+    (tmp_path / "world_model.py").write_text(MODEL)
+    request = tmp_path / "trusted" / "request.json"
+    request.parent.mkdir()
+    request.write_text(
+        json.dumps(
+            {
+                "source_path": "world_model.py",
+                "timeline_path": "canonical-input.json",
+                "legal_actions_key": "legal_actions",
+                "max_depth": 4,
+                "max_nodes": 100,
+                "work_dir": "trusted/work",
+                "output_path": "trusted/report.json",
+            }
+        )
+    )
+
+    script = evaluator_file_script("trusted/request.json")
+    completed = subprocess.run(
+        ["python", "-c", script],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert len(script) < 10_000
+    assert "x" * 1_000 not in script
+    assert parse_evaluator_receipt(completed.stdout) == "trusted/report.json"
+    assert set(json.loads(report.read_text())["backtest"]["models"]) == {"a", "b"}
+
+
+def test_file_evaluator_script_stays_below_linux_single_argument_limit():
+    script = evaluator_file_script(".trusted/requests/" + "a" * 40 + ".json")
+
+    assert len(script.encode()) < 131_072
+    assert max(len(line.encode()) for line in script.splitlines()) < 131_072
+
+
 def test_generic_evaluator_reports_all_models_and_multistep_discrimination():
     result = run_evaluator(
         {
@@ -261,6 +318,20 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
     assert len(observed) == 2
     assert "resolution=models_discriminated" in result.feedback
     assert calls == [result.critic_thread_id]
+    request_path = (
+        tmp_path
+        / "run"
+        / "workspace"
+        / "critic-repository"
+        / ".trusted"
+        / "requests"
+        / f"{git(workspace, 'log', '--format=%H', '--grep=actor theory and plan', '-1')}.json"
+    )
+    request = json.loads(request_path.read_text())
+    assert request["source_path"] == "world_model.py"
+    assert request["timeline_path"] == "canonical-input.json"
+    assert "source" not in request
+    assert "timeline" not in request
     report_path = (
         tmp_path
         / "run"
@@ -444,6 +515,7 @@ def test_critic_feedback_explains_each_execution_resolution():
 def test_evaluation_report_path_requires_full_git_head():
     head = "a" * 40
     assert _evaluation_report_path(head) == f".trusted/evaluations/{head}.json"
+    assert _evaluation_request_path(head) == f".trusted/requests/{head}.json"
     with pytest.raises(ValueError, match="full hexadecimal"):
         _evaluation_report_path("../escape")
 

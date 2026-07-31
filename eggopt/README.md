@@ -64,6 +64,9 @@ use(result.best_candidate)
   finish after Actor/Critic assignment and before the corresponding model turn.
 - `ThreadTool` is the reusable Eggflow task for durable synthetic tool calls on
   assigned Eggthreads threads; domain code never queries Eggthreads storage.
+  Its optional `input_files=(...)` contract authorizes files and includes their
+  content hashes in the cache identity without copying large inputs into tool
+  arguments.
   Its optional `output_files=(...)` contract snapshots sandbox-written files into
   content-addressed storage and verifies/rematerializes them on recovery while
   returning a compact `ThreadToolResult` receipt.
@@ -121,12 +124,15 @@ The Critic keeps `workspace/critic-repository`, pulls submitted history, and
 restores/rehydrates the latest canonical state if the Actor deletes `.git`.
 
 Committed world-model code is never imported into the controller. The generic
-Critic serializes canonical evidence into a self-contained evaluator and invokes
-`python_exec` through its assigned Critic Eggthread. Eggthreads therefore applies
-the Critic thread's working directory and Docker sandbox to untrusted execution.
-The evaluator writes `.trusted/evaluations/<ACTOR_HEAD>.json`; `ThreadTool`
-snapshots those bytes by SHA-256 and records only a compact receipt. Cached replay
-verifies or rematerializes the report before the Critic consumes it.
+Critic writes a compact `.trusted/requests/<ACTOR_HEAD>.json` manifest; the
+sandbox evaluator reads that manifest, committed `world_model.py`, and
+`canonical-input.json` as declared `ThreadTool` file inputs. Only the small fixed
+runner and paths travel through `python_exec`. Eggthreads therefore applies the
+Critic thread's working directory and Docker sandbox to untrusted execution while
+file hashes keep caching content-addressed. The evaluator writes
+`.trusted/evaluations/<ACTOR_HEAD>.json`; `ThreadTool` snapshots those bytes by
+SHA-256 and records only a compact receipt. Cached replay verifies or
+rematerializes the report before the Critic consumes it.
 
 Actor-facing `backtest.py` and `plan.py` use the same generic algorithm for local
 advice; they are untrusted workspace copies. `commit.py PLAN_ID` selects a
