@@ -15,7 +15,7 @@ from eggthreads.provider_output_artifacts import (
     resolve_provider_output_bytes,
     save_provider_output_bytes,
 )
-from eggthreads.sandbox import authorize_thread_path_read
+from eggthreads.sandbox import authorize_thread_path_read, authorize_thread_path_write
 
 from eggflow import Task
 from eggthreads import (
@@ -304,7 +304,7 @@ def _materialize_output_file(db: Any, thread_id: str, file: ThreadToolFile) -> N
     ):
         raise RuntimeError(f"durable ThreadTool file contradicts receipt: {file.path}")
     root = get_thread_working_directory(db, thread_id).resolve()
-    target = (root / file.path).resolve()
+    target = authorize_thread_path_write(db, thread_id, file.path)
     try:
         target.relative_to(root)
     except ValueError as exc:
