@@ -20,9 +20,10 @@ class MutatorInput:
     generation: int
     full_validation_scores: tuple[Mapping[str, Any], ...] = ()
     last_candidate_result: Mapping[str, Any] | None = None
+    exploration: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("parents", "evidence", "full_validation_scores"):
+        for name in ("parents", "evidence", "full_validation_scores", "exploration"):
             object.__setattr__(
                 self,
                 name,
@@ -50,6 +51,8 @@ class MutatorInput:
         }
         if self.last_candidate_result is not None:
             value["last_candidate_result"] = self.last_candidate_result
+        if self.exploration:
+            value["exploration"] = self.exploration
         return canonical_value(value, what="mutation context")
 
 

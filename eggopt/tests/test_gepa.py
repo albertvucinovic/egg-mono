@@ -2375,3 +2375,82 @@ def test_callable_mutator_state_changes_cache_identity():
         RunMutator(StatefulMutator("v1"), context).get_cache_key()
         != RunMutator(StatefulMutator("v2"), context).get_cache_key()
     )
+
+
+def test_candidate_equivalence_rejects_duplicate_before_evaluation(tmp_path):
+    class EquivalentIncrement(Increment):
+        def __call__(self, context):
+            self.calls += 1
+            self.requests.append((context.parents, context.evidence, context.objective))
+            return {"instruction": "1", "spelling": str(self.calls)}
+
+    evaluator = Evaluator()
+    result = optimize_anything(
+        {"instruction": "0", "spelling": "seed"},
+        evaluator=evaluator,
+        dataset=[{"id": "train", "target": 0}],
+        objective="Keep passing without duplicate behavior.",
+        config=config(
+            tmp_path,
+            evaluator,
+            EquivalentIncrement(),
+            max_candidates=2,
+            minibatch_acceptance="improvement_or_equal",
+            candidate_equivalence=lambda candidate: candidate["instruction"],
+        ),
+    )
+
+    assert result.generated_candidates == 2
+    assert result.candidates == (
+        {"instruction": "0", "spelling": "seed"},
+        {"instruction": "1", "spelling": "1"},
+    )
+    assert evaluator.calls == 4
+
+
+def test_near_improving_rejection_is_returned_as_exploration_evidence(tmp_path):
+    class ExploreThenImprove:
+        def __init__(self):
+            self.requests = []
+
+        def __call__(self, context):
+            self.requests.append(context)
+            return {"instruction": str(len(self.requests))}
+
+        def get_cache_key(self):
+            return "test.explore-then-improve.v1"
+
+    class ExactEvaluator:
+        def __call__(self, candidate, case):
+            return case["scores"][candidate["instruction"]]
+
+    mutator = ExploreThenImprove()
+    result = optimize_anything(
+        {"instruction": "0"},
+        evaluator=ExactEvaluator(),
+        dataset=[{"id": "train", "scores": {"0": 0.0, "1": -0.1, "2": 1.0}}],
+        objective="Cross a shallow valley.",
+        config=config(
+            tmp_path,
+            ExactEvaluator(),
+            mutator,
+            max_candidates=2,
+            parents_per_candidate=1,
+            exploration_candidates=1,
+        ),
+    )
+
+    assert mutator.requests[0].exploration == ()
+    evidence = mutator.requests[1].exploration[0]
+    assert evidence["candidate"] == {"instruction": "1"}
+    assert evidence["score_delta"] == pytest.approx(-0.1)
+    assert evidence["cases"][0]["score"] == -0.1
+    assert result.best_candidate == {"instruction": "2"}
+
+
+def test_gepa_search_extension_controls_are_validated():
+    with pytest.raises(TypeError, match="candidate_equivalence"):
+        GEPAConfig(candidate_equivalence="behavior")
+    for count in (-1, True, 1.5):
+        with pytest.raises(ValueError, match="exploration_candidates"):
+            GEPAConfig(exploration_candidates=count)

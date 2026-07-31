@@ -58,6 +58,10 @@ class GEPAConfig:
     )
     max_concurrent_evaluations: int | None = 1
     evaluator_context_limit: int | None = None
+    candidate_equivalence: Callable[[Any], Any] | None = field(
+        default=None, repr=False, compare=False
+    )
+    exploration_candidates: int = 0
     progress: ProgressCallback | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -88,6 +92,12 @@ class GEPAConfig:
             or self.mutator_context_limit < 1
         ):
             raise ValueError("mutator_context_limit must be positive or None")
+        if (
+            isinstance(self.exploration_candidates, bool)
+            or not isinstance(self.exploration_candidates, int)
+            or self.exploration_candidates < 0
+        ):
+            raise ValueError("exploration_candidates must be a non-negative integer")
         if self.minibatch_acceptance not in _MINIBATCH_ACCEPTANCE:
             raise ValueError(
                 "minibatch_acceptance must be 'strict_improvement' or "
@@ -101,6 +111,10 @@ class GEPAConfig:
             raise TypeError("mutator must be callable or an Eggflow Task")
         if self.progress is not None and not callable(self.progress):
             raise TypeError("progress must be callable or None")
+        if self.candidate_equivalence is not None and not callable(
+            self.candidate_equivalence
+        ):
+            raise TypeError("candidate_equivalence must be callable or None")
 
 
 @dataclass(frozen=True)
@@ -326,6 +340,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
             evaluation_role="candidate_validation",
         )
         candidates = [seed]
+        proposed_equivalences = {_candidate_equivalence(self.config, seed)}
         case_scores = [first.scores]
         outputs = [first.outputs]
         feedback = [first.feedback]
@@ -334,6 +349,7 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
         calls = _completed_evaluator_calls(self.flow)
         generated = 0
         last_candidate_result = None
+        exploration: list[tuple[float, int, Mapping[str, Any], str]] = []
 
         while generated < self.config.max_candidates:
             generation = generated
@@ -414,11 +430,22 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                     generation,
                     validation_scores,
                     last_candidate_result,
+                    tuple(item[2] for item in exploration),
                 ),
                 self.config.mutator_context_limit,
             )
             child = yield generation_task
             generated = generation + 1
+            equivalence = _candidate_equivalence(self.config, child)
+            if equivalence in proposed_equivalences:
+                last_candidate_result = {
+                    "mutation_generation": generated,
+                    "outcome": "rejected_as_equivalent_candidate",
+                    "minibatch": None,
+                    "full_validation": None,
+                }
+                continue
+            proposed_equivalences.add(equivalence)
 
             child_needed = _new_call_count(
                 self.flow,
@@ -465,6 +492,24 @@ class _NativeSearch(Task, Generic[CaseT, OutputT]):
                 accepted,
             )
             if not accepted:
+                _remember_exploration_candidate(
+                    exploration,
+                    generation,
+                    _exploration_evidence(
+                        child,
+                        generation,
+                        child_batch,
+                        batch_ids,
+                        fmean(child_batch.scores)
+                        - fmean(
+                            _parent_envelope_scores(
+                                parent_evaluations, len(child_batch.scores)
+                            )
+                        ),
+                    ),
+                    self.config.exploration_candidates,
+                    equivalence,
+                )
                 continue
 
             full_needed = _new_call_count(
@@ -695,6 +740,47 @@ def _minibatch_candidate_result(
             "accepted": accepted,
         },
         "full_validation": None,
+    }
+
+
+def _candidate_equivalence(config: GEPAConfig, candidate: Candidate) -> str:
+    value = (
+        candidate
+        if config.candidate_equivalence is None
+        else config.candidate_equivalence(candidate)
+    )
+    return canonical_json(value, what="candidate equivalence")
+
+
+def _remember_exploration_candidate(pool, generation, evidence, limit, equivalence):
+    if limit == 0:
+        return
+    pool[:] = [item for item in pool if item[3] != equivalence]
+    pool.append((evidence["score_delta"], generation, evidence, equivalence))
+    pool.sort(key=lambda item: (-item[0], item[1]))
+    del pool[limit:]
+
+
+def _exploration_evidence(candidate, generation, evaluation, case_ids, score_delta):
+    return {
+        "candidate": candidate,
+        "mutation_generation": generation + 1,
+        "score_delta": score_delta,
+        "aggregate_score": fmean(evaluation.scores),
+        "cases": [
+            {
+                "case": case_id,
+                "score": item.score,
+                "feedback": _feedback(item),
+                "evaluation_thread_id": case_thread_id,
+            }
+            for case_id, case_thread_id, item in zip(
+                case_ids,
+                evaluation.case_thread_ids,
+                evaluation.evaluations,
+                strict=True,
+            )
+        ],
     }
 
 
