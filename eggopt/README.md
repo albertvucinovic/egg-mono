@@ -86,36 +86,49 @@ Use `plan_optimization(...)` to estimate evaluator work before choosing limits.
 
 ## PhysicsStrategy
 
-`PhysicsStrategy` is one Git-backed `ActorCritic` scientific loop. The domain
-supplies an Actor, a repository-preparation Task, and a trusted Critic Task:
+`PhysicsStrategy` is the complete Git-backed scientific method, implemented as
+one persistent `ActorCritic`:
 
-```python
-from eggopt import PhysicsStrategy, physics_actor_system_prompt
-
-physics = PhysicsStrategy(
-    actor=actor,
-    prepare=prepare_repository,
-    critic=trusted_physics_critic,
-    identity={"domain": "my-world", "version": 1},
-)
-result = physics.run(run_dir="runs/my-physics", max_actions=50)
+```text
+Physics
+└── Critic
+    └── Actor
 ```
 
-The Actor works in `workspace/innerContext`, which is an ordinary writable Git
-repository. Every turn must create a clean new commit. The trusted Critic keeps
-`workspace/critic-repository` as a pulled copy of the complete history and
-evaluates the submitted Git HEAD rather than the Actor's mutable working tree.
-A dirty repository is rejected. If the Actor deletes or corrupts `.git`, the
-Critic restores its last copy; the domain Critic then rehydrates its latest
-canonical irreversible world state.
+The domain supplies only its world ports:
 
-The generic system prompt, available through
-`physics_actor_system_prompt(domain_information)`, explains the Git and trust
-rules. Domains append their model, evidence, instrument, plan, and environment
-contracts.
+```python
+physics = PhysicsStrategy(
+    actor=actor,
+    observe=initial_state_task,
+    execute=real_action_task,
+    is_goal=trusted_goal_predicate,
+    identity={"domain": "my-world", "version": 1},
+    domain_information="Explain the public state and action formats.",
+)
+```
 
-The domain Critic may yield cached Tasks and real effects. It returns
-`Critique.revise(...)` after validation errors or newly acquired evidence, and
-`Critique.accept(value)` only at a terminal success/stopping condition. Thus the
-same persistent Actor/Critic pair naturally alternates theory revision, trusted
-validation, real execution, and new evidence until win or budget.
+Eggopt owns the Timeline, `step_<suffix>` / `reward_<suffix>` theory convention,
+all-model backtesting, goal and subset-discrimination planning, Actor instruments,
+non-empty committed-plan validation, execute-until-resolution loop, and Git
+repository lifecycle.
+
+The Actor works in `workspace/innerContext`; every turn submits a clean Git HEAD.
+The Critic keeps `workspace/critic-repository`, pulls submitted history, and
+restores/rehydrates the latest canonical state if the Actor deletes `.git`.
+
+Committed world-model code is never imported into the controller. The generic
+Critic serializes canonical evidence into a self-contained evaluator and invokes
+`python_exec` through its assigned Critic Eggthread. Eggthreads therefore applies
+the Critic thread's working directory and Docker sandbox to untrusted execution.
+The result is a durable synthetic tool call tied to Git HEAD.
+
+Actor-facing `backtest.py` and `plan.py` use the same generic algorithm for local
+advice; they are untrusted workspace copies. `commit.py PLAN_ID` selects a
+canonical non-empty planner result and commits it. The trusted Critic repeats the
+pipeline independently before any real action.
+
+An experiment can contain a common multi-action prefix. Execution stops on the
+first wrong prediction or immediately after the first intent whose model
+predictions actually branch. Goal plans stop on trusted goal detection, mismatch,
+plan exhaustion, or action budget.

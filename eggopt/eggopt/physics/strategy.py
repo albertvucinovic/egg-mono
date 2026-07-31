@@ -23,6 +23,8 @@ from ..actor_critic import ActorCritic, Agent, Critique
 from ..context import _current_operation, _operation_runtime, _operation_scope
 from ..identity import digest_payload
 from ..runtime import Runtime, sync
+from .critic import PhysicsCritic, write_state
+from .instruments import write_actor_files
 
 TaskFactory = Callable[..., Task]
 
@@ -109,15 +111,19 @@ class PhysicsStrategy:
     """
 
     actor: Agent = field(repr=False, compare=False)
-    prepare: TaskFactory = field(repr=False, compare=False)
-    critic: Task = field(repr=False, compare=False)
+    observe: TaskFactory = field(repr=False, compare=False)
+    execute: TaskFactory = field(repr=False, compare=False)
+    is_goal: Callable[[Any], bool] = field(repr=False, compare=False)
     identity: Any
+    domain_information: str = ""
+    legal_actions_key: str = "legal_actions"
+    max_depth: int = 8
+    max_nodes: int = 10_000
 
     def __post_init__(self) -> None:
-        if not callable(self.prepare):
-            raise TypeError("prepare must construct an Eggflow Task")
-        if not isinstance(self.critic, Task):
-            raise TypeError("critic must be an Eggflow Task")
+        for name in ("observe", "execute", "is_goal"):
+            if not callable(getattr(self, name)):
+                raise TypeError(f"{name} must be callable")
         digest_payload("eggopt.physics.identity.v2", self.identity)
 
     def run(
@@ -224,18 +230,28 @@ class _PhysicsRun(Task):
             "_context_limit": None,
         }
         with _operation_scope(context):
-            prepare = self.strategy.prepare(
-                workspace=workspace,
-                outer_context=outer,
-                max_actions=self.max_actions,
+            observe = self.strategy.observe(workspace=workspace)
+            if not isinstance(observe, Task):
+                raise TypeError("observe must construct an Eggflow Task")
+            yield _InitializeRepository(
+                observe,
+                workspace,
+                outer,
+                self.strategy.domain_information,
             )
-            if not isinstance(prepare, Task):
-                raise TypeError("prepare must construct an Eggflow Task")
-            yield _InitializeRepository(prepare, workspace, outer)
             result = yield ActorCritic(
                 actor=self.strategy.actor,
                 critic=_GitCritic(
-                    self.strategy.critic,
+                    PhysicsCritic(
+                        tools=self.strategy.actor.tools,
+                        execute=self.strategy.execute,
+                        is_goal=self.strategy.is_goal,
+                        identity=self.strategy.identity,
+                        domain_information=self.strategy.domain_information,
+                        legal_actions_key=self.strategy.legal_actions_key,
+                        max_depth=self.strategy.max_depth,
+                        max_nodes=self.strategy.max_nodes,
+                    ),
                     outer,
                     self.max_actions,
                 ),
@@ -285,9 +301,10 @@ def _stopping_reason(value: Any, accepted: bool) -> str:
 class _InitializeRepository(Task):
     cacheable = False
 
-    prepare: Task = field(repr=False, compare=False)
+    observe: Task = field(repr=False, compare=False)
     workspace: str
     outer_context: str
+    domain_information: str
 
     def run(self):
         actor = Path(self.workspace)
@@ -315,15 +332,18 @@ class _InitializeRepository(Task):
         if (actor / ".git").exists():
             shutil.rmtree(actor / ".git")
         _initialize_repository(actor)
-        prepared = copy.copy(self.prepare)
+        observed = copy.copy(self.observe)
         _bind_fields(
-            prepared,
+            observed,
             {
                 "workspace": str(actor),
                 "outer_context": self.outer_context,
             },
         )
-        yield prepared
+        initial = yield observed
+        write_actor_files(actor, (initial,), self.domain_information)
+        write_state(actor, (initial,), 0, None)
+        write_state(Path(self.outer_context), (initial,), 0, None)
         _commit(actor, "[physics] initialize canonical world state")
         _clone_repository(actor, critic)
         return _git_head(actor)
@@ -459,11 +479,20 @@ class _GitCritic(Task):
                 f"[physics] trusted Critic result after {actor_head[:12]}",
             )
         if _git_head(actor) != _git_head(critic_repo):
-            if _git_status(actor):
+            actor_dirty = "\n".join(
+                line
+                for line in _git_status(actor).splitlines()
+                if line[3:] not in {"canonical-input.json", "trusted-report.json"}
+                and line[3:] != ".trusted"
+                and not line[3:].startswith(".trusted/")
+            )
+            if actor_dirty:
                 return Critique.revise(
                     "The Actor repository changed during Critic evaluation. Restore or "
                     "commit a clean state before the trusted result can be synchronized."
                 )
+            _git(actor, "reset", "--hard", "HEAD")
+            _git(actor, "clean", "-fd")
             _pull(actor, critic_repo)
         return result
 
@@ -602,6 +631,8 @@ def _restore_repository(actor: Path, critic: Path) -> None:
 
 
 def _pull(destination: Path, source: Path) -> None:
+    _git(destination, "reset", "--hard", "HEAD")
+    _git(destination, "clean", "-fd")
     _git(destination, "pull", "--ff-only", str(source), "HEAD")
 
 

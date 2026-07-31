@@ -1,19 +1,33 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from eggopt.physics import canonical_plan
+from eggopt.physics.theory import evaluator_script, parse_evaluator_output
 
 from eggflow import Task
-from eggopt import Agent, Critique, PhysicsStrategy, physics_actor_system_prompt
+from eggopt import Agent, PhysicsStrategy, physics_actor_system_prompt
 from eggthreads import (
     ThreadsDB,
+    ToolRegistry,
     list_children_with_meta,
     list_root_threads,
-    list_threads,
 )
+
+MODEL = """
+def step_a(state, action):
+    return {"position": state["position"] + 1, "legal_actions": [1]}
+def reward_a(state):
+    return float(state["position"] >= 2)
+def step_b(state, action):
+    return {"position": state["position"] + (1 if state["position"] == 0 else 2), "legal_actions": [1]}
+def reward_b(state):
+    return float(state["position"] >= 3)
+"""
 
 
 class ScriptedLLM:
@@ -32,7 +46,7 @@ class ScriptedLLM:
 
     async def astream_chat(self, _messages, **_kwargs):
         self.calls += 1
-        if self.edit is not None:
+        if self.edit:
             self.edit(self.calls)
         yield {
             "type": "message",
@@ -42,111 +56,178 @@ class ScriptedLLM:
         }
 
 
+@dataclass
+class Value(Task):
+    value: object
+
+    def run(self):
+        return self.value
+
+
 def git(path, *args):
     return subprocess.run(
-        ["git", "-C", str(path), *args],
-        check=True,
-        text=True,
-        capture_output=True,
+        ["git", "-C", str(path), *args], check=True, text=True, capture_output=True
     ).stdout.strip()
 
 
-@dataclass
-class Prepare(Task):
-    workspace: str | None = None
-
-    def get_cache_key(self):
-        return "test.physics.prepare.v1"
-
-    def run(self):
-        workspace = Path(self.workspace)
-        workspace.mkdir(parents=True, exist_ok=True)
-        (workspace / "INSTRUCTIONS.md").write_text("Study the toy world.\n")
-        (workspace / "state.json").write_text('{"position": 0}\n')
-        (workspace / ".gitignore").write_text("scratch/\n")
-
-
-@dataclass
-class Review(Task):
-    workspace: str | None = None
-    head: str | None = None
-    visits: list[str] | None = None
-    accept: bool = True
-
-    def get_cache_key(self):
-        return "test.physics.review.v1"
-
-    def run(self):
-        plan = Path(self.workspace, "committed-plan.json")
-        if not plan.is_file():
-            return Critique.revise("committed-plan.json is missing")
-        if self.visits is not None:
-            self.visits.append(self.head)
-        trusted = Path(self.workspace, ".trusted")
-        trusted.mkdir(exist_ok=True)
-        (trusted / "report.json").write_text('{"reviewed": true}\n')
-        if self.accept:
-            return Critique.accept(
-                {"stopping_reason": "won", "head": self.head}, "Game won."
-            )
-        return Critique.revise("Reality added new evidence; revise the theory.")
-
-
-def strategy(tmp_path, *, replies=("ready",), edit=None, review=None):
-    actor = ScriptedLLM(replies, edit=edit)
+def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
+    llm = ScriptedLLM(replies, edit)
+    tools = tools or Agent(object(), {"role": "default"}).tools
+    actor = Agent(
+        llm,
+        {"role": "physics-actor"},
+        tools=tools,
+        auto_approve_tools=True,
+        allowed_tools=frozenset({"bash", "python_exec"}),
+        system_prompt=physics_actor_system_prompt("Toy domain."),
+    )
     return (
         PhysicsStrategy(
-            actor=Agent(
-                actor,
-                {"role": "physics-actor"},
-                auto_approve_tools=True,
-                allowed_tools=frozenset({"bash", "python_exec"}),
-                system_prompt=physics_actor_system_prompt("Toy domain."),
-            ),
-            prepare=lambda **_: Prepare(),
-            critic=review or Review(),
+            actor=actor,
+            observe=lambda **_: Value({"position": 0, "legal_actions": [1]}),
+            execute=execute or (lambda intent, **_: Value(intent["prediction"]["a"])),
+            is_goal=lambda state: state["position"] >= 2,
             identity={"domain": "toy"},
+            domain_information="State has position and legal_actions.",
+            max_depth=4,
         ),
-        actor,
+        llm,
     )
 
 
-def test_physics_actor_critic_accepts_clean_committed_head(tmp_path, monkeypatch):
+def write_plan(workspace, plan, message="actor theory and plan"):
+    (workspace / "world_model.py").write_text(MODEL)
+    (workspace / "committed-plan.json").write_text(json.dumps(plan))
+    git(workspace, "add", "-A")
+    git(workspace, "commit", "-m", message)
+
+
+def experiment_plan():
+    request = {
+        "source": MODEL,
+        "timeline": [{"position": 0, "legal_actions": [1]}],
+        "legal_actions_key": "legal_actions",
+        "max_depth": 4,
+        "max_nodes": 100,
+    }
+    result = run_evaluator(request)
+    return next(
+        plan for plan in result["planning"]["plans"] if plan["purpose"] == "experiment"
+    )
+
+
+def run_evaluator(request):
+    completed = subprocess.run(
+        ["python", "-c", evaluator_script(request)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return parse_evaluator_output(completed.stdout)
+
+
+def test_generic_evaluator_reports_all_models_and_multistep_discrimination():
+    result = run_evaluator(
+        {
+            "source": MODEL,
+            "timeline": [{"position": 0, "legal_actions": [1]}],
+            "legal_actions_key": "legal_actions",
+            "max_depth": 4,
+            "max_nodes": 100,
+        }
+    )
+
+    assert set(result["backtest"]["models"]) == {"a", "b"}
+    experiment = result["planning"]["discrimination_plans"][0]
+    assert len(experiment["plan"]) == 2
+    assert (
+        experiment["plan"][0]["prediction"]["a"]
+        == experiment["plan"][0]["prediction"]["b"]
+    )
+    assert (
+        experiment["plan"][1]["prediction"]["a"]
+        != experiment["plan"][1]["prediction"]["b"]
+    )
+
+
+def test_planner_reports_models_even_when_none_survive():
+    timeline = [
+        {"position": 0, "legal_actions": [1]},
+        {
+            "state": {"position": 0, "legal_actions": [1]},
+            "action": {"action": 1},
+            "next_state": {"position": 99, "legal_actions": [1]},
+        },
+    ]
+    result = run_evaluator(
+        {
+            "source": MODEL,
+            "timeline": timeline,
+            "legal_actions_key": "legal_actions",
+            "max_depth": 4,
+            "max_nodes": 100,
+        }
+    )
+
+    assert result["backtest"]["surviving_models"] == []
+    assert set(result["planning"]["goal_plans"]) == {"a", "b"}
+    assert result["planning"]["discrimination_plans"]
+
+
+def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
+    tmp_path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "run" / "workspace" / "innerContext"
-    visits = []
+    calls = []
+    tools = ToolRegistry()
+
+    def python_exec(arguments, context):
+        calls.append(context.thread_id)
+        completed = subprocess.run(
+            ["python", "-c", arguments["script"]],
+            cwd=Path(context.db.path).parent.parent / "workspace" / "critic-repository",
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return completed.stdout
+
+    tools.register(
+        "bash", "unused", {"type": "object", "properties": {}}, lambda _args: ""
+    )
+    tools.register(
+        "python_exec",
+        "sandbox evaluator",
+        {"type": "object", "properties": {"script": {"type": "string"}}},
+        python_exec,
+        accepts_context=True,
+    )
+    plan = experiment_plan()
 
     def edit(_call):
-        (workspace / "world_model.py").write_text(
-            "def step_1(state, action): return state\n"
-        )
-        (workspace / "committed-plan.json").write_text(
-            '{"intents":[{"action":1,"prediction":{"1":{"position":1}}}]}\n'
-        )
-        git(workspace, "add", "-A")
-        git(workspace, "commit", "-m", "actor theory and plan")
+        write_plan(workspace, plan)
 
-    physics, actor = strategy(tmp_path, edit=edit, review=Review(visits=visits))
-    result = physics.run(run_dir="run", max_actions=5, max_cycles=2)
+    observed = []
 
-    assert result.accepted is True
-    assert result.stopping_reason == "won"
-    assert visits == [result.value["head"]]
-    assert result.head == git(workspace, "rev-parse", "HEAD")
-    assert actor.calls == 1
-    critic_copy = tmp_path / "run" / "workspace" / "critic-repository"
-    assert git(critic_copy, "log", "--format=%s", "-1") == (
-        "[physics] trusted Critic result after " + visits[0][:12]
-    )
+    def execute(intent, **_):
+        next_state = intent["prediction"]["a"]
+        observed.append(next_state)
+        return Value(next_state)
 
+    physics, _actor = strategy(workspace, edit, tools=tools, execute=execute)
+    result = physics.run(run_dir="run", max_cycles=1)
+
+    assert result.accepted is False
+    assert len(observed) == 2
+    assert result.feedback.endswith("models_discriminated.")
+    assert calls == [result.critic_thread_id]
     db = ThreadsDB(tmp_path / "run" / ".egg" / "threads.sqlite")
     try:
         root = list_root_threads(db)[0]
-        assert (
-            next(t.name for t in list_threads(db) if t.thread_id == root) == "Physics"
-        )
         critic = list_children_with_meta(db, root)
         assert [name for _, name, *_ in critic] == ["Critic"]
+        assert critic[0][0] == result.critic_thread_id
         assert [name for _, name, *_ in list_children_with_meta(db, critic[0][0])] == [
             "Actor"
         ]
@@ -154,24 +235,36 @@ def test_physics_actor_critic_accepts_clean_committed_head(tmp_path, monkeypatch
         db.close()
 
 
-def test_dirty_repository_is_rejected_then_actor_can_fix_it(tmp_path, monkeypatch):
+def test_dirty_repository_rejected_then_fixed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "run" / "workspace" / "innerContext"
+    plan = canonical_plan(
+        {
+            "purpose": "goal",
+            "models": ["a"],
+            "intents": [
+                {
+                    "action": 1,
+                    "prediction": {"a": {"position": 1, "legal_actions": [1]}},
+                },
+                {
+                    "action": 1,
+                    "prediction": {"a": {"position": 2, "legal_actions": [1]}},
+                },
+            ],
+        }
+    )
 
     def edit(call):
         if call == 1:
-            (workspace / "committed-plan.json").write_text(
-                '{"intents":[{"action":1}]}\n'
-            )
-            git(workspace, "add", "-A")
-            git(workspace, "commit", "-m", "actor plan")
-            (workspace / "forgotten.txt").write_text("dirty\n")
+            write_plan(workspace, plan)
+            (workspace / "dirty.txt").write_text("dirty")
         else:
-            (workspace / ".gitignore").write_text("scratch/\nforgotten.txt\n")
+            (workspace / ".gitignore").write_text("scratch/\ndirty.txt\n")
             git(workspace, "add", "-A")
             git(workspace, "commit", "-m", "ignore scratch")
 
-    physics, actor = strategy(tmp_path, replies=("ready", "fixed"), edit=edit)
+    physics, actor = strategy(workspace, edit, replies=("ready", "fixed"))
     result = physics.run(run_dir="run", max_cycles=2)
 
     assert result.accepted is True
@@ -179,120 +272,51 @@ def test_dirty_repository_is_rejected_then_actor_can_fix_it(tmp_path, monkeypatc
     assert not git(workspace, "status", "--short")
 
 
-def test_deleted_actor_git_is_restored_from_critic_copy(tmp_path, monkeypatch):
+def test_deleted_repo_restores_history_and_authoritative_state(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "run" / "workspace" / "innerContext"
+    plan = experiment_plan()
 
     def edit(call):
         if call == 1:
-            (workspace / "committed-plan.json").write_text(
-                '{"intents":[{"action":1}]}\n'
-            )
-            git(workspace, "add", "-A")
-            git(workspace, "commit", "-m", "first actor plan")
-        else:
-            (workspace / "committed-plan.json").write_text(
-                '{"intents":[{"action":2}]}\n'
-            )
-            git(workspace, "add", "-A")
-            git(workspace, "commit", "-m", "restored actor plan")
-
-    review = Review(accept=False)
-    physics, actor = strategy(
-        tmp_path,
-        replies=("ready", "reset", "restored"),
-        edit=edit,
-        review=review,
-    )
-
-    # Delete .git during the second turn to request a reset. Critic restores its copy.
-    original = actor.edit
-
-    def reset_edit(call):
-        if call == 2:
-            import shutil
-
-            shutil.rmtree(workspace / ".git")
-        else:
-            original(call if call == 1 else 2)
-
-    actor.edit = reset_edit
-    result = physics.run(run_dir="run", max_cycles=3)
-
-    assert result.accepted is False
-    assert actor.calls == 3
-    assert (workspace / ".git").exists()
-    assert git(workspace, "log", "--format=%s", "-1") == "restored actor plan"
-
-
-def test_restore_overlays_latest_authoritative_state(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    workspace = tmp_path / "run" / "workspace" / "innerContext"
-
-    def edit(call):
-        if call == 1:
-            (workspace / "committed-plan.json").write_text(
-                '{"intents":[{"action":1}]}\n'
-            )
-            git(workspace, "add", "-A")
-            git(workspace, "commit", "-m", "actor plan")
+            write_plan(workspace, plan, "first plan")
         elif call == 2:
             import shutil
 
             shutil.rmtree(workspace / ".git")
         else:
-            assert '"position": 7' in (workspace / "canonical-input.json").read_text()
-            (workspace / "committed-plan.json").write_text(
-                '{"intents":[{"action":2}]}\n'
-            )
+            assert (workspace / ".git").exists()
+            (workspace / "restored.txt").write_text("restored")
             git(workspace, "add", "-A")
-            git(workspace, "commit", "-m", "rehydrated plan")
+            git(workspace, "commit", "-m", "restored plan")
 
-    @dataclass
-    class StatefulReview(Review):
-        outer_context: str | None = None
+    physics, actor = strategy(workspace, edit, replies=("ready", "reset", "restored"))
 
-        def run(self):
-            trusted = Path(self.outer_context, ".trusted")
-            trusted.mkdir(parents=True, exist_ok=True)
-            (trusted / "state.json").write_text(
-                '{"timeline":[{"position":7}],"actions":1}\n'
-            )
-            return Critique.revise("New evidence; revise.")
+    def wrong_execute(intent, **_):
+        return Value({"position": 999, "legal_actions": [1]})
 
-    physics, actor = strategy(
-        tmp_path,
-        replies=("ready", "reset", "rehydrated"),
-        edit=edit,
-        review=StatefulReview(),
-    )
-    physics.run(run_dir="run", max_cycles=3)
+    object.__setattr__(physics, "execute", wrong_execute)
+    physics.run(run_dir="run", max_cycles=3, max_actions=10)
 
     assert actor.calls == 3
-    assert '"position": 7' in (workspace / "canonical-input.json").read_text()
+    assert (workspace / ".git").exists()
+    assert "[physics]" in git(workspace, "log", "--format=%s", "-2")
 
 
-def test_actor_system_prompt_is_extensible():
-    prompt = physics_actor_system_prompt("ARC observations are color grids.")
-
+def test_actor_system_prompt_is_domain_extensible():
+    prompt = physics_actor_system_prompt("Color grids and ARC actions.")
     assert "Git repository" in prompt
     assert "non-empty plan" in prompt
-    assert "delete .git" in prompt
-    assert "ARC observations are color grids" in prompt
+    assert "Color grids" in prompt
 
 
-def test_physics_requires_task_contracts():
-    with pytest.raises(TypeError, match="prepare"):
+def test_physics_requires_domain_ports():
+    actor = Agent(object(), {"role": "actor"})
+    with pytest.raises(TypeError, match="observe"):
         PhysicsStrategy(
-            actor=Agent(object(), {"role": "actor"}),
-            prepare="not callable",
-            critic=Review(),
-            identity={"bad": True},
-        )
-    with pytest.raises(TypeError, match="critic"):
-        PhysicsStrategy(
-            actor=Agent(object(), {"role": "actor"}),
-            prepare=lambda **_: Prepare(),
-            critic="not a task",
-            identity={"bad": True},
+            actor=actor,
+            observe="bad",
+            execute=lambda **_: Value({}),
+            is_goal=lambda _: False,
+            identity={},
         )
