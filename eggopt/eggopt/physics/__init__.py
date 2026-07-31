@@ -1,5 +1,17 @@
-"""Durable active-inference strategy built from Eggflow Tasks."""
+"""Git-backed scientific-discovery strategy."""
 
-from .strategy import PhysicsEffect, PhysicsResult, PhysicsStrategy, run_physics
+from .strategy import (
+    PHYSICS_ACTOR_SYSTEM_PROMPT,
+    PhysicsResult,
+    PhysicsStrategy,
+    physics_actor_system_prompt,
+    run_physics,
+)
 
-__all__ = ["PhysicsEffect", "PhysicsResult", "PhysicsStrategy", "run_physics"]
+__all__ = [
+    "PHYSICS_ACTOR_SYSTEM_PROMPT",
+    "PhysicsResult",
+    "PhysicsStrategy",
+    "physics_actor_system_prompt",
+    "run_physics",
+]

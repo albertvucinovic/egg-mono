@@ -86,44 +86,36 @@ Use `plan_optimization(...)` to estimate evaluator work before choosing limits.
 
 ## PhysicsStrategy
 
-`PhysicsStrategy` is a durable observe → hypothesize → test → deliberate →
-execute loop. It prescribes no world-model, hypothesis, action, or evidence
-types: each role constructs an Eggflow `Task` and may be deterministic,
-ActorCritic-backed, GEPA-backed, or another Task graph.
+`PhysicsStrategy` is one Git-backed `ActorCritic` scientific loop. The domain
+supplies an Actor, a repository-preparation Task, and a trusted Critic Task:
 
 ```python
-from eggopt import PhysicsStrategy
+from eggopt import PhysicsStrategy, physics_actor_system_prompt
 
 physics = PhysicsStrategy(
-    observe=observe_task,
-    hypothesize=hypothesize_task,
-    test=test_task,
-    deliberate=deliberate_task,
-    execute=execute_task,
-    identity={"name": "my-physics", "version": 1},
+    actor=actor,
+    prepare=prepare_repository,
+    critic=trusted_physics_critic,
+    identity={"domain": "my-world", "version": 1},
 )
-
 result = physics.run(run_dir="runs/my-physics", max_actions=50)
 ```
 
-The Timeline is append-only. A commitment is durably produced before its
-opaque intents execute one at a time. After each real transition, `test`
-returns `None` to keep the remaining queue or feedback to abort it and revise
-the hypotheses. Thus reality always outranks the model.
+The Actor works in `workspace/innerContext`, which is an ordinary writable Git
+repository. Every turn must create a clean new commit. The trusted Critic keeps
+`workspace/critic-repository` as a pulled copy of the complete history and
+evaluates the submitted Git HEAD rather than the Actor's mutable working tree.
+A dirty repository is rejected. If the Actor deletes or corrupts `.git`, the
+Critic restores its last copy; the domain Critic then rehydrates its latest
+canonical irreversible world state.
 
-Wrap domain effects in `PhysicsEffect` when their calls and results should also
-form one readable history on the shared Environment thread. The wrapped Task
-remains the cache/recovery boundary; no live environment handle is persisted.
+The generic system prompt, available through
+`physics_actor_system_prompt(domain_information)`, explains the Git and trust
+rules. Domains append their model, evidence, instrument, plan, and environment
+contracts.
 
-The default thread skeleton is deliberately small:
-
-```text
-Physics
-├── Environment
-├── Hypotheses
-└── Plan
-```
-
-Tasks, not threads, are the durable unit of work. A role may yield
-`ActorCritic`; its Critic/Actor children then live beneath the corresponding
-holding thread and retain conversation context across cached operations.
+The domain Critic may yield cached Tasks and real effects. It returns
+`Critique.revise(...)` after validation errors or newly acquired evidence, and
+`Critique.accept(value)` only at a terminal success/stopping condition. Thus the
+same persistent Actor/Critic pair naturally alternates theory revision, trusted
+validation, real execution, and new evidence until win or budget.

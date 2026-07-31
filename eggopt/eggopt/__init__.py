@@ -12,7 +12,13 @@ from .gepa import (
     optimize_anything,
     plan_optimization,
 )
-from .physics import PhysicsEffect, PhysicsResult, PhysicsStrategy, run_physics
+from .physics import (
+    PHYSICS_ACTOR_SYSTEM_PROMPT,
+    PhysicsResult,
+    PhysicsStrategy,
+    physics_actor_system_prompt,
+    run_physics,
+)
 from .recovery import InteractionRecovery, InteractionRecoveryError
 from .thread_tool import ThreadTool
 
@@ -28,7 +34,7 @@ __all__ = [  # noqa: RUF022
     "InteractionRecovery",
     "InteractionRecoveryError",
     "MutatorInput",
-    "PhysicsEffect",
+    "PHYSICS_ACTOR_SYSTEM_PROMPT",
     "PhysicsResult",
     "PhysicsStrategy",
     "SelectParents",
@@ -37,5 +43,6 @@ __all__ = [  # noqa: RUF022
     "current_operation",
     "optimize_anything",
     "plan_optimization",
+    "physics_actor_system_prompt",
     "run_physics",
 ]
