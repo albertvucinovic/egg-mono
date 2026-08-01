@@ -990,6 +990,113 @@ def test_thread_state_waiting_and_running(tmp_path):
     assert ts.thread_state(db, tid) == "running"
 
 
+def test_thread_state_does_not_load_snapshot_json(tmp_path, monkeypatch):
+    import eggthreads as ts
+
+    db = _make_db(tmp_path)
+    tid = "thread-state-metadata"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.conn.execute(
+        "UPDATE threads SET snapshot_json=? WHERE thread_id=?",
+        ("x" * 1_000_000, tid),
+    )
+
+    def forbidden(_thread_id):
+        raise AssertionError("thread_state must not load snapshot_json")
+
+    monkeypatch.setattr(db, "get_thread", forbidden)
+
+    assert ts.thread_state(db, tid) == "waiting_user"
+
+
+def test_pending_tool_call_states_does_not_copy_completed_history(
+    tmp_path, monkeypatch
+):
+    from eggthreads.tool_state import pending_tool_call_states
+
+    db = _make_db(tmp_path)
+    tid = "thread-pending-tool-calls"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    for index in range(20):
+        tool_call_id = f"done-{index}"
+        db.append_event(
+            f"msg-{index}",
+            tid,
+            "msg.create",
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": "{}"},
+                    }
+                ],
+            },
+            msg_id=f"parent-{index}",
+        )
+        _append_event(
+            db,
+            tid,
+            "tool_call.approval",
+            {"tool_call_id": tool_call_id, "decision": "granted"},
+        )
+        _append_event(
+            db,
+            tid,
+            "tool_call.execution_started",
+            {"tool_call_id": tool_call_id},
+        )
+        _append_event(
+            db,
+            tid,
+            "tool_call.finished",
+            {"tool_call_id": tool_call_id, "reason": "success", "output": "ok"},
+        )
+        _append_event(
+            db,
+            tid,
+            "tool_call.output_approval",
+            {"tool_call_id": tool_call_id, "decision": "whole"},
+        )
+        _append_event(
+            db,
+            tid,
+            "msg.create",
+            {"role": "tool", "tool_call_id": tool_call_id, "content": "ok"},
+        )
+    db.append_event(
+        "msg-pending",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "pending",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{}"},
+                }
+            ],
+        },
+        msg_id="parent-pending",
+    )
+
+    copied = []
+    original = __import__("eggthreads.tool_state", fromlist=["deepcopy"]).deepcopy
+
+    def record(value):
+        copied.append(value.tool_call_id)
+        return original(value)
+
+    monkeypatch.setattr("eggthreads.tool_state.deepcopy", record)
+
+    pending = pending_tool_call_states(db, tid)
+
+    assert [item.tool_call_id for item in pending] == ["pending"]
+    assert copied == ["pending"]
+
+
 def test_tool_call_lifecycle_events_before_parent_message_are_ignored(tmp_path):
     """Tool state should not attach stale reused tool_call_id events.
 

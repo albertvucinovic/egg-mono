@@ -991,3 +991,197 @@ def test_scheduler_managed_turn_waits_for_shared_scheduler(tmp_path, monkeypatch
         assert asyncio.run(exercise()) == "done"
     finally:
         db.close()
+
+
+def test_scheduler_managed_wait_uses_bounded_token_accounting(tmp_path, monkeypatch):
+    import asyncio
+
+    from eggopt.actor_critic import _wait_until_waiting
+
+    from eggthreads import append_message, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Actor")
+    prompt_id = append_message(db, thread_id, "user", "go")
+    after_seq = db.max_event_seq(thread_id)
+    calls = []
+
+    def bounded_stats(_db, observed_thread_id):
+        calls.append(observed_thread_id)
+        return {"full_thread_tokens": 1}
+
+    def forbidden_full_stats(*_args, **_kwargs):
+        raise AssertionError("scheduler wait must not rebuild full token statistics")
+
+    monkeypatch.setattr("eggthreads.header_token_stats", bounded_stats)
+    monkeypatch.setattr("eggthreads.thread_token_stats", forbidden_full_stats)
+
+    async def answer():
+        await asyncio.sleep(0)
+        append_message(db, thread_id, "assistant", "done")
+
+    async def exercise():
+        responder = asyncio.create_task(answer())
+        try:
+            await _wait_until_waiting(
+                db,
+                thread_id,
+                prompt_id,
+                after_seq,
+                100,
+            )
+        finally:
+            await responder
+
+    try:
+        asyncio.run(exercise())
+        assert calls
+    finally:
+        db.close()
+
+
+def test_scheduler_managed_wait_confirms_a_bounded_limit_exactly(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    from eggopt.actor_critic import _wait_until_waiting
+
+    from eggflow import ContextLimitExceededError
+    from eggthreads import append_message, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Actor")
+    prompt_id = append_message(db, thread_id, "user", "go")
+    after_seq = db.max_event_seq(thread_id)
+    exact_calls = []
+
+    monkeypatch.setattr(
+        "eggthreads.header_token_stats",
+        lambda _db, _thread_id: {"full_thread_tokens": 100},
+    )
+
+    def exact(_db, observed_thread_id):
+        exact_calls.append(observed_thread_id)
+        return 100
+
+    monkeypatch.setattr("eggopt.context_limit.full_context_tokens", exact)
+
+    try:
+        with pytest.raises(ContextLimitExceededError):
+            asyncio.run(
+                _wait_until_waiting(
+                    db,
+                    thread_id,
+                    prompt_id,
+                    after_seq,
+                    100,
+                )
+            )
+        assert exact_calls == [thread_id]
+    finally:
+        db.close()
+
+
+def test_scheduler_managed_wait_does_not_project_answers_while_streaming(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    from eggopt.actor_critic import _wait_until_waiting
+
+    from eggthreads import append_message, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Actor")
+    prompt_id = append_message(db, thread_id, "user", "go")
+    after_seq = db.max_event_seq(thread_id)
+    states = iter(("running", "waiting_user"))
+    projected = []
+
+    def state(_db, observed_thread_id):
+        assert observed_thread_id == thread_id
+        return next(states)
+
+    def answer(_db, observed_thread_id, observed_after_seq):
+        projected.append((observed_thread_id, observed_after_seq))
+        return "done"
+
+    monkeypatch.setattr("eggopt.actor_critic.thread_state", state)
+    monkeypatch.setattr("eggopt.actor_critic._latest_answer", answer)
+
+    async def append_activity():
+        await asyncio.sleep(0.1)
+        append_message(db, thread_id, "assistant", "partial activity")
+
+    async def exercise():
+        activity = asyncio.create_task(append_activity())
+        try:
+            await _wait_until_waiting(
+                db,
+                thread_id,
+                prompt_id,
+                after_seq,
+                None,
+            )
+        finally:
+            await activity
+
+    try:
+        asyncio.run(exercise())
+        assert projected == [(thread_id, after_seq)]
+    finally:
+        db.close()
+
+
+def test_scheduler_managed_wait_only_reduces_state_after_new_events(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    from eggopt.actor_critic import _wait_until_waiting
+
+    from eggthreads import append_message, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Actor")
+    prompt_id = append_message(db, thread_id, "user", "go")
+    after_seq = db.max_event_seq(thread_id)
+    calls = []
+
+    def state(_db, observed_thread_id):
+        calls.append(observed_thread_id)
+        return "running"
+
+    monkeypatch.setattr("eggopt.actor_critic.thread_state", state)
+
+    async def change_state():
+        await asyncio.sleep(0.35)
+        append_message(db, thread_id, "assistant", "done")
+
+    async def exercise():
+        changer = asyncio.create_task(change_state())
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    _wait_until_waiting(
+                        db,
+                        thread_id,
+                        prompt_id,
+                        after_seq,
+                        None,
+                    ),
+                    timeout=0.55,
+                )
+        finally:
+            await changer
+
+    try:
+        asyncio.run(exercise())
+        assert calls == [thread_id, thread_id]
+    finally:
+        db.close()

@@ -1580,15 +1580,13 @@ class ThreadRunner:
                 request_from_tool_call_state,
             )
             from .api import approve_tool_calls_for_thread
-            from .tool_state import build_tool_call_states
+            from .tool_state import pending_tool_call_states
         except Exception:
             return
 
         registry = create_approval_policy_registry()
         changed = False
-        for tc in build_tool_call_states(self.db, self.thread_id).values():
-            if tc.state != "TC1":
-                continue
+        for tc in pending_tool_call_states(self.db, self.thread_id):
             origin = "user_command" if tc.parent_role == "user" else "assistant"
             request = request_from_tool_call_state(self.db, self.thread_id, tc, origin=origin)
             # Assistant-originated calls still fall back to the existing human

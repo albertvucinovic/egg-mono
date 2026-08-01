@@ -1510,6 +1510,13 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
     return {tcid: deepcopy(tc) for tcid, tc in states.items()}
 
 
+def pending_tool_call_states(db: ThreadsDB, thread_id: str) -> List[ToolCallState]:
+    """Return only approval-pending calls without copying completed history."""
+
+    states = _reduce_thread_events(db, thread_id).tool_call_states
+    return [deepcopy(tc) for tc in states.values() if tc.state == "TC1"]
+
+
 def get_user_wait_candidates(db: ThreadsDB, thread_id: str) -> List[ToolCallState]:
     """Return bounded unresolved/recoverable get-user lifecycles in order.
 
@@ -1949,7 +1956,10 @@ def thread_state(db: ThreadsDB, thread_id: str) -> str:
       - "waiting_user"            (idle, waiting for user input)
       - "paused"                  (thread.status == 'paused')
     """
-    th = db.get_thread(thread_id)
+    # Coarse state never reads the potentially multi-megabyte snapshot blob.
+    # Loading it on every scheduler-managed poll can saturate SQLite/Python while
+    # several long-lived threads stream concurrently.
+    th = db.get_thread_metadata(thread_id)
     if th is None:
         return "unknown"
     if th and th.status == "paused":

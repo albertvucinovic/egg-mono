@@ -640,25 +640,45 @@ async def _wait_until_waiting(
 ) -> None:
     """Wait while a shared subtree scheduler drives this ActorCritic turn."""
 
-    from .context_limit import full_context_tokens
+    from eggthreads import header_token_stats
 
+    next_context_check_at = 0.0
+    last_event_seq = -1
+    state = "running"
     while True:
-        if (
-            context_limit is not None
-            and full_context_tokens(db, thread_id) >= context_limit
-        ):
-            interrupt_thread(
-                db,
-                thread_id,
-                reason="ActorCritic agent full context limit reached",
+        now = asyncio.get_running_loop().time()
+        if context_limit is not None and now >= next_context_check_at:
+            bounded_tokens = int(
+                header_token_stats(db, thread_id)["full_thread_tokens"]
             )
-            raise ContextLimitExceededError(
-                "ActorCritic agent full context limit reached; operation terminated"
-            )
-        state = thread_state(db, thread_id)
-        response = _latest_answer(db, thread_id, after_seq)
-        if response is not _NO_ANSWER and state != "running":
-            return
+            if bounded_tokens >= context_limit:
+                # The cached count is deliberately cheap and may lag message
+                # mutations. Pay for an exact count only at the terminal edge.
+                from .context_limit import full_context_tokens
+
+                if full_context_tokens(db, thread_id) >= context_limit:
+                    interrupt_thread(
+                        db,
+                        thread_id,
+                        reason="ActorCritic agent full context limit reached",
+                    )
+                    raise ContextLimitExceededError(
+                        "ActorCritic agent full context limit reached; "
+                        "operation terminated"
+                    )
+        if context_limit is not None and now >= next_context_check_at:
+            # Match the bounded cadence used by the ordinary ThreadRunner path.
+            # Re-tokenizing every 100 ms starves a shared scheduler when several
+            # large persistent Actor threads stream concurrently.
+            next_context_check_at = now + 10.0
+        current_event_seq = db.max_event_seq(thread_id)
+        if current_event_seq != last_event_seq:
+            state = thread_state(db, thread_id)
+            last_event_seq = current_event_seq
+        if state != "running":
+            response = _latest_answer(db, thread_id, after_seq)
+            if response is not _NO_ANSWER:
+                return
         if state == "waiting_user":
             InteractionRecovery(
                 db,
