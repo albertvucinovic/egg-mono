@@ -13,6 +13,28 @@ class InteractionRecoveryError(RuntimeError):
     """A persisted agent interaction could not be reset for retry."""
 
 
+def _turn_answers_after(projection: Any, after_seq: int) -> list[Any]:
+    """Return final assistant answers owned by one user-turn boundary."""
+
+    next_user_seq = next(
+        (
+            message.created_event_seq
+            for message in projection.messages
+            if message.created_event_seq > after_seq
+            and message.payload.get("role") == "user"
+        ),
+        None,
+    )
+    return [
+        message
+        for message in projection.messages
+        if message.created_event_seq > after_seq
+        and (next_user_seq is None or message.created_event_seq < next_user_seq)
+        and message.payload.get("role") == "assistant"
+        and not message.payload.get("tool_calls")
+    ]
+
+
 @dataclass(frozen=True)
 class InteractionRecovery:
     """Recover one trigger-anchored Eggthreads interaction before retry.
@@ -80,12 +102,7 @@ def _has_usable_answer_after(db: Any, thread_id: str, trigger_msg_id: str) -> bo
         raise InteractionRecoveryError(
             f"Interaction trigger {trigger_msg_id} is unavailable on thread {thread_id}"
         )
-    return any(
-        message.created_event_seq > trigger.created_event_seq
-        and message.payload.get("role") == "assistant"
-        and not message.payload.get("tool_calls")
-        for message in projection.messages
-    )
+    return bool(_turn_answers_after(projection, trigger.created_event_seq))
 
 
 __all__ = ["InteractionRecovery", "InteractionRecoveryError"]

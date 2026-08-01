@@ -256,7 +256,7 @@ def test_thread_tool_without_files_keeps_legacy_cache_identity():
     from eggthreads import ToolRegistry
 
     legacy = ThreadTool(ToolRegistry(), "thread", "echo", {"value": "ok"})
-    with_files = ThreadTool(
+    with_output = ThreadTool(
         ToolRegistry(),
         "thread",
         "echo",
@@ -265,7 +265,167 @@ def test_thread_tool_without_files_keeps_legacy_cache_identity():
     )
 
     assert legacy.get_cache_key().startswith("eggopt.thread-tool.v1:")
-    assert with_files.get_cache_key().startswith("eggopt.thread-tool.v2:")
+    assert with_output.get_cache_key().startswith("eggopt.thread-tool.v2:")
+
+
+def test_thread_tool_rejects_a_timed_out_tool_result(tmp_path, monkeypatch):
+    import asyncio
+
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+    from eggthreads import (
+        ThreadsDB,
+        ToolExecutionResult,
+        ToolRegistry,
+        create_root_thread,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    registry = ToolRegistry()
+    registry.register(
+        "hang",
+        "Hang",
+        {"type": "object", "properties": {}},
+        lambda _arguments: ToolExecutionResult("timed out", reason="timeout"),
+    )
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Critic")
+    _bind_evaluation_runtime("runtime", db)
+    context = {
+        "evaluation_thread_id": thread_id,
+        "outer_context": str(tmp_path),
+        "inner_context": str(tmp_path),
+        "_runtime_key": "runtime",
+        "_evaluation_key": "test",
+        "_context_limit": None,
+    }
+    task = ThreadTool(registry, thread_id, "hang", {"timeout": 1})
+
+    try:
+        with (
+            _evaluation_scope(context),
+            pytest.raises(RuntimeError, match="tool call failed: timeout"),
+        ):
+            asyncio.run(task.run())
+    finally:
+        db.close()
+
+
+def test_thread_tool_input_file_content_is_part_of_cache_identity(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+
+    from eggthreads import (
+        ThreadsDB,
+        ToolRegistry,
+        create_root_thread,
+        set_thread_working_directory,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "request.json"
+    source.write_text('{"version": 1}\n')
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Input")
+    set_thread_working_directory(db, thread_id, str(workspace), reason="test")
+    _bind_evaluation_runtime("runtime", db)
+    context = {
+        "evaluation_thread_id": thread_id,
+        "outer_context": str(workspace),
+        "inner_context": str(workspace),
+        "_runtime_key": "runtime",
+        "_evaluation_key": "test",
+        "_context_limit": None,
+    }
+    try:
+        with _evaluation_scope(context):
+            task = ThreadTool(
+                ToolRegistry(),
+                thread_id,
+                "python_exec",
+                {"script": "pass"},
+                input_files=("request.json",),
+            )
+            identities = task.input_file_identities()
+            first = task.get_cache_key()
+            source.write_text('{"version": 2}\n')
+            second = ThreadTool(
+                ToolRegistry(),
+                thread_id,
+                "python_exec",
+                {"script": "pass"},
+                input_files=("request.json",),
+            ).get_cache_key()
+        assert first.startswith("eggopt.thread-tool.v2:")
+        assert first != second
+        assert identities[0]["size_bytes"] == len(b'{"version": 1}\n')
+        assert json.loads(source.read_text()) == {"version": 2}
+    finally:
+        db.close()
+
+
+def test_thread_tool_input_files_honor_sandbox_read_policy(tmp_path, monkeypatch):
+    from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+
+    from eggthreads import (
+        ThreadsDB,
+        ToolRegistry,
+        create_root_thread,
+        set_thread_sandbox_config,
+        set_thread_working_directory,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "secret.json").write_text("secret")
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Input")
+    set_thread_working_directory(db, thread_id, str(workspace), reason="test")
+    set_thread_sandbox_config(
+        db,
+        thread_id,
+        enabled=True,
+        provider="docker",
+        settings={
+            "filesystem": {
+                "allowWrite": ["."],
+                "denyWrite": [".egg"],
+                "denyRead": ["secret.json", ".egg"],
+            }
+        },
+        reason="test",
+    )
+    _bind_evaluation_runtime("runtime", db)
+    context = {
+        "evaluation_thread_id": thread_id,
+        "outer_context": str(workspace),
+        "inner_context": str(workspace),
+        "_runtime_key": "runtime",
+        "_evaluation_key": "test",
+        "_context_limit": None,
+    }
+    try:
+        with (
+            _evaluation_scope(context),
+            pytest.raises(PermissionError, match="denyRead"),
+        ):
+            ThreadTool(
+                ToolRegistry(),
+                thread_id,
+                "python_exec",
+                {"script": "pass"},
+                input_files=("secret.json",),
+            ).input_file_identities()
+    finally:
+        db.close()
 
 
 def test_thread_tool_recovers_existing_recorded_call(tmp_path, monkeypatch):
@@ -430,14 +590,15 @@ def test_thread_tool_snapshots_and_rematerializes_hashed_output_file(
         db.close()
 
 
+@pytest.mark.parametrize("kind", ["input_files", "output_files"])
 @pytest.mark.parametrize(
     "path", ["/absolute.json", "../escape.json", ".egg/private.json", "a/../b.json"]
 )
-def test_thread_tool_rejects_unsafe_output_file_paths(path):
+def test_thread_tool_rejects_unsafe_file_paths(kind, path):
     from eggthreads import ToolRegistry
 
     with pytest.raises(ValueError, match="workspace-relative"):
-        ThreadTool(ToolRegistry(), "thread", "tool", {}, output_files=(path,))
+        ThreadTool(ToolRegistry(), "thread", "tool", {}, **{kind: (path,)})
 
 
 def test_thread_tool_requires_every_declared_output_file(tmp_path, monkeypatch):

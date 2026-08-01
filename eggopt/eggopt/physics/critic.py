@@ -5,14 +5,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from eggflow import Task
+from eggflow import Task, TaskError
 
 from ..actor_critic import Critique
 from ..identity import digest_payload
 from ..thread_tool import ThreadTool, ThreadToolResult
 from .instruments import write_actor_files
 from .planning import canonical_plan, freeze, load_committed_plan
-from .theory import evaluator_script, parse_evaluator_receipt
+from .theory import evaluator_file_script, parse_evaluator_receipt
 
 
 @dataclass
@@ -27,6 +27,7 @@ class PhysicsCritic(Task):
     legal_actions_key: str = "legal_actions"
     max_depth: int = 8
     max_nodes: int = 10_000
+    evaluator_timeout_sec: float = 300.0
     workspace: str | None = None
     outer_context: str | None = None
     head: str | None = None
@@ -35,13 +36,14 @@ class PhysicsCritic(Task):
 
     def get_cache_key(self):
         return digest_payload(
-            "eggopt.physics.domain-critic.v1",
+            "eggopt.physics.domain-critic.v1.file-inputs",
             {
                 "identity": self.identity,
                 "head": self.head,
                 "max_actions": self.max_actions,
                 "max_depth": self.max_depth,
                 "max_nodes": self.max_nodes,
+                "evaluator_timeout_sec": self.evaluator_timeout_sec,
                 "legal_actions_key": self.legal_actions_key,
             },
         )
@@ -68,21 +70,27 @@ class PhysicsCritic(Task):
 
         try:
             report_path = _evaluation_report_path(self.head)
+            request_path = _evaluation_request_path(self.head)
             request = {
-                "source": source_path.read_text(),
-                "timeline": timeline,
+                "source_path": "world_model.py",
+                "timeline_path": "canonical-input.json",
                 "legal_actions_key": self.legal_actions_key,
                 "max_depth": self.max_depth,
                 "max_nodes": self.max_nodes,
                 "work_dir": ".trusted/evaluator-work",
                 "output_path": report_path,
             }
+            _write_json(repository / request_path, request)
             result = yield ThreadTool(
                 self.tools,
                 self.critic_thread_id,
                 "python_exec",
-                {"script": evaluator_script(request)},
+                {
+                    "script": evaluator_file_script(request_path),
+                    "timeout": self.evaluator_timeout_sec,
+                },
                 origin="eggopt.physics.trusted-evaluator",
+                input_files=(request_path, "world_model.py", "canonical-input.json"),
                 output_files=(report_path,),
             )
             if not isinstance(result, ThreadToolResult):
@@ -92,7 +100,7 @@ class PhysicsCritic(Task):
             evaluation = _evaluation_report(repository / report_path)
             committed = load_committed_plan(repository)
             committed = canonical_plan(committed)
-        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        except (OSError, TaskError, TypeError, ValueError, RuntimeError) as exc:
             return self._revise(repository, state_root, timeline, actions, str(exc))
 
         backtest = evaluation["backtest"]
@@ -184,7 +192,16 @@ class PhysicsCritic(Task):
             "actions": actions,
         }
         sync_state(
-            repository, state_root, timeline, actions, report, self.domain_information
+            repository,
+            state_root,
+            timeline,
+            actions,
+            report,
+            self.domain_information,
+            legal_actions_key=self.legal_actions_key,
+            max_depth=self.max_depth,
+            max_nodes=self.max_nodes,
+            evaluator_timeout_sec=self.evaluator_timeout_sec,
         )
         if resolution in {"won", "max_actions"}:
             return Critique.accept(
@@ -215,7 +232,16 @@ class PhysicsCritic(Task):
             "evaluation": evaluation,
         }
         sync_state(
-            repository, state_root, timeline, actions, report, self.domain_information
+            repository,
+            state_root,
+            timeline,
+            actions,
+            report,
+            self.domain_information,
+            legal_actions_key=self.legal_actions_key,
+            max_depth=self.max_depth,
+            max_nodes=self.max_nodes,
+            evaluator_timeout_sec=self.evaluator_timeout_sec,
         )
         return Critique.revise(
             "The trusted Critic rejected the submitted Git HEAD before executing any "
@@ -250,21 +276,25 @@ def _execution_feedback(resolution: str) -> str:
             "planner-returned plan."
         ),
     }
-    return (
-        f"Trusted execution stopped with resolution={resolution}. "
-        + guidance.get(
-            resolution,
-            "Inspect trusted-report.json and canonical-input.json, revise the theory, "
-            "rerun backtest.py and plan.py, and commit another planner-returned plan.",
-        )
+    return f"Trusted execution stopped with resolution={resolution}. " + guidance.get(
+        resolution,
+        "Inspect trusted-report.json and canonical-input.json, revise the theory, "
+        "rerun backtest.py and plan.py, and commit another planner-returned plan.",
     )
 
 
 def _evaluation_report_path(head: str | None) -> str:
     value = str(head or "").strip().lower()
     if len(value) != 40 or any(ch not in "0123456789abcdef" for ch in value):
-        raise ValueError("Physics Critic requires a full hexadecimal submitted Git HEAD")
+        raise ValueError(
+            "Physics Critic requires a full hexadecimal submitted Git HEAD"
+        )
     return f".trusted/evaluations/{value}.json"
+
+
+def _evaluation_request_path(head: str | None) -> str:
+    value = _evaluation_report_path(head).rsplit("/", 1)[-1]
+    return f".trusted/requests/{value}"
 
 
 def _evaluation_report(path: Path) -> dict[str, Any]:
@@ -301,11 +331,32 @@ def write_state(repository: Path, timeline, actions, report) -> None:
         _write_json(repository / "trusted-report.json", report)
 
 
-def sync_state(repository, state_root, timeline, actions, report, domain_information):
+def sync_state(
+    repository,
+    state_root,
+    timeline,
+    actions,
+    report,
+    domain_information,
+    *,
+    legal_actions_key="legal_actions",
+    max_depth=8,
+    max_nodes=10_000,
+    evaluator_timeout_sec=300.0,
+):
     write_state(repository, timeline, actions, report)
     if state_root != repository:
         write_state(state_root, timeline, actions, report)
-    write_actor_files(repository, timeline, domain_information)
+    write_actor_files(
+        repository,
+        timeline,
+        domain_information,
+        legal_actions_key=legal_actions_key,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        evaluator_timeout_sec=evaluator_timeout_sec,
+        refresh_instruments=False,
+    )
 
 
 def _write_json(path, value):

@@ -10,10 +10,12 @@ from eggopt.physics import canonical_plan
 from eggopt.physics.critic import (
     _evaluation_report,
     _evaluation_report_path,
+    _evaluation_request_path,
     _execution_feedback,
 )
 from eggopt.physics.strategy import _actor_turn_prompt
 from eggopt.physics.theory import (
+    evaluator_file_script,
     evaluator_script,
     parse_evaluator_output,
     parse_evaluator_receipt,
@@ -28,6 +30,7 @@ from eggopt import (
     physics_actor_system_prompt,
 )
 from eggthreads import (
+    RunnerConfig,
     ThreadsDB,
     ToolRegistry,
     list_children_with_meta,
@@ -106,6 +109,7 @@ def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
             identity={"domain": "toy"},
             domain_information="State has position and legal_actions.",
             max_depth=4,
+            evaluator_timeout_sec=17,
         ),
         llm,
     )
@@ -165,6 +169,61 @@ def test_generic_evaluator_can_write_a_compactly_receipted_report(tmp_path):
     assert "models" not in completed.stdout
 
 
+def test_generic_evaluator_loads_large_inputs_from_workspace_files(tmp_path):
+    report = tmp_path / "trusted" / "report.json"
+    canonical = tmp_path / "canonical-input.json"
+    canonical.write_text(
+        json.dumps(
+            {
+                "timeline": [
+                    {
+                        "position": 0,
+                        "legal_actions": [1],
+                        "irrelevant": "x" * 200_000,
+                    }
+                ]
+            }
+        )
+    )
+    (tmp_path / "world_model.py").write_text(MODEL)
+    request = tmp_path / "trusted" / "request.json"
+    request.parent.mkdir()
+    request.write_text(
+        json.dumps(
+            {
+                "source_path": "world_model.py",
+                "timeline_path": "canonical-input.json",
+                "legal_actions_key": "legal_actions",
+                "max_depth": 4,
+                "max_nodes": 100,
+                "work_dir": "trusted/work",
+                "output_path": "trusted/report.json",
+            }
+        )
+    )
+
+    script = evaluator_file_script("trusted/request.json")
+    completed = subprocess.run(
+        ["python", "-c", script],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert len(script) < 10_000
+    assert "x" * 1_000 not in script
+    assert parse_evaluator_receipt(completed.stdout) == "trusted/report.json"
+    assert set(json.loads(report.read_text())["backtest"]["models"]) == {"a", "b"}
+
+
+def test_file_evaluator_script_stays_below_linux_single_argument_limit():
+    script = evaluator_file_script(".trusted/requests/" + "a" * 40 + ".json")
+
+    assert len(script.encode()) < 131_072
+    assert max(len(line.encode()) for line in script.splitlines()) < 131_072
+
+
 def test_generic_evaluator_reports_all_models_and_multistep_discrimination():
     result = run_evaluator(
         {
@@ -222,7 +281,7 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
     tools = ToolRegistry()
 
     def python_exec(arguments, context):
-        calls.append(context.thread_id)
+        calls.append((context.thread_id, context.timeout_sec))
         completed = subprocess.run(
             ["python", "-c", arguments["script"]],
             cwd=Path(context.db.path).parent.parent / "workspace" / "critic-repository",
@@ -260,7 +319,21 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
     assert result.accepted is False
     assert len(observed) == 2
     assert "resolution=models_discriminated" in result.feedback
-    assert calls == [result.critic_thread_id]
+    assert calls == [(result.critic_thread_id, 17)]
+    request_path = (
+        tmp_path
+        / "run"
+        / "workspace"
+        / "critic-repository"
+        / ".trusted"
+        / "requests"
+        / f"{git(workspace, 'log', '--format=%H', '--grep=actor theory and plan', '-1')}.json"
+    )
+    request = json.loads(request_path.read_text())
+    assert request["source_path"] == "world_model.py"
+    assert request["timeline_path"] == "canonical-input.json"
+    assert "source" not in request
+    assert "timeline" not in request
     report_path = (
         tmp_path
         / "run"
@@ -310,7 +383,9 @@ def test_dirty_repository_rejected_then_fixed(tmp_path, monkeypatch):
             write_plan(workspace, plan)
             (workspace / "dirty.txt").write_text("dirty")
         else:
-            (workspace / ".gitignore").write_text("scratch/\ndirty.txt\n")
+            (workspace / ".gitignore").write_text(
+                "scratch/\ndirty.txt\n.physics-evaluation/\n"
+            )
             git(workspace, "add", "-A")
             git(workspace, "commit", "-m", "ignore scratch")
 
@@ -417,6 +492,357 @@ def test_actor_files_publish_the_same_complete_runbook(tmp_path):
     assert refreshed.endswith("Updated details.\n")
 
 
+def test_actor_instruments_are_self_contained_and_use_strategy_configuration(
+    tmp_path,
+):
+    import os
+
+    from eggopt import write_actor_files
+
+    write_actor_files(
+        tmp_path,
+        ({"position": 0, "moves": [1]},),
+        legal_actions_key="moves",
+        max_depth=3,
+        max_nodes=41,
+        evaluator_timeout_sec=7,
+    )
+    (tmp_path / "world_model.py").write_text(
+        "def step_a(state, action):\n"
+        "    return {'position': state['position'] + action, 'moves': [1]}\n"
+        "def reward_a(state):\n"
+        "    return state['position']\n"
+    )
+
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    for script in ("backtest.py", "plan.py"):
+        completed = subprocess.run(
+            ["python", "-E", script],
+            cwd=tmp_path,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    config = json.loads((tmp_path / "physics-config.json").read_text())
+    assert config == {
+        "evaluator_timeout_sec": 7,
+        "legal_actions_key": "moves",
+        "max_depth": 3,
+        "max_nodes": 41,
+    }
+    assert json.loads((tmp_path / "backtest-report.json").read_text())[
+        "surviving_models"
+    ] == ["a"]
+    plans = json.loads((tmp_path / "plan-report.json").read_text())[
+        "canonical_plans"
+    ]
+    assert plans and len(plans[0]["plan"]["intents"]) == 3
+    runtime = (tmp_path / "physics_runtime.py").read_text()
+    assert "eggopt" not in runtime
+    assert "arcagi3" not in runtime
+
+
+def test_actor_instruments_run_in_a_clean_python_container(tmp_path):
+    import os
+    import shutil
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker is unavailable")
+    from eggopt import write_actor_files
+
+    write_actor_files(
+        tmp_path,
+        ({"position": 0, "legal_actions": [1]},),
+        max_depth=2,
+        max_nodes=20,
+    )
+    (tmp_path / "world_model.py").write_text(
+        "def step_a(state, action):\n"
+        "    return {'position': state['position'] + action, 'legal_actions': [1]}\n"
+        "def reward_a(state):\n"
+        "    return state['position']\n"
+    )
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cap-drop",
+            "ALL",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "-e",
+            "HOME=/tmp",
+            "-v",
+            f"{tmp_path}:/workspace",
+            "-w",
+            "/workspace",
+            "python:3.12-slim",
+            "python",
+            "plan.py",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((tmp_path / "plan-report.json").read_text())[
+        "canonical_plans"
+    ]
+
+
+def test_local_and_trusted_plan_validation_match(tmp_path):
+    import importlib.util
+
+    from eggopt import write_actor_files
+
+    write_actor_files(tmp_path, ({"legal_actions": [1]},))
+    spec = importlib.util.spec_from_file_location(
+        "generated_physics_runtime", tmp_path / "physics_runtime.py"
+    )
+    assert spec is not None and spec.loader is not None
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    values = (
+        {"purpose": "goal", "models": ["a"], "intents": []},
+        {
+            "purpose": "goal",
+            "models": ["a"],
+            "intents": [{"action": 1, "prediction": {"b": {}}}],
+        },
+        {
+            "purpose": "goal",
+            "models": ["a"],
+            "intents": [{"action": 1, "prediction": {"a": {}}}],
+            "extra": True,
+        },
+    )
+    for value in values:
+        with pytest.raises(ValueError) as trusted:
+            canonical_plan(value)
+        with pytest.raises(ValueError) as local:
+            runtime.canonical_plan(value)
+        assert str(local.value) == str(trusted.value)
+
+
+def test_actor_instrument_subprocess_has_a_timeout(tmp_path):
+    import os
+
+    from eggopt import write_actor_files
+
+    write_actor_files(
+        tmp_path,
+        ({"legal_actions": [1]},),
+        evaluator_timeout_sec=0.05,
+    )
+    (tmp_path / "world_model.py").write_text(
+        "while True:\n"
+        "    pass\n"
+        "def step_a(state, action):\n"
+        "    return state\n"
+        "def reward_a(state):\n"
+        "    return 0\n"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        ["python", "-E", "backtest.py"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "timed out after 0.05 seconds" in completed.stderr
+
+
+def test_actor_instrument_timeout_terminates_descendants(tmp_path):
+    import os
+    import time
+
+    from eggopt import write_actor_files
+
+    write_actor_files(
+        tmp_path,
+        ({"legal_actions": [1]},),
+        evaluator_timeout_sec=0.2,
+    )
+    marker = tmp_path / "descendant-survived"
+    (tmp_path / "world_model.py").write_text(
+        "import subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', "
+        f"\"import time; time.sleep(0.8); open({str(marker)!r}, 'w').write('bad')\"])\n"
+        "while True:\n"
+        "    pass\n"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        ["python", "-E", "backtest.py"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=2,
+        check=False,
+    )
+    time.sleep(0.9)
+
+    assert completed.returncode != 0
+    assert "timed out after 0.2 seconds" in completed.stderr
+    assert not marker.exists()
+
+
+def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor = tmp_path / "actor"
+    critic = tmp_path / "critic"
+    actor.mkdir()
+    git(actor, "init", "-b", "main")
+    git(actor, "config", "user.name", "Physics")
+    git(actor, "config", "user.email", "physics@test")
+    (actor / "world_model.py").write_text("THEORY = 'preserve me'\n")
+    (actor / "backtest.py").write_text(
+        'from eggopt.physics import actor_backtest\n\n'
+        'if __name__ == "__main__":\n'
+        '    actor_backtest()\n'
+    )
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "old instruments")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    _refresh_actor_instruments(
+        actor,
+        critic,
+        legal_actions_key="moves",
+        max_depth=5,
+        max_nodes=99,
+        evaluator_timeout_sec=11,
+    )
+
+    assert (actor / "world_model.py").read_text() == "THEORY = 'preserve me'\n"
+    assert "physics_runtime" in (actor / "backtest.py").read_text()
+    assert json.loads((actor / "physics-config.json").read_text())["max_depth"] == 5
+    assert git(actor, "log", "-1", "--format=%s") == (
+        "[physics] refresh Actor instruments"
+    )
+    assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
+
+
+def test_instrument_refresh_refuses_modified_owned_files(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor = tmp_path / "actor"
+    critic = tmp_path / "critic"
+    actor.mkdir()
+    git(actor, "init", "-b", "main")
+    git(actor, "config", "user.name", "Physics")
+    git(actor, "config", "user.email", "physics@test")
+    (actor / "backtest.py").write_text("old\n")
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "old instruments")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    (actor / "backtest.py").write_text("actor modification\n")
+
+    with pytest.raises(RuntimeError, match="modified Physics-owned.*backtest.py"):
+        _refresh_actor_instruments(
+            actor,
+            critic,
+            legal_actions_key="legal_actions",
+            max_depth=8,
+            max_nodes=10_000,
+            evaluator_timeout_sec=300,
+        )
+
+    assert (actor / "backtest.py").read_text() == "actor modification\n"
+
+
+def test_instrument_refresh_refuses_committed_custom_helpers(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor = tmp_path / "actor"
+    critic = tmp_path / "critic"
+    actor.mkdir()
+    git(actor, "init", "-b", "main")
+    git(actor, "config", "user.name", "Physics")
+    git(actor, "config", "user.email", "physics@test")
+    (actor / "backtest.py").write_text("custom committed helper\n")
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "custom helper")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(RuntimeError, match="customized.*backtest.py"):
+        _refresh_actor_instruments(
+            actor,
+            critic,
+            legal_actions_key="legal_actions",
+            max_depth=8,
+            max_nodes=10_000,
+            evaluator_timeout_sec=300,
+        )
+
+    assert (actor / "backtest.py").read_text() == "custom committed helper\n"
+
+
+def test_git_critic_does_not_evaluate_an_instrument_maintenance_commit(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+    calls = []
+
+    def edit(call):
+        calls.append(call)
+        if call == 1:
+            (workspace / "backtest.py").write_text(
+                'from eggopt.physics import actor_backtest\n\n'
+                'if __name__ == "__main__":\n'
+                '    actor_backtest()\n'
+            )
+            git(workspace, "add", "backtest.py")
+            git(workspace, "commit", "-m", "restore legacy helper")
+        else:
+            write_plan(workspace, experiment_plan())
+
+    physics, actor = strategy(workspace, edit, replies=("legacy", "ready"))
+    result = physics.run(run_dir="run", max_cycles=2)
+
+    assert actor.calls == 2
+    assert calls == [1, 2]
+    assert "models_discriminated" in result.feedback
+    subjects = git(workspace, "log", "--format=%s", "-3").splitlines()
+    assert "[physics] refresh Actor instruments" in subjects
+
+
 def test_actor_turn_prompts_require_the_full_runbook():
     first = _actor_turn_prompt(1, {})
     revision = _actor_turn_prompt(2, {"feedback": "Prediction contradicted."})
@@ -444,6 +870,7 @@ def test_critic_feedback_explains_each_execution_resolution():
 def test_evaluation_report_path_requires_full_git_head():
     head = "a" * 40
     assert _evaluation_report_path(head) == f".trusted/evaluations/{head}.json"
+    assert _evaluation_request_path(head) == f".trusted/requests/{head}.json"
     with pytest.raises(ValueError, match="full hexadecimal"):
         _evaluation_report_path("../escape")
 
@@ -465,3 +892,102 @@ def test_physics_requires_domain_ports():
             is_goal=lambda _: False,
             identity={},
         )
+
+
+def test_physics_task_reuses_an_existing_runtime_thread(tmp_path, monkeypatch):
+    import asyncio
+
+    from eggopt.runtime import Runtime
+
+    from eggthreads import create_child_thread, create_root_thread
+
+    monkeypatch.chdir(tmp_path)
+    workspace = (
+        tmp_path / "benchmark" / "environments" / "toy" / "workspace" / "innerContext"
+    )
+    plan = canonical_plan(
+        {
+            "purpose": "goal",
+            "models": ["a"],
+            "intents": [
+                {
+                    "action": 1,
+                    "prediction": {"a": {"position": 2, "legal_actions": [1]}},
+                }
+            ],
+        }
+    )
+
+    def edit(_call):
+        write_plan(workspace, plan)
+
+    physics, _actor = strategy(workspace, edit)
+    with Runtime.open("benchmark") as runtime:
+        root = create_root_thread(runtime.threads, name="Benchmark")
+        physics_id = create_child_thread(runtime.threads, root, name="Physics toy")
+        result = asyncio.run(
+            runtime.flow.run(
+                physics.task(
+                    runtime_key=runtime.runtime_key,
+                    run_dir=tmp_path / "benchmark" / "environments" / "toy",
+                    physics_thread_id=physics_id,
+                    max_cycles=1,
+                )
+            )
+        )
+
+        assert result.physics_thread_id == physics_id
+        assert list_root_threads(runtime.threads) == [root]
+        assert [
+            name for _, name, *_ in list_children_with_meta(runtime.threads, root)
+        ] == ["Physics toy"]
+
+
+def test_scheduler_managed_agent_is_part_of_task_identity():
+    ordinary = Agent(object(), {"role": "actor"})
+    managed = Agent(object(), {"role": "actor"}, scheduler_managed=True)
+
+    assert "scheduler_managed" not in ordinary.task_identity
+    assert managed.task_identity["scheduler_managed"] is True
+    assert ordinary.task_identity != managed.task_identity
+    assert managed.runner_config == RunnerConfig()
+
+
+def test_scheduler_managed_turn_waits_for_shared_scheduler(tmp_path, monkeypatch):
+    import asyncio
+
+    from eggopt.actor_critic import _AgentTurn
+    from eggopt.context import _bind_evaluation_runtime
+
+    from eggthreads import (
+        append_message,
+        create_root_thread,
+        load_thread_projection,
+    )
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Actor")
+    agent = Agent(object(), {"role": "actor"}, scheduler_managed=True)
+    task = _AgentTurn("runtime", thread_id, agent, "go", "actor", 1)
+    _bind_evaluation_runtime("runtime", db)
+
+    async def answer_after_scheduler_started():
+        while not any(
+            message.payload.get("role") == "user"
+            for message in load_thread_projection(db, thread_id).messages
+        ):
+            await asyncio.sleep(0)
+        append_message(db, thread_id, "assistant", "done")
+
+    async def exercise():
+        responder = asyncio.create_task(answer_after_scheduler_started())
+        try:
+            return await task.run()
+        finally:
+            await responder
+
+    try:
+        assert asyncio.run(exercise()) == "done"
+    finally:
+        db.close()

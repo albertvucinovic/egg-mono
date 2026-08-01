@@ -64,6 +64,9 @@ use(result.best_candidate)
   finish after Actor/Critic assignment and before the corresponding model turn.
 - `ThreadTool` is the reusable Eggflow task for durable synthetic tool calls on
   assigned Eggthreads threads; domain code never queries Eggthreads storage.
+  Its optional `input_files=(...)` contract authorizes files and includes their
+  content hashes in the cache identity without copying large inputs into tool
+  arguments.
   Its optional `output_files=(...)` contract snapshots sandbox-written files into
   content-addressed storage and verifies/rematerializes them on recovery while
   returning a compact `ThreadToolResult` receipt.
@@ -108,8 +111,16 @@ physics = PhysicsStrategy(
     is_goal=trusted_goal_predicate,
     identity={"domain": "my-world", "version": 1},
     domain_information="Explain the public state and action formats.",
+    evaluator_timeout_sec=300,
 )
 ```
+
+`PhysicsStrategy.task(...)` composes the same study into an already-open Eggopt
+runtime and an existing Physics thread. Batch applications can therefore place
+related studies below one root, give each study its own workspace, and drive all
+Actor turns through one bounded Eggthreads `SubtreeScheduler`. An Agent with
+`scheduler_managed=True` waits for that shared scheduler instead of constructing
+its own `ThreadRunner`; ordinary standalone Physics runs remain unchanged.
 
 Eggopt owns the Timeline, `step_<suffix>` / `reward_<suffix>` theory convention,
 all-model backtesting, goal and subset-discrimination planning, Actor instruments,
@@ -121,12 +132,24 @@ The Critic keeps `workspace/critic-repository`, pulls submitted history, and
 restores/rehydrates the latest canonical state if the Actor deletes `.git`.
 
 Committed world-model code is never imported into the controller. The generic
-Critic serializes canonical evidence into a self-contained evaluator and invokes
-`python_exec` through its assigned Critic Eggthread. Eggthreads therefore applies
-the Critic thread's working directory and Docker sandbox to untrusted execution.
-The evaluator writes `.trusted/evaluations/<ACTOR_HEAD>.json`; `ThreadTool`
-snapshots those bytes by SHA-256 and records only a compact receipt. Cached replay
-verifies or rematerializes the report before the Critic consumes it.
+Critic writes a compact `.trusted/requests/<ACTOR_HEAD>.json` manifest; the
+sandbox evaluator reads that manifest, committed `world_model.py`, and
+`canonical-input.json` as declared `ThreadTool` file inputs. Only the small fixed
+runner and paths travel through `python_exec`. Eggthreads therefore applies the
+Critic thread's working directory and Docker sandbox to untrusted execution while
+the evaluator timeout terminates runaway submitted code and file hashes keep
+caching content-addressed. The evaluator writes
+`.trusted/evaluations/<ACTOR_HEAD>.json`; `ThreadTool` snapshots those bytes by
+SHA-256 and records only a compact receipt. Cached replay verifies or
+rematerializes the report before the Critic consumes it.
+
+PhysicsStrategy also publishes a generated, standard-library-only
+`physics_runtime.py` plus `physics-config.json` into the Actor repository. The
+local `backtest.py`, `plan.py`, and `commit.py` wrappers therefore work in an
+isolated Actor container without installing Eggopt. This runtime contains only
+the generic Physics evaluator and public search limits; domain `observe`,
+`execute`, and `is_goal` implementations remain on the trusted host and are never
+copied into the Actor workspace.
 
 Actor-facing `backtest.py` and `plan.py` use the same generic algorithm for local
 advice; they are untrusted workspace copies. `commit.py PLAN_ID` selects a

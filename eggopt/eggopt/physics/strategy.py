@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
@@ -24,7 +25,12 @@ from ..context import _current_operation, _operation_runtime, _operation_scope
 from ..identity import digest_payload
 from ..runtime import Runtime, sync
 from .critic import PhysicsCritic, write_state
-from .instruments import ACTOR_INSTRUCTIONS, write_actor_files
+from .instruments import (
+    ACTOR_INSTRUCTIONS,
+    ensure_evaluator_ignore,
+    instrument_files,
+    write_actor_files,
+)
 
 TaskFactory = Callable[..., Task]
 
@@ -112,11 +118,19 @@ class PhysicsStrategy:
     legal_actions_key: str = "legal_actions"
     max_depth: int = 8
     max_nodes: int = 10_000
+    evaluator_timeout_sec: float = 300.0
 
     def __post_init__(self) -> None:
         for name in ("observe", "execute", "is_goal"):
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name} must be callable")
+        if (
+            isinstance(self.evaluator_timeout_sec, bool)
+            or not isinstance(self.evaluator_timeout_sec, (int, float))
+            or not math.isfinite(self.evaluator_timeout_sec)
+            or self.evaluator_timeout_sec <= 0
+        ):
+            raise ValueError("evaluator_timeout_sec must be positive")
         digest_payload("eggopt.physics.identity.v2", self.identity)
 
     def run(
@@ -138,17 +152,50 @@ class PhysicsStrategy:
             )
             return sync(
                 runtime.flow.run(
-                    _PhysicsRun(
-                        self,
-                        runtime.runtime_key,
-                        str(runtime.root),
-                        physics_id,
-                        max_actions,
-                        max_cycles,
+                    self.task(
+                        runtime_key=runtime.runtime_key,
+                        run_dir=runtime.root,
+                        physics_thread_id=physics_id,
+                        max_actions=max_actions,
+                        max_cycles=max_cycles,
                     )
                 ),
                 operation="PhysicsStrategy",
             )
+
+    def task(
+        self,
+        *,
+        runtime_key: str,
+        run_dir: str | Path,
+        physics_thread_id: str,
+        max_actions: int = 100,
+        max_cycles: int = 100,
+    ) -> Task:
+        """Build this study inside an already-open Eggopt runtime and thread tree.
+
+        This is the composition boundary for a batch/root runner. The caller owns
+        the shared :class:`Runtime`, creates the Physics child, and may run one
+        :class:`~eggthreads.SubtreeScheduler` across all sibling studies. Set the
+        Actor's ``scheduler_managed`` flag when that scheduler, rather than the
+        ActorCritic task itself, should drive model turns.
+        """
+
+        for name, value in (("max_actions", max_actions), ("max_cycles", max_cycles)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(runtime_key, str) or not runtime_key:
+            raise ValueError("runtime_key must be a non-empty string")
+        if not isinstance(physics_thread_id, str) or not physics_thread_id:
+            raise ValueError("physics_thread_id must be a non-empty string")
+        return _PhysicsRun(
+            self,
+            runtime_key,
+            str(Path(run_dir).resolve()),
+            physics_thread_id,
+            max_actions,
+            max_cycles,
+        )
 
 
 def run_physics(
@@ -218,7 +265,11 @@ class _PhysicsRun(Task):
             "inner_context": workspace,
             "_runtime_key": self.runtime_key,
             "_evaluation_key": digest_payload(
-                "eggopt.physics.study.v2", self.strategy.identity
+                "eggopt.physics.study.v3",
+                {
+                    "identity": self.strategy.identity,
+                    "evaluator_timeout_sec": self.strategy.evaluator_timeout_sec,
+                },
             ),
             "_context_limit": None,
         }
@@ -231,6 +282,10 @@ class _PhysicsRun(Task):
                 workspace,
                 outer,
                 self.strategy.domain_information,
+                self.strategy.legal_actions_key,
+                self.strategy.max_depth,
+                self.strategy.max_nodes,
+                self.strategy.evaluator_timeout_sec,
             )
             result = yield ActorCritic(
                 actor=self.strategy.actor,
@@ -244,6 +299,7 @@ class _PhysicsRun(Task):
                         legal_actions_key=self.strategy.legal_actions_key,
                         max_depth=self.strategy.max_depth,
                         max_nodes=self.strategy.max_nodes,
+                        evaluator_timeout_sec=self.strategy.evaluator_timeout_sec,
                     ),
                     outer,
                     self.max_actions,
@@ -268,6 +324,7 @@ class _PhysicsRun(Task):
             workspace=workspace,
         )
 
+
 def _stopping_reason(value: Any, accepted: bool) -> str:
     if isinstance(value, Mapping):
         reason = value.get("stopping_reason")
@@ -287,6 +344,10 @@ class _InitializeRepository(Task):
     workspace: str
     outer_context: str
     domain_information: str
+    legal_actions_key: str = "legal_actions"
+    max_depth: int = 8
+    max_nodes: int = 10_000
+    evaluator_timeout_sec: float = 300.0
 
     def run(self):
         actor = Path(self.workspace)
@@ -323,7 +384,15 @@ class _InitializeRepository(Task):
             },
         )
         initial = yield observed
-        write_actor_files(actor, (initial,), self.domain_information)
+        write_actor_files(
+            actor,
+            (initial,),
+            self.domain_information,
+            legal_actions_key=self.legal_actions_key,
+            max_depth=self.max_depth,
+            max_nodes=self.max_nodes,
+            evaluator_timeout_sec=self.evaluator_timeout_sec,
+        )
         write_state(actor, (initial,), 0, None)
         write_state(Path(self.outer_context), (initial,), 0, None)
         _commit(actor, "[physics] initialize canonical world state")
@@ -347,7 +416,7 @@ class _GitCritic(Task):
         actor = Path(self.workspace) if self.workspace else None
         head = _git_head(actor) if actor is not None else None
         return digest_payload(
-            "eggopt.physics.git-critic.v1",
+            "eggopt.physics.git-critic.v1.file-inputs",
             {
                 "critic": _task_identity(self.critic),
                 "outer_context": self.outer_context,
@@ -363,6 +432,7 @@ class _GitCritic(Task):
             )
         actor = Path(self.workspace)
         critic_repo = _critic_repository(Path(self.outer_context))
+        critic_head_before = _git_head(critic_repo)
         if not _valid_repository(critic_repo):
             if not _valid_repository(actor):
                 return Critique.revise(
@@ -372,6 +442,7 @@ class _GitCritic(Task):
                     "plan.py, then submit one clean commit using commit.py plan-N."
                 )
             _clone_repository(actor, critic_repo)
+            critic_head_before = _git_head(critic_repo)
 
         if not _valid_repository(actor):
             _restore_repository(actor, critic_repo)
@@ -393,6 +464,28 @@ class _GitCritic(Task):
                 "state. No real action was attempted for this proposal. Read the restored "
                 "canonical-input.json and trusted-report.json, rebuild the proposal, and "
                 "finish with python commit.py plan-N."
+            )
+
+        try:
+            _refresh_actor_instruments(
+                actor,
+                critic_repo,
+                legal_actions_key=self.critic.legal_actions_key,
+                max_depth=self.critic.max_depth,
+                max_nodes=self.critic.max_nodes,
+                evaluator_timeout_sec=self.critic.evaluator_timeout_sec,
+            )
+        except RuntimeError as exc:
+            return Critique.revise(
+                "The Physics-owned Actor instruments could not be refreshed safely. "
+                f"No real action was attempted. Reason: {exc}"
+            )
+        if _git_head(critic_repo) != critic_head_before:
+            return Critique.revise(
+                "PhysicsStrategy refreshed its standard Actor instruments for this "
+                "study. No real action was attempted for the maintenance commit. "
+                "Rerun backtest.py and plan.py, then submit the theory with "
+                "python commit.py plan-N."
             )
 
         dirty = _git_status(actor)
@@ -547,6 +640,80 @@ def _overlay_authoritative_state(actor: Path, authoritative: Path) -> None:
         (actor / "canonical-input.json").write_text(
             json.dumps({"timeline": timeline}, indent=2, sort_keys=True) + "\n"
         )
+
+
+def _refresh_actor_instruments(
+    actor: Path,
+    critic: Path,
+    *,
+    legal_actions_key: str,
+    max_depth: int,
+    max_nodes: int,
+    evaluator_timeout_sec: float,
+) -> None:
+    """Upgrade Physics-owned helpers without touching an Actor's proposal."""
+
+    legacy_files = {
+        "backtest.py": "from eggopt.physics import actor_backtest\n\n"
+        'if __name__ == "__main__":\n    actor_backtest()\n',
+        "plan.py": "from eggopt.physics import actor_plan\n\n"
+        'if __name__ == "__main__":\n    actor_plan()\n',
+        "commit.py": "import sys\nfrom eggopt.physics import actor_commit\n\n"
+        'if __name__ == "__main__":\n'
+        '    actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")\n',
+    }
+    files = instrument_files(
+        legal_actions_key=legal_actions_key,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        evaluator_timeout_sec=evaluator_timeout_sec,
+    )
+    dirty = _git(actor, "status", "--porcelain=v1").splitlines()
+    dirty_paths = {
+        entry[2:].lstrip().split(" -> ")[-1]
+        for entry in dirty
+        if entry and len(entry) > 2
+    }
+    conflicts = sorted(dirty_paths.intersection(files))
+    if conflicts:
+        raise RuntimeError(
+            "Cannot refresh modified Physics-owned instruments: "
+            + ", ".join(conflicts)
+        )
+    customized = sorted(
+        name
+        for name, legacy in legacy_files.items()
+        if (actor / name).is_file()
+        and (actor / name).read_text() != legacy
+        and (actor / name).read_text() != files[name]
+    )
+    if customized:
+        raise RuntimeError(
+            "Cannot replace customized Physics-owned instruments: "
+            + ", ".join(customized)
+        )
+    changed = False
+    for name, content in files.items():
+        path = actor / name
+        if path.is_file() and path.read_text() == content:
+            continue
+        path.write_text(content)
+        changed = True
+    ignore_path = actor / ".gitignore"
+    before_ignore = ignore_path.read_text() if ignore_path.is_file() else None
+    ensure_evaluator_ignore(actor)
+    if ignore_path.read_text() != before_ignore:
+        changed = True
+    if not changed:
+        return
+    owned = (*files, ".gitignore")
+    _git(actor, "add", "--", *owned)
+    staged = _git(actor, "diff", "--cached", "--name-only", "--", *owned)
+    if not staged:
+        return
+    _configure_git(actor)
+    _git(actor, "commit", "-m", "[physics] refresh Actor instruments")
+    _pull(critic, actor)
 
 
 def _git(repository: Path, *args: str, check: bool = True) -> str:
