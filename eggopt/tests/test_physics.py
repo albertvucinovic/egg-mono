@@ -383,7 +383,9 @@ def test_dirty_repository_rejected_then_fixed(tmp_path, monkeypatch):
             write_plan(workspace, plan)
             (workspace / "dirty.txt").write_text("dirty")
         else:
-            (workspace / ".gitignore").write_text("scratch/\ndirty.txt\n")
+            (workspace / ".gitignore").write_text(
+                "scratch/\ndirty.txt\n.physics-evaluation/\n"
+            )
             git(workspace, "add", "-A")
             git(workspace, "commit", "-m", "ignore scratch")
 
@@ -488,6 +490,357 @@ def test_actor_files_publish_the_same_complete_runbook(tmp_path):
     refreshed = (tmp_path / "INSTRUCTIONS.md").read_text()
     assert refreshed.startswith(ACTOR_INSTRUCTIONS)
     assert refreshed.endswith("Updated details.\n")
+
+
+def test_actor_instruments_are_self_contained_and_use_strategy_configuration(
+    tmp_path,
+):
+    import os
+
+    from eggopt import write_actor_files
+
+    write_actor_files(
+        tmp_path,
+        ({"position": 0, "moves": [1]},),
+        legal_actions_key="moves",
+        max_depth=3,
+        max_nodes=41,
+        evaluator_timeout_sec=7,
+    )
+    (tmp_path / "world_model.py").write_text(
+        "def step_a(state, action):\n"
+        "    return {'position': state['position'] + action, 'moves': [1]}\n"
+        "def reward_a(state):\n"
+        "    return state['position']\n"
+    )
+
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    for script in ("backtest.py", "plan.py"):
+        completed = subprocess.run(
+            ["python", "-E", script],
+            cwd=tmp_path,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    config = json.loads((tmp_path / "physics-config.json").read_text())
+    assert config == {
+        "evaluator_timeout_sec": 7,
+        "legal_actions_key": "moves",
+        "max_depth": 3,
+        "max_nodes": 41,
+    }
+    assert json.loads((tmp_path / "backtest-report.json").read_text())[
+        "surviving_models"
+    ] == ["a"]
+    plans = json.loads((tmp_path / "plan-report.json").read_text())[
+        "canonical_plans"
+    ]
+    assert plans and len(plans[0]["plan"]["intents"]) == 3
+    runtime = (tmp_path / "physics_runtime.py").read_text()
+    assert "eggopt" not in runtime
+    assert "arcagi3" not in runtime
+
+
+def test_actor_instruments_run_in_a_clean_python_container(tmp_path):
+    import os
+    import shutil
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker is unavailable")
+    from eggopt import write_actor_files
+
+    write_actor_files(
+        tmp_path,
+        ({"position": 0, "legal_actions": [1]},),
+        max_depth=2,
+        max_nodes=20,
+    )
+    (tmp_path / "world_model.py").write_text(
+        "def step_a(state, action):\n"
+        "    return {'position': state['position'] + action, 'legal_actions': [1]}\n"
+        "def reward_a(state):\n"
+        "    return state['position']\n"
+    )
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cap-drop",
+            "ALL",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "-e",
+            "HOME=/tmp",
+            "-v",
+            f"{tmp_path}:/workspace",
+            "-w",
+            "/workspace",
+            "python:3.12-slim",
+            "python",
+            "plan.py",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((tmp_path / "plan-report.json").read_text())[
+        "canonical_plans"
+    ]
+
+
+def test_local_and_trusted_plan_validation_match(tmp_path):
+    import importlib.util
+
+    from eggopt import write_actor_files
+
+    write_actor_files(tmp_path, ({"legal_actions": [1]},))
+    spec = importlib.util.spec_from_file_location(
+        "generated_physics_runtime", tmp_path / "physics_runtime.py"
+    )
+    assert spec is not None and spec.loader is not None
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    values = (
+        {"purpose": "goal", "models": ["a"], "intents": []},
+        {
+            "purpose": "goal",
+            "models": ["a"],
+            "intents": [{"action": 1, "prediction": {"b": {}}}],
+        },
+        {
+            "purpose": "goal",
+            "models": ["a"],
+            "intents": [{"action": 1, "prediction": {"a": {}}}],
+            "extra": True,
+        },
+    )
+    for value in values:
+        with pytest.raises(ValueError) as trusted:
+            canonical_plan(value)
+        with pytest.raises(ValueError) as local:
+            runtime.canonical_plan(value)
+        assert str(local.value) == str(trusted.value)
+
+
+def test_actor_instrument_subprocess_has_a_timeout(tmp_path):
+    import os
+
+    from eggopt import write_actor_files
+
+    write_actor_files(
+        tmp_path,
+        ({"legal_actions": [1]},),
+        evaluator_timeout_sec=0.05,
+    )
+    (tmp_path / "world_model.py").write_text(
+        "while True:\n"
+        "    pass\n"
+        "def step_a(state, action):\n"
+        "    return state\n"
+        "def reward_a(state):\n"
+        "    return 0\n"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        ["python", "-E", "backtest.py"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "timed out after 0.05 seconds" in completed.stderr
+
+
+def test_actor_instrument_timeout_terminates_descendants(tmp_path):
+    import os
+    import time
+
+    from eggopt import write_actor_files
+
+    write_actor_files(
+        tmp_path,
+        ({"legal_actions": [1]},),
+        evaluator_timeout_sec=0.2,
+    )
+    marker = tmp_path / "descendant-survived"
+    (tmp_path / "world_model.py").write_text(
+        "import subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', "
+        f"\"import time; time.sleep(0.8); open({str(marker)!r}, 'w').write('bad')\"])\n"
+        "while True:\n"
+        "    pass\n"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        ["python", "-E", "backtest.py"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=2,
+        check=False,
+    )
+    time.sleep(0.9)
+
+    assert completed.returncode != 0
+    assert "timed out after 0.2 seconds" in completed.stderr
+    assert not marker.exists()
+
+
+def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor = tmp_path / "actor"
+    critic = tmp_path / "critic"
+    actor.mkdir()
+    git(actor, "init", "-b", "main")
+    git(actor, "config", "user.name", "Physics")
+    git(actor, "config", "user.email", "physics@test")
+    (actor / "world_model.py").write_text("THEORY = 'preserve me'\n")
+    (actor / "backtest.py").write_text(
+        'from eggopt.physics import actor_backtest\n\n'
+        'if __name__ == "__main__":\n'
+        '    actor_backtest()\n'
+    )
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "old instruments")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    _refresh_actor_instruments(
+        actor,
+        critic,
+        legal_actions_key="moves",
+        max_depth=5,
+        max_nodes=99,
+        evaluator_timeout_sec=11,
+    )
+
+    assert (actor / "world_model.py").read_text() == "THEORY = 'preserve me'\n"
+    assert "physics_runtime" in (actor / "backtest.py").read_text()
+    assert json.loads((actor / "physics-config.json").read_text())["max_depth"] == 5
+    assert git(actor, "log", "-1", "--format=%s") == (
+        "[physics] refresh Actor instruments"
+    )
+    assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
+
+
+def test_instrument_refresh_refuses_modified_owned_files(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor = tmp_path / "actor"
+    critic = tmp_path / "critic"
+    actor.mkdir()
+    git(actor, "init", "-b", "main")
+    git(actor, "config", "user.name", "Physics")
+    git(actor, "config", "user.email", "physics@test")
+    (actor / "backtest.py").write_text("old\n")
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "old instruments")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    (actor / "backtest.py").write_text("actor modification\n")
+
+    with pytest.raises(RuntimeError, match="modified Physics-owned.*backtest.py"):
+        _refresh_actor_instruments(
+            actor,
+            critic,
+            legal_actions_key="legal_actions",
+            max_depth=8,
+            max_nodes=10_000,
+            evaluator_timeout_sec=300,
+        )
+
+    assert (actor / "backtest.py").read_text() == "actor modification\n"
+
+
+def test_instrument_refresh_refuses_committed_custom_helpers(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor = tmp_path / "actor"
+    critic = tmp_path / "critic"
+    actor.mkdir()
+    git(actor, "init", "-b", "main")
+    git(actor, "config", "user.name", "Physics")
+    git(actor, "config", "user.email", "physics@test")
+    (actor / "backtest.py").write_text("custom committed helper\n")
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "custom helper")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(RuntimeError, match="customized.*backtest.py"):
+        _refresh_actor_instruments(
+            actor,
+            critic,
+            legal_actions_key="legal_actions",
+            max_depth=8,
+            max_nodes=10_000,
+            evaluator_timeout_sec=300,
+        )
+
+    assert (actor / "backtest.py").read_text() == "custom committed helper\n"
+
+
+def test_git_critic_does_not_evaluate_an_instrument_maintenance_commit(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+    calls = []
+
+    def edit(call):
+        calls.append(call)
+        if call == 1:
+            (workspace / "backtest.py").write_text(
+                'from eggopt.physics import actor_backtest\n\n'
+                'if __name__ == "__main__":\n'
+                '    actor_backtest()\n'
+            )
+            git(workspace, "add", "backtest.py")
+            git(workspace, "commit", "-m", "restore legacy helper")
+        else:
+            write_plan(workspace, experiment_plan())
+
+    physics, actor = strategy(workspace, edit, replies=("legacy", "ready"))
+    result = physics.run(run_dir="run", max_cycles=2)
+
+    assert actor.calls == 2
+    assert calls == [1, 2]
+    assert "models_discriminated" in result.feedback
+    subjects = git(workspace, "log", "--format=%s", "-3").splitlines()
+    assert "[physics] refresh Actor instruments" in subjects
 
 
 def test_actor_turn_prompts_require_the_full_runbook():

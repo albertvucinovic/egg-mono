@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from .planning import canonical_plan
+from .theory import MODEL_RUNNER
 
 WORLD_MODEL_TEMPLATE = '''"""Current competing hypotheses for one observed world.
 
@@ -61,6 +62,9 @@ a brief completion signal; files at committed HEAD are the proposal.
 - `trusted-report.json`: when present, the previous Critic validation/execution
   report. It explains the last failure or the newest real evidence.
 - `world_model.py`: your editable program of competing world-model hypotheses.
+- `physics_runtime.py`: the generated, standard-library-only generic Physics
+  instrument. It contains no domain implementation or hidden environment state.
+- `physics-config.json`: the public planning limits for this Physics study.
 - `backtest.py`: an untrusted local preview of the canonical backtest.
 - `plan.py`: an untrusted local preview of canonical goal and experiment search.
 - `backtest-report.json` and `plan-report.json`: regenerated local reports.
@@ -234,26 +238,230 @@ canonical state, then ask you for a fresh clean commit. This can discard local
 work and **never** rewinds real actions or the append-only Timeline.
 """
 
-BACKTEST_WRAPPER = """from eggopt.physics import actor_backtest
+BACKTEST_WRAPPER = """from physics_runtime import actor_backtest
 
 if __name__ == "__main__":
     actor_backtest()
 """
-PLAN_WRAPPER = """from eggopt.physics import actor_plan
+PLAN_WRAPPER = """from physics_runtime import actor_plan
 
 if __name__ == "__main__":
     actor_plan()
 """
 COMMIT_WRAPPER = """import sys
-from eggopt.physics import actor_commit
+from physics_runtime import actor_commit
 
 if __name__ == "__main__":
     actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")
 """
 
+_RUNTIME_SUPPORT = r'''
+
+
+def _write_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def _configuration():
+    value = json.loads(Path("physics-config.json").read_text())
+    required = ("legal_actions_key", "max_depth", "max_nodes", "evaluator_timeout_sec")
+    if not isinstance(value, dict) or any(key not in value for key in required):
+        raise ValueError("physics-config.json is missing required configuration")
+    return value
+
+
+def _request(output_path):
+    config = _configuration()
+    timeline = json.loads(Path("canonical-input.json").read_text())["timeline"]
+    return {
+        "source": Path("world_model.py").read_text(),
+        "timeline": timeline,
+        "legal_actions_key": config["legal_actions_key"],
+        "max_depth": config["max_depth"],
+        "max_nodes": config["max_nodes"],
+        "work_dir": ".physics-evaluation",
+        "output_path": output_path,
+    }, float(config["evaluator_timeout_sec"])
+
+
+def _terminate(process):
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=0.25)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def _run_local_evaluator():
+    request, timeout = _request(".physics-evaluation/result.json")
+    command = [sys.executable, str(Path(__file__).resolve()), "_evaluate"]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(
+            json.dumps(request, allow_nan=False, separators=(",", ":"), sort_keys=True),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        _terminate(process)
+        raise SystemExit(f"Physics evaluator timed out after {timeout:g} seconds") from exc
+    if process.returncode:
+        detail = (stderr or stdout).strip()
+        raise SystemExit(detail or f"Physics evaluator exited with status {process.returncode}")
+    path = Path(request["output_path"])
+    if not path.is_file():
+        raise SystemExit("Physics evaluator did not write its report")
+    return json.loads(path.read_text())
+
+
+def canonical_plan(value):
+    if not isinstance(value, dict) or set(value) != {"purpose", "models", "intents"}:
+        raise ValueError("plan must contain exactly purpose, models, and intents")
+    if value["purpose"] not in {"goal", "experiment"}:
+        raise ValueError("plan purpose must be goal or experiment")
+    models = value["models"]
+    intents = value["intents"]
+    if not isinstance(models, list) or not models or not all(
+        isinstance(item, str) and item for item in models
+    ):
+        raise ValueError("plan models must be a non-empty string list")
+    if not isinstance(intents, list) or not intents:
+        raise ValueError("committed plan must contain at least one intent")
+    for intent in intents:
+        if not isinstance(intent, dict) or "action" not in intent:
+            raise ValueError("every intent must contain an action")
+        predictions = intent.get("prediction")
+        if not isinstance(predictions, dict) or set(predictions) != set(models):
+            raise ValueError("every intent must predict once for every plan model")
+    return {"purpose": value["purpose"], "models": models, "intents": intents}
+
+
+def actor_backtest():
+    report = _run_local_evaluator()["backtest"]
+    _write_json("backtest-report.json", report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def actor_plan():
+    planning = _run_local_evaluator()["planning"]
+    plans = [
+        {"plan_id": f"plan-{index}", "plan": canonical_plan(plan)}
+        for index, plan in enumerate(planning["plans"], start=1)
+    ]
+    report = {**planning, "canonical_plans": plans}
+    _write_json("plan-report.json", report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def actor_commit(plan_id):
+    report_path = Path("plan-report.json")
+    if not report_path.is_file():
+        raise SystemExit("Run python plan.py before commit.py")
+    report = json.loads(report_path.read_text())
+    selected = next(
+        (
+            item["plan"]
+            for item in report.get("canonical_plans", ())
+            if item["plan_id"] == plan_id
+        ),
+        None,
+    )
+    if selected is None:
+        raise SystemExit(f"Unknown plan_id: {plan_id!r}")
+    _write_json("committed-plan.json", canonical_plan(selected))
+    subprocess.run(["git", "add", "-A"], check=True)
+    subprocess.run(["git", "commit", "-m", f"Actor commits {plan_id}"], check=True)
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["_evaluate"]:
+    exec(MODEL_RUNNER, {"__name__": "__main__"})
+'''
+
+
+def _runtime_source() -> str:
+    return (
+        "# Generated by Eggopt PhysicsStrategy. Standard-library only.\n"
+        "import json\n"
+        "import os\n"
+        "import signal\n"
+        "import subprocess\n"
+        "import sys\n"
+        "from pathlib import Path\n\n"
+        f"MODEL_RUNNER = {MODEL_RUNNER!r}\n"
+        + _RUNTIME_SUPPORT
+    )
+
+
+def instrument_files(
+    *,
+    legal_actions_key: str,
+    max_depth: int,
+    max_nodes: int,
+    evaluator_timeout_sec: float,
+) -> dict[str, str]:
+    """Return the generic, domain-free Actor instrument bundle."""
+
+    config = json.dumps(
+        _instrument_configuration(
+            legal_actions_key=legal_actions_key,
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+            evaluator_timeout_sec=evaluator_timeout_sec,
+        ),
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    return {
+        "backtest.py": BACKTEST_WRAPPER,
+        "commit.py": COMMIT_WRAPPER,
+        "physics-config.json": config,
+        "physics_runtime.py": _runtime_source(),
+        "plan.py": PLAN_WRAPPER,
+    }
+
+
+def _instrument_configuration(
+    *,
+    legal_actions_key: str = "legal_actions",
+    max_depth: int = 8,
+    max_nodes: int = 10_000,
+    evaluator_timeout_sec: float = 300.0,
+) -> dict[str, object]:
+    """Return the public configuration shared by local and trusted evaluators."""
+
+    return {
+        "evaluator_timeout_sec": evaluator_timeout_sec,
+        "legal_actions_key": legal_actions_key,
+        "max_depth": max_depth,
+        "max_nodes": max_nodes,
+    }
+
 
 def write_actor_files(
-    workspace: str | Path, timeline, domain_information: str = ""
+    workspace: str | Path,
+    timeline,
+    domain_information: str = "",
+    *,
+    legal_actions_key: str = "legal_actions",
+    max_depth: int = 8,
+    max_nodes: int = 10_000,
+    evaluator_timeout_sec: float = 300.0,
+    refresh_instruments: bool = True,
 ) -> None:
     workspace = Path(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -264,11 +472,19 @@ def write_actor_files(
         )
     _write_if_changed(workspace / "INSTRUCTIONS.md", instructions)
     _write_json(workspace / "canonical-input.json", {"timeline": timeline})
-    _write_if_missing(workspace / ".gitignore", "scratch/\n__pycache__/\n*.pyc\n")
+    _write_if_missing(
+        workspace / ".gitignore",
+        "scratch/\n__pycache__/\n*.pyc\n.physics-evaluation/\n",
+    )
     _write_if_missing(workspace / "world_model.py", WORLD_MODEL_TEMPLATE)
-    _write_if_missing(workspace / "backtest.py", BACKTEST_WRAPPER)
-    _write_if_missing(workspace / "plan.py", PLAN_WRAPPER)
-    _write_if_missing(workspace / "commit.py", COMMIT_WRAPPER)
+    if refresh_instruments:
+        for name, content in instrument_files(
+            legal_actions_key=legal_actions_key,
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+            evaluator_timeout_sec=evaluator_timeout_sec,
+        ).items():
+            _write_if_changed(workspace / name, content)
 
 
 def actor_backtest() -> None:
@@ -356,11 +572,23 @@ def _write_if_changed(path, content):
         path.write_text(content)
 
 
+def ensure_evaluator_ignore(workspace: str | Path) -> None:
+    """Keep generated evaluator state out of Actor proposals."""
+
+    path = Path(workspace) / ".gitignore"
+    lines = path.read_text().splitlines() if path.is_file() else []
+    if ".physics-evaluation/" not in lines:
+        lines.append(".physics-evaluation/")
+        path.write_text("\n".join(lines) + "\n")
+
+
 __all__ = [
     "ACTOR_INSTRUCTIONS",
     "WORLD_MODEL_TEMPLATE",
     "actor_backtest",
     "actor_commit",
     "actor_plan",
+    "ensure_evaluator_ignore",
+    "instrument_files",
     "write_actor_files",
 ]

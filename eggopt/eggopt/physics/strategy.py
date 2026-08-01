@@ -25,7 +25,12 @@ from ..context import _current_operation, _operation_runtime, _operation_scope
 from ..identity import digest_payload
 from ..runtime import Runtime, sync
 from .critic import PhysicsCritic, write_state
-from .instruments import ACTOR_INSTRUCTIONS, write_actor_files
+from .instruments import (
+    ACTOR_INSTRUCTIONS,
+    ensure_evaluator_ignore,
+    instrument_files,
+    write_actor_files,
+)
 
 TaskFactory = Callable[..., Task]
 
@@ -277,6 +282,10 @@ class _PhysicsRun(Task):
                 workspace,
                 outer,
                 self.strategy.domain_information,
+                self.strategy.legal_actions_key,
+                self.strategy.max_depth,
+                self.strategy.max_nodes,
+                self.strategy.evaluator_timeout_sec,
             )
             result = yield ActorCritic(
                 actor=self.strategy.actor,
@@ -335,6 +344,10 @@ class _InitializeRepository(Task):
     workspace: str
     outer_context: str
     domain_information: str
+    legal_actions_key: str = "legal_actions"
+    max_depth: int = 8
+    max_nodes: int = 10_000
+    evaluator_timeout_sec: float = 300.0
 
     def run(self):
         actor = Path(self.workspace)
@@ -371,7 +384,15 @@ class _InitializeRepository(Task):
             },
         )
         initial = yield observed
-        write_actor_files(actor, (initial,), self.domain_information)
+        write_actor_files(
+            actor,
+            (initial,),
+            self.domain_information,
+            legal_actions_key=self.legal_actions_key,
+            max_depth=self.max_depth,
+            max_nodes=self.max_nodes,
+            evaluator_timeout_sec=self.evaluator_timeout_sec,
+        )
         write_state(actor, (initial,), 0, None)
         write_state(Path(self.outer_context), (initial,), 0, None)
         _commit(actor, "[physics] initialize canonical world state")
@@ -411,6 +432,7 @@ class _GitCritic(Task):
             )
         actor = Path(self.workspace)
         critic_repo = _critic_repository(Path(self.outer_context))
+        critic_head_before = _git_head(critic_repo)
         if not _valid_repository(critic_repo):
             if not _valid_repository(actor):
                 return Critique.revise(
@@ -420,6 +442,7 @@ class _GitCritic(Task):
                     "plan.py, then submit one clean commit using commit.py plan-N."
                 )
             _clone_repository(actor, critic_repo)
+            critic_head_before = _git_head(critic_repo)
 
         if not _valid_repository(actor):
             _restore_repository(actor, critic_repo)
@@ -441,6 +464,28 @@ class _GitCritic(Task):
                 "state. No real action was attempted for this proposal. Read the restored "
                 "canonical-input.json and trusted-report.json, rebuild the proposal, and "
                 "finish with python commit.py plan-N."
+            )
+
+        try:
+            _refresh_actor_instruments(
+                actor,
+                critic_repo,
+                legal_actions_key=self.critic.legal_actions_key,
+                max_depth=self.critic.max_depth,
+                max_nodes=self.critic.max_nodes,
+                evaluator_timeout_sec=self.critic.evaluator_timeout_sec,
+            )
+        except RuntimeError as exc:
+            return Critique.revise(
+                "The Physics-owned Actor instruments could not be refreshed safely. "
+                f"No real action was attempted. Reason: {exc}"
+            )
+        if _git_head(critic_repo) != critic_head_before:
+            return Critique.revise(
+                "PhysicsStrategy refreshed its standard Actor instruments for this "
+                "study. No real action was attempted for the maintenance commit. "
+                "Rerun backtest.py and plan.py, then submit the theory with "
+                "python commit.py plan-N."
             )
 
         dirty = _git_status(actor)
@@ -595,6 +640,80 @@ def _overlay_authoritative_state(actor: Path, authoritative: Path) -> None:
         (actor / "canonical-input.json").write_text(
             json.dumps({"timeline": timeline}, indent=2, sort_keys=True) + "\n"
         )
+
+
+def _refresh_actor_instruments(
+    actor: Path,
+    critic: Path,
+    *,
+    legal_actions_key: str,
+    max_depth: int,
+    max_nodes: int,
+    evaluator_timeout_sec: float,
+) -> None:
+    """Upgrade Physics-owned helpers without touching an Actor's proposal."""
+
+    legacy_files = {
+        "backtest.py": "from eggopt.physics import actor_backtest\n\n"
+        'if __name__ == "__main__":\n    actor_backtest()\n',
+        "plan.py": "from eggopt.physics import actor_plan\n\n"
+        'if __name__ == "__main__":\n    actor_plan()\n',
+        "commit.py": "import sys\nfrom eggopt.physics import actor_commit\n\n"
+        'if __name__ == "__main__":\n'
+        '    actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")\n',
+    }
+    files = instrument_files(
+        legal_actions_key=legal_actions_key,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        evaluator_timeout_sec=evaluator_timeout_sec,
+    )
+    dirty = _git(actor, "status", "--porcelain=v1").splitlines()
+    dirty_paths = {
+        entry[2:].lstrip().split(" -> ")[-1]
+        for entry in dirty
+        if entry and len(entry) > 2
+    }
+    conflicts = sorted(dirty_paths.intersection(files))
+    if conflicts:
+        raise RuntimeError(
+            "Cannot refresh modified Physics-owned instruments: "
+            + ", ".join(conflicts)
+        )
+    customized = sorted(
+        name
+        for name, legacy in legacy_files.items()
+        if (actor / name).is_file()
+        and (actor / name).read_text() != legacy
+        and (actor / name).read_text() != files[name]
+    )
+    if customized:
+        raise RuntimeError(
+            "Cannot replace customized Physics-owned instruments: "
+            + ", ".join(customized)
+        )
+    changed = False
+    for name, content in files.items():
+        path = actor / name
+        if path.is_file() and path.read_text() == content:
+            continue
+        path.write_text(content)
+        changed = True
+    ignore_path = actor / ".gitignore"
+    before_ignore = ignore_path.read_text() if ignore_path.is_file() else None
+    ensure_evaluator_ignore(actor)
+    if ignore_path.read_text() != before_ignore:
+        changed = True
+    if not changed:
+        return
+    owned = (*files, ".gitignore")
+    _git(actor, "add", "--", *owned)
+    staged = _git(actor, "diff", "--cached", "--name-only", "--", *owned)
+    if not staged:
+        return
+    _configure_git(actor)
+    _git(actor, "commit", "-m", "[physics] refresh Actor instruments")
+    _pull(critic, actor)
 
 
 def _git(repository: Path, *args: str, check: bool = True) -> str:

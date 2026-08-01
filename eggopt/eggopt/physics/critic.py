@@ -192,7 +192,16 @@ class PhysicsCritic(Task):
             "actions": actions,
         }
         sync_state(
-            repository, state_root, timeline, actions, report, self.domain_information
+            repository,
+            state_root,
+            timeline,
+            actions,
+            report,
+            self.domain_information,
+            legal_actions_key=self.legal_actions_key,
+            max_depth=self.max_depth,
+            max_nodes=self.max_nodes,
+            evaluator_timeout_sec=self.evaluator_timeout_sec,
         )
         if resolution in {"won", "max_actions"}:
             return Critique.accept(
@@ -223,7 +232,16 @@ class PhysicsCritic(Task):
             "evaluation": evaluation,
         }
         sync_state(
-            repository, state_root, timeline, actions, report, self.domain_information
+            repository,
+            state_root,
+            timeline,
+            actions,
+            report,
+            self.domain_information,
+            legal_actions_key=self.legal_actions_key,
+            max_depth=self.max_depth,
+            max_nodes=self.max_nodes,
+            evaluator_timeout_sec=self.evaluator_timeout_sec,
         )
         return Critique.revise(
             "The trusted Critic rejected the submitted Git HEAD before executing any "
@@ -313,11 +331,32 @@ def write_state(repository: Path, timeline, actions, report) -> None:
         _write_json(repository / "trusted-report.json", report)
 
 
-def sync_state(repository, state_root, timeline, actions, report, domain_information):
+def sync_state(
+    repository,
+    state_root,
+    timeline,
+    actions,
+    report,
+    domain_information,
+    *,
+    legal_actions_key="legal_actions",
+    max_depth=8,
+    max_nodes=10_000,
+    evaluator_timeout_sec=300.0,
+):
     write_state(repository, timeline, actions, report)
     if state_root != repository:
         write_state(state_root, timeline, actions, report)
-    write_actor_files(repository, timeline, domain_information)
+    write_actor_files(
+        repository,
+        timeline,
+        domain_information,
+        legal_actions_key=legal_actions_key,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        evaluator_timeout_sec=evaluator_timeout_sec,
+        refresh_instruments=False,
+    )
 
 
 def _write_json(path, value):

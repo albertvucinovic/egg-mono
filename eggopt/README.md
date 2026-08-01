@@ -143,6 +143,14 @@ caching content-addressed. The evaluator writes
 SHA-256 and records only a compact receipt. Cached replay verifies or
 rematerializes the report before the Critic consumes it.
 
+PhysicsStrategy also publishes a generated, standard-library-only
+`physics_runtime.py` plus `physics-config.json` into the Actor repository. The
+local `backtest.py`, `plan.py`, and `commit.py` wrappers therefore work in an
+isolated Actor container without installing Eggopt. This runtime contains only
+the generic Physics evaluator and public search limits; domain `observe`,
+`execute`, and `is_goal` implementations remain on the trusted host and are never
+copied into the Actor workspace.
+
 Actor-facing `backtest.py` and `plan.py` use the same generic algorithm for local
 advice; they are untrusted workspace copies. `commit.py PLAN_ID` selects a
 canonical non-empty planner result and commits it. The trusted Critic repeats the
