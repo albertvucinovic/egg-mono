@@ -410,6 +410,18 @@ def test_physics_executes_raw_actions_and_reports_alternative_model(
     assert report["matching_models"] == ["b"]
     assert [item["action"] for item in report["executed"]] == observed_actions
     assert calls == [(result.critic_thread_id, 17)]
+    from eggthreads import get_thread_sandbox_config, get_thread_working_directory
+
+    db = ThreadsDB(tmp_path / "run" / ".egg" / "threads.sqlite")
+    try:
+        actor_dir = get_thread_working_directory(db, result.actor_thread_id)
+        critic_dir = get_thread_working_directory(db, result.critic_thread_id)
+        assert actor_dir == workspace
+        assert critic_dir == tmp_path / "run" / "workspace" / "critic-repository"
+        assert get_thread_sandbox_config(db, result.actor_thread_id).enabled
+        assert get_thread_sandbox_config(db, result.critic_thread_id).enabled
+    finally:
+        db.close()
 
 
 def test_domain_action_validation_happens_before_execution(tmp_path, monkeypatch):
@@ -472,9 +484,11 @@ def test_actor_prompt_explains_freedom_and_minimal_interface():
         "supporting model",
         "python commit.py",
         "What the trusted Critic does",
+        "do not delete",
     ):
         assert required in prompt
     assert "actions_<suffix>" not in prompt
+    assert "delete `.git`" not in prompt
     assert "Domain-defined action objects" in prompt
 
 
@@ -1093,3 +1107,167 @@ def step_click(state, action):
     )
     assert result["plan_validation"]["valid"] is True
     assert result["plan_validation"]["plan"][0]["action"] == click
+
+
+def test_nested_parent_git_repository_is_not_a_physics_repository(tmp_path):
+    from eggopt.physics.strategy import _git, _valid_repository
+
+    git(tmp_path, "init", "-b", "main")
+    git(tmp_path, "config", "user.name", "Parent")
+    git(tmp_path, "config", "user.email", "parent@test")
+    (tmp_path / "parent.txt").write_text("parent")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-m", "parent")
+    nested = tmp_path / "runs" / "physics" / "workspace" / "innerContext"
+    nested.mkdir(parents=True)
+
+    assert git(nested, "rev-parse", "--show-toplevel") == str(tmp_path)
+    assert _valid_repository(nested) is False
+    with pytest.raises(RuntimeError, match="not an exact repository root"):
+        _git(nested, "status", "--short")
+
+
+def test_physics_initializes_nested_repository_instead_of_using_parent_git(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    git(tmp_path, "init", "-b", "main")
+    git(tmp_path, "config", "user.name", "Parent")
+    git(tmp_path, "config", "user.email", "parent@test")
+    (tmp_path / "unrelated.txt").write_text("parent dirty")
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+    plan = trajectory(0, 1, 2)
+
+    def edit(_call):
+        assert (workspace / ".git").is_dir()
+        assert git(workspace, "rev-parse", "--show-toplevel") == str(workspace)
+        write_plan(workspace, plan)
+
+    physics, _actor = strategy(workspace, edit)
+    result = physics.run(run_dir="run", max_cycles=1)
+
+    assert result.accepted is True
+    assert (workspace / ".git").is_dir()
+    assert git(workspace, "status", "--short") == ""
+    assert (tmp_path / "unrelated.txt").read_text() == "parent dirty"
+
+
+def test_thread_isolation_requires_exact_working_directory_and_sandbox(
+    tmp_path, monkeypatch
+):
+    from eggopt.physics.strategy import _require_thread_isolation
+
+    from eggthreads import (
+        create_root_thread,
+        set_thread_sandbox_config,
+        set_thread_working_directory,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="isolated")
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    try:
+        set_thread_working_directory(db, thread_id, str(repository))
+        set_thread_sandbox_config(
+            db,
+            thread_id,
+            enabled=True,
+            provider="docker",
+            settings={"filesystem": {"allowWrite": ["."]}},
+        )
+        _require_thread_isolation(db, thread_id, repository, role="Test")
+        with pytest.raises(RuntimeError, match="escaped"):
+            _require_thread_isolation(
+                db, thread_id, tmp_path / "other", role="Test"
+            )
+        set_thread_sandbox_config(
+            db,
+            thread_id,
+            enabled=False,
+            provider="docker",
+            settings={"filesystem": {"allowWrite": ["."]}},
+        )
+        with pytest.raises(RuntimeError, match="no enabled"):
+            _require_thread_isolation(db, thread_id, repository, role="Test")
+    finally:
+        db.close()
+
+
+def test_critic_python_exec_uses_eggthreads_sandbox_and_exact_repository(
+    tmp_path, monkeypatch
+):
+    import asyncio
+    import shutil
+
+    from eggthreads import (
+        create_default_tools,
+        create_root_thread,
+        set_thread_sandbox_config,
+        set_thread_working_directory,
+    )
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker is unavailable")
+    completed = subprocess.run(
+        ["docker", "info"], capture_output=True, text=True, timeout=10, check=False
+    )
+    if completed.returncode:
+        pytest.skip("Docker daemon is unavailable")
+
+    monkeypatch.chdir(tmp_path)
+    repository = tmp_path / "critic-repository"
+    repository.mkdir()
+    (repository / "visible.txt").write_text("inside")
+    (tmp_path / "outside.txt").write_text("outside")
+    db = ThreadsDB(tmp_path / ".egg" / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Critic")
+    try:
+        set_thread_working_directory(db, thread_id, str(repository))
+        set_thread_sandbox_config(
+            db,
+            thread_id,
+            enabled=True,
+            provider="docker",
+            settings={
+                "network": {"allowedDomains": [], "deniedDomains": []},
+                "workspace": "/workspace",
+                "filesystem": {
+                    "allowWrite": ["."],
+                    "denyWrite": [".egg"],
+                    "denyRead": [".egg"],
+                },
+                "extra_mounts": [],
+                "extra_args": ["--cap-drop", "ALL"],
+            },
+            user_control_enabled=False,
+        )
+
+        async def execute():
+            return await create_default_tools().execute_in_thread_context(
+                "python_exec",
+                {
+                    "script": (
+                        "import json, os\n"
+                        "from pathlib import Path\n"
+                        "print(json.dumps({"
+                        "'cwd': os.getcwd(), "
+                        "'inside': Path('visible.txt').read_text(), "
+                        "'outside': Path('../outside.txt').exists()}))"
+                    ),
+                    "timeout": 30,
+                },
+                thread_id=thread_id,
+                db=db,
+                preserve_tool_result=True,
+            )
+
+        output = asyncio.run(execute())
+        assert '"cwd": "/workspace"' in str(output)
+        assert '"inside": "inside"' in str(output)
+        assert '"outside": false' in str(output)
+    finally:
+        db.close()

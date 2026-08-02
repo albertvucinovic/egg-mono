@@ -181,10 +181,9 @@ trusted evaluation may be cached by that HEAD and evaluator configuration. Make
 one meaningful clean commit per turn. Put disposable work under `scratch/` or
 ignore it before committing. Do not rewrite trusted history to hide evidence.
 
-If the Actor repository becomes unusable and you deliberately want the trusted
-copy restored, delete `.git` and answer without claiming a proposal. The Critic
-will restore its last pulled history and overlay the latest canonical state. This
-never rewinds real actions or the append-only Timeline.
+If Git history or synchronized trusted files appear inconsistent, do not delete
+or rewrite `.git`. Stop editing, report the problem, and answer without claiming
+a proposal. PhysicsStrategy owns repository recovery and the append-only Timeline.
 """
 
 BACKTEST_WRAPPER = """from physics_runtime import actor_backtest

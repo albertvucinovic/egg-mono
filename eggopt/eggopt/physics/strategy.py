@@ -13,6 +13,8 @@ from typing import Any
 from eggflow import Task, keyed
 from eggthreads import (
     create_root_thread,
+    get_thread_sandbox_config,
+    get_thread_working_directory,
     list_root_threads,
     list_threads,
     set_thread_sandbox_config,
@@ -53,8 +55,7 @@ def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
         "Physics Actor turn. Read the synchronized canonical-input.json and "
         "trusted-report.json before editing. Follow the complete runbook again, "
         "address the Critic evidence below, and finish with one new clean commit "
-        "created through commit.py.\n\nTrusted Critic feedback:\n"
-        + state["feedback"]
+        "created through commit.py.\n\nTrusted Critic feedback:\n" + state["feedback"]
     )
 
 
@@ -429,7 +430,7 @@ class _GitCritic(Task):
         actor = Path(self.workspace) if self.workspace else None
         head = _git_head(actor) if actor is not None else None
         return digest_payload(
-            "eggopt.physics.git-critic.v1.file-inputs",
+            "eggopt.physics.git-critic.v2.exact-root-isolation",
             {
                 "critic": _task_identity(self.critic),
                 "outer_context": self.outer_context,
@@ -445,6 +446,16 @@ class _GitCritic(Task):
             )
         actor = Path(self.workspace)
         critic_repo = _critic_repository(Path(self.outer_context))
+        context = _current_operation()
+        db = _operation_runtime(str(context["_runtime_key"]))
+        if self.actor_thread_id is None:
+            raise RuntimeError("Physics Critic was not assigned its Actor thread")
+        _require_thread_isolation(
+            db,
+            self.actor_thread_id,
+            actor,
+            role="Actor",
+        )
         critic_head_before = _git_head(critic_repo)
         if not _valid_repository(critic_repo):
             if not _valid_repository(actor):
@@ -628,10 +639,32 @@ class _GitCritic(Task):
             user_control_enabled=False,
             reason="Physics Critic independent evaluation",
         )
+        _require_thread_isolation(
+            db,
+            self.critic_thread_id,
+            repository,
+            role="Critic",
+        )
 
 
 def _critic_repository(outer_context: Path) -> Path:
     return outer_context / "critic-repository"
+
+
+def _require_thread_isolation(
+    db, thread_id: str, repository: Path, *, role: str
+) -> None:
+    """Fail closed unless an Eggthread owns this exact sandboxed repository."""
+
+    working_directory = get_thread_working_directory(db, thread_id).resolve()
+    if working_directory != repository.resolve():
+        raise RuntimeError(
+            f"Physics {role} thread working directory escaped its repository: "
+            f"{working_directory} != {repository.resolve()}"
+        )
+    sandbox = get_thread_sandbox_config(db, thread_id)
+    if not sandbox.enabled or not sandbox.provider:
+        raise RuntimeError(f"Physics {role} thread has no enabled Eggthreads sandbox")
 
 
 def _authoritative_state(outer_context: Path) -> Path:
@@ -727,8 +760,7 @@ def _refresh_actor_instruments(
     conflicts = sorted(dirty_paths.intersection(files))
     if conflicts:
         raise RuntimeError(
-            "Cannot refresh modified Physics-owned instruments: "
-            + ", ".join(conflicts)
+            "Cannot refresh modified Physics-owned instruments: " + ", ".join(conflicts)
         )
     customized = sorted(
         name
@@ -773,6 +805,10 @@ def _refresh_actor_instruments(
 
 
 def _git(repository: Path, *args: str, check: bool = True) -> str:
+    if args and args[0] != "init" and not _is_repository_root(repository):
+        raise RuntimeError(
+            f"Git target is not an exact repository root: {repository.resolve()}"
+        )
     completed = subprocess.run(
         ["git", "-C", str(repository), *args],
         text=True,
@@ -786,15 +822,37 @@ def _git(repository: Path, *args: str, check: bool = True) -> str:
 
 
 def _valid_repository(repository: Path) -> bool:
-    if not repository.is_dir():
+    """Return whether ``repository`` itself, not an ancestor, is a Git worktree."""
+
+    if not _is_repository_root(repository):
         return False
-    completed = subprocess.run(
+    head = subprocess.run(
         ["git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
         text=True,
         capture_output=True,
         check=False,
     )
-    return completed.returncode == 0
+    return head.returncode == 0
+
+
+def _is_repository_root(repository: Path) -> bool:
+    """Return whether Git resolves this directory itself as the worktree root."""
+
+    if not repository.is_dir():
+        return False
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode or not completed.stdout.strip():
+        return False
+    try:
+        top = Path(completed.stdout.strip()).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return top == repository.resolve()
 
 
 def _git_head(repository: Path | None) -> str | None:
