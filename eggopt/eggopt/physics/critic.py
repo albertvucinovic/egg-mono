@@ -11,6 +11,7 @@ from ..actor_critic import Critique
 from ..identity import digest_payload
 from ..thread_tool import ThreadTool, ThreadToolResult
 from .instruments import write_actor_files
+from .lifecycle import classify_terminal_state, terminal_feedback
 from .planning import load_plan
 from .theory import evaluator_file_script, parse_evaluator_receipt
 
@@ -24,6 +25,7 @@ class PhysicsCritic(Task):
     validate_action: Any = field(repr=False, compare=False)
     is_goal: Any = field(repr=False, compare=False)
     identity: Any
+    terminal_outcome: Any = field(default=None, repr=False, compare=False)
     domain_information: str = ""
     planner_actions: tuple[Any, ...] = ()
     max_depth: int = 8
@@ -59,6 +61,21 @@ class PhysicsCritic(Task):
         state = read_state(state_root)
         timeline = tuple(state["timeline"])
         actions = int(state["actions"])
+        current = timeline[-1].get("next_state", timeline[-1])
+        terminal = self._terminal_outcome(current)
+        if terminal is not None:
+            return self._accept_terminal(
+                repository,
+                state_root,
+                timeline,
+                actions,
+                terminal,
+                executed=[],
+                evaluation=None,
+                plan=None,
+                supporting_models=[],
+                matching_models=[],
+            )
         if not (repository / "world_model.py").is_file():
             return self._revise(
                 repository,
@@ -70,7 +87,6 @@ class PhysicsCritic(Task):
 
         try:
             plan = load_plan(repository)
-            current = timeline[-1].get("next_state", timeline[-1])
             if plan[0]["state"] != current:
                 raise ValueError(
                     "the first plan state must equal the authoritative current state"
@@ -99,6 +115,7 @@ class PhysicsCritic(Task):
 
         executed = []
         resolution = "plan_exhausted"
+        outcome = None
         surviving_models = set(evaluation["backtest"]["surviving_models"])
         matching_models = set(surviving_models)
         predictions = validation["predictions"]
@@ -151,11 +168,12 @@ class PhysicsCritic(Task):
                 for suffix in surviving_models
                 if predictions[index].get(suffix) == next_state
             }
+            outcome = self._terminal_outcome(next_state)
+            if outcome is not None:
+                resolution = outcome
+                break
             if next_state != transition["next_state"]:
                 resolution = "wrong_prediction"
-                break
-            if self.is_goal(next_state):
-                resolution = "won"
                 break
 
         report = {
@@ -181,7 +199,7 @@ class PhysicsCritic(Task):
             max_nodes=self.max_nodes,
             evaluator_timeout_sec=self.evaluator_timeout_sec,
         )
-        if resolution in {"won", "max_actions"}:
+        if resolution in {"won", "max_actions"} or outcome is not None:
             return Critique.accept(
                 {
                     "stopping_reason": resolution,
@@ -193,13 +211,72 @@ class PhysicsCritic(Task):
                     "The trusted application detected the goal after executing the "
                     "submitted plan. The Physics run is complete."
                     if resolution == "won"
-                    else "The trusted real-action budget is exhausted. No further Actor "
-                    "proposal can execute; inspect trusted-report.json for the final "
-                    "Timeline and execution report."
+                    else (
+                        "The trusted real-action budget is exhausted. No further Actor "
+                        "proposal can execute; inspect trusted-report.json for the final "
+                        "Timeline and execution report."
+                        if resolution == "max_actions"
+                        else "The trusted domain reported a terminal state "
+                        f"({resolution}). No further real action is possible."
+                    )
                 ),
             )
         return Critique.revise(
             _execution_feedback(resolution, sorted(matching_models))
+        )
+
+    def _terminal_outcome(self, state) -> str | None:
+        return classify_terminal_state(
+            state,
+            is_goal=self.is_goal,
+            terminal_outcome=self.terminal_outcome,
+        )
+
+    def _accept_terminal(
+        self,
+        repository,
+        state_root,
+        timeline,
+        actions,
+        resolution,
+        *,
+        executed,
+        evaluation,
+        plan,
+        supporting_models,
+        matching_models,
+    ):
+        report = {
+            "stage": "execution",
+            "head": self.head,
+            **(evaluation or {}),
+            "plan": plan,
+            "supporting_models": supporting_models,
+            "executed": executed,
+            "resolution": resolution,
+            "matching_models": matching_models,
+            "actions": actions,
+        }
+        sync_state(
+            repository,
+            state_root,
+            timeline,
+            actions,
+            report,
+            self.domain_information,
+            planner_actions=self.planner_actions,
+            max_depth=self.max_depth,
+            max_nodes=self.max_nodes,
+            evaluator_timeout_sec=self.evaluator_timeout_sec,
+        )
+        return Critique.accept(
+            {
+                "stopping_reason": resolution,
+                "timeline": timeline,
+                "actions": actions,
+                "report": report,
+            },
+            terminal_feedback(resolution),
         )
 
     def _evaluate(self, repository):

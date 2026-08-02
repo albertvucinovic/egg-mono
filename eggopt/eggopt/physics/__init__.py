@@ -10,6 +10,7 @@ from .instruments import (
     actor_plan,
     write_actor_files,
 )
+from .lifecycle import TerminalOutcome
 from .planning import PLAN, canonical_plan, load_plan
 from .strategy import (
     PHYSICS_ACTOR_SYSTEM_PROMPT,
@@ -28,6 +29,7 @@ __all__ = [
     "PhysicsCritic",
     "PhysicsResult",
     "PhysicsStrategy",
+    "TerminalOutcome",
     "actor_backtest",
     "actor_commit",
     "actor_plan",
