@@ -13,7 +13,7 @@ def step_1(state, action):
     raise NotImplementedError
 
 
-# Optional: define reward_1(state) to opt model 1 into advisory planning.
+# Normally define reward_1(state) so plan.py can search model 1 productively.
 '''
 
 PLAN_TEMPLATE = "[]\n"
@@ -45,8 +45,8 @@ Python modules, analysis scripts, notes, tests, or planning code. What matters t
 PhysicsStrategy is this small file interface:
 
 - `world_model.py`: define one or more `step_<suffix>(state, action)` hypotheses;
-- optional `reward_<suffix>(state)` functions for hypotheses you want the
-  advisory planner to search;
+- matching `reward_<suffix>(state)` functions whenever you can express useful
+  progress, so the advisory planner can search those hypotheses;
 - `plan.json`: submit one predicted trajectory as a non-empty JSON list of
   `{state, action, next_state}` transitions.
 
@@ -106,16 +106,21 @@ environment directly.
 You own the plan. You may construct `plan.json` directly and run `python plan.py`
 to check it.
 
-`plan.py` is also an optional bounded planner. A hypothesis opts into advisory
-planning by defining `reward_<suffix>(state)`. The instrument may suggest a
-trajectory toward higher predicted reward or a trajectory ending at the first
-action whose predicted outcome distinguishes competing eligible hypotheses.
-All hypotheses involved in an advisory search must define matching `reward_*`
-functions.
+Use `plan.py` as your normal first attempt at constructing a productive
+trajectory, rather than wandering through manually chosen actions. Define a
+finite `reward_<suffix>(state)` for each plausible `step_<suffix>` whenever a
+meaningful progress signal can be expressed, then run `python plan.py` and inspect
+`plan-report.json.planning.suggestions`. The instrument may suggest a trajectory
+toward higher predicted reward or a trajectory ending at the first action whose
+predicted outcome distinguishes competing eligible hypotheses. All hypotheses
+involved in an advisory search must define matching `reward_*` functions.
 
-The built-in planner is breadth-first and deliberately simple. It is useful for
-small enumerable action spaces, but it is not the only planning method you may
-use and it is never an acceptance requirement.
+The built-in planner is breadth-first and deliberately simple. It is especially
+useful for small enumerable action spaces. Prefer a useful generated suggestion
+when one exists. If the domain cannot enumerate complete actions, no useful
+suggestion exists, or bounded search cannot reach progress, construct the
+trajectory yourself. Planner use is strongly encouraged but is never an
+acceptance requirement.
 
 When several hypotheses remain consistent with the Timeline, normally submit a
 useful trajectory predicted by the hypothesis you consider most likely. It may
@@ -137,11 +142,14 @@ The planner can use only the complete actions exposed by the domain in
 2. Read `INSTRUCTIONS.md`, `canonical-input.json`, and the latest
    `trusted-report.json` when present.
 3. Inspect and revise `world_model.py`; preserve genuinely plausible competing
-   hypotheses.
+   hypotheses and normally add a matching useful `reward_<suffix>` for each.
 4. Run `python backtest.py` and resolve relevant Timeline mismatches.
-5. Write one complete trajectory to `plan.json` yourself, or use an advisory
-   suggestion from `python plan.py` as a starting point.
-6. Run `python plan.py`. Read `plan-report.json`; the submitted plan must be valid
+5. Run `python plan.py` to search the surviving rewarded hypotheses. Inspect
+   `plan-report.json.planning.suggestions` and normally use the best productive
+   suggestion as the starting point for `plan.json`; construct a trajectory
+   manually only when bounded advisory search cannot provide a useful one.
+6. Run `python plan.py` again after writing `plan.json`. Read `plan-report.json`;
+   the submitted plan must be valid
    under the model and trajectory checks and list at least one supporting model.
    The trusted Critic separately applies the domain action validator.
 7. Run `python commit.py`. It reruns the checks, stages non-ignored files, and
@@ -318,8 +326,7 @@ def _runtime_source() -> str:
         "import subprocess\n"
         "import sys\n"
         "from pathlib import Path\n\n"
-        f"MODEL_RUNNER = {MODEL_RUNNER!r}\n"
-        + _RUNTIME_SUPPORT
+        f"MODEL_RUNNER = {MODEL_RUNNER!r}\n" + _RUNTIME_SUPPORT
     )
 
 

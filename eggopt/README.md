@@ -110,6 +110,7 @@ physics = PhysicsStrategy(
     execute=real_action_task,
     validate_action=trusted_domain_action_validator,
     is_goal=trusted_goal_predicate,
+    terminal_outcome=trusted_absorbing_state_classifier,  # optional
     identity={"domain": "my-world", "version": 1},
     domain_information="Explain the public state and action formats.",
     evaluator_timeout_sec=300,
@@ -121,6 +122,14 @@ domain action or raises before execution. It validates without translating the
 action. `planner_actions` may optionally expose a finite tuple of complete actions
 to the advisory planner; Actor-authored `plan.json` trajectories do not depend on
 that tuple.
+
+`is_goal(state)` identifies successful completion. Domains with absorbing
+non-goal states may additionally return `TerminalOutcome("reason")` from
+`terminal_outcome(state)`; otherwise it returns `None`. Eggopt owns when that
+lifecycle port is checked, while the domain alone owns what its states mean.
+`PhysicsResult.goal_reached` distinguishes successful goal completion from
+domain-terminal and safety-limit stops; `accepted` means the ActorCritic loop
+settled and is not itself a success signal.
 
 `PhysicsStrategy.task(...)` composes the same study into an already-open Eggopt
 runtime and an existing Physics thread. Batch applications can therefore place

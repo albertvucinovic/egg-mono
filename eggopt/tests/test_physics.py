@@ -29,6 +29,7 @@ from eggopt import (
     PHYSICS_ACTOR_SYSTEM_PROMPT,
     Agent,
     PhysicsStrategy,
+    TerminalOutcome,
     canonical_plan,
     physics_actor_system_prompt,
     write_actor_files,
@@ -109,7 +110,15 @@ def trajectory(*positions):
     ]
 
 
-def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
+def strategy(
+    workspace,
+    edit,
+    *,
+    replies=("ready",),
+    tools=None,
+    execute=None,
+    terminal_outcome=None,
+):
     llm = ScriptedLLM(replies, edit)
     tools = tools or Agent(object(), {"role": "default"}).tools
     actor = Agent(
@@ -138,8 +147,9 @@ def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
                 if action == {"action": 1} and 1 in state["legal_actions"]
                 else (_ for _ in ()).throw(ValueError("illegal toy action"))
             ),
-            is_goal=lambda value: value["position"] >= 2,
+            is_goal=lambda value: value["position"] == 2,
             identity={"domain": "toy"},
+            terminal_outcome=terminal_outcome,
             domain_information="State has position and legal_actions.",
             planner_actions=({"action": 1},),
             max_depth=4,
@@ -473,12 +483,15 @@ def test_actor_prompt_explains_freedom_and_minimal_interface():
     for required in (
         "You own this Git repository",
         "world_model.py",
-        "optional `reward_<suffix>",
+        "matching `reward_<suffix>",
         "plan.json",
         "{state, action, next_state}",
         "hypothesis you consider most likely",
         "continue beyond the first action",
         "optional planner can help find",
+        "normal first attempt",
+        "normally add a matching useful `reward_<suffix>`",
+        "normally use the best productive",
         "Planner suggestions are aids, not constraints",
         "need not have been found by `plan.py`",
         "supporting model",
@@ -497,6 +510,8 @@ def test_actor_turn_prompts_match_new_protocol():
     revision = _actor_turn_prompt(2, {"feedback": "Prediction contradicted."})
     assert "complete runbook" in first
     assert "plan" in first
+    assert "reward_<suffix>" in first
+    assert "use python plan.py to search" in first
     assert "commit.py" in first
     assert "do not execute the real environment" in first
     assert "trusted-report.json" in revision
@@ -613,6 +628,20 @@ def test_physics_requires_all_domain_ports():
             is_goal=lambda _: False,
             identity={"domain": "x"},
         )
+
+    with pytest.raises(TypeError, match="terminal_outcome"):
+        PhysicsStrategy(
+            actor=actor,
+            observe=lambda **_: Value({}),
+            execute=lambda **_: Value({}),
+            validate_action=lambda **_: None,
+            is_goal=lambda _: False,
+            identity={"domain": "x"},
+            terminal_outcome="bad",
+        )
+
+    with pytest.raises(ValueError, match="non-empty"):
+        TerminalOutcome("")
 
 
 def test_scheduler_managed_agent_is_part_of_task_identity():
@@ -1040,6 +1069,98 @@ def test_valid_plan_acceptance_is_independent_of_advisory_planner(tmp_path, monk
     assert result.accepted is True
     assert result.stopping_reason == "won"
     assert result.value["report"]["planning"]["suggestions"] == []
+
+
+def test_domain_terminal_state_stops_after_real_transition(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+    plan = trajectory(0, 1)
+
+    def edit(_call):
+        write_plan(workspace, plan)
+
+    physics, actor = strategy(
+        workspace,
+        edit,
+        execute=lambda **_: Value(state(-1)),
+        terminal_outcome=lambda value: (
+            TerminalOutcome("game_over") if value["position"] == -1 else None
+        ),
+    )
+    result = physics.run(run_dir="run", max_cycles=3)
+
+    assert result.accepted is True
+    assert result.stopping_reason == "game_over"
+    assert result.goal_reached is False
+    assert result.actions == 1
+    assert result.value["report"]["resolution"] == "game_over"
+    assert result.timeline[-1]["next_state"] == state(-1)
+    assert actor.calls == 1
+
+
+def test_goal_state_stops_even_when_prediction_was_wrong(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+
+    def edit(_call):
+        write_plan(workspace, trajectory(0, 1))
+
+    physics, actor = strategy(
+        workspace,
+        edit,
+        execute=lambda **_: Value(state(2)),
+    )
+    result = physics.run(run_dir="run", max_cycles=3)
+
+    assert result.accepted is True
+    assert result.stopping_reason == "won"
+    assert result.goal_reached is True
+    assert result.actions == 1
+    assert result.value["report"]["resolution"] == "won"
+    assert actor.calls == 1
+
+
+def test_initial_domain_terminal_state_stops_before_actor_turn(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+    physics, actor = strategy(
+        workspace,
+        None,
+        terminal_outcome=lambda value: (
+            TerminalOutcome("game_over") if value["position"] == 0 else None
+        ),
+    )
+
+    result = physics.run(run_dir="run", max_cycles=3)
+
+    assert result.accepted is True
+    assert result.stopping_reason == "game_over"
+    assert result.goal_reached is False
+    assert result.actions == 0
+    assert result.rounds == 0
+    assert result.critic_thread_id is None
+    assert result.actor_thread_id is None
+    assert actor.calls == 0
+
+
+def test_domain_terminal_outcome_must_be_typed(tmp_path, monkeypatch):
+    from eggflow import TaskError
+
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+
+    def edit(_call):
+        write_plan(workspace, trajectory(0, 1))
+
+    physics, _actor = strategy(
+        workspace,
+        edit,
+        execute=lambda **_: Value(state(1)),
+        terminal_outcome=lambda _value: "game_over",
+    )
+
+    with pytest.raises(TaskError, match="TerminalOutcome or None"):
+        physics.run(run_dir="run", max_cycles=1)
 
 
 def test_one_broken_model_does_not_block_another_supporting_model():

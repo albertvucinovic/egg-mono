@@ -33,6 +33,7 @@ from .instruments import (
     instrument_files,
     write_actor_files,
 )
+from .lifecycle import TerminalOutcome, classify_terminal_state, terminal_feedback
 
 TaskFactory = Callable[..., Task]
 
@@ -44,8 +45,9 @@ def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
         return (
             "Begin one Physics Actor turn now. Follow the complete runbook in your "
             "system instructions and INSTRUCTIONS.md: inspect Git and canonical "
-            "evidence, revise and backtest world_model.py, create and validate "
-            "plan.json (using advisory planning only if useful), run commit.py, "
+            "evidence, revise and backtest world_model.py, define useful matching "
+            "reward_<suffix> objectives whenever possible, use python plan.py to "
+            "search for a productive trajectory, create and validate plan.json, run commit.py, "
             "verify a new clean HEAD, then "
             "answer briefly. Do not merely describe the procedure and do not execute "
             "the real environment yourself."
@@ -83,8 +85,8 @@ class PhysicsResult:
     rounds: int
     head: str | None
     physics_thread_id: str
-    critic_thread_id: str
-    actor_thread_id: str
+    critic_thread_id: str | None
+    actor_thread_id: str | None
     workspace: str
 
     @property
@@ -100,6 +102,12 @@ class PhysicsResult:
         if isinstance(value, Mapping):
             return int(value.get("actions", 0))
         return int(getattr(value, "actions", 0))
+
+    @property
+    def goal_reached(self) -> bool:
+        """Whether the trusted domain goal, rather than another stop, was reached."""
+
+        return self.stopping_reason == "won"
 
 
 @dataclass(frozen=True)
@@ -120,6 +128,9 @@ class PhysicsStrategy:
     validate_action: Callable[..., Any] = field(repr=False, compare=False)
     is_goal: Callable[[Any], bool] = field(repr=False, compare=False)
     identity: Any
+    terminal_outcome: Callable[[Any], TerminalOutcome | None] | None = field(
+        default=None, repr=False, compare=False
+    )
     domain_information: str = ""
     planner_actions: tuple[Any, ...] = ()
     max_depth: int = 8
@@ -130,6 +141,8 @@ class PhysicsStrategy:
         for name in ("observe", "execute", "validate_action", "is_goal"):
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name} must be callable")
+        if self.terminal_outcome is not None and not callable(self.terminal_outcome):
+            raise TypeError("terminal_outcome must be callable or None")
         for name in ("max_depth", "max_nodes"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -300,6 +313,21 @@ class _PhysicsRun(Task):
                 self.strategy.max_nodes,
                 self.strategy.evaluator_timeout_sec,
             )
+            terminal = _current_terminal_state(outer, self.strategy)
+            if terminal is not None:
+                value = _terminal_value(outer, terminal)
+                return PhysicsResult(
+                    value=value,
+                    accepted=True,
+                    feedback=terminal_feedback(terminal),
+                    stopping_reason=terminal,
+                    rounds=0,
+                    head=_git_head(Path(workspace)),
+                    physics_thread_id=self.physics_id,
+                    critic_thread_id=None,
+                    actor_thread_id=None,
+                    workspace=workspace,
+                )
             result = yield ActorCritic(
                 actor=self.strategy.actor,
                 critic=_GitCritic(
@@ -309,6 +337,7 @@ class _PhysicsRun(Task):
                         validate_action=self.strategy.validate_action,
                         is_goal=self.strategy.is_goal,
                         identity=self.strategy.identity,
+                        terminal_outcome=self.strategy.terminal_outcome,
                         domain_information=self.strategy.domain_information,
                         planner_actions=self.strategy.planner_actions,
                         max_depth=self.strategy.max_depth,
@@ -412,6 +441,39 @@ class _InitializeRepository(Task):
         _commit(actor, "[physics] initialize canonical world state")
         _clone_repository(actor, critic)
         return _git_head(actor)
+
+
+def _current_terminal_state(
+    outer_context: str, strategy: PhysicsStrategy
+) -> str | None:
+    state = json.loads(
+        (_authoritative_state(Path(outer_context)) / "state.json").read_text()
+    )
+    timeline = tuple(state["timeline"])
+    current = timeline[-1].get("next_state", timeline[-1])
+    return classify_terminal_state(
+        current,
+        is_goal=strategy.is_goal,
+        terminal_outcome=strategy.terminal_outcome,
+    )
+
+
+def _terminal_value(outer_context: str, reason: str) -> dict[str, Any]:
+    state = json.loads(
+        (_authoritative_state(Path(outer_context)) / "state.json").read_text()
+    )
+    report = {
+        "stage": "execution",
+        "resolution": reason,
+        "actions": int(state["actions"]),
+        "executed": [],
+    }
+    return {
+        "stopping_reason": reason,
+        "timeline": tuple(state["timeline"]),
+        "actions": int(state["actions"]),
+        "report": report,
+    }
 
 
 @dataclass
@@ -933,6 +995,7 @@ __all__ = [
     "PHYSICS_ACTOR_SYSTEM_PROMPT",
     "PhysicsResult",
     "PhysicsStrategy",
+    "TerminalOutcome",
     "physics_actor_system_prompt",
     "run_physics",
 ]
