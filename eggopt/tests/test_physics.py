@@ -146,6 +146,135 @@ def run_evaluator(request):
     return parse_evaluator_output(completed.stdout)
 
 
+def test_generic_evaluator_plans_with_structured_legal_intents():
+    click = {"action": 6, "data": {"x": 12, "y": 34}}
+    source = '''
+from copy import deepcopy
+def step_a(state, action):
+    result = deepcopy(state)
+    if action == {"action": 6, "data": {"x": 12, "y": 34}}:
+        result["score"] += 1
+    return result
+def reward_a(state):
+    return state["score"]
+def step_b(state, action):
+    return deepcopy(state)
+def reward_b(state):
+    return state["score"]
+'''
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [{"score": 0, "legal_actions": [click]}],
+            "legal_actions_key": "legal_actions",
+            "max_depth": 2,
+            "max_nodes": 20,
+        }
+    )
+
+    assert result["planning"]["goal_plans"]["a"][0]["action"] == click
+    experiment = next(
+        plan
+        for plan in result["planning"]["plans"]
+        if plan["purpose"] == "experiment"
+    )
+    assert experiment["intents"][0]["action"] == click
+
+
+def test_generic_evaluator_intersects_equivalent_structured_intents():
+    click = {"action": 6, "data": {"x": 12, "y": 34}}
+    source = '''
+from copy import deepcopy
+def _next(state, action, branch):
+    result = deepcopy(state)
+    result["branch"] = branch
+    result["legal_actions"] = [{"action": 6, "data": {"x": 12, "y": 34}}]
+    return result
+def step_a(state, action):
+    return _next(state, action, "a")
+def reward_a(state):
+    return 0
+def step_b(state, action):
+    return _next(state, action, "b")
+def reward_b(state):
+    return 0
+'''
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [{"branch": None, "legal_actions": [click]}],
+            "legal_actions_key": "legal_actions",
+            "max_depth": 1,
+            "max_nodes": 20,
+        }
+    )
+
+    assert result["planning"]["discrimination_plans"][0]["plan"][0][
+        "action"
+    ] == click
+
+
+def test_generic_evaluator_uses_model_specific_action_generators():
+    click = {"action": 6, "data": {"x": 12, "y": 34}}
+    source = '''
+from copy import deepcopy
+def _clicks(state):
+    if 6 not in state["legal_actions"]:
+        return []
+    return [{"action": 6, "data": {"x": 12, "y": 34}}]
+def actions_a(state):
+    return _clicks(state)
+def actions_b(state):
+    return _clicks(state)
+def step_a(state, action):
+    result = deepcopy(state)
+    result["branch"] = "a"
+    return result
+def reward_a(state):
+    return 0
+def step_b(state, action):
+    result = deepcopy(state)
+    result["branch"] = "b"
+    return result
+def reward_b(state):
+    return 0
+'''
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [{"branch": None, "legal_actions": [6]}],
+            "legal_actions_key": "legal_actions",
+            "max_depth": 1,
+            "max_nodes": 20,
+        }
+    )
+
+    assert result["planning"]["discrimination_plans"][0]["plan"][0][
+        "action"
+    ] == click
+
+
+def test_generic_evaluator_rejects_orphan_action_generators():
+    source = '''
+def step_a(state, action):
+    return state
+def reward_a(state):
+    return 0
+def actions_missing(state):
+    return []
+'''
+    with pytest.raises(subprocess.CalledProcessError):
+        run_evaluator(
+            {
+                "source": source,
+                "timeline": [{"legal_actions": [1]}],
+                "legal_actions_key": "legal_actions",
+                "max_depth": 1,
+                "max_nodes": 20,
+            }
+        )
+
+
 def test_generic_evaluator_can_write_a_compactly_receipted_report(tmp_path):
     report = tmp_path / "trusted" / "report.json"
     request = {
@@ -733,6 +862,7 @@ def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
     _refresh_actor_instruments(
         actor,
         critic,
+        domain_information="Updated domain contract.",
         legal_actions_key="moves",
         max_depth=5,
         max_nodes=99,
@@ -741,6 +871,9 @@ def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
 
     assert (actor / "world_model.py").read_text() == "THEORY = 'preserve me'\n"
     assert "physics_runtime" in (actor / "backtest.py").read_text()
+    assert (actor / "INSTRUCTIONS.md").read_text().endswith(
+        "Updated domain contract.\n"
+    )
     assert json.loads((actor / "physics-config.json").read_text())["max_depth"] == 5
     assert git(actor, "log", "-1", "--format=%s") == (
         "[physics] refresh Actor instruments"
@@ -772,6 +905,7 @@ def test_instrument_refresh_refuses_modified_owned_files(tmp_path):
         _refresh_actor_instruments(
             actor,
             critic,
+            domain_information="",
             legal_actions_key="legal_actions",
             max_depth=8,
             max_nodes=10_000,
@@ -804,6 +938,7 @@ def test_instrument_refresh_refuses_committed_custom_helpers(tmp_path):
         _refresh_actor_instruments(
             actor,
             critic,
+            domain_information="",
             legal_actions_key="legal_actions",
             max_depth=8,
             max_nodes=10_000,

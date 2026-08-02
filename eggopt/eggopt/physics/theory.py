@@ -29,13 +29,15 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 steps = {name[5:]: value for name, value in vars(module).items() if name.startswith("step_") and name[5:] and callable(value)}
 rewards = {name[7:]: value for name, value in vars(module).items() if name.startswith("reward_") and name[7:] and callable(value)}
+actions = {name[8:]: value for name, value in vars(module).items() if name.startswith("actions_") and name[8:] and callable(value)}
 if not steps:
     raise ValueError("world_model.py defines no step_<suffix> functions")
 missing = sorted(set(steps) - set(rewards))
 orphan = sorted(set(rewards) - set(steps))
-if missing or orphan:
-    raise ValueError(f"step/reward suffixes must match; missing rewards={missing}, orphan rewards={orphan}")
-models = {suffix: (steps[suffix], rewards[suffix]) for suffix in sorted(steps)}
+orphan_actions = sorted(set(actions) - set(steps))
+if missing or orphan or orphan_actions:
+    raise ValueError(f"step/reward suffixes must match; missing rewards={missing}, orphan rewards={orphan}, orphan actions={orphan_actions}")
+models = {suffix: (steps[suffix], rewards[suffix], actions.get(suffix)) for suffix in sorted(steps)}
 
 def freeze(value):
     if isinstance(value, dict):
@@ -44,12 +46,22 @@ def freeze(value):
         return tuple(freeze(item) for item in value)
     return value
 
-def legal(state):
+def freeze_action(action):
+    # Return one JSON action as a hashable, order-preserving search value.
+    return freeze(action)
+
+def action_map(state, generate=None):
     if not isinstance(state, dict):
         raise TypeError("model states must expose legal actions in a mapping")
-    return tuple(request["legal_actions"].get(str(action), ()) if False else state.get(request["legal_actions_key"], ()))
+    values = generate(state) if generate is not None else state.get(request["legal_actions_key"], ())
+    if not isinstance(values, (list, tuple)):
+        raise TypeError("legal actions must be a finite list or tuple")
+    return {freeze_action(action): action for action in values}
 
-def goal_plan(step, reward, start):
+def legal(state, generate=None):
+    return tuple(action_map(state, generate).values())
+
+def goal_plan(step, reward, generate, start):
     frontier = deque([(start, ())])
     seen = {freeze(start)}
     baseline = float(reward(start))
@@ -67,7 +79,7 @@ def goal_plan(step, reward, start):
             best = (score, path)
         if len(path) >= request["max_depth"]:
             continue
-        for action in legal(state):
+        for action in legal(state, generate):
             next_state = step(state, action)
             key = freeze(next_state)
             if key in seen:
@@ -85,9 +97,11 @@ def discriminate(subset, start):
         nodes += 1
         if len(path) >= request["max_depth"]:
             continue
-        sets = [set(legal(state)) for state in states.values()]
-        common = set.intersection(*sets) if sets else set()
-        for action in sorted(common, key=repr):
+        actions_by_model = [action_map(states[suffix], models[suffix][2]) for suffix in subset]
+        common = set.intersection(*(set(actions) for actions in actions_by_model)) if actions_by_model else set()
+        reference = actions_by_model[0] if actions_by_model else {}
+        for action_key in sorted(common, key=repr):
+            action = reference[action_key]
             next_states = {suffix: models[suffix][0](states[suffix], action) for suffix in subset}
             intent = {"action": action, "prediction": next_states}
             next_path = path + (intent,)
@@ -100,7 +114,7 @@ def discriminate(subset, start):
     return None
 
 reports = {}
-for suffix, (step, reward) in models.items():
+for suffix, (step, reward, _generate) in models.items():
     mismatches = []
     matches = 0
     for index, item in enumerate(timeline[1:], start=1):
@@ -115,7 +129,7 @@ for suffix, (step, reward) in models.items():
     reports[suffix] = {"matches": matches, "mismatches": mismatches}
 
 current = timeline[-1].get("next_state", timeline[-1])
-goals = {suffix: goal_plan(step, reward, current) for suffix, (step, reward) in models.items()}
+goals = {suffix: goal_plan(step, reward, generate, current) for suffix, (step, reward, generate) in models.items()}
 discrimination = []
 suffixes = tuple(models)
 for size in range(2, len(suffixes) + 1):

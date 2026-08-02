@@ -130,8 +130,10 @@ class PhysicsCritic(Task):
             )
 
         current = timeline[-1].get("next_state", timeline[-1])
-        legal = set(current.get(self.legal_actions_key, ()))
-        if committed["intents"][0]["action"] not in legal:
+        legal = {
+            freeze(action) for action in current.get(self.legal_actions_key, ())
+        }
+        if freeze(committed["intents"][0]["action"]) not in legal:
             return self._revise(
                 repository,
                 state_root,
@@ -157,7 +159,23 @@ class PhysicsCritic(Task):
             )
             if not isinstance(effect, Task):
                 raise TypeError("Physics execute must construct an Eggflow Task")
-            next_state = yield effect
+            try:
+                next_state = yield effect
+            except TaskError as exc:
+                if exc.is_terminal:
+                    raise
+                return self._revise(
+                    repository,
+                    state_root,
+                    timeline,
+                    actions,
+                    "The domain rejected the committed action before producing an "
+                    f"observation: {exc}. No transition was appended and the real-action "
+                    "budget was not incremented. Inspect the canonical legal intent "
+                    "payload, revise the world model, rerun backtest.py and plan.py, and "
+                    "commit a planner-returned plan.",
+                    evaluation,
+                )
             transition = {
                 "state": timeline[-1].get("next_state", timeline[-1]),
                 "action": intent,

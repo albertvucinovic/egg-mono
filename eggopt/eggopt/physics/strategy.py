@@ -470,6 +470,7 @@ class _GitCritic(Task):
             _refresh_actor_instruments(
                 actor,
                 critic_repo,
+                domain_information=self.critic.domain_information,
                 legal_actions_key=self.critic.legal_actions_key,
                 max_depth=self.critic.max_depth,
                 max_nodes=self.critic.max_nodes,
@@ -646,6 +647,7 @@ def _refresh_actor_instruments(
     actor: Path,
     critic: Path,
     *,
+    domain_information: str,
     legal_actions_key: str,
     max_depth: int,
     max_nodes: int,
@@ -668,6 +670,12 @@ def _refresh_actor_instruments(
         max_nodes=max_nodes,
         evaluator_timeout_sec=evaluator_timeout_sec,
     )
+    instructions = ACTOR_INSTRUCTIONS
+    if domain_information.strip():
+        instructions += (
+            "\n## Domain information\n\n" + domain_information.strip() + "\n"
+        )
+    files["INSTRUCTIONS.md"] = instructions
     dirty = _git(actor, "status", "--porcelain=v1").splitlines()
     dirty_paths = {
         entry[2:].lstrip().split(" -> ")[-1]

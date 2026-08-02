@@ -20,6 +20,10 @@ def step_1(state, action):
 
 def reward_1(state):
     return 0.0
+
+
+# Optionally define actions_1(state) when this hypothesis must expand structured
+# domain intents that are described by, but not enumerated in, the public state.
 '''
 
 ACTOR_INSTRUCTIONS = """# Physics Actor runbook
@@ -34,7 +38,8 @@ current theory is provisional.
 Work like a physicist:
 
 1. **Ground the state.** Decide which parts of each raw observation are useful
-   entities, variables, and relations. A persistent prediction failure may mean
+   entities, variables, and relations. Legal actions are complete domain intents,
+   not necessarily scalar identifiers. A persistent prediction failure may mean
    that this representation—not just a transition rule—is wrong.
 2. **Discover mechanisms.** Write executable hypotheses for how a legal action
    transforms one complete public state into the next.
@@ -97,13 +102,23 @@ The non-empty suffix names a hypothesis; for example, `step_door` pairs only
 with `reward_door`. Every step must have one reward with the same suffix and no
 reward may be orphaned.
 
+You may also define an optional matching `actions_<suffix>(state)` function. Use
+it when a public legal-action identifier denotes a parameterized family rather
+than enumerating every complete intent. It must return a finite list or tuple of
+complete candidate intents derived only from public state and domain information.
+For example, a visual domain may generate a bounded set of plausible click
+coordinates from visible pixels. Without `actions_<suffix>`, search expands the
+configured legal-actions field directly.
+
 For each hypothesis:
 
 - `step_*` must be deterministic for the same inputs, must not mutate its
   arguments, and must return the **complete** public state—not merely a latent
   summary or changed fields.
 - The returned state must expose the configured legal-actions field. Search
-  expands only actions that your simulated state declares legal.
+  expands only actions that your simulated state declares legal. Treat every
+  listed value as an opaque complete intent and preserve it exactly. It may be a
+  scalar, mapping, or another JSON value; never discard parameters embedded in it.
 - `reward_*` must return a finite number. The generic planner searches for a
   reachable state with utility strictly greater than the current state's
   utility; encode inferred progress accordingly.
@@ -128,7 +143,7 @@ The planner emits only non-empty canonical plans:
   "models": ["suffix", "..."],
   "intents": [
     {
-      "action": "domain action value",
+      "action": "complete domain intent copied from legal actions",
       "prediction": {
         "suffix": "complete predicted next public state"
       }
