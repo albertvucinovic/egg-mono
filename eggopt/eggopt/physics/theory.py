@@ -4,20 +4,19 @@ import json
 from typing import Any
 
 MODEL_RUNNER = r"""
+import copy
 import hashlib
 import importlib.util
-import itertools
 import json
-import math
 import os
 import sys
 import tempfile
-from collections import deque
 from pathlib import Path
 
 request = json.loads(sys.stdin.read())
 source = request["source"]
 timeline = request["timeline"]
+raw_plans = request.get("plans", [])
 work = Path(request.get("work_dir", ".physics-evaluation"))
 work.mkdir(parents=True, exist_ok=True)
 path = work / ("world_model_" + hashlib.sha256(source.encode()).hexdigest()[:12] + ".py")
@@ -28,16 +27,28 @@ if spec is None or spec.loader is None:
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 steps = {name[5:]: value for name, value in vars(module).items() if name.startswith("step_") and name[5:] and callable(value)}
-rewards = {name[7:]: value for name, value in vars(module).items() if name.startswith("reward_") and name[7:] and callable(value)}
 actions = {name[8:]: value for name, value in vars(module).items() if name.startswith("actions_") and name[8:] and callable(value)}
 if not steps:
     raise ValueError("world_model.py defines no step_<suffix> functions")
-missing = sorted(set(steps) - set(rewards))
-orphan = sorted(set(rewards) - set(steps))
 orphan_actions = sorted(set(actions) - set(steps))
-if missing or orphan or orphan_actions:
-    raise ValueError(f"step/reward suffixes must match; missing rewards={missing}, orphan rewards={orphan}, orphan actions={orphan_actions}")
-models = {suffix: (steps[suffix], rewards[suffix], actions.get(suffix)) for suffix in sorted(steps)}
+if orphan_actions:
+    raise ValueError(f"actions suffixes require matching steps; orphan actions={orphan_actions}")
+models = {suffix: (steps[suffix], actions.get(suffix)) for suffix in sorted(steps)}
+
+if not isinstance(timeline, list) or not timeline:
+    raise ValueError("timeline must be a non-empty list")
+if not isinstance(raw_plans, list):
+    raise TypeError("plans must be a finite list")
+max_depth = request["max_depth"]
+max_nodes = request["max_nodes"]
+if isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1:
+    raise ValueError("max_depth must be a positive integer")
+if isinstance(max_nodes, bool) or not isinstance(max_nodes, int) or max_nodes < 1:
+    raise ValueError("max_nodes must be a positive integer")
+validation_nodes = sum(max(1, len(plan.get("intents", ()))) if isinstance(plan, dict) else 1 for plan in raw_plans)
+if validation_nodes > max_nodes:
+    raise ValueError(f"submitted plans require {validation_nodes} validation nodes; limit is {max_nodes}")
+
 
 def freeze(value):
     if isinstance(value, dict):
@@ -46,80 +57,73 @@ def freeze(value):
         return tuple(freeze(item) for item in value)
     return value
 
-def freeze_action(action):
-    # Return one JSON action as a hashable, order-preserving search value.
-    return freeze(action)
+
+def canonical_plan(value):
+    if not isinstance(value, dict) or set(value) != {"purpose", "models", "intents"}:
+        raise ValueError("plan must contain exactly purpose, models, and intents")
+    if value["purpose"] not in {"goal", "experiment"}:
+        raise ValueError("plan purpose must be goal or experiment")
+    selected = value["models"]
+    intents = value["intents"]
+    if not isinstance(selected, list) or not selected or not all(isinstance(item, str) and item for item in selected):
+        raise ValueError("plan models must be a non-empty string list")
+    if len(set(selected)) != len(selected):
+        raise ValueError("plan models must be unique")
+    if value["purpose"] == "goal" and len(selected) != 1:
+        raise ValueError("goal plans must use exactly one model")
+    if value["purpose"] == "experiment" and len(selected) < 2:
+        raise ValueError("experiment plans must use at least two models")
+    if not isinstance(intents, list) or not intents:
+        raise ValueError("committed plan must contain at least one intent")
+    for intent in intents:
+        if not isinstance(intent, dict) or set(intent) != {"action", "prediction"}:
+            raise ValueError("every intent must contain exactly action and prediction")
+        predictions = intent["prediction"]
+        if not isinstance(predictions, dict) or set(predictions) != set(selected):
+            raise ValueError("every intent must predict once for every plan model")
+    if value["purpose"] == "experiment":
+        for index, intent in enumerate(intents):
+            distinct = len({freeze(item) for item in intent["prediction"].values()})
+            if index < len(intents) - 1 and distinct != 1:
+                raise ValueError("experiment predictions must share one common prefix")
+            if index == len(intents) - 1 and distinct < 2:
+                raise ValueError("an experiment must end with its first distinguishing action")
+    return {"purpose": value["purpose"], "models": selected, "intents": intents}
+
+
+def recorded_action(value):
+    if isinstance(value, dict) and set(value) == {"action", "prediction"} and isinstance(value["prediction"], dict):
+        return value["action"]
+    return value
+
 
 def action_map(state, generate=None):
     if not isinstance(state, dict):
         raise TypeError("model states must expose legal actions in a mapping")
-    values = generate(state) if generate is not None else state.get(request["legal_actions_key"], ())
+    values = generate(copy.deepcopy(state)) if generate is not None else state.get(request["legal_actions_key"], ())
     if not isinstance(values, (list, tuple)):
         raise TypeError("legal actions must be a finite list or tuple")
-    return {freeze_action(action): action for action in values}
+    return {freeze(action): action for action in values}
 
-def legal(state, generate=None):
-    return tuple(action_map(state, generate).values())
 
-def goal_plan(step, reward, generate, start):
-    frontier = deque([(start, ())])
-    seen = {freeze(start)}
-    baseline = float(reward(start))
-    if not math.isfinite(baseline):
-        raise ValueError("reward must be finite")
-    best = (baseline, ())
-    nodes = 0
-    while frontier and nodes < request["max_nodes"]:
-        state, path = frontier.popleft()
-        nodes += 1
-        score = float(reward(state))
-        if not math.isfinite(score):
-            raise ValueError("reward must be finite")
-        if score > best[0]:
-            best = (score, path)
-        if len(path) >= request["max_depth"]:
-            continue
-        for action in legal(state, generate):
-            next_state = step(state, action)
-            key = freeze(next_state)
-            if key in seen:
-                continue
-            seen.add(key)
-            frontier.append((next_state, path + ({"action": action, "prediction": next_state},)))
-    return list(best[1]) if best[0] > baseline and best[1] else None
+def predict(step, state, action):
+    state_arg = copy.deepcopy(state)
+    action_arg = copy.deepcopy(action)
+    state_before = copy.deepcopy(state_arg)
+    action_before = copy.deepcopy(action_arg)
+    predicted = step(state_arg, action_arg)
+    if state_arg != state_before or action_arg != action_before:
+        raise ValueError("step functions must not mutate their arguments")
+    return predicted
 
-def discriminate(subset, start):
-    frontier = deque([({suffix: start for suffix in subset}, ())])
-    seen = {freeze({suffix: start for suffix in subset})}
-    nodes = 0
-    while frontier and nodes < request["max_nodes"]:
-        states, path = frontier.popleft()
-        nodes += 1
-        if len(path) >= request["max_depth"]:
-            continue
-        actions_by_model = [action_map(states[suffix], models[suffix][2]) for suffix in subset]
-        common = set.intersection(*(set(actions) for actions in actions_by_model)) if actions_by_model else set()
-        reference = actions_by_model[0] if actions_by_model else {}
-        for action_key in sorted(common, key=repr):
-            action = reference[action_key]
-            next_states = {suffix: models[suffix][0](states[suffix], action) for suffix in subset}
-            intent = {"action": action, "prediction": next_states}
-            next_path = path + (intent,)
-            if len({freeze(value) for value in next_states.values()}) > 1:
-                return list(next_path)
-            key = freeze(next_states)
-            if key not in seen:
-                seen.add(key)
-                frontier.append((next_states, next_path))
-    return None
 
 reports = {}
-for suffix, (step, reward, _generate) in models.items():
+for suffix, (step, _generate) in models.items():
     mismatches = []
     matches = 0
     for index, item in enumerate(timeline[1:], start=1):
         try:
-            predicted = step(item["state"], item["action"])
+            predicted = predict(step, item["state"], recorded_action(item["action"]))
             if predicted == item["next_state"]:
                 matches += 1
             else:
@@ -128,30 +132,54 @@ for suffix, (step, reward, _generate) in models.items():
             mismatches.append({"transition": index, "error": str(exc)})
     reports[suffix] = {"matches": matches, "mismatches": mismatches}
 
+surviving = [suffix for suffix, report in reports.items() if not report["mismatches"]]
 current = timeline[-1].get("next_state", timeline[-1])
-goals = {suffix: goal_plan(step, reward, generate, current) for suffix, (step, reward, generate) in models.items()}
-discrimination = []
-suffixes = tuple(models)
-for size in range(2, len(suffixes) + 1):
-    for subset in itertools.combinations(suffixes, size):
-        plan = discriminate(subset, current)
-        if plan is not None:
-            discrimination.append({"models": list(subset), "plan": plan})
-plans = []
-for suffix, plan in goals.items():
-    if plan:
-        plans.append({"purpose": "goal", "models": [suffix], "intents": [{"action": item["action"], "prediction": {suffix: item["prediction"]}} for item in plan]})
-for item in discrimination:
-    plans.append({"purpose": "experiment", "models": item["models"], "intents": item["plan"]})
+
+
+def validate_plan(raw):
+    plan = canonical_plan(raw)
+    if len(plan["intents"]) > max_depth:
+        raise ValueError(f"plan has {len(plan['intents'])} intents; limit is {max_depth}")
+    unknown = sorted(set(plan["models"]) - set(models))
+    if unknown:
+        raise ValueError(f"plan references unknown models: {unknown}")
+    contradicted = sorted(set(plan["models"]) - set(surviving))
+    if contradicted:
+        raise ValueError(f"plan references models contradicted by the Timeline: {contradicted}")
+    states = {suffix: copy.deepcopy(current) for suffix in plan["models"]}
+    for intent_index, intent in enumerate(plan["intents"], start=1):
+        action = intent["action"]
+        next_states = {}
+        for suffix in plan["models"]:
+            step, generate = models[suffix]
+            if freeze(action) not in action_map(states[suffix], generate):
+                raise ValueError(f"intent {intent_index} action is not legal under model {suffix!r}")
+            predicted = predict(step, states[suffix], action)
+            claimed = intent["prediction"][suffix]
+            if predicted != claimed:
+                raise ValueError(f"intent {intent_index} prediction for model {suffix!r} does not match step_{suffix}")
+            next_states[suffix] = predicted
+        states = next_states
+    return plan
+
+valid_plans = []
+invalid_plans = []
+for index, raw in enumerate(raw_plans, start=1):
+    plan_id = f"plan-{index}"
+    try:
+        valid_plans.append({"plan_id": plan_id, "plan": validate_plan(raw)})
+    except (TypeError, ValueError, RuntimeError, KeyError, AttributeError) as exc:
+        invalid_plans.append({"plan_id": plan_id, "error": str(exc)})
+
 result = {
     "backtest": {
         "models": reports,
-        "surviving_models": [suffix for suffix, report in reports.items() if not report["mismatches"]],
+        "surviving_models": surviving,
     },
     "planning": {
-        "goal_plans": goals,
-        "discrimination_plans": discrimination,
-        "plans": plans,
+        "submitted_plans": len(raw_plans),
+        "valid_plans": valid_plans,
+        "invalid_plans": invalid_plans,
     },
 }
 output_path = request.get("output_path")
@@ -201,6 +229,7 @@ def evaluator_file_script(request_path: str) -> str:
         'request["source"] = Path(request.pop("source_path")).read_text()\n'
         'timeline = json.loads(Path(request.pop("timeline_path")).read_text())\n'
         'request["timeline"] = timeline["timeline"]\n'
+        'request["plans"] = json.loads(Path(request.pop("plans_path")).read_text())\n'
         "sys.stdin = io.StringIO(json.dumps(request, allow_nan=False, "
         'separators=(",", ":"), sort_keys=True))\n'
     )

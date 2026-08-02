@@ -11,7 +11,13 @@ from ..actor_critic import Critique
 from ..identity import digest_payload
 from ..thread_tool import ThreadTool, ThreadToolResult
 from .instruments import write_actor_files
-from .planning import canonical_plan, freeze, load_committed_plan
+from .planning import (
+    canonical_plan,
+    freeze,
+    load_committed_plan,
+    load_proposed_plans,
+    selected_plan_id,
+)
 from .theory import evaluator_file_script, parse_evaluator_receipt
 
 
@@ -36,7 +42,7 @@ class PhysicsCritic(Task):
 
     def get_cache_key(self):
         return digest_payload(
-            "eggopt.physics.domain-critic.v1.file-inputs",
+            "eggopt.physics.domain-critic.v2.actor-plans",
             {
                 "identity": self.identity,
                 "head": self.head,
@@ -69,11 +75,15 @@ class PhysicsCritic(Task):
             )
 
         try:
+            committed = load_committed_plan(repository)
+            proposed = load_proposed_plans(repository)
+            selected = selected_plan_id(proposed, committed)
             report_path = _evaluation_report_path(self.head)
             request_path = _evaluation_request_path(self.head)
             request = {
                 "source_path": "world_model.py",
                 "timeline_path": "canonical-input.json",
+                "plans_path": "proposed-plans.json",
                 "legal_actions_key": self.legal_actions_key,
                 "max_depth": self.max_depth,
                 "max_nodes": self.max_nodes,
@@ -90,7 +100,13 @@ class PhysicsCritic(Task):
                     "timeout": self.evaluator_timeout_sec,
                 },
                 origin="eggopt.physics.trusted-evaluator",
-                input_files=(request_path, "world_model.py", "canonical-input.json"),
+                input_files=(
+                    request_path,
+                    "world_model.py",
+                    "canonical-input.json",
+                    "proposed-plans.json",
+                    "committed-plan.json",
+                ),
                 output_files=(report_path,),
             )
             if not isinstance(result, ThreadToolResult):
@@ -98,22 +114,28 @@ class PhysicsCritic(Task):
             if parse_evaluator_receipt(result.output) != report_path:
                 raise ValueError("trusted evaluator receipt named an unexpected report")
             evaluation = _evaluation_report(repository / report_path)
-            committed = load_committed_plan(repository)
-            committed = canonical_plan(committed)
         except (OSError, TaskError, TypeError, ValueError, RuntimeError) as exc:
             return self._revise(repository, state_root, timeline, actions, str(exc))
 
         backtest = evaluation["backtest"]
         planning = evaluation["planning"]
-        plans = [canonical_plan(plan) for plan in planning["plans"]]
+        plans = [canonical_plan(item["plan"]) for item in planning["valid_plans"]]
         if committed not in plans:
+            detail = next(
+                (
+                    item["error"]
+                    for item in planning["invalid_plans"]
+                    if item.get("plan_id") == selected
+                ),
+                "the submitted plan was not validated",
+            )
             return self._revise(
                 repository,
                 state_root,
                 timeline,
                 actions,
-                "committed-plan.json does not exactly match any plan independently "
-                "generated from the submitted world_model.py and canonical Timeline",
+                "committed-plan.json failed independent prediction validation: "
+                + detail,
                 evaluation,
             )
         if not set(committed["models"]) <= set(backtest["surviving_models"]):
@@ -129,32 +151,31 @@ class PhysicsCritic(Task):
                 evaluation,
             )
 
-        current = timeline[-1].get("next_state", timeline[-1])
-        legal = {
-            freeze(action) for action in current.get(self.legal_actions_key, ())
-        }
-        if freeze(committed["intents"][0]["action"]) not in legal:
-            return self._revise(
-                repository,
-                state_root,
-                timeline,
-                actions,
-                "The first committed action is not listed in the canonical current "
-                "state's legal actions. Rerun plan.py from the latest "
-                "canonical-input.json and choose a newly returned plan",
-                evaluation,
-            )
-
         executed = []
         compatible = set(committed["models"])
         resolution = "plan_exhausted"
-        for intent in committed["intents"]:
+        last_intent = len(committed["intents"]) - 1
+        for index, intent in enumerate(committed["intents"]):
+            predictions = intent["prediction"]
+            branched = len({freeze(value) for value in predictions.values()}) > 1
+            if committed["purpose"] == "experiment" and branched != (
+                index == last_intent
+            ):
+                return self._revise(
+                    repository,
+                    state_root,
+                    timeline,
+                    actions,
+                    "The trusted evaluator returned an experiment that does not share "
+                    "one prediction prefix and end at its first distinguishing action",
+                    evaluation,
+                )
             if actions >= self.max_actions:
                 resolution = "max_actions"
                 break
             effect = self.execute(
                 timeline=timeline,
-                intent=intent,
+                intent=intent["action"],
                 workspace=str(repository),
             )
             if not isinstance(effect, Task):
@@ -171,22 +192,20 @@ class PhysicsCritic(Task):
                     actions,
                     "The domain rejected the committed action before producing an "
                     f"observation: {exc}. No transition was appended and the real-action "
-                    "budget was not incremented. Inspect the canonical legal intent "
-                    "payload, revise the world model, rerun backtest.py and plan.py, and "
-                    "commit a planner-returned plan.",
+                    "budget was not incremented. Inspect the complete action payload, "
+                    "revise the world model or proposed plan, rerun backtest.py and "
+                    "plan.py, and commit a validated plan.",
                     evaluation,
                 )
             transition = {
                 "state": timeline[-1].get("next_state", timeline[-1]),
-                "action": intent,
+                "action": intent["action"],
                 "next_state": next_state,
             }
             timeline += (transition,)
             executed.append(transition)
             actions += 1
-            predictions = intent["prediction"]
             matching = {name for name in compatible if predictions[name] == next_state}
-            branched = len({freeze(value) for value in predictions.values()}) > 1
             if not matching:
                 compatible.clear()
                 resolution = "wrong_prediction"
@@ -265,7 +284,7 @@ class PhysicsCritic(Task):
             "The trusted Critic rejected the submitted Git HEAD before executing any "
             f"real action. Reason: {error}. Read trusted-report.json (stage=validation) "
             "and canonical-input.json. Correct world_model.py or select a plan newly "
-            "returned by plan.py, run the local checks, then finish this turn with "
+            "validated by plan.py, run the local checks, then finish this turn with "
             "python commit.py plan-N and an otherwise clean repository."
         )
 
@@ -289,15 +308,15 @@ def _execution_feedback(resolution: str) -> str:
         "plan_exhausted": (
             "Every committed intent ran without a prediction mismatch, but the trusted "
             "application did not report the goal. Treat that outcome as evidence about "
-            "reward/goal inference. Inspect trusted-report.json and the appended "
+            "goal inference. Inspect trusted-report.json and the appended "
             "Timeline, revise the utility or mechanism if needed, and commit another "
-            "planner-returned plan."
+            "validated Actor plan."
         ),
     }
     return f"Trusted execution stopped with resolution={resolution}. " + guidance.get(
         resolution,
         "Inspect trusted-report.json and canonical-input.json, revise the theory, "
-        "rerun backtest.py and plan.py, and commit another planner-returned plan.",
+        "rerun backtest.py and plan.py, and commit another validated Actor plan.",
     )
 
 
@@ -325,8 +344,10 @@ def _evaluation_report(path: Path) -> dict[str, Any]:
         raise TypeError("trusted evaluator report is missing backtest or planning")
     if not isinstance(backtest.get("surviving_models"), list):
         raise TypeError("trusted evaluator report has invalid surviving_models")
-    if not isinstance(planning.get("plans"), list):
-        raise TypeError("trusted evaluator report has invalid plans")
+    if not isinstance(planning.get("valid_plans"), list) or not isinstance(
+        planning.get("invalid_plans"), list
+    ):
+        raise TypeError("trusted evaluator report has invalid plan validation")
     return value
 
 

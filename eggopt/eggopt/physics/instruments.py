@@ -8,9 +8,8 @@ from .theory import MODEL_RUNNER
 
 WORLD_MODEL_TEMPLATE = '''"""Current competing hypotheses for one observed world.
 
-Each hypothesis is a matching ``step_<suffix>`` and ``reward_<suffix>`` pair.
-``step_*`` predicts the next complete public state from state plus action.
-``reward_*`` returns a finite utility and thereby defines that model's goal.
+Each hypothesis is one ``step_<suffix>`` function. ``step_*`` predicts the next
+complete public state from state plus action.
 """
 
 
@@ -18,13 +17,11 @@ def step_1(state, action):
     raise NotImplementedError
 
 
-def reward_1(state):
-    return 0.0
-
-
 # Optionally define actions_1(state) when this hypothesis must expand structured
 # domain intents that are described by, but not enumerated in, the public state.
 '''
+
+PROPOSED_PLANS_TEMPLATE = "[]\n"
 
 ACTOR_INSTRUCTIONS = """# Physics Actor runbook
 
@@ -43,13 +40,15 @@ Work like a physicist:
    that this representation—not just a transition rule—is wrong.
 2. **Discover mechanisms.** Write executable hypotheses for how a legal action
    transforms one complete public state into the next.
-3. **Infer utility.** State what progress means under each hypothesis. The goal
-   is unknown to you even when the application has a private completion check.
+3. **Infer the goal.** Decide what progress and completion probably mean. The
+   goal is unknown to you even when the application has a private completion
+   check; use that reasoning when proposing plans.
 4. **Test every belief against all recorded reality.** Preserve plausible
    alternatives instead of silently choosing one unsupported story.
-5. **Plan in the model.** Prefer a short goal-directed plan when a model is
-   credible. When important alternatives remain, prefer a short experiment
-   whose predicted outcomes distinguish them.
+5. **Propose plans from the theory.** Search or reason however you find useful.
+   Prefer a short goal-directed plan when a model is credible. When important
+   alternatives remain, prefer a short experiment whose predicted outcomes
+   distinguish them.
 6. **Commit before reality changes.** Freeze the chosen actions and exact
    predictions in Git. The trusted Critic—not you—then validates the commit and
    decides whether any real actions may run.
@@ -69,13 +68,13 @@ a brief completion signal; files at committed HEAD are the proposal.
 - `world_model.py`: your editable program of competing world-model hypotheses.
 - `physics_runtime.py`: the generated, standard-library-only generic Physics
   instrument. It contains no domain implementation or hidden environment state.
-- `physics-config.json`: the public planning limits for this Physics study.
+- `physics-config.json`: the public plan-validation limits for this study.
 - `backtest.py`: an untrusted local preview of the canonical backtest.
-- `plan.py`: an untrusted local preview of canonical goal and experiment search.
+- `proposed-plans.json`: your editable finite list of complete plan proposals.
+- `plan.py`: an untrusted local replay/validation of your proposed plans.
 - `backtest-report.json` and `plan-report.json`: regenerated local reports.
-- `commit.py`: selects one plan from the latest plan report and commits the turn.
-- `committed-plan.json`: the plan selected by `commit.py`; do not hand-invent a
-  plan that `plan.py` did not return.
+- `commit.py`: selects one validated plan from the latest report and commits it.
+- `committed-plan.json`: the exact validated plan selected by `commit.py`.
 - `.trusted/`: Critic-owned synchronization state. It is not your scratch area.
 - `scratch/`: ignored workspace for notes, visualizations, and temporary code.
 
@@ -86,28 +85,22 @@ internal `.egg` data. Do not call the real environment directly.
 ## The world-model contract
 
 `world_model.py` is the single editable program containing both state grounding
-and mechanisms. Define one or more matching function pairs:
+and mechanisms. Define one or more hypothesis functions:
 
 ```python
 def step_<suffix>(state, action):
     # Return the complete predicted next public state.
     ...
-
-def reward_<suffix>(state):
-    # Return a finite numeric utility under this hypothesis.
-    ...
 ```
 
-The non-empty suffix names a hypothesis; for example, `step_door` pairs only
-with `reward_door`. Every step must have one reward with the same suffix and no
-reward may be orphaned.
+The non-empty suffix names a hypothesis, for example `step_door`.
 
 You may also define an optional matching `actions_<suffix>(state)` function. Use
 it when a public legal-action identifier denotes a parameterized family rather
 than enumerating every complete intent. It must return a finite list or tuple of
 complete candidate intents derived only from public state and domain information.
 For example, a visual domain may generate a bounded set of plausible click
-coordinates from visible pixels. Without `actions_<suffix>`, search expands the
+coordinates from visible pixels. Without `actions_<suffix>`, validation uses the
 configured legal-actions field directly.
 
 For each hypothesis:
@@ -115,27 +108,26 @@ For each hypothesis:
 - `step_*` must be deterministic for the same inputs, must not mutate its
   arguments, and must return the **complete** public state—not merely a latent
   summary or changed fields.
-- The returned state must expose the configured legal-actions field. Search
-  expands only actions that your simulated state declares legal. Treat every
-  listed value as an opaque complete intent and preserve it exactly. It may be a
-  scalar, mapping, or another JSON value; never discard parameters embedded in it.
-- `reward_*` must return a finite number. The generic planner searches for a
-  reachable state with utility strictly greater than the current state's
-  utility; encode inferred progress accordingly.
+- The returned state must expose the configured legal-actions field. The
+  validator accepts only actions that every selected simulated state declares
+  legal. Treat each value as an opaque complete action and preserve it exactly.
+  It may be a scalar, mapping, or another JSON value; never discard parameters.
 - Keep genuinely plausible alternatives as separate suffixes. Repair or remove
   hypotheses contradicted by the Timeline, but use counterexamples to reconsider
   both the representation and the mechanism before adding patches.
 - The model is untrusted code. Local success is advice, not authorization.
 
-Timeline transitions record the **committed intent** in their `action` field,
-not necessarily a bare action identifier. Read the domain section to learn its
-shape. A hypothesis is historically consistent only when
+Timeline transitions record the **executed complete action** in their `action`
+field, not the surrounding prediction envelope and not necessarily a bare action
+identifier. Read the domain section to learn its shape. A hypothesis is
+historically consistent only when
 `step_*(transition["state"], transition["action"])` exactly equals the recorded
 `transition["next_state"]` for every real transition.
 
 ## The plan contract
 
-The planner emits only non-empty canonical plans:
+You own plan search. Write a finite JSON list to `proposed-plans.json`. Each item
+must be one non-empty canonical plan:
 
 ```json
 {
@@ -152,18 +144,24 @@ The planner emits only non-empty canonical plans:
 }
 ```
 
-Every intent predicts exactly once for every suffix listed in `models`.
+Every intent predicts exactly once for every suffix listed in `models`. The
+trusted evaluator independently replays every action through every selected
+`step_*` function and requires exact equality with these predictions.
 
-- A **goal** plan is produced for one hypothesis when search finds a path to
-  strictly higher reward.
-- An **experiment** plan is produced for two or more hypotheses when search finds
-  a common legal action sequence whose predictions eventually diverge. It may
-  contain a shared setup prefix. The first divergent intent is executed too; the
-  resulting observation is the experiment's evidence.
+- A **goal** plan names exactly one hypothesis. Execution may continue through
+  its intents until the trusted application detects the goal, a prediction is
+  wrong, the plan ends, or the action budget is exhausted.
+- An **experiment** plan names at least two hypotheses. Its actions form one
+  common sequence across those hypotheses. Every prediction before the final
+  intent must be identical across all selected models. The final intent must be
+  their **first distinguishing action**, with at least two different predicted
+  next states. Put no suffix after that action: execution observes it and stops
+  immediately so you can revise from the evidence.
 
-The generic planner searches only to its configured depth/node limits. If it
-returns no useful plan, revise the representation, transition functions, reward
-functions, or model set; do not fabricate `committed-plan.json`.
+Different submitted plans are independent candidates and need not share a
+prefix with each other. The configured depth and validation-work limits keep the
+finite submission bounded. Invalid candidates are reported individually; the
+Critic executes only the one selected from `valid_plans` by `commit.py`.
 
 ## Required procedure for every turn
 
@@ -175,17 +173,18 @@ functions, or model set; do not fabricate `committed-plan.json`.
 3. Inspect `world_model.py` and the previous committed plan. State several
    plausible explanations when evidence underdetermines the mechanism.
 4. Edit `world_model.py`. You may create helpers inside it and use `scratch/` for
-   analysis, but the matching `step_*`/`reward_*` pairs are the evaluated API.
+   analysis, but `step_*` functions are the evaluated model API.
 5. Run `python backtest.py`. Read `backtest-report.json`. For every mismatch,
    determine whether the representation, mechanism, action interpretation, or
    goal hypothesis is wrong. Repeat editing and backtesting until at least the
    models you intend to use explain the full Timeline.
-6. Run `python plan.py`. Read `plan-report.json`, including `goal_plans`,
-   `discrimination_plans`, and `canonical_plans`. Prefer useful progress with few
-   real actions: a robust goal plan when justified, otherwise an informative
-   experiment. Repeat model/backtest/plan work as needed.
-7. Choose one listed `plan-N` and run `python commit.py plan-N`. This writes the
-   exact corresponding `committed-plan.json`, stages all non-ignored changes,
+6. Search or reason over the model yourself, then write one or more complete
+   candidates to `proposed-plans.json`. Run `python plan.py` and read
+   `plan-report.json`, especially `valid_plans` and `invalid_plans`. Prefer useful
+   progress with few real actions: a credible goal plan when justified,
+   otherwise an informative experiment. Repeat theory/proposal work as needed.
+7. Choose one validated `plan-N` and run `python commit.py plan-N`. This writes
+   the exact corresponding `committed-plan.json`, stages all non-ignored changes,
    and creates the required Actor commit.
 8. Run `git status --short` and `git show --stat --oneline HEAD`. The status must
    be empty and HEAD must be the new commit for this turn. Make **no edits after
@@ -204,16 +203,16 @@ The trusted Critic operates on committed Git history, not your live reasoning:
 3. It loads committed `world_model.py` and independently reruns the original
    evaluator in the Critic Eggthread sandbox against the canonical Timeline.
    Your editable helper scripts and local reports are not trusted inputs.
-4. It requires matching model pairs, valid finite rewards, a valid non-empty
-   `committed-plan.json`, and exact equality with one independently generated
-   canonical plan. Every selected model must survive the full backtest, and the
-   first action must be legal in the actual current state.
+4. It requires valid model functions and a valid non-empty
+   `committed-plan.json`. Every selected model must survive the full backtest. It
+   independently replays the complete submitted plan from canonical current
+   state, checks every action's model-specific legality, and recomputes every
+   submitted prediction. It does not search for or rediscover the Actor's plan.
 5. Only after those checks does it execute intents through the trusted domain
    adapter. Each real transition is appended permanently to the Timeline.
-6. Execution stops immediately on a wrong prediction, after the first intent
-   where the selected models predicted different outcomes, when the plan ends,
-   when the trusted application reports the goal, or when the action budget is
-   exhausted.
+6. Execution stops immediately on a wrong prediction, after an experiment's
+   final distinguishing action, when the plan ends, when the trusted application
+   reports the goal, or when the action budget is exhausted.
 7. The Critic writes the new canonical input and report, commits trusted state,
    synchronizes that commit back here, and either asks this same persistent Actor
    to revise or accepts the run. Wrong predictions and discriminating outcomes
@@ -226,7 +225,7 @@ Typical resolutions are:
 - `models_discriminated`: a branching experiment ran; retain/revise hypotheses
   according to the observed branch and replan.
 - `plan_exhausted`: the predicted plan ran without a trusted win; revise the
-  reward/goal theory or extend the mechanism and plan.
+  goal theory or extend the mechanism and plan.
 - `won`: the trusted application detected completion; the run is accepted.
 - `max_actions`: the irreversible real-action budget is exhausted; the run ends.
 
@@ -287,12 +286,17 @@ def _configuration():
     return value
 
 
-def _request(output_path):
+def _request(output_path, plans=None):
     config = _configuration()
     timeline = json.loads(Path("canonical-input.json").read_text())["timeline"]
+    proposals = Path("proposed-plans.json")
+    submitted = json.loads(proposals.read_text()) if plans is None else plans
+    if not isinstance(submitted, list):
+        raise TypeError("proposed-plans.json must contain a finite JSON list")
     return {
         "source": Path("world_model.py").read_text(),
         "timeline": timeline,
+        "plans": submitted,
         "legal_actions_key": config["legal_actions_key"],
         "max_depth": config["max_depth"],
         "max_nodes": config["max_nodes"],
@@ -316,8 +320,8 @@ def _terminate(process):
         process.wait()
 
 
-def _run_local_evaluator():
-    request, timeout = _request(".physics-evaluation/result.json")
+def _run_local_evaluator(plans=None):
+    request, timeout = _request(".physics-evaluation/result.json", plans)
     command = [sys.executable, str(Path(__file__).resolve()), "_evaluate"]
     process = subprocess.Popen(
         command,
@@ -355,32 +359,48 @@ def canonical_plan(value):
         isinstance(item, str) and item for item in models
     ):
         raise ValueError("plan models must be a non-empty string list")
+    if len(set(models)) != len(models):
+        raise ValueError("plan models must be unique")
+    if value["purpose"] == "goal" and len(models) != 1:
+        raise ValueError("goal plans must use exactly one model")
+    if value["purpose"] == "experiment" and len(models) < 2:
+        raise ValueError("experiment plans must use at least two models")
     if not isinstance(intents, list) or not intents:
         raise ValueError("committed plan must contain at least one intent")
     for intent in intents:
-        if not isinstance(intent, dict) or "action" not in intent:
-            raise ValueError("every intent must contain an action")
-        predictions = intent.get("prediction")
+        if not isinstance(intent, dict) or set(intent) != {"action", "prediction"}:
+            raise ValueError("every intent must contain exactly action and prediction")
+        predictions = intent["prediction"]
         if not isinstance(predictions, dict) or set(predictions) != set(models):
             raise ValueError("every intent must predict once for every plan model")
+    if value["purpose"] == "experiment":
+        for index, intent in enumerate(intents):
+            distinct = len({_freeze(item) for item in intent["prediction"].values()})
+            if index < len(intents) - 1 and distinct != 1:
+                raise ValueError("experiment predictions must share one common prefix")
+            if index == len(intents) - 1 and distinct < 2:
+                raise ValueError("an experiment must end with its first distinguishing action")
     return {"purpose": value["purpose"], "models": models, "intents": intents}
 
 
+def _freeze(value):
+    if isinstance(value, dict):
+        return tuple(sorted((key, _freeze(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
 def actor_backtest():
-    report = _run_local_evaluator()["backtest"]
+    report = _run_local_evaluator(plans=[])["backtest"]
     _write_json("backtest-report.json", report)
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
 def actor_plan():
     planning = _run_local_evaluator()["planning"]
-    plans = [
-        {"plan_id": f"plan-{index}", "plan": canonical_plan(plan)}
-        for index, plan in enumerate(planning["plans"], start=1)
-    ]
-    report = {**planning, "canonical_plans": plans}
-    _write_json("plan-report.json", report)
-    print(json.dumps(report, indent=2, sort_keys=True))
+    _write_json("plan-report.json", planning)
+    print(json.dumps(planning, indent=2, sort_keys=True))
 
 
 def actor_commit(plan_id):
@@ -391,13 +411,18 @@ def actor_commit(plan_id):
     selected = next(
         (
             item["plan"]
-            for item in report.get("canonical_plans", ())
+            for item in report.get("valid_plans", ())
             if item["plan_id"] == plan_id
         ),
         None,
     )
     if selected is None:
         raise SystemExit(f"Unknown plan_id: {plan_id!r}")
+    proposals = json.loads(Path("proposed-plans.json").read_text())
+    matches = [index for index, proposal in enumerate(proposals, start=1) if proposal == selected]
+    expected = f"plan-{matches[0]}" if len(matches) == 1 else None
+    if expected != plan_id:
+        raise SystemExit("plan-report.json is stale; rerun python plan.py")
     _write_json("committed-plan.json", canonical_plan(selected))
     subprocess.run(["git", "add", "-A"], check=True)
     subprocess.run(["git", "commit", "-m", f"Actor commits {plan_id}"], check=True)
@@ -492,6 +517,9 @@ def write_actor_files(
         "scratch/\n__pycache__/\n*.pyc\n.physics-evaluation/\n",
     )
     _write_if_missing(workspace / "world_model.py", WORLD_MODEL_TEMPLATE)
+    _write_if_missing(
+        workspace / "proposed-plans.json", PROPOSED_PLANS_TEMPLATE
+    )
     if refresh_instruments:
         for name, content in instrument_files(
             legal_actions_key=legal_actions_key,
@@ -503,7 +531,7 @@ def write_actor_files(
 
 
 def actor_backtest() -> None:
-    document = _run_local_evaluator()
+    document = _run_local_evaluator(plans=[])
     report = document["backtest"]
     _write_json(Path("backtest-report.json"), report)
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -512,13 +540,8 @@ def actor_backtest() -> None:
 def actor_plan() -> None:
     document = _run_local_evaluator()
     planning = document["planning"]
-    plans = [
-        {"plan_id": f"plan-{index}", "plan": canonical_plan(plan)}
-        for index, plan in enumerate(planning["plans"], start=1)
-    ]
-    report = {**planning, "canonical_plans": plans}
-    _write_json(Path("plan-report.json"), report)
-    print(json.dumps(report, indent=2, sort_keys=True))
+    _write_json(Path("plan-report.json"), planning)
+    print(json.dumps(planning, indent=2, sort_keys=True))
 
 
 def actor_commit(plan_id: str) -> None:
@@ -531,7 +554,7 @@ def actor_commit(plan_id: str) -> None:
     selected = next(
         (
             item["plan"]
-            for item in report.get("canonical_plans", ())
+            for item in report.get("valid_plans", ())
             if item["plan_id"] == plan_id
         ),
         None,
@@ -539,22 +562,33 @@ def actor_commit(plan_id: str) -> None:
     if selected is None:
         raise SystemExit(f"Unknown plan_id: {plan_id!r}")
     canonical_plan(selected)
+    proposals = json.loads(Path("proposed-plans.json").read_text())
+    matches = [index for index, proposal in enumerate(proposals, start=1) if proposal == selected]
+    expected = f"plan-{matches[0]}" if len(matches) == 1 else None
+    if expected != plan_id:
+        raise SystemExit("plan-report.json is stale; rerun python plan.py")
     _write_json(Path("committed-plan.json"), selected)
     subprocess.run(["git", "add", "-A"], check=True)
     subprocess.run(["git", "commit", "-m", f"Actor commits {plan_id}"], check=True)
 
 
-def _run_local_evaluator():
+def _run_local_evaluator(plans=None):
     from .theory import MODEL_RUNNER, parse_evaluator_output
 
     workspace = Path.cwd()
     timeline = json.loads((workspace / "canonical-input.json").read_text())["timeline"]
+    config = _instrument_configuration_from_file(workspace)
     request = {
         "source": (workspace / "world_model.py").read_text(),
         "timeline": timeline,
-        "legal_actions_key": "legal_actions",
-        "max_depth": 8,
-        "max_nodes": 10_000,
+        "plans": (
+            json.loads((workspace / "proposed-plans.json").read_text())
+            if plans is None
+            else plans
+        ),
+        "legal_actions_key": config["legal_actions_key"],
+        "max_depth": config["max_depth"],
+        "max_nodes": config["max_nodes"],
     }
     from contextlib import redirect_stdout
     from io import StringIO
@@ -570,6 +604,14 @@ def _run_local_evaluator():
         finally:
             sys.stdin = previous
     return parse_evaluator_output(output.getvalue())
+
+
+def _instrument_configuration_from_file(workspace):
+    value = json.loads((workspace / "physics-config.json").read_text())
+    required = {"legal_actions_key", "max_depth", "max_nodes"}
+    if not isinstance(value, dict) or not required <= set(value):
+        raise ValueError("physics-config.json is missing required configuration")
+    return value
 
 
 def _write_json(path, value):
@@ -599,6 +641,7 @@ def ensure_evaluator_ignore(workspace: str | Path) -> None:
 
 __all__ = [
     "ACTOR_INSTRUCTIONS",
+    "PROPOSED_PLANS_TEMPLATE",
     "WORLD_MODEL_TEMPLATE",
     "actor_backtest",
     "actor_commit",

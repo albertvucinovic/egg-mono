@@ -104,7 +104,13 @@ def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
         PhysicsStrategy(
             actor=actor,
             observe=lambda **_: Value({"position": 0, "legal_actions": [1]}),
-            execute=execute or (lambda intent, **_: Value(intent["prediction"]["a"])),
+            execute=execute
+            or (
+                lambda timeline, **_: Value(
+                    {"position": timeline[-1].get("next_state", timeline[-1])["position"] + 1,
+                     "legal_actions": [1]}
+                )
+            ),
             is_goal=lambda state: state["position"] >= 2,
             identity={"domain": "toy"},
             domain_information="State has position and legal_actions.",
@@ -117,23 +123,28 @@ def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
 
 def write_plan(workspace, plan, message="actor theory and plan"):
     (workspace / "world_model.py").write_text(MODEL)
+    (workspace / "proposed-plans.json").write_text(json.dumps([plan]))
     (workspace / "committed-plan.json").write_text(json.dumps(plan))
     git(workspace, "add", "-A")
     git(workspace, "commit", "-m", message)
 
 
 def experiment_plan():
-    request = {
-        "source": MODEL,
-        "timeline": [{"position": 0, "legal_actions": [1]}],
-        "legal_actions_key": "legal_actions",
-        "max_depth": 4,
-        "max_nodes": 100,
+    shared = {"position": 1, "legal_actions": [1]}
+    return {
+        "purpose": "experiment",
+        "models": ["a", "b"],
+        "intents": [
+            {"action": 1, "prediction": {"a": shared, "b": shared}},
+            {
+                "action": 1,
+                "prediction": {
+                    "a": {"position": 2, "legal_actions": [1]},
+                    "b": {"position": 3, "legal_actions": [1]},
+                },
+            },
+        ],
     }
-    result = run_evaluator(request)
-    return next(
-        plan for plan in result["planning"]["plans"] if plan["purpose"] == "experiment"
-    )
 
 
 def run_evaluator(request):
@@ -146,7 +157,7 @@ def run_evaluator(request):
     return parse_evaluator_output(completed.stdout)
 
 
-def test_generic_evaluator_plans_with_structured_legal_intents():
+def test_generic_evaluator_validates_actor_plan_with_structured_action():
     click = {"action": 6, "data": {"x": 12, "y": 34}}
     source = '''
 from copy import deepcopy
@@ -157,61 +168,62 @@ def step_a(state, action):
     return result
 def reward_a(state):
     return state["score"]
-def step_b(state, action):
-    return deepcopy(state)
-def reward_b(state):
-    return state["score"]
 '''
+    prediction = {"score": 1, "legal_actions": [click]}
+    plan = {
+        "purpose": "goal",
+        "models": ["a"],
+        "intents": [{"action": click, "prediction": {"a": prediction}}],
+    }
+
     result = run_evaluator(
         {
             "source": source,
             "timeline": [{"score": 0, "legal_actions": [click]}],
+            "plans": [plan],
             "legal_actions_key": "legal_actions",
             "max_depth": 2,
             "max_nodes": 20,
         }
     )
 
-    assert result["planning"]["goal_plans"]["a"][0]["action"] == click
-    experiment = next(
-        plan
-        for plan in result["planning"]["plans"]
-        if plan["purpose"] == "experiment"
-    )
-    assert experiment["intents"][0]["action"] == click
+    assert result["planning"]["valid_plans"] == [
+        {"plan_id": "plan-1", "plan": plan}
+    ]
+    assert result["planning"]["invalid_plans"] == []
 
 
-def test_generic_evaluator_intersects_equivalent_structured_intents():
+def test_generic_evaluator_accepts_equivalent_structured_actions():
     click = {"action": 6, "data": {"x": 12, "y": 34}}
     source = '''
 from copy import deepcopy
-def _next(state, action, branch):
-    result = deepcopy(state)
-    result["branch"] = branch
-    result["legal_actions"] = [{"action": 6, "data": {"x": 12, "y": 34}}]
-    return result
+def actions_a(state):
+    return [{"data": {"y": 34, "x": 12}, "action": 6}]
 def step_a(state, action):
-    return _next(state, action, "a")
+    result = deepcopy(state)
+    result["clicked"] = True
+    return result
 def reward_a(state):
-    return 0
-def step_b(state, action):
-    return _next(state, action, "b")
-def reward_b(state):
-    return 0
+    return int(state.get("clicked", False))
 '''
+    prediction = {"clicked": True, "legal_actions": [6]}
+    plan = {
+        "purpose": "goal",
+        "models": ["a"],
+        "intents": [{"action": click, "prediction": {"a": prediction}}],
+    }
     result = run_evaluator(
         {
             "source": source,
-            "timeline": [{"branch": None, "legal_actions": [click]}],
+            "timeline": [{"clicked": False, "legal_actions": [6]}],
+            "plans": [plan],
             "legal_actions_key": "legal_actions",
             "max_depth": 1,
             "max_nodes": 20,
         }
     )
 
-    assert result["planning"]["discrimination_plans"][0]["plan"][0][
-        "action"
-    ] == click
+    assert result["planning"]["valid_plans"][0]["plan"] == plan
 
 
 def test_generic_evaluator_uses_model_specific_action_generators():
@@ -239,19 +251,124 @@ def step_b(state, action):
 def reward_b(state):
     return 0
 '''
+    plan = {
+        "purpose": "experiment",
+        "models": ["a", "b"],
+        "intents": [
+            {
+                "action": click,
+                "prediction": {
+                    "a": {"branch": "a", "legal_actions": [6]},
+                    "b": {"branch": "b", "legal_actions": [6]},
+                },
+            }
+        ],
+    }
     result = run_evaluator(
         {
             "source": source,
             "timeline": [{"branch": None, "legal_actions": [6]}],
+            "plans": [plan],
             "legal_actions_key": "legal_actions",
             "max_depth": 1,
             "max_nodes": 20,
         }
     )
 
-    assert result["planning"]["discrimination_plans"][0]["plan"][0][
-        "action"
-    ] == click
+    assert result["planning"]["valid_plans"][0]["plan"] == plan
+
+
+def test_experiment_plan_requires_common_prefix_and_first_distinction():
+    shared = {"position": 1, "legal_actions": [1]}
+    divergent = {
+        "a": {"position": 2, "legal_actions": [1]},
+        "b": {"position": 3, "legal_actions": [1]},
+    }
+    valid = {
+        "purpose": "experiment",
+        "models": ["a", "b"],
+        "intents": [
+            {"action": 1, "prediction": {"a": shared, "b": shared}},
+            {"action": 1, "prediction": divergent},
+        ],
+    }
+    assert canonical_plan(valid) == valid
+
+    early = json.loads(json.dumps(valid))
+    early["intents"].append(early["intents"].pop(0))
+    with pytest.raises(ValueError, match="common prefix"):
+        canonical_plan(early)
+
+    never = json.loads(json.dumps(valid))
+    never["intents"][-1]["prediction"]["b"] = never["intents"][-1]["prediction"]["a"]
+    with pytest.raises(ValueError, match="distinguishing action"):
+        canonical_plan(never)
+
+
+def test_evaluator_reports_invalid_actor_plans_without_searching():
+    valid = experiment_plan()
+    wrong_prediction = {
+        "purpose": "goal",
+        "models": ["a"],
+        "intents": [
+            {
+                "action": 1,
+                "prediction": {
+                    "a": {"position": 99, "legal_actions": [1]}
+                },
+            }
+        ],
+    }
+    illegal = json.loads(json.dumps(wrong_prediction))
+    illegal["intents"][0]["action"] = 2
+    too_long = json.loads(json.dumps(valid))
+
+    result = run_evaluator(
+        {
+            "source": MODEL,
+            "timeline": [{"position": 0, "legal_actions": [1]}],
+            "plans": [valid, wrong_prediction, illegal, too_long],
+            "legal_actions_key": "legal_actions",
+            "max_depth": 1,
+            "max_nodes": 20,
+        }
+    )
+
+    assert result["planning"]["valid_plans"] == []
+    errors = [item["error"] for item in result["planning"]["invalid_plans"]]
+    assert "plan has 2 intents; limit is 1" in errors[0]
+    assert "does not match step_a" in errors[1]
+    assert "action is not legal" in errors[2]
+    assert "plan has 2 intents; limit is 1" in errors[3]
+
+    result = run_evaluator(
+        {
+            "source": MODEL,
+            "timeline": [{"position": 0, "legal_actions": [1]}],
+            "plans": [wrong_prediction, illegal],
+            "legal_actions_key": "legal_actions",
+            "max_depth": 4,
+            "max_nodes": 20,
+        }
+    )
+    errors = [item["error"] for item in result["planning"]["invalid_plans"]]
+    assert "does not match step_a" in errors[0]
+    assert "action is not legal" in errors[1]
+
+
+def test_evaluator_bounds_total_submitted_plan_validation():
+    plan = experiment_plan()
+    with pytest.raises(subprocess.CalledProcessError):
+        run_evaluator(
+            {
+                "source": MODEL,
+                "timeline": [{"position": 0, "legal_actions": [1]}],
+                "plans": [plan, plan],
+                "legal_actions_key": "legal_actions",
+                "max_depth": 4,
+                "max_nodes": 3,
+            }
+        )
 
 
 def test_generic_evaluator_rejects_orphan_action_generators():
@@ -315,6 +432,14 @@ def test_generic_evaluator_loads_large_inputs_from_workspace_files(tmp_path):
         )
     )
     (tmp_path / "world_model.py").write_text(MODEL)
+    (tmp_path / "proposed-plans.json").write_text(json.dumps([{
+        "purpose": "goal",
+        "models": ["a"],
+        "intents": [{
+            "action": 1,
+            "prediction": {"a": {"position": 1, "legal_actions": [1]}},
+        }],
+    }]))
     request = tmp_path / "trusted" / "request.json"
     request.parent.mkdir()
     request.write_text(
@@ -322,6 +447,7 @@ def test_generic_evaluator_loads_large_inputs_from_workspace_files(tmp_path):
             {
                 "source_path": "world_model.py",
                 "timeline_path": "canonical-input.json",
+                "plans_path": "proposed-plans.json",
                 "legal_actions_key": "legal_actions",
                 "max_depth": 4,
                 "max_nodes": 100,
@@ -340,7 +466,7 @@ def test_generic_evaluator_loads_large_inputs_from_workspace_files(tmp_path):
         check=True,
     )
 
-    assert len(script) < 10_000
+    assert len(script) < 20_000
     assert "x" * 1_000 not in script
     assert parse_evaluator_receipt(completed.stdout) == "trusted/report.json"
     assert set(json.loads(report.read_text())["backtest"]["models"]) == {"a", "b"}
@@ -353,11 +479,27 @@ def test_file_evaluator_script_stays_below_linux_single_argument_limit():
     assert max(len(line.encode()) for line in script.splitlines()) < 131_072
 
 
-def test_generic_evaluator_reports_all_models_and_multistep_discrimination():
+def test_generic_evaluator_validates_multistep_discrimination():
+    shared = {"position": 1, "legal_actions": [1]}
+    plan = {
+        "purpose": "experiment",
+        "models": ["a", "b"],
+        "intents": [
+            {"action": 1, "prediction": {"a": shared, "b": shared}},
+            {
+                "action": 1,
+                "prediction": {
+                    "a": {"position": 2, "legal_actions": [1]},
+                    "b": {"position": 3, "legal_actions": [1]},
+                },
+            },
+        ],
+    }
     result = run_evaluator(
         {
             "source": MODEL,
             "timeline": [{"position": 0, "legal_actions": [1]}],
+            "plans": [plan],
             "legal_actions_key": "legal_actions",
             "max_depth": 4,
             "max_nodes": 100,
@@ -365,24 +507,17 @@ def test_generic_evaluator_reports_all_models_and_multistep_discrimination():
     )
 
     assert set(result["backtest"]["models"]) == {"a", "b"}
-    experiment = result["planning"]["discrimination_plans"][0]
-    assert len(experiment["plan"]) == 2
-    assert (
-        experiment["plan"][0]["prediction"]["a"]
-        == experiment["plan"][0]["prediction"]["b"]
-    )
-    assert (
-        experiment["plan"][1]["prediction"]["a"]
-        != experiment["plan"][1]["prediction"]["b"]
-    )
+    assert result["planning"]["valid_plans"] == [
+        {"plan_id": "plan-1", "plan": plan}
+    ]
 
 
-def test_planner_reports_models_even_when_none_survive():
+def test_evaluator_reports_models_even_when_none_survive():
     timeline = [
         {"position": 0, "legal_actions": [1]},
         {
             "state": {"position": 0, "legal_actions": [1]},
-            "action": {"action": 1},
+            "action": 1,
             "next_state": {"position": 99, "legal_actions": [1]},
         },
     ]
@@ -390,6 +525,7 @@ def test_planner_reports_models_even_when_none_survive():
         {
             "source": MODEL,
             "timeline": timeline,
+            "plans": [],
             "legal_actions_key": "legal_actions",
             "max_depth": 4,
             "max_nodes": 100,
@@ -397,8 +533,8 @@ def test_planner_reports_models_even_when_none_survive():
     )
 
     assert result["backtest"]["surviving_models"] == []
-    assert set(result["planning"]["goal_plans"]) == {"a", "b"}
-    assert result["planning"]["discrimination_plans"]
+    assert set(result["backtest"]["models"]) == {"a", "b"}
+    assert result["planning"]["valid_plans"] == []
 
 
 def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
@@ -438,7 +574,9 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
     observed = []
 
     def execute(intent, **_):
-        next_state = intent["prediction"]["a"]
+        index = len(observed)
+        next_state = plan["intents"][index]["prediction"]["a"]
+        assert intent == plan["intents"][index]["action"]
         observed.append(next_state)
         return Value(next_state)
 
@@ -447,6 +585,10 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
 
     assert result.accepted is False
     assert len(observed) == 2
+    state = json.loads(
+        (tmp_path / "run" / "workspace" / ".trusted" / "state.json").read_text()
+    )
+    assert [item["action"] for item in state["timeline"][1:]] == [1, 1]
     assert "resolution=models_discriminated" in result.feedback
     assert calls == [(result.critic_thread_id, 17)]
     request_path = (
@@ -485,6 +627,44 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
         ]
     finally:
         db.close()
+
+
+def test_critic_accepts_a_selected_nonfirst_actor_plan(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+    selected = experiment_plan()
+    invalid = json.loads(json.dumps(selected))
+    invalid["intents"][0]["action"] = 2
+
+    def edit(_call):
+        (workspace / "world_model.py").write_text(MODEL)
+        (workspace / "proposed-plans.json").write_text(
+            json.dumps([invalid, selected])
+        )
+        (workspace / "committed-plan.json").write_text(json.dumps(selected))
+        git(workspace, "add", "-A")
+        git(workspace, "commit", "-m", "select second actor plan")
+
+    observed = []
+
+    def execute(intent, **_):
+        index = len(observed)
+        assert intent == selected["intents"][index]["action"]
+        state = selected["intents"][index]["prediction"]["a"]
+        observed.append(state)
+        return Value(state)
+
+    physics, _actor = strategy(workspace, edit, execute=execute)
+    result = physics.run(run_dir="run", max_cycles=1)
+
+    assert result.accepted is False
+    assert "models_discriminated" in result.feedback
+    assert len(observed) == 2
+    planning = json.loads(
+        (tmp_path / "run" / "workspace" / ".trusted" / "state.json").read_text()
+    )["last_report"]["planning"]
+    assert [item["plan_id"] for item in planning["invalid_plans"]] == ["plan-1"]
+    assert [item["plan_id"] for item in planning["valid_plans"]] == ["plan-2"]
 
 
 def test_dirty_repository_rejected_then_fixed(tmp_path, monkeypatch):
@@ -584,11 +764,11 @@ def test_actor_system_prompt_is_detailed_and_domain_extensible():
     for required in (
         "Ground the state",
         "Discover mechanisms",
-        "Infer utility",
+        "Infer the goal",
         "canonical-input.json",
         "trusted-report.json",
         "step_<suffix>",
-        "reward_<suffix>",
+        "proposed-plans.json",
         "python backtest.py",
         "python plan.py",
         "python commit.py plan-N",
@@ -642,6 +822,25 @@ def test_actor_instruments_are_self_contained_and_use_strategy_configuration(
         "def reward_a(state):\n"
         "    return state['position']\n"
     )
+    proposed = {
+        "purpose": "goal",
+        "models": ["a"],
+        "intents": [
+            {
+                "action": 1,
+                "prediction": {"a": {"position": 1, "moves": [1]}},
+            },
+            {
+                "action": 1,
+                "prediction": {"a": {"position": 2, "moves": [1]}},
+            },
+            {
+                "action": 1,
+                "prediction": {"a": {"position": 3, "moves": [1]}},
+            },
+        ],
+    }
+    (tmp_path / "proposed-plans.json").write_text(json.dumps([proposed]))
 
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
@@ -666,9 +865,7 @@ def test_actor_instruments_are_self_contained_and_use_strategy_configuration(
     assert json.loads((tmp_path / "backtest-report.json").read_text())[
         "surviving_models"
     ] == ["a"]
-    plans = json.loads((tmp_path / "plan-report.json").read_text())[
-        "canonical_plans"
-    ]
+    plans = json.loads((tmp_path / "plan-report.json").read_text())["valid_plans"]
     assert plans and len(plans[0]["plan"]["intents"]) == 3
     runtime = (tmp_path / "physics_runtime.py").read_text()
     assert "eggopt" not in runtime
@@ -695,6 +892,19 @@ def test_actor_instruments_run_in_a_clean_python_container(tmp_path):
         "def reward_a(state):\n"
         "    return state['position']\n"
     )
+    proposal = {
+        "purpose": "goal",
+        "models": ["a"],
+        "intents": [
+            {
+                "action": 1,
+                "prediction": {
+                    "a": {"position": 1, "legal_actions": [1]}
+                },
+            }
+        ],
+    }
+    (tmp_path / "proposed-plans.json").write_text(json.dumps([proposal]))
     completed = subprocess.run(
         [
             "docker",
@@ -724,7 +934,7 @@ def test_actor_instruments_run_in_a_clean_python_container(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads((tmp_path / "plan-report.json").read_text())[
-        "canonical_plans"
+        "valid_plans"
     ]
 
 
@@ -760,6 +970,38 @@ def test_local_and_trusted_plan_validation_match(tmp_path):
         with pytest.raises(ValueError) as local:
             runtime.canonical_plan(value)
         assert str(local.value) == str(trusted.value)
+
+
+def test_commit_rejects_a_stale_plan_report(tmp_path, monkeypatch):
+    import importlib.util
+
+    from eggopt import write_actor_files
+
+    monkeypatch.chdir(tmp_path)
+    write_actor_files(tmp_path, ({"legal_actions": [1]},))
+    proposal = {
+        "purpose": "goal",
+        "models": ["a"],
+        "intents": [
+            {
+                "action": 1,
+                "prediction": {"a": {"legal_actions": [1]}},
+            }
+        ],
+    }
+    (tmp_path / "proposed-plans.json").write_text(json.dumps([]))
+    (tmp_path / "plan-report.json").write_text(
+        json.dumps({"valid_plans": [{"plan_id": "plan-1", "plan": proposal}]})
+    )
+    spec = importlib.util.spec_from_file_location(
+        "generated_physics_runtime_stale", tmp_path / "physics_runtime.py"
+    )
+    assert spec is not None and spec.loader is not None
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+
+    with pytest.raises(SystemExit, match="stale"):
+        runtime.actor_commit("plan-1")
 
 
 def test_actor_instrument_subprocess_has_a_timeout(tmp_path):
@@ -999,7 +1241,7 @@ def test_critic_feedback_explains_each_execution_resolution():
     assert "first intent" in discriminated
     exhausted = _execution_feedback("plan_exhausted")
     assert "did not report the goal" in exhausted
-    assert "reward/goal inference" in exhausted
+    assert "goal inference" in exhausted
 
 
 def test_evaluation_report_path_requires_full_git_head():

@@ -42,8 +42,8 @@ def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
         return (
             "Begin one Physics Actor turn now. Follow the complete runbook in your "
             "system instructions and INSTRUCTIONS.md: inspect Git and canonical "
-            "evidence, revise and backtest world_model.py, generate and inspect "
-            "plans, select one plan with commit.py, verify a new clean HEAD, then "
+            "evidence, revise and backtest world_model.py, propose and validate "
+            "plans, select one with commit.py, verify a new clean HEAD, then "
             "answer briefly. Do not merely describe the procedure and do not execute "
             "the real environment yourself."
         )
@@ -107,6 +107,9 @@ class PhysicsStrategy:
     ``prepare`` creates the domain's initial repository files and canonical world
     state. ``critic`` independently validates committed HEAD and may execute real
     actions until a prediction mismatch or experiment branch resolves the plan.
+
+    ``max_depth`` now bounds submitted plan length and ``max_nodes`` bounds total
+    submitted validation work; PhysicsStrategy performs no generic plan search.
     """
 
     actor: Agent = field(repr=False, compare=False)
@@ -124,6 +127,10 @@ class PhysicsStrategy:
         for name in ("observe", "execute", "is_goal"):
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name} must be callable")
+        for name in ("max_depth", "max_nodes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
         if (
             isinstance(self.evaluator_timeout_sec, bool)
             or not isinstance(self.evaluator_timeout_sec, (int, float))
@@ -483,9 +490,9 @@ class _GitCritic(Task):
             )
         if _git_head(critic_repo) != critic_head_before:
             return Critique.revise(
-                "PhysicsStrategy refreshed its standard Actor instruments for this "
+            "PhysicsStrategy refreshed its standard Actor instruments for this "
                 "study. No real action was attempted for the maintenance commit. "
-                "Rerun backtest.py and plan.py, then submit the theory with "
+            "Rerun backtest.py, propose plans, and run plan.py, then submit with "
                 "python commit.py plan-N."
             )
 
@@ -511,7 +518,7 @@ class _GitCritic(Task):
             return Critique.revise(
                 "This turn did not create a new Actor Git HEAD, so there is no proposal "
                 "for the Critic to validate and no real action was attempted. Revise the "
-                "theory as needed, run both instruments, select a non-empty returned plan "
+                "theory as needed, run both instruments, select a non-empty validated plan "
                 "with python commit.py plan-N, verify a clean new HEAD, then answer."
             )
 
