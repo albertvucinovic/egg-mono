@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from typing import Any, Dict
 
 import pytest
@@ -94,6 +96,137 @@ def test_open_streams_lease_heartbeat_and_release(tmp_path) -> None:
     assert db.heartbeat(tid, "inv-lease", "2999-01-02 00:00:00") is True
     assert db.release(tid, "inv-lease") is True
     assert db.current_open(tid) is None
+
+
+def test_open_stream_acquisition_reserves_writer_before_reading_lease(tmp_path) -> None:
+    """A concurrent UI write cannot invalidate lease acquisition's snapshot."""
+
+    path = tmp_path / "threads.sqlite"
+    runner = ThreadsDB(path)
+    runner.init_schema()
+    observer = ThreadsDB(path)
+    thread_id = "thread-shared-with-ui"
+    runner.create_thread(thread_id=thread_id, name="Live run")
+
+    statements = []
+    runner.conn.set_trace_callback(statements.append)
+    assert runner.try_open_stream(
+        thread_id,
+        "runner-invoke",
+        "2999-01-01 00:00:00",
+        owner="runner",
+        purpose="llm",
+    )
+
+    normalized = [statement.lstrip().upper() for statement in statements]
+    begin = next(
+        index
+        for index, statement in enumerate(normalized)
+        if statement.startswith("SAVEPOINT OPEN_STREAM_")
+    )
+    reserve = next(
+        index
+        for index, statement in enumerate(normalized)
+        if statement.startswith("UPDATE THREADS SET STATUS=STATUS")
+    )
+    first_lease_read = next(
+        index
+        for index, statement in enumerate(normalized)
+        if "FROM OPEN_STREAMS" in statement and statement.startswith("SELECT")
+    )
+    assert begin < reserve < first_lease_read
+
+    observer.append_event(
+        event_id="ui-observation",
+        thread_id=thread_id,
+        type_="thread.config",
+        payload={"source": "live-ui"},
+    )
+    assert runner.current_open(thread_id)["invoke_id"] == "runner-invoke"
+    observer.close()
+    runner.close()
+
+
+def test_old_read_before_write_lease_pattern_reproduces_busy_snapshot(tmp_path) -> None:
+    """Document the WAL race that live UI writes used to trigger."""
+
+    path = tmp_path / "threads.sqlite"
+    runner = ThreadsDB(path)
+    runner.init_schema()
+    observer = ThreadsDB(path)
+    thread_id = "thread-with-stale-lease-snapshot"
+    runner.create_thread(thread_id=thread_id, name="Live run")
+
+    runner.conn.execute("SAVEPOINT old_read_before_write")
+    assert runner.conn.execute(
+        "SELECT 1 FROM open_streams WHERE thread_id=?", (thread_id,)
+    ).fetchone() is None
+    observer.append_event(
+        event_id="ui-between-read-and-write",
+        thread_id=thread_id,
+        type_="thread.config",
+        payload={"source": "live-ui"},
+    )
+
+    with pytest.raises(sqlite3.OperationalError) as exc_info:
+        runner.conn.execute(
+            "INSERT INTO open_streams(thread_id, invoke_id, lease_until) "
+            "VALUES (?, ?, ?)",
+            (thread_id, "old-runner", "2999-01-01 00:00:00"),
+        )
+    assert exc_info.value.sqlite_errorname == "SQLITE_BUSY_SNAPSHOT"
+    runner.conn.execute("ROLLBACK TO SAVEPOINT old_read_before_write")
+    runner.conn.execute("RELEASE SAVEPOINT old_read_before_write")
+
+    observer.close()
+    runner.close()
+
+
+def test_open_stream_acquisition_waits_for_concurrent_ui_writer(tmp_path) -> None:
+    """A short UI write serializes instead of failing lease acquisition."""
+
+    path = tmp_path / "threads.sqlite"
+    runner = ThreadsDB(path)
+    runner.init_schema()
+    thread_id = "thread-with-active-ui-write"
+    runner.create_thread(thread_id=thread_id, name="Live run")
+
+    holding = threading.Event()
+    errors = []
+
+    def ui_write() -> None:
+        ui = ThreadsDB(path)
+        try:
+            ui.conn.execute("BEGIN IMMEDIATE")
+            ui.append_event(
+                event_id="ui-write",
+                thread_id=thread_id,
+                type_="thread.config",
+                payload={"source": "live-ui"},
+            )
+            holding.set()
+            time.sleep(0.05)
+            ui.conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            errors.append(exc)
+            holding.set()
+        finally:
+            ui.close()
+
+    writer = threading.Thread(target=ui_write)
+    writer.start()
+    assert holding.wait(timeout=1)
+    assert runner.try_open_stream(
+        thread_id,
+        "runner-after-ui",
+        "2999-01-01 00:00:00",
+        owner="runner",
+        purpose="llm",
+    )
+    writer.join()
+    assert errors == []
+
+    runner.close()
 
 
 @pytest.mark.parametrize(

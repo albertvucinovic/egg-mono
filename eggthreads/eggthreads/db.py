@@ -294,6 +294,20 @@ class ThreadsDB:
         savepoint = f"open_stream_{uuid.uuid4().hex}"
         self.conn.execute(f"SAVEPOINT {savepoint}")
         try:
+            # Reserve WAL writer authority before reading lease state.  A
+            # deferred savepoint that reads first cannot be upgraded if another
+            # connection commits in between: SQLite returns
+            # SQLITE_BUSY_SNAPSHOT immediately and does not honor busy_timeout.
+            # The no-op row update keeps the lease decision and mutation atomic.
+            # WAL readers such as an Egg UI observing a live headless run remain
+            # concurrent; short UI writes serialize through busy_timeout.
+            locked = self.conn.execute(
+                "UPDATE threads SET status=status WHERE thread_id=?",
+                (thread_id,),
+            )
+            if locked.rowcount != 1:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return False
             expired = self.conn.execute(
                 """
                 SELECT invoke_id, purpose FROM open_streams
