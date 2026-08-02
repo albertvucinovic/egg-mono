@@ -888,6 +888,124 @@ def test_scheduler_managed_wait_only_reduces_state_after_new_events(
         db.close()
 
 
+def _completed_scheduler_turn_with_live_lease(tmp_path, invoke_id):
+    from eggthreads import append_message, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="Actor")
+    prompt_id = append_message(db, thread_id, "user", "go")
+    after_seq = db.max_event_seq(thread_id)
+    assert db.try_open_stream(
+        thread_id,
+        invoke_id,
+        "2999-01-01 00:00:00",
+        purpose="llm",
+    )
+    writer = db.invocation_writer(thread_id, invoke_id)
+    writer.append_event(
+        event_id="answer-event",
+        type_="msg.create",
+        msg_id="answer-message",
+        payload={"role": "assistant", "content": "done"},
+    )
+    writer.close(event_id="close-event")
+    return db, thread_id, prompt_id, after_seq, writer
+
+
+@pytest.mark.parametrize("lease_end", ["release", "expire"])
+def test_scheduler_managed_wait_observes_lease_end_without_new_event(
+    tmp_path, lease_end
+):
+    import asyncio
+
+    from eggopt.actor_critic import _wait_until_waiting
+
+    invoke_id = "finishing-invoke"
+    db, thread_id, prompt_id, after_seq, writer = (
+        _completed_scheduler_turn_with_live_lease(tmp_path, invoke_id)
+    )
+
+    async def finish_turn():
+        await asyncio.sleep(0.2)
+        event_seq = db.max_event_seq(thread_id)
+        if lease_end == "release":
+            writer.release()
+        else:
+            assert db.heartbeat(thread_id, invoke_id, "2000-01-01 00:00:00")
+        assert db.max_event_seq(thread_id) == event_seq
+
+    async def exercise():
+        finisher = asyncio.create_task(finish_turn())
+        try:
+            await asyncio.wait_for(
+                _wait_until_waiting(
+                    db,
+                    thread_id,
+                    prompt_id,
+                    after_seq,
+                    None,
+                ),
+                timeout=1,
+            )
+        finally:
+            await finisher
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        assert db.current_open(thread_id) is None
+        db.close()
+
+
+def test_scheduler_managed_wait_does_not_reduce_state_on_heartbeat(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    from eggopt.actor_critic import _wait_until_waiting
+
+    invoke_id = "heartbeat-invoke"
+    db, thread_id, prompt_id, after_seq, _writer = (
+        _completed_scheduler_turn_with_live_lease(tmp_path, invoke_id)
+    )
+    calls = []
+
+    def state(_db, observed_thread_id):
+        calls.append(observed_thread_id)
+        return "running"
+
+    monkeypatch.setattr("eggopt.actor_critic.thread_state", state)
+
+    async def heartbeat():
+        await asyncio.sleep(0.2)
+        assert db.heartbeat(thread_id, invoke_id, "2999-01-02 00:00:00")
+
+    async def exercise():
+        heartbeat_task = asyncio.create_task(heartbeat())
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    _wait_until_waiting(
+                        db,
+                        thread_id,
+                        prompt_id,
+                        after_seq,
+                        None,
+                    ),
+                    timeout=0.5,
+                )
+        finally:
+            await heartbeat_task
+
+    try:
+        asyncio.run(exercise())
+        assert calls == [thread_id]
+    finally:
+        db.release(thread_id, invoke_id)
+        db.close()
+
+
 def _instrument_repository(tmp_path):
     actor = tmp_path / "actor"
     critic = tmp_path / "critic"

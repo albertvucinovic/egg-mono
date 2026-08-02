@@ -11,6 +11,7 @@ from typing import Any
 from eggflow import ContextLimitExceededError, Task, keyed
 from eggthreads import (
     RunnerConfig,
+    ThreadEventFeed,
     ThreadRunner,
     ToolRegistry,
     append_message,
@@ -643,7 +644,9 @@ async def _wait_until_waiting(
     from eggthreads import header_token_stats
 
     next_context_check_at = 0.0
+    event_feed = ThreadEventFeed(db)
     last_event_seq = -1
+    last_lease_invoke_id: str | None = None
     state = "running"
     while True:
         now = asyncio.get_running_loop().time()
@@ -672,9 +675,15 @@ async def _wait_until_waiting(
             # large persistent Actor threads stream concurrently.
             next_context_check_at = now + 10.0
         current_event_seq = db.max_event_seq(thread_id)
-        if current_event_seq != last_event_seq:
+        open_stream = event_feed.active_lease(thread_id)
+        lease_invoke_id = open_stream.invoke_id if open_stream is not None else None
+        if (
+            current_event_seq != last_event_seq
+            or lease_invoke_id != last_lease_invoke_id
+        ):
             state = thread_state(db, thread_id)
             last_event_seq = current_event_seq
+            last_lease_invoke_id = lease_invoke_id
         if state != "running":
             response = _latest_answer(db, thread_id, after_seq)
             if response is not _NO_ANSWER:
