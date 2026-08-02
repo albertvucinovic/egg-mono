@@ -42,8 +42,9 @@ def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
         return (
             "Begin one Physics Actor turn now. Follow the complete runbook in your "
             "system instructions and INSTRUCTIONS.md: inspect Git and canonical "
-            "evidence, revise and backtest world_model.py, propose and validate "
-            "plans, select one with commit.py, verify a new clean HEAD, then "
+            "evidence, revise and backtest world_model.py, create and validate "
+            "plan.json (using advisory planning only if useful), run commit.py, "
+            "verify a new clean HEAD, then "
             "answer briefly. Do not merely describe the procedure and do not execute "
             "the real environment yourself."
         )
@@ -106,31 +107,35 @@ class PhysicsStrategy:
 
     ``prepare`` creates the domain's initial repository files and canonical world
     state. ``critic`` independently validates committed HEAD and may execute real
-    actions until a prediction mismatch or experiment branch resolves the plan.
+    actions until a prediction mismatch or another stopping condition.
 
-    ``max_depth`` now bounds submitted plan length and ``max_nodes`` bounds total
-    submitted validation work; PhysicsStrategy performs no generic plan search.
+    ``max_depth`` bounds submitted/advisory plan length and ``max_nodes`` bounds
+    advisory search work. Planner suggestions never gate submitted trajectories.
     """
 
     actor: Agent = field(repr=False, compare=False)
     observe: TaskFactory = field(repr=False, compare=False)
     execute: TaskFactory = field(repr=False, compare=False)
+    validate_action: Callable[..., Any] = field(repr=False, compare=False)
     is_goal: Callable[[Any], bool] = field(repr=False, compare=False)
     identity: Any
     domain_information: str = ""
-    legal_actions_key: str = "legal_actions"
+    planner_actions: tuple[Any, ...] = ()
     max_depth: int = 8
     max_nodes: int = 10_000
     evaluator_timeout_sec: float = 300.0
 
     def __post_init__(self) -> None:
-        for name in ("observe", "execute", "is_goal"):
+        for name in ("observe", "execute", "validate_action", "is_goal"):
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name} must be callable")
         for name in ("max_depth", "max_nodes"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(self.planner_actions, tuple):
+            raise TypeError("planner_actions must be a finite tuple")
+        json.dumps(self.planner_actions, allow_nan=False)
         if (
             isinstance(self.evaluator_timeout_sec, bool)
             or not isinstance(self.evaluator_timeout_sec, (int, float))
@@ -289,7 +294,7 @@ class _PhysicsRun(Task):
                 workspace,
                 outer,
                 self.strategy.domain_information,
-                self.strategy.legal_actions_key,
+                self.strategy.planner_actions,
                 self.strategy.max_depth,
                 self.strategy.max_nodes,
                 self.strategy.evaluator_timeout_sec,
@@ -300,10 +305,11 @@ class _PhysicsRun(Task):
                     PhysicsCritic(
                         tools=self.strategy.actor.tools,
                         execute=self.strategy.execute,
+                        validate_action=self.strategy.validate_action,
                         is_goal=self.strategy.is_goal,
                         identity=self.strategy.identity,
                         domain_information=self.strategy.domain_information,
-                        legal_actions_key=self.strategy.legal_actions_key,
+                        planner_actions=self.strategy.planner_actions,
                         max_depth=self.strategy.max_depth,
                         max_nodes=self.strategy.max_nodes,
                         evaluator_timeout_sec=self.strategy.evaluator_timeout_sec,
@@ -351,7 +357,7 @@ class _InitializeRepository(Task):
     workspace: str
     outer_context: str
     domain_information: str
-    legal_actions_key: str = "legal_actions"
+    planner_actions: tuple[Any, ...] = ()
     max_depth: int = 8
     max_nodes: int = 10_000
     evaluator_timeout_sec: float = 300.0
@@ -395,7 +401,7 @@ class _InitializeRepository(Task):
             actor,
             (initial,),
             self.domain_information,
-            legal_actions_key=self.legal_actions_key,
+            planner_actions=self.planner_actions,
             max_depth=self.max_depth,
             max_nodes=self.max_nodes,
             evaluator_timeout_sec=self.evaluator_timeout_sec,
@@ -446,7 +452,7 @@ class _GitCritic(Task):
                     "Neither the Actor workspace nor the Critic's trusted history copy "
                     "is a valid Git repository. No real action was attempted. Recreate "
                     "the Actor repository from the canonical files, run backtest.py and "
-                    "plan.py, then submit one clean commit using commit.py plan-N."
+                    "plan.py, then submit one clean commit using commit.py."
                 )
             _clone_repository(actor, critic_repo)
             critic_head_before = _git_head(critic_repo)
@@ -470,7 +476,7 @@ class _GitCritic(Task):
                 "last pulled history and overlaid the latest irreversible canonical "
                 "state. No real action was attempted for this proposal. Read the restored "
                 "canonical-input.json and trusted-report.json, rebuild the proposal, and "
-                "finish with python commit.py plan-N."
+                "finish with python commit.py."
             )
 
         try:
@@ -478,7 +484,7 @@ class _GitCritic(Task):
                 actor,
                 critic_repo,
                 domain_information=self.critic.domain_information,
-                legal_actions_key=self.critic.legal_actions_key,
+                planner_actions=self.critic.planner_actions,
                 max_depth=self.critic.max_depth,
                 max_nodes=self.critic.max_nodes,
                 evaluator_timeout_sec=self.critic.evaluator_timeout_sec,
@@ -490,10 +496,10 @@ class _GitCritic(Task):
             )
         if _git_head(critic_repo) != critic_head_before:
             return Critique.revise(
-            "PhysicsStrategy refreshed its standard Actor instruments for this "
+                "PhysicsStrategy refreshed its standard Actor instruments for this "
                 "study. No real action was attempted for the maintenance commit. "
-            "Rerun backtest.py, propose plans, and run plan.py, then submit with "
-                "python commit.py plan-N."
+                "Rerun backtest.py and plan.py, then submit with "
+                "python commit.py."
             )
 
         dirty = _git_status(actor)
@@ -507,7 +513,7 @@ class _GitCritic(Task):
                 "The Critic evaluates only a clean committed HEAD, but the Actor "
                 "workspace contains the non-ignored changes listed below. No real action "
                 "was attempted. Commit intended theory/plan changes (normally with "
-                "python commit.py plan-N) or move disposable work under scratch/ or "
+                "python commit.py) or move disposable work under scratch/ or "
                 "ignore it, verify `git status --short` is empty, then answer again.\n\n"
                 + meaningful_dirty
             )
@@ -518,8 +524,8 @@ class _GitCritic(Task):
             return Critique.revise(
                 "This turn did not create a new Actor Git HEAD, so there is no proposal "
                 "for the Critic to validate and no real action was attempted. Revise the "
-                "theory as needed, run both instruments, select a non-empty validated plan "
-                "with python commit.py plan-N, verify a clean new HEAD, then answer."
+                "theory as needed, run both instruments, validate plan.json "
+                "with python commit.py, verify a clean new HEAD, then answer."
             )
 
         try:
@@ -655,7 +661,7 @@ def _refresh_actor_instruments(
     critic: Path,
     *,
     domain_information: str,
-    legal_actions_key: str,
+    planner_actions: tuple[Any, ...],
     max_depth: int,
     max_nodes: int,
     evaluator_timeout_sec: float,
@@ -663,16 +669,45 @@ def _refresh_actor_instruments(
     """Upgrade Physics-owned helpers without touching an Actor's proposal."""
 
     legacy_files = {
-        "backtest.py": "from eggopt.physics import actor_backtest\n\n"
-        'if __name__ == "__main__":\n    actor_backtest()\n',
-        "plan.py": "from eggopt.physics import actor_plan\n\n"
-        'if __name__ == "__main__":\n    actor_plan()\n',
-        "commit.py": "import sys\nfrom eggopt.physics import actor_commit\n\n"
-        'if __name__ == "__main__":\n'
-        '    actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")\n',
+        "backtest.py": {
+            (
+                "from eggopt.physics import actor_backtest\n\n"
+                'if __name__ == "__main__":\n    actor_backtest()\n'
+            ),
+            (
+                "from physics_runtime import actor_backtest\n\n"
+                'if __name__ == "__main__":\n    actor_backtest()\n'
+            ),
+        },
+        "plan.py": {
+            (
+                "from eggopt.physics import actor_plan\n\n"
+                'if __name__ == "__main__":\n    actor_plan()\n'
+            ),
+            (
+                "from physics_runtime import actor_plan\n\n"
+                'if __name__ == "__main__":\n    actor_plan()\n'
+            ),
+        },
+        "commit.py": {
+            (
+                "import sys\nfrom eggopt.physics import actor_commit\n\n"
+                'if __name__ == "__main__":\n'
+                '    actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")\n'
+            ),
+            (
+                "from physics_runtime import actor_commit\n\n"
+                'if __name__ == "__main__":\n    actor_commit()\n'
+            ),
+            (
+                "import sys\nfrom physics_runtime import actor_commit\n\n"
+                'if __name__ == "__main__":\n'
+                '    actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")\n'
+            ),
+        },
     }
     files = instrument_files(
-        legal_actions_key=legal_actions_key,
+        planner_actions=planner_actions,
         max_depth=max_depth,
         max_nodes=max_nodes,
         evaluator_timeout_sec=evaluator_timeout_sec,
@@ -699,7 +734,7 @@ def _refresh_actor_instruments(
         name
         for name, legacy in legacy_files.items()
         if (actor / name).is_file()
-        and (actor / name).read_text() != legacy
+        and (actor / name).read_text() not in legacy
         and (actor / name).read_text() != files[name]
     )
     if customized:
@@ -708,11 +743,17 @@ def _refresh_actor_instruments(
             + ", ".join(customized)
         )
     changed = False
+    created = []
     for name, content in files.items():
         path = actor / name
         if path.is_file() and path.read_text() == content:
             continue
         path.write_text(content)
+        changed = True
+    plan = actor / "plan.json"
+    if not plan.exists():
+        plan.write_text("[]\n")
+        created.append("plan.json")
         changed = True
     ignore_path = actor / ".gitignore"
     before_ignore = ignore_path.read_text() if ignore_path.is_file() else None
@@ -721,7 +762,7 @@ def _refresh_actor_instruments(
         changed = True
     if not changed:
         return
-    owned = (*files, ".gitignore")
+    owned = (*files, *created, ".gitignore")
     _git(actor, "add", "--", *owned)
     staged = _git(actor, "diff", "--cached", "--name-only", "--", *owned)
     if not staged:

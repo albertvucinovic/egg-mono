@@ -108,12 +108,19 @@ physics = PhysicsStrategy(
     actor=actor,
     observe=initial_state_task,
     execute=real_action_task,
+    validate_action=trusted_domain_action_validator,
     is_goal=trusted_goal_predicate,
     identity={"domain": "my-world", "version": 1},
     domain_information="Explain the public state and action formats.",
     evaluator_timeout_sec=300,
 )
 ```
+
+`validate_action(state=..., action=...)` returns `None` for one valid complete
+domain action or raises before execution. It validates without translating the
+action. `planner_actions` may optionally expose a finite tuple of complete actions
+to the advisory planner; Actor-authored `plan.json` trajectories do not depend on
+that tuple.
 
 `PhysicsStrategy.task(...)` composes the same study into an already-open Eggopt
 runtime and an existing Physics thread. Batch applications can therefore place
@@ -122,10 +129,10 @@ Actor turns through one bounded Eggthreads `SubtreeScheduler`. An Agent with
 `scheduler_managed=True` waits for that shared scheduler instead of constructing
 its own `ThreadRunner`; ordinary standalone Physics runs remain unchanged.
 
-Eggopt owns the Timeline, `step_<suffix>` / `reward_<suffix>` theory convention,
-all-model backtesting, goal and subset-discrimination planning, Actor instruments,
-non-empty committed-plan validation, execute-until-resolution loop, and Git
-repository lifecycle.
+Eggopt owns the Timeline, `step_<suffix>` hypotheses, optional `reward_<suffix>`
+advisory planning, Actor instruments, independent `plan.json` trajectory
+validation, the execute-until-resolution loop, and the Git repository lifecycle.
+The domain owns its action representation and trusted action validator.
 
 The Actor works in `workspace/innerContext`; every turn submits a clean Git HEAD.
 The Critic keeps `workspace/critic-repository`, pulls submitted history, and
@@ -134,8 +141,8 @@ restores/rehydrates the latest canonical state if the Actor deletes `.git`.
 Committed world-model code is never imported into the controller. The generic
 Critic writes a compact `.trusted/requests/<ACTOR_HEAD>.json` manifest; the
 sandbox evaluator reads that manifest, committed `world_model.py`, and
-`canonical-input.json` as declared `ThreadTool` file inputs. Only the small fixed
-runner and paths travel through `python_exec`. Eggthreads therefore applies the
+`canonical-input.json`, and `plan.json` as declared `ThreadTool` file inputs. Only
+the small fixed runner and paths travel through `python_exec`. Eggthreads applies the
 Critic thread's working directory and Docker sandbox to untrusted execution while
 the evaluator timeout terminates runaway submitted code and file hashes keep
 caching content-addressed. The evaluator writes

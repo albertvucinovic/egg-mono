@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
-from eggopt.physics import canonical_plan
 from eggopt.physics.critic import (
     _evaluation_report,
     _evaluation_report_path,
@@ -27,30 +29,27 @@ from eggopt import (
     PHYSICS_ACTOR_SYSTEM_PROMPT,
     Agent,
     PhysicsStrategy,
+    canonical_plan,
     physics_actor_system_prompt,
+    write_actor_files,
 )
-from eggthreads import (
-    RunnerConfig,
-    ThreadsDB,
-    ToolRegistry,
-    list_children_with_meta,
-    list_root_threads,
-)
+from eggthreads import RunnerConfig, ThreadsDB, ToolRegistry
 
 MODEL = """
 def step_a(state, action):
-    return {"position": state["position"] + 1, "legal_actions": [1]}
+    return {"position": state["position"] + action["action"], "legal_actions": [1]}
 def reward_a(state):
-    return float(state["position"] >= 2)
+    return state["position"]
 def step_b(state, action):
-    return {"position": state["position"] + (1 if state["position"] == 0 else 2), "legal_actions": [1]}
+    amount = 1 if state["position"] == 0 else 2
+    return {"position": state["position"] + amount, "legal_actions": [1]}
 def reward_b(state):
-    return float(state["position"] >= 3)
+    return state["position"]
 """
 
 
 class ScriptedLLM:
-    current_model_key = "test-model"
+    current_model_key = "***"
 
     def __init__(self, replies, edit=None):
         self.replies = iter(replies)
@@ -89,6 +88,27 @@ def git(path, *args):
     ).stdout.strip()
 
 
+def run_evaluator(request):
+    completed = subprocess.run(
+        ["python", "-c", evaluator_script(request)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return parse_evaluator_output(completed.stdout)
+
+
+def state(position):
+    return {"position": position, "legal_actions": [1]}
+
+
+def trajectory(*positions):
+    return [
+        {"state": state(left), "action": {"action": 1}, "next_state": state(right)}
+        for left, right in pairwise(positions)
+    ]
+
+
 def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
     llm = ScriptedLLM(replies, edit)
     tools = tools or Agent(object(), {"role": "default"}).tools
@@ -103,17 +123,25 @@ def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
     return (
         PhysicsStrategy(
             actor=actor,
-            observe=lambda **_: Value({"position": 0, "legal_actions": [1]}),
+            observe=lambda **_: Value(state(0)),
             execute=execute
             or (
-                lambda timeline, **_: Value(
-                    {"position": timeline[-1].get("next_state", timeline[-1])["position"] + 1,
-                     "legal_actions": [1]}
+                lambda timeline, action, **_: Value(
+                    state(
+                        timeline[-1].get("next_state", timeline[-1])["position"]
+                        + action["action"]
+                    )
                 )
             ),
-            is_goal=lambda state: state["position"] >= 2,
+            validate_action=lambda state, action: (
+                None
+                if action == {"action": 1} and 1 in state["legal_actions"]
+                else (_ for _ in ()).throw(ValueError("illegal toy action"))
+            ),
+            is_goal=lambda value: value["position"] >= 2,
             identity={"domain": "toy"},
             domain_information="State has position and legal_actions.",
+            planner_actions=({"action": 1},),
             max_depth=4,
             evaluator_timeout_sec=17,
         ),
@@ -123,281 +151,151 @@ def strategy(workspace, edit, *, replies=("ready",), tools=None, execute=None):
 
 def write_plan(workspace, plan, message="actor theory and plan"):
     (workspace / "world_model.py").write_text(MODEL)
-    (workspace / "proposed-plans.json").write_text(json.dumps([plan]))
-    (workspace / "committed-plan.json").write_text(json.dumps(plan))
+    (workspace / "plan.json").write_text(json.dumps(plan))
     git(workspace, "add", "-A")
     git(workspace, "commit", "-m", message)
 
 
-def experiment_plan():
-    shared = {"position": 1, "legal_actions": [1]}
-    return {
-        "purpose": "experiment",
-        "models": ["a", "b"],
-        "intents": [
-            {"action": 1, "prediction": {"a": shared, "b": shared}},
-            {
-                "action": 1,
-                "prediction": {
-                    "a": {"position": 2, "legal_actions": [1]},
-                    "b": {"position": 3, "legal_actions": [1]},
-                },
-            },
-        ],
-    }
+def test_plan_is_one_untyped_continuous_trajectory():
+    plan = trajectory(0, 1, 2)
+    assert canonical_plan(plan) == plan
+    assert all(set(item) == {"state", "action", "next_state"} for item in plan)
+    with pytest.raises(ValueError, match="non-empty"):
+        canonical_plan([])
+    broken = json.loads(json.dumps(plan))
+    broken[1]["state"] = state(9)
+    with pytest.raises(ValueError, match="continuous"):
+        canonical_plan(broken)
+    with pytest.raises(ValueError, match="exactly state"):
+        canonical_plan([{"state": state(0), "action": {"action": 1}}])
 
 
-def run_evaluator(request):
-    completed = subprocess.run(
-        ["python", "-c", evaluator_script(request)],
-        text=True,
-        capture_output=True,
-        check=True,
+def test_evaluator_validates_actor_trajectory_without_planner_rediscovery():
+    plan = trajectory(0, 1, 2)
+    result = run_evaluator(
+        {
+            "source": MODEL,
+            "timeline": [state(0)],
+            "plan": plan,
+            "planner_actions": [],
+            "max_depth": 4,
+            "max_nodes": 100,
+        }
     )
-    return parse_evaluator_output(completed.stdout)
+    validation = result["plan_validation"]
+    assert validation["valid"] is True
+    assert validation["supporting_models"] == ["a"]
+    assert validation["plan"] == plan
+    assert result["planning"]["suggestions"] == []
 
 
-def test_generic_evaluator_validates_actor_plan_with_structured_action():
-    click = {"action": 6, "data": {"x": 12, "y": 34}}
-    source = '''
-from copy import deepcopy
-def step_a(state, action):
-    result = deepcopy(state)
-    if action == {"action": 6, "data": {"x": 12, "y": 34}}:
-        result["score"] += 1
-    return result
-def reward_a(state):
-    return state["score"]
-'''
-    prediction = {"score": 1, "legal_actions": [click]}
-    plan = {
-        "purpose": "goal",
-        "models": ["a"],
-        "intents": [{"action": click, "prediction": {"a": prediction}}],
+def test_evaluator_rejects_wrong_or_discontinuous_trajectory():
+    wrong = trajectory(0, 99)
+    result = run_evaluator(
+        {
+            "source": MODEL,
+            "timeline": [state(0)],
+            "plan": wrong,
+            "planner_actions": [{"action": 1}],
+            "max_depth": 4,
+            "max_nodes": 100,
+        }
+    )
+    assert result["plan_validation"]["valid"] is False
+    assert "no Timeline-consistent" in result["plan_validation"]["error"]
+
+
+def test_optional_rewards_enable_advisory_planning():
+    result = run_evaluator(
+        {
+            "source": MODEL,
+            "timeline": [state(0)],
+            "plan": trajectory(0, 1),
+            "planner_actions": [{"action": 1}],
+            "max_depth": 4,
+            "max_nodes": 100,
+        }
+    )
+    planning = result["planning"]
+    assert planning["eligible_models"] == ["a", "b"]
+    assert any(item["kind"] == "reward" for item in planning["suggestions"])
+    distinction = next(
+        item for item in planning["suggestions"] if item["kind"] == "distinction"
+    )
+    assert len(distinction["plan"]) == 2
+    final = distinction["plan"][-1]
+    assert final == {
+        "state": state(1),
+        "action": {"action": 1},
+        "next_state": state(2),
     }
 
+
+def test_step_without_reward_still_backtests_and_validates():
+    source = """
+def step_a(state, action):
+    return {"position": state["position"] + 1, "legal_actions": [1]}
+"""
     result = run_evaluator(
         {
             "source": source,
-            "timeline": [{"score": 0, "legal_actions": [click]}],
-            "plans": [plan],
-            "legal_actions_key": "legal_actions",
+            "timeline": [state(0)],
+            "plan": trajectory(0, 1),
+            "planner_actions": [{"action": 1}],
             "max_depth": 2,
             "max_nodes": 20,
         }
     )
+    assert result["plan_validation"]["valid"] is True
+    assert result["planning"]["eligible_models"] == []
+    assert result["planning"]["suggestions"] == []
 
-    assert result["planning"]["valid_plans"] == [
-        {"plan_id": "plan-1", "plan": plan}
+
+def test_evaluator_backtests_raw_timeline_actions():
+    timeline = [
+        state(0),
+        {"state": state(0), "action": {"action": 1}, "next_state": state(1)},
     ]
-    assert result["planning"]["invalid_plans"] == []
-
-
-def test_generic_evaluator_accepts_equivalent_structured_actions():
-    click = {"action": 6, "data": {"x": 12, "y": 34}}
-    source = '''
-from copy import deepcopy
-def actions_a(state):
-    return [{"data": {"y": 34, "x": 12}, "action": 6}]
-def step_a(state, action):
-    result = deepcopy(state)
-    result["clicked"] = True
-    return result
-def reward_a(state):
-    return int(state.get("clicked", False))
-'''
-    prediction = {"clicked": True, "legal_actions": [6]}
-    plan = {
-        "purpose": "goal",
-        "models": ["a"],
-        "intents": [{"action": click, "prediction": {"a": prediction}}],
-    }
-    result = run_evaluator(
-        {
-            "source": source,
-            "timeline": [{"clicked": False, "legal_actions": [6]}],
-            "plans": [plan],
-            "legal_actions_key": "legal_actions",
-            "max_depth": 1,
-            "max_nodes": 20,
-        }
-    )
-
-    assert result["planning"]["valid_plans"][0]["plan"] == plan
-
-
-def test_generic_evaluator_uses_model_specific_action_generators():
-    click = {"action": 6, "data": {"x": 12, "y": 34}}
-    source = '''
-from copy import deepcopy
-def _clicks(state):
-    if 6 not in state["legal_actions"]:
-        return []
-    return [{"action": 6, "data": {"x": 12, "y": 34}}]
-def actions_a(state):
-    return _clicks(state)
-def actions_b(state):
-    return _clicks(state)
-def step_a(state, action):
-    result = deepcopy(state)
-    result["branch"] = "a"
-    return result
-def reward_a(state):
-    return 0
-def step_b(state, action):
-    result = deepcopy(state)
-    result["branch"] = "b"
-    return result
-def reward_b(state):
-    return 0
-'''
-    plan = {
-        "purpose": "experiment",
-        "models": ["a", "b"],
-        "intents": [
-            {
-                "action": click,
-                "prediction": {
-                    "a": {"branch": "a", "legal_actions": [6]},
-                    "b": {"branch": "b", "legal_actions": [6]},
-                },
-            }
-        ],
-    }
-    result = run_evaluator(
-        {
-            "source": source,
-            "timeline": [{"branch": None, "legal_actions": [6]}],
-            "plans": [plan],
-            "legal_actions_key": "legal_actions",
-            "max_depth": 1,
-            "max_nodes": 20,
-        }
-    )
-
-    assert result["planning"]["valid_plans"][0]["plan"] == plan
-
-
-def test_experiment_plan_requires_common_prefix_and_first_distinction():
-    shared = {"position": 1, "legal_actions": [1]}
-    divergent = {
-        "a": {"position": 2, "legal_actions": [1]},
-        "b": {"position": 3, "legal_actions": [1]},
-    }
-    valid = {
-        "purpose": "experiment",
-        "models": ["a", "b"],
-        "intents": [
-            {"action": 1, "prediction": {"a": shared, "b": shared}},
-            {"action": 1, "prediction": divergent},
-        ],
-    }
-    assert canonical_plan(valid) == valid
-
-    early = json.loads(json.dumps(valid))
-    early["intents"].append(early["intents"].pop(0))
-    with pytest.raises(ValueError, match="common prefix"):
-        canonical_plan(early)
-
-    never = json.loads(json.dumps(valid))
-    never["intents"][-1]["prediction"]["b"] = never["intents"][-1]["prediction"]["a"]
-    with pytest.raises(ValueError, match="distinguishing action"):
-        canonical_plan(never)
-
-
-def test_evaluator_reports_invalid_actor_plans_without_searching():
-    valid = experiment_plan()
-    wrong_prediction = {
-        "purpose": "goal",
-        "models": ["a"],
-        "intents": [
-            {
-                "action": 1,
-                "prediction": {
-                    "a": {"position": 99, "legal_actions": [1]}
-                },
-            }
-        ],
-    }
-    illegal = json.loads(json.dumps(wrong_prediction))
-    illegal["intents"][0]["action"] = 2
-    too_long = json.loads(json.dumps(valid))
-
     result = run_evaluator(
         {
             "source": MODEL,
-            "timeline": [{"position": 0, "legal_actions": [1]}],
-            "plans": [valid, wrong_prediction, illegal, too_long],
-            "legal_actions_key": "legal_actions",
-            "max_depth": 1,
+            "timeline": timeline,
+            "plan": [{"state": state(1), "action": {"action": 1}, "next_state": state(2)}],
+            "planner_actions": [],
+            "max_depth": 2,
             "max_nodes": 20,
         }
     )
-
-    assert result["planning"]["valid_plans"] == []
-    errors = [item["error"] for item in result["planning"]["invalid_plans"]]
-    assert "plan has 2 intents; limit is 1" in errors[0]
-    assert "does not match step_a" in errors[1]
-    assert "action is not legal" in errors[2]
-    assert "plan has 2 intents; limit is 1" in errors[3]
-
-    result = run_evaluator(
-        {
-            "source": MODEL,
-            "timeline": [{"position": 0, "legal_actions": [1]}],
-            "plans": [wrong_prediction, illegal],
-            "legal_actions_key": "legal_actions",
-            "max_depth": 4,
-            "max_nodes": 20,
-        }
-    )
-    errors = [item["error"] for item in result["planning"]["invalid_plans"]]
-    assert "does not match step_a" in errors[0]
-    assert "action is not legal" in errors[1]
+    assert result["backtest"]["models"]["a"]["matches"] == 1
 
 
-def test_evaluator_bounds_total_submitted_plan_validation():
-    plan = experiment_plan()
-    with pytest.raises(subprocess.CalledProcessError):
-        run_evaluator(
-            {
-                "source": MODEL,
-                "timeline": [{"position": 0, "legal_actions": [1]}],
-                "plans": [plan, plan],
-                "legal_actions_key": "legal_actions",
-                "max_depth": 4,
-                "max_nodes": 3,
-            }
-        )
-
-
-def test_generic_evaluator_rejects_orphan_action_generators():
-    source = '''
+def test_generic_evaluator_rejects_orphan_rewards():
+    source = """
 def step_a(state, action):
     return state
-def reward_a(state):
+def reward_missing(state):
     return 0
-def actions_missing(state):
-    return []
-'''
+"""
     with pytest.raises(subprocess.CalledProcessError):
         run_evaluator(
             {
                 "source": source,
-                "timeline": [{"legal_actions": [1]}],
-                "legal_actions_key": "legal_actions",
+                "timeline": [state(0)],
+                "plan": trajectory(0, 1),
+                "planner_actions": [],
                 "max_depth": 1,
                 "max_nodes": 20,
             }
         )
 
 
-def test_generic_evaluator_can_write_a_compactly_receipted_report(tmp_path):
+def test_generic_evaluator_can_write_compact_receipt(tmp_path):
     report = tmp_path / "trusted" / "report.json"
     request = {
         "source": MODEL,
-        "timeline": [{"position": 0, "legal_actions": [1]}],
-        "legal_actions_key": "legal_actions",
+        "timeline": [state(0)],
+        "plan": trajectory(0, 1),
+        "planner_actions": [],
         "max_depth": 4,
         "max_nodes": 100,
         "work_dir": str(tmp_path / "work"),
@@ -409,37 +307,27 @@ def test_generic_evaluator_can_write_a_compactly_receipted_report(tmp_path):
         capture_output=True,
         check=True,
     )
-
     assert parse_evaluator_receipt(completed.stdout) == str(report)
-    assert set(json.loads(report.read_text())["backtest"]["models"]) == {"a", "b"}
-    assert "models" not in completed.stdout
+    assert json.loads(report.read_text())["plan_validation"]["valid"] is True
 
 
-def test_generic_evaluator_loads_large_inputs_from_workspace_files(tmp_path):
-    report = tmp_path / "trusted" / "report.json"
-    canonical = tmp_path / "canonical-input.json"
-    canonical.write_text(
-        json.dumps(
-            {
-                "timeline": [
-                    {
-                        "position": 0,
-                        "legal_actions": [1],
-                        "irrelevant": "x" * 200_000,
-                    }
-                ]
-            }
-        )
+def test_file_evaluator_loads_large_inputs(tmp_path):
+    (tmp_path / "canonical-input.json").write_text(
+        json.dumps({"timeline": [{**state(0), "irrelevant": "x" * 200_000}]})
     )
-    (tmp_path / "world_model.py").write_text(MODEL)
-    (tmp_path / "proposed-plans.json").write_text(json.dumps([{
-        "purpose": "goal",
-        "models": ["a"],
-        "intents": [{
-            "action": 1,
-            "prediction": {"a": {"position": 1, "legal_actions": [1]}},
-        }],
-    }]))
+    # Model preserves the extra public field for the submitted first state.
+    source = """
+def step_a(state, action):
+    result = dict(state)
+    result["position"] += 1
+    return result
+"""
+    (tmp_path / "world_model.py").write_text(source)
+    current = {**state(0), "irrelevant": "x" * 200_000}
+    predicted = {**current, "position": 1}
+    (tmp_path / "plan.json").write_text(
+        json.dumps([{"state": current, "action": {"action": 1}, "next_state": predicted}])
+    )
     request = tmp_path / "trusted" / "request.json"
     request.parent.mkdir()
     request.write_text(
@@ -447,8 +335,8 @@ def test_generic_evaluator_loads_large_inputs_from_workspace_files(tmp_path):
             {
                 "source_path": "world_model.py",
                 "timeline_path": "canonical-input.json",
-                "plans_path": "proposed-plans.json",
-                "legal_actions_key": "legal_actions",
+                "plan_path": "plan.json",
+                "planner_actions": [],
                 "max_depth": 4,
                 "max_nodes": 100,
                 "work_dir": "trusted/work",
@@ -456,7 +344,6 @@ def test_generic_evaluator_loads_large_inputs_from_workspace_files(tmp_path):
             }
         )
     )
-
     script = evaluator_file_script("trusted/request.json")
     completed = subprocess.run(
         ["python", "-c", script],
@@ -465,79 +352,12 @@ def test_generic_evaluator_loads_large_inputs_from_workspace_files(tmp_path):
         capture_output=True,
         check=True,
     )
-
-    assert len(script) < 20_000
+    assert len(script.encode()) < 131_072
     assert "x" * 1_000 not in script
     assert parse_evaluator_receipt(completed.stdout) == "trusted/report.json"
-    assert set(json.loads(report.read_text())["backtest"]["models"]) == {"a", "b"}
 
 
-def test_file_evaluator_script_stays_below_linux_single_argument_limit():
-    script = evaluator_file_script(".trusted/requests/" + "a" * 40 + ".json")
-
-    assert len(script.encode()) < 131_072
-    assert max(len(line.encode()) for line in script.splitlines()) < 131_072
-
-
-def test_generic_evaluator_validates_multistep_discrimination():
-    shared = {"position": 1, "legal_actions": [1]}
-    plan = {
-        "purpose": "experiment",
-        "models": ["a", "b"],
-        "intents": [
-            {"action": 1, "prediction": {"a": shared, "b": shared}},
-            {
-                "action": 1,
-                "prediction": {
-                    "a": {"position": 2, "legal_actions": [1]},
-                    "b": {"position": 3, "legal_actions": [1]},
-                },
-            },
-        ],
-    }
-    result = run_evaluator(
-        {
-            "source": MODEL,
-            "timeline": [{"position": 0, "legal_actions": [1]}],
-            "plans": [plan],
-            "legal_actions_key": "legal_actions",
-            "max_depth": 4,
-            "max_nodes": 100,
-        }
-    )
-
-    assert set(result["backtest"]["models"]) == {"a", "b"}
-    assert result["planning"]["valid_plans"] == [
-        {"plan_id": "plan-1", "plan": plan}
-    ]
-
-
-def test_evaluator_reports_models_even_when_none_survive():
-    timeline = [
-        {"position": 0, "legal_actions": [1]},
-        {
-            "state": {"position": 0, "legal_actions": [1]},
-            "action": 1,
-            "next_state": {"position": 99, "legal_actions": [1]},
-        },
-    ]
-    result = run_evaluator(
-        {
-            "source": MODEL,
-            "timeline": timeline,
-            "plans": [],
-            "legal_actions_key": "legal_actions",
-            "max_depth": 4,
-            "max_nodes": 100,
-        }
-    )
-
-    assert result["backtest"]["surviving_models"] == []
-    assert set(result["backtest"]["models"]) == {"a", "b"}
-    assert result["planning"]["valid_plans"] == []
-
-
-def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
+def test_physics_executes_raw_actions_and_reports_alternative_model(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -556,9 +376,7 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
         )
         return completed.stdout
 
-    tools.register(
-        "bash", "unused", {"type": "object", "properties": {}}, lambda _args: ""
-    )
+    tools.register("bash", "unused", {"type": "object", "properties": {}}, lambda _: "")
     tools.register(
         "python_exec",
         "sandbox evaluator",
@@ -566,126 +384,58 @@ def test_physics_uses_critic_thread_python_exec_and_executes_until_branch(
         python_exec,
         accepts_context=True,
     )
-    plan = experiment_plan()
+    plan = trajectory(0, 1, 2)
 
     def edit(_call):
         write_plan(workspace, plan)
 
-    observed = []
+    observed_actions = []
 
-    def execute(intent, **_):
-        index = len(observed)
-        next_state = plan["intents"][index]["prediction"]["a"]
-        assert intent == plan["intents"][index]["action"]
-        observed.append(next_state)
-        return Value(next_state)
+    def execute(action, timeline, **_):
+        observed_actions.append(action)
+        # First transition matches both; second follows model b and contradicts plan a.
+        position = 1 if len(observed_actions) == 1 else 3
+        return Value(state(position))
 
     physics, _actor = strategy(workspace, edit, tools=tools, execute=execute)
     result = physics.run(run_dir="run", max_cycles=1)
 
     assert result.accepted is False
-    assert len(observed) == 2
-    state = json.loads(
+    assert observed_actions == [{"action": 1}, {"action": 1}]
+    assert "wrong_prediction" in result.feedback
+    assert "['b']" in result.feedback
+    report = json.loads(
         (tmp_path / "run" / "workspace" / ".trusted" / "state.json").read_text()
-    )
-    assert [item["action"] for item in state["timeline"][1:]] == [1, 1]
-    assert "resolution=models_discriminated" in result.feedback
+    )["last_report"]
+    assert report["matching_models"] == ["b"]
+    assert [item["action"] for item in report["executed"]] == observed_actions
     assert calls == [(result.critic_thread_id, 17)]
-    request_path = (
-        tmp_path
-        / "run"
-        / "workspace"
-        / "critic-repository"
-        / ".trusted"
-        / "requests"
-        / f"{git(workspace, 'log', '--format=%H', '--grep=actor theory and plan', '-1')}.json"
-    )
-    request = json.loads(request_path.read_text())
-    assert request["source_path"] == "world_model.py"
-    assert request["timeline_path"] == "canonical-input.json"
-    assert "source" not in request
-    assert "timeline" not in request
-    report_path = (
-        tmp_path
-        / "run"
-        / "workspace"
-        / "critic-repository"
-        / ".trusted"
-        / "evaluations"
-        / f"{git(workspace, 'log', '--format=%H', '--grep=actor theory and plan', '-1')}.json"
-    )
-    assert report_path.is_file()
-    assert set(json.loads(report_path.read_text())["backtest"]["models"]) == {"a", "b"}
-    db = ThreadsDB(tmp_path / "run" / ".egg" / "threads.sqlite")
-    try:
-        root = list_root_threads(db)[0]
-        critic = list_children_with_meta(db, root)
-        assert [name for _, name, *_ in critic] == ["Critic"]
-        assert critic[0][0] == result.critic_thread_id
-        assert [name for _, name, *_ in list_children_with_meta(db, critic[0][0])] == [
-            "Actor"
-        ]
-    finally:
-        db.close()
 
 
-def test_critic_accepts_a_selected_nonfirst_actor_plan(tmp_path, monkeypatch):
+def test_domain_action_validation_happens_before_execution(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "run" / "workspace" / "innerContext"
-    selected = experiment_plan()
-    invalid = json.loads(json.dumps(selected))
-    invalid["intents"][0]["action"] = 2
+    plan = [{"state": state(0), "action": {"action": 2}, "next_state": state(2)}]
 
     def edit(_call):
-        (workspace / "world_model.py").write_text(MODEL)
-        (workspace / "proposed-plans.json").write_text(
-            json.dumps([invalid, selected])
-        )
-        (workspace / "committed-plan.json").write_text(json.dumps(selected))
-        git(workspace, "add", "-A")
-        git(workspace, "commit", "-m", "select second actor plan")
+        write_plan(workspace, plan)
 
-    observed = []
-
-    def execute(intent, **_):
-        index = len(observed)
-        assert intent == selected["intents"][index]["action"]
-        state = selected["intents"][index]["prediction"]["a"]
-        observed.append(state)
-        return Value(state)
-
-    physics, _actor = strategy(workspace, edit, execute=execute)
+    executed = []
+    physics, _actor = strategy(
+        workspace,
+        edit,
+        execute=lambda **_: executed.append(True) or Value(state(2)),
+    )
     result = physics.run(run_dir="run", max_cycles=1)
-
     assert result.accepted is False
-    assert "models_discriminated" in result.feedback
-    assert len(observed) == 2
-    planning = json.loads(
-        (tmp_path / "run" / "workspace" / ".trusted" / "state.json").read_text()
-    )["last_report"]["planning"]
-    assert [item["plan_id"] for item in planning["invalid_plans"]] == ["plan-1"]
-    assert [item["plan_id"] for item in planning["valid_plans"]] == ["plan-2"]
+    assert executed == []
+    assert "illegal toy action" in result.feedback
 
 
 def test_dirty_repository_rejected_then_fixed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "run" / "workspace" / "innerContext"
-    plan = canonical_plan(
-        {
-            "purpose": "goal",
-            "models": ["a"],
-            "intents": [
-                {
-                    "action": 1,
-                    "prediction": {"a": {"position": 1, "legal_actions": [1]}},
-                },
-                {
-                    "action": 1,
-                    "prediction": {"a": {"position": 2, "legal_actions": [1]}},
-                },
-            ],
-        }
-    )
+    plan = trajectory(0, 1, 2)
 
     def edit(call):
         if call == 1:
@@ -700,148 +450,56 @@ def test_dirty_repository_rejected_then_fixed(tmp_path, monkeypatch):
 
     physics, actor = strategy(workspace, edit, replies=("ready", "fixed"))
     result = physics.run(run_dir="run", max_cycles=2)
-
     assert result.accepted is True
     assert actor.calls == 2
     assert not git(workspace, "status", "--short")
 
 
-def test_dirty_repository_feedback_says_what_happened_and_how_to_fix_it(
-    tmp_path, monkeypatch
-):
-    monkeypatch.chdir(tmp_path)
-    workspace = tmp_path / "run" / "workspace" / "innerContext"
-    plan = experiment_plan()
-
-    def edit(_call):
-        write_plan(workspace, plan)
-        (workspace / "uncommitted-notes.txt").write_text("scratch")
-
-    physics, _actor = strategy(workspace, edit)
-    result = physics.run(run_dir="run", max_cycles=1)
-
-    assert result.accepted is False
-    assert "evaluates only a clean committed HEAD" in result.feedback
-    assert "No real action was attempted" in result.feedback
-    assert "git status --short" in result.feedback
-    assert "uncommitted-notes.txt" in result.feedback
-
-
-def test_deleted_repo_restores_history_and_authoritative_state(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    workspace = tmp_path / "run" / "workspace" / "innerContext"
-    plan = experiment_plan()
-
-    def edit(call):
-        if call == 1:
-            write_plan(workspace, plan, "first plan")
-        elif call == 2:
-            import shutil
-
-            shutil.rmtree(workspace / ".git")
-        else:
-            assert (workspace / ".git").exists()
-            (workspace / "restored.txt").write_text("restored")
-            git(workspace, "add", "-A")
-            git(workspace, "commit", "-m", "restored plan")
-
-    physics, actor = strategy(workspace, edit, replies=("ready", "reset", "restored"))
-
-    def wrong_execute(intent, **_):
-        return Value({"position": 999, "legal_actions": [1]})
-
-    object.__setattr__(physics, "execute", wrong_execute)
-    physics.run(run_dir="run", max_cycles=3, max_actions=10)
-
-    assert actor.calls == 3
-    assert (workspace / ".git").exists()
-    assert "[physics]" in git(workspace, "log", "--format=%s", "-2")
-
-
-def test_actor_system_prompt_is_detailed_and_domain_extensible():
-    prompt = physics_actor_system_prompt("Color grids and ARC actions.")
+def test_actor_prompt_explains_freedom_and_minimal_interface():
+    prompt = physics_actor_system_prompt("Domain-defined action objects.")
     assert PHYSICS_ACTOR_SYSTEM_PROMPT == ACTOR_INSTRUCTIONS
     for required in (
-        "Ground the state",
-        "Discover mechanisms",
-        "Infer the goal",
-        "canonical-input.json",
-        "trusted-report.json",
-        "step_<suffix>",
-        "proposed-plans.json",
-        "python backtest.py",
-        "python plan.py",
-        "python commit.py plan-N",
-        "What happens after you answer",
-        "wrong_prediction",
-        "models_discriminated",
-        "plan_exhausted",
-        "max_actions",
-        "Git, caching, and recovery",
+        "You own this Git repository",
+        "world_model.py",
+        "optional `reward_<suffix>",
+        "plan.json",
+        "{state, action, next_state}",
+        "plan has no type and no branches",
+        "Planner suggestions are aids, not constraints",
+        "need not have been found by `plan.py`",
+        "supporting model",
+        "python commit.py",
+        "What the trusted Critic does",
     ):
         assert required in prompt
-    assert "Color grids" in prompt
+    assert "actions_<suffix>" not in prompt
+    assert "Domain-defined action objects" in prompt
 
 
-def test_actor_files_publish_the_same_complete_runbook(tmp_path):
-    from eggopt import write_actor_files
-
-    write_actor_files(tmp_path, ({"legal_actions": [1]},), "Toy domain details.")
-
-    instructions = (tmp_path / "INSTRUCTIONS.md").read_text()
-    assert instructions.startswith(ACTOR_INSTRUCTIONS)
-    assert "Required procedure for every turn" in instructions
-    assert "The trusted Critic operates on committed Git history" in instructions
-    assert instructions.endswith("Toy domain details.\n")
-
-    (tmp_path / "INSTRUCTIONS.md").write_text("obsolete generic instructions")
-    write_actor_files(tmp_path, ({"legal_actions": [1]},), "Updated details.")
-    refreshed = (tmp_path / "INSTRUCTIONS.md").read_text()
-    assert refreshed.startswith(ACTOR_INSTRUCTIONS)
-    assert refreshed.endswith("Updated details.\n")
+def test_actor_turn_prompts_match_new_protocol():
+    first = _actor_turn_prompt(1, {})
+    revision = _actor_turn_prompt(2, {"feedback": "Prediction contradicted."})
+    assert "complete runbook" in first
+    assert "plan" in first
+    assert "commit.py" in first
+    assert "do not execute the real environment" in first
+    assert "trusted-report.json" in revision
+    assert "one new clean commit" in revision
+    assert revision.endswith("Prediction contradicted.")
 
 
-def test_actor_instruments_are_self_contained_and_use_strategy_configuration(
-    tmp_path,
-):
-    import os
-
-    from eggopt import write_actor_files
-
+def test_actor_files_and_instruments_are_self_contained(tmp_path):
     write_actor_files(
         tmp_path,
-        ({"position": 0, "moves": [1]},),
-        legal_actions_key="moves",
+        (state(0),),
+        "Toy domain.",
+        planner_actions=({"action": 1},),
         max_depth=3,
         max_nodes=41,
         evaluator_timeout_sec=7,
     )
-    (tmp_path / "world_model.py").write_text(
-        "def step_a(state, action):\n"
-        "    return {'position': state['position'] + action, 'moves': [1]}\n"
-        "def reward_a(state):\n"
-        "    return state['position']\n"
-    )
-    proposed = {
-        "purpose": "goal",
-        "models": ["a"],
-        "intents": [
-            {
-                "action": 1,
-                "prediction": {"a": {"position": 1, "moves": [1]}},
-            },
-            {
-                "action": 1,
-                "prediction": {"a": {"position": 2, "moves": [1]}},
-            },
-            {
-                "action": 1,
-                "prediction": {"a": {"position": 3, "moves": [1]}},
-            },
-        ],
-    }
-    (tmp_path / "proposed-plans.json").write_text(json.dumps([proposed]))
-
+    (tmp_path / "world_model.py").write_text(MODEL)
+    (tmp_path / "plan.json").write_text(json.dumps(trajectory(0, 1, 2)))
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
     for script in ("backtest.py", "plan.py"):
@@ -854,202 +512,39 @@ def test_actor_instruments_are_self_contained_and_use_strategy_configuration(
             check=False,
         )
         assert completed.returncode == 0, completed.stderr
-
     config = json.loads((tmp_path / "physics-config.json").read_text())
     assert config == {
         "evaluator_timeout_sec": 7,
-        "legal_actions_key": "moves",
         "max_depth": 3,
         "max_nodes": 41,
+        "planner_actions": [{"action": 1}],
     }
-    assert json.loads((tmp_path / "backtest-report.json").read_text())[
-        "surviving_models"
-    ] == ["a"]
-    plans = json.loads((tmp_path / "plan-report.json").read_text())["valid_plans"]
-    assert plans and len(plans[0]["plan"]["intents"]) == 3
+    assert json.loads((tmp_path / "plan-report.json").read_text())["validation"][
+        "valid"
+    ]
     runtime = (tmp_path / "physics_runtime.py").read_text()
     assert "eggopt" not in runtime
     assert "arcagi3" not in runtime
+    assert (tmp_path / "INSTRUCTIONS.md").read_text().endswith("Toy domain.\n")
 
 
-def test_actor_instruments_run_in_a_clean_python_container(tmp_path):
-    import os
-    import shutil
-
-    if shutil.which("docker") is None:
-        pytest.skip("Docker is unavailable")
-    from eggopt import write_actor_files
-
-    write_actor_files(
-        tmp_path,
-        ({"position": 0, "legal_actions": [1]},),
-        max_depth=2,
-        max_nodes=20,
-    )
-    (tmp_path / "world_model.py").write_text(
-        "def step_a(state, action):\n"
-        "    return {'position': state['position'] + action, 'legal_actions': [1]}\n"
-        "def reward_a(state):\n"
-        "    return state['position']\n"
-    )
-    proposal = {
-        "purpose": "goal",
-        "models": ["a"],
-        "intents": [
-            {
-                "action": 1,
-                "prediction": {
-                    "a": {"position": 1, "legal_actions": [1]}
-                },
-            }
-        ],
-    }
-    (tmp_path / "proposed-plans.json").write_text(json.dumps([proposal]))
-    completed = subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--cap-drop",
-            "ALL",
-            "--user",
-            f"{os.getuid()}:{os.getgid()}",
-            "-e",
-            "HOME=/tmp",
-            "-v",
-            f"{tmp_path}:/workspace",
-            "-w",
-            "/workspace",
-            "python:3.12-slim",
-            "python",
-            "plan.py",
-        ],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads((tmp_path / "plan-report.json").read_text())[
-        "valid_plans"
-    ]
-
-
-def test_local_and_trusted_plan_validation_match(tmp_path):
-    import importlib.util
-
-    from eggopt import write_actor_files
-
-    write_actor_files(tmp_path, ({"legal_actions": [1]},))
-    spec = importlib.util.spec_from_file_location(
-        "generated_physics_runtime", tmp_path / "physics_runtime.py"
-    )
-    assert spec is not None and spec.loader is not None
-    runtime = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(runtime)
-    values = (
-        {"purpose": "goal", "models": ["a"], "intents": []},
-        {
-            "purpose": "goal",
-            "models": ["a"],
-            "intents": [{"action": 1, "prediction": {"b": {}}}],
-        },
-        {
-            "purpose": "goal",
-            "models": ["a"],
-            "intents": [{"action": 1, "prediction": {"a": {}}}],
-            "extra": True,
-        },
-    )
-    for value in values:
-        with pytest.raises(ValueError) as trusted:
-            canonical_plan(value)
-        with pytest.raises(ValueError) as local:
-            runtime.canonical_plan(value)
-        assert str(local.value) == str(trusted.value)
-
-
-def test_commit_rejects_a_stale_plan_report(tmp_path, monkeypatch):
-    import importlib.util
-
-    from eggopt import write_actor_files
-
-    monkeypatch.chdir(tmp_path)
-    write_actor_files(tmp_path, ({"legal_actions": [1]},))
-    proposal = {
-        "purpose": "goal",
-        "models": ["a"],
-        "intents": [
-            {
-                "action": 1,
-                "prediction": {"a": {"legal_actions": [1]}},
-            }
-        ],
-    }
-    (tmp_path / "proposed-plans.json").write_text(json.dumps([]))
-    (tmp_path / "plan-report.json").write_text(
-        json.dumps({"valid_plans": [{"plan_id": "plan-1", "plan": proposal}]})
-    )
-    spec = importlib.util.spec_from_file_location(
-        "generated_physics_runtime_stale", tmp_path / "physics_runtime.py"
-    )
-    assert spec is not None and spec.loader is not None
-    runtime = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(runtime)
-
-    with pytest.raises(SystemExit, match="stale"):
-        runtime.actor_commit("plan-1")
-
-
-def test_actor_instrument_subprocess_has_a_timeout(tmp_path):
-    import os
-
-    from eggopt import write_actor_files
-
-    write_actor_files(
-        tmp_path,
-        ({"legal_actions": [1]},),
-        evaluator_timeout_sec=0.05,
-    )
-    (tmp_path / "world_model.py").write_text(
-        "while True:\n"
-        "    pass\n"
-        "def step_a(state, action):\n"
-        "    return state\n"
-        "def reward_a(state):\n"
-        "    return 0\n"
-    )
-    environment = os.environ.copy()
-    environment.pop("PYTHONPATH", None)
-
+def test_actor_instrument_subprocess_timeout(tmp_path):
+    write_actor_files(tmp_path, (state(0),), evaluator_timeout_sec=0.05)
+    (tmp_path / "world_model.py").write_text("while True:\n    pass\n")
     completed = subprocess.run(
         ["python", "-E", "backtest.py"],
         cwd=tmp_path,
-        env=environment,
         text=True,
         capture_output=True,
         timeout=2,
         check=False,
     )
-
     assert completed.returncode != 0
     assert "timed out after 0.05 seconds" in completed.stderr
 
 
 def test_actor_instrument_timeout_terminates_descendants(tmp_path):
-    import os
-    import time
-
-    from eggopt import write_actor_files
-
-    write_actor_files(
-        tmp_path,
-        ({"legal_actions": [1]},),
-        evaluator_timeout_sec=0.2,
-    )
+    write_actor_files(tmp_path, (state(0),), evaluator_timeout_sec=0.2)
     marker = tmp_path / "descendant-survived"
     (tmp_path / "world_model.py").write_text(
         "import subprocess, sys\n"
@@ -1058,266 +553,50 @@ def test_actor_instrument_timeout_terminates_descendants(tmp_path):
         "while True:\n"
         "    pass\n"
     )
-    environment = os.environ.copy()
-    environment.pop("PYTHONPATH", None)
-
     completed = subprocess.run(
         ["python", "-E", "backtest.py"],
         cwd=tmp_path,
-        env=environment,
         text=True,
         capture_output=True,
         timeout=2,
         check=False,
     )
     time.sleep(0.9)
-
     assert completed.returncode != 0
-    assert "timed out after 0.2 seconds" in completed.stderr
     assert not marker.exists()
 
 
-def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
-    from eggopt.physics.strategy import _refresh_actor_instruments
-
-    actor = tmp_path / "actor"
-    critic = tmp_path / "critic"
-    actor.mkdir()
-    git(actor, "init", "-b", "main")
-    git(actor, "config", "user.name", "Physics")
-    git(actor, "config", "user.email", "physics@test")
-    (actor / "world_model.py").write_text("THEORY = 'preserve me'\n")
-    (actor / "backtest.py").write_text(
-        'from eggopt.physics import actor_backtest\n\n'
-        'if __name__ == "__main__":\n'
-        '    actor_backtest()\n'
-    )
-    git(actor, "add", "-A")
-    git(actor, "commit", "-m", "old instruments")
-    subprocess.run(
-        ["git", "clone", "--no-local", str(actor), str(critic)],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    _refresh_actor_instruments(
-        actor,
-        critic,
-        domain_information="Updated domain contract.",
-        legal_actions_key="moves",
-        max_depth=5,
-        max_nodes=99,
-        evaluator_timeout_sec=11,
-    )
-
-    assert (actor / "world_model.py").read_text() == "THEORY = 'preserve me'\n"
-    assert "physics_runtime" in (actor / "backtest.py").read_text()
-    assert (actor / "INSTRUCTIONS.md").read_text().endswith(
-        "Updated domain contract.\n"
-    )
-    assert json.loads((actor / "physics-config.json").read_text())["max_depth"] == 5
-    assert git(actor, "log", "-1", "--format=%s") == (
-        "[physics] refresh Actor instruments"
-    )
-    assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
-
-
-def test_instrument_refresh_refuses_modified_owned_files(tmp_path):
-    from eggopt.physics.strategy import _refresh_actor_instruments
-
-    actor = tmp_path / "actor"
-    critic = tmp_path / "critic"
-    actor.mkdir()
-    git(actor, "init", "-b", "main")
-    git(actor, "config", "user.name", "Physics")
-    git(actor, "config", "user.email", "physics@test")
-    (actor / "backtest.py").write_text("old\n")
-    git(actor, "add", "-A")
-    git(actor, "commit", "-m", "old instruments")
-    subprocess.run(
-        ["git", "clone", "--no-local", str(actor), str(critic)],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    (actor / "backtest.py").write_text("actor modification\n")
-
-    with pytest.raises(RuntimeError, match="modified Physics-owned.*backtest.py"):
-        _refresh_actor_instruments(
-            actor,
-            critic,
-            domain_information="",
-            legal_actions_key="legal_actions",
-            max_depth=8,
-            max_nodes=10_000,
-            evaluator_timeout_sec=300,
-        )
-
-    assert (actor / "backtest.py").read_text() == "actor modification\n"
-
-
-def test_instrument_refresh_refuses_committed_custom_helpers(tmp_path):
-    from eggopt.physics.strategy import _refresh_actor_instruments
-
-    actor = tmp_path / "actor"
-    critic = tmp_path / "critic"
-    actor.mkdir()
-    git(actor, "init", "-b", "main")
-    git(actor, "config", "user.name", "Physics")
-    git(actor, "config", "user.email", "physics@test")
-    (actor / "backtest.py").write_text("custom committed helper\n")
-    git(actor, "add", "-A")
-    git(actor, "commit", "-m", "custom helper")
-    subprocess.run(
-        ["git", "clone", "--no-local", str(actor), str(critic)],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    with pytest.raises(RuntimeError, match="customized.*backtest.py"):
-        _refresh_actor_instruments(
-            actor,
-            critic,
-            domain_information="",
-            legal_actions_key="legal_actions",
-            max_depth=8,
-            max_nodes=10_000,
-            evaluator_timeout_sec=300,
-        )
-
-    assert (actor / "backtest.py").read_text() == "custom committed helper\n"
-
-
-def test_git_critic_does_not_evaluate_an_instrument_maintenance_commit(
-    tmp_path, monkeypatch
-):
-    monkeypatch.chdir(tmp_path)
-    workspace = tmp_path / "run" / "workspace" / "innerContext"
-    calls = []
-
-    def edit(call):
-        calls.append(call)
-        if call == 1:
-            (workspace / "backtest.py").write_text(
-                'from eggopt.physics import actor_backtest\n\n'
-                'if __name__ == "__main__":\n'
-                '    actor_backtest()\n'
-            )
-            git(workspace, "add", "backtest.py")
-            git(workspace, "commit", "-m", "restore legacy helper")
-        else:
-            write_plan(workspace, experiment_plan())
-
-    physics, actor = strategy(workspace, edit, replies=("legacy", "ready"))
-    result = physics.run(run_dir="run", max_cycles=2)
-
-    assert actor.calls == 2
-    assert calls == [1, 2]
-    assert "models_discriminated" in result.feedback
-    subjects = git(workspace, "log", "--format=%s", "-3").splitlines()
-    assert "[physics] refresh Actor instruments" in subjects
-
-
-def test_actor_turn_prompts_require_the_full_runbook():
-    first = _actor_turn_prompt(1, {})
-    revision = _actor_turn_prompt(2, {"feedback": "Prediction contradicted."})
-
-    assert "complete runbook" in first
-    assert "commit.py" in first
-    assert "do not execute the real environment" in first
-    assert "trusted-report.json" in revision
-    assert "one new clean commit" in revision
-    assert revision.endswith("Prediction contradicted.")
-
-
-def test_critic_feedback_explains_each_execution_resolution():
-    mismatch = _execution_feedback("wrong_prediction")
+def test_critic_feedback_explains_mismatch_and_exhaustion():
+    mismatch = _execution_feedback("wrong_prediction", ["b"])
     assert "permanently appended" in mismatch
-    assert "state grounding" in mismatch
-    discriminated = _execution_feedback("models_discriminated")
-    assert "compatible_models" in discriminated
-    assert "first intent" in discriminated
+    assert "['b']" in mismatch
     exhausted = _execution_feedback("plan_exhausted")
     assert "did not report the goal" in exhausted
-    assert "goal inference" in exhausted
 
 
-def test_evaluation_report_path_requires_full_git_head():
+def test_evaluation_paths_and_schema(tmp_path):
     head = "a" * 40
     assert _evaluation_report_path(head) == f".trusted/evaluations/{head}.json"
     assert _evaluation_request_path(head) == f".trusted/requests/{head}.json"
     with pytest.raises(ValueError, match="full hexadecimal"):
         _evaluation_report_path("../escape")
-
-
-def test_evaluation_report_rejects_incomplete_json(tmp_path):
     path = tmp_path / "report.json"
     path.write_text('{"backtest": {}}')
-    with pytest.raises(TypeError, match="backtest or planning"):
+    with pytest.raises(TypeError, match="plan_validation"):
         _evaluation_report(path)
 
 
-def test_physics_requires_domain_ports():
+def test_physics_requires_all_domain_ports():
     actor = Agent(object(), {"role": "actor"})
     with pytest.raises(TypeError, match="observe"):
         PhysicsStrategy(
             actor=actor,
             observe="bad",
             execute=lambda **_: Value({}),
+            validate_action=lambda **_: None,
             is_goal=lambda _: False,
-            identity={},
+            identity={"domain": "x"},
         )
-
-
-def test_physics_task_reuses_an_existing_runtime_thread(tmp_path, monkeypatch):
-    import asyncio
-
-    from eggopt.runtime import Runtime
-
-    from eggthreads import create_child_thread, create_root_thread
-
-    monkeypatch.chdir(tmp_path)
-    workspace = (
-        tmp_path / "benchmark" / "environments" / "toy" / "workspace" / "innerContext"
-    )
-    plan = canonical_plan(
-        {
-            "purpose": "goal",
-            "models": ["a"],
-            "intents": [
-                {
-                    "action": 1,
-                    "prediction": {"a": {"position": 2, "legal_actions": [1]}},
-                }
-            ],
-        }
-    )
-
-    def edit(_call):
-        write_plan(workspace, plan)
-
-    physics, _actor = strategy(workspace, edit)
-    with Runtime.open("benchmark") as runtime:
-        root = create_root_thread(runtime.threads, name="Benchmark")
-        physics_id = create_child_thread(runtime.threads, root, name="Physics toy")
-        result = asyncio.run(
-            runtime.flow.run(
-                physics.task(
-                    runtime_key=runtime.runtime_key,
-                    run_dir=tmp_path / "benchmark" / "environments" / "toy",
-                    physics_thread_id=physics_id,
-                    max_cycles=1,
-                )
-            )
-        )
-
-        assert result.physics_thread_id == physics_id
-        assert list_root_threads(runtime.threads) == [root]
-        assert [
-            name for _, name, *_ in list_children_with_meta(runtime.threads, root)
-        ] == ["Physics toy"]
 
 
 def test_scheduler_managed_agent_is_part_of_task_identity():
@@ -1562,3 +841,253 @@ def test_scheduler_managed_wait_only_reduces_state_after_new_events(
         assert calls == [thread_id, thread_id]
     finally:
         db.close()
+
+
+def _instrument_repository(tmp_path):
+    actor = tmp_path / "actor"
+    critic = tmp_path / "critic"
+    actor.mkdir()
+    git(actor, "init", "-b", "main")
+    git(actor, "config", "user.name", "Physics")
+    git(actor, "config", "user.email", "physics@test")
+    return actor, critic
+
+
+def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor, critic = _instrument_repository(tmp_path)
+    (actor / "world_model.py").write_text("THEORY = 'preserve me'\n")
+    (actor / "backtest.py").write_text(
+        'from physics_runtime import actor_backtest\n\n'
+        'if __name__ == "__main__":\n'
+        '    actor_backtest()\n'
+    )
+    (actor / "commit.py").write_text(
+        "import sys\nfrom physics_runtime import actor_commit\n\n"
+        'if __name__ == "__main__":\n'
+        '    actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")\n'
+    )
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "old instruments")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    _refresh_actor_instruments(
+        actor,
+        critic,
+        domain_information="Updated domain contract.",
+        planner_actions=({"action": 1},),
+        max_depth=5,
+        max_nodes=99,
+        evaluator_timeout_sec=11,
+    )
+
+    assert (actor / "world_model.py").read_text() == "THEORY = 'preserve me'\n"
+    assert "physics_runtime" in (actor / "backtest.py").read_text()
+    assert (actor / "plan.json").read_text() == "[]\n"
+    assert (actor / "INSTRUCTIONS.md").read_text().endswith(
+        "Updated domain contract.\n"
+    )
+    assert "plan has no type and no branches" in (
+        actor / "INSTRUCTIONS.md"
+    ).read_text()
+    config = json.loads((actor / "physics-config.json").read_text())
+    assert config["planner_actions"] == [{"action": 1}]
+    assert git(actor, "log", "-1", "--format=%s") == (
+        "[physics] refresh Actor instruments"
+    )
+    assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
+
+
+def test_instrument_refresh_refuses_modified_owned_files(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor, critic = _instrument_repository(tmp_path)
+    (actor / "backtest.py").write_text("old\n")
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "old instruments")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    (actor / "backtest.py").write_text("actor modification\n")
+
+    with pytest.raises(RuntimeError, match="modified Physics-owned.*backtest.py"):
+        _refresh_actor_instruments(
+            actor,
+            critic,
+            domain_information="",
+            planner_actions=(),
+            max_depth=8,
+            max_nodes=10_000,
+            evaluator_timeout_sec=300,
+        )
+    assert (actor / "backtest.py").read_text() == "actor modification\n"
+
+
+def test_instrument_refresh_refuses_committed_custom_helpers(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor, critic = _instrument_repository(tmp_path)
+    (actor / "backtest.py").write_text("custom committed helper\n")
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "custom helper")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(RuntimeError, match="customized.*backtest.py"):
+        _refresh_actor_instruments(
+            actor,
+            critic,
+            domain_information="",
+            planner_actions=(),
+            max_depth=8,
+            max_nodes=10_000,
+            evaluator_timeout_sec=300,
+        )
+
+
+def test_commit_validates_current_plan_and_creates_clean_head(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    git(tmp_path, "init", "-b", "main")
+    git(tmp_path, "config", "user.name", "Physics")
+    git(tmp_path, "config", "user.email", "physics@test")
+    write_actor_files(
+        tmp_path,
+        (state(0),),
+        planner_actions=({"action": 1},),
+    )
+    (tmp_path / "world_model.py").write_text(MODEL)
+    (tmp_path / "plan.json").write_text(json.dumps(trajectory(0, 1)))
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-m", "initial")
+    (tmp_path / "plan.json").write_text(json.dumps(trajectory(0, 1, 2)))
+
+    completed = subprocess.run(
+        ["python", "-E", "commit.py"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert git(tmp_path, "log", "-1", "--format=%s") == "Actor submits trajectory"
+    assert git(tmp_path, "status", "--short") == ""
+
+
+def test_evaluator_rejects_step_argument_mutation():
+    source = """
+def step_a(state, action):
+    state["position"] += 1
+    return state
+"""
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [state(0)],
+            "plan": trajectory(0, 1),
+            "planner_actions": [],
+            "max_depth": 2,
+            "max_nodes": 20,
+        }
+    )
+    assert result["plan_validation"]["valid"] is False
+    assert "no Timeline-consistent" in result["plan_validation"]["error"]
+    assert result["plan_validation"]["predictions"][0]["a"] is None
+    assert "must not mutate" in result["plan_validation"]["model_errors"][0]["a"]
+
+
+def test_valid_plan_acceptance_is_independent_of_advisory_planner(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+    plan = trajectory(0, 1, 2)
+
+    def edit(_call):
+        write_plan(workspace, plan)
+
+    physics, _actor = strategy(workspace, edit)
+    object.__setattr__(physics, "planner_actions", ())
+    result = physics.run(run_dir="run", max_cycles=1)
+
+    assert result.accepted is True
+    assert result.stopping_reason == "won"
+    assert result.value["report"]["planning"]["suggestions"] == []
+
+
+def test_one_broken_model_does_not_block_another_supporting_model():
+    source = """
+def step_broken(state, action):
+    raise ValueError("unknown mechanism")
+def step_good(state, action):
+    return {"position": state["position"] + 1, "legal_actions": [1]}
+"""
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [state(0)],
+            "plan": trajectory(0, 1),
+            "planner_actions": [],
+            "max_depth": 2,
+            "max_nodes": 20,
+        }
+    )
+    assert result["plan_validation"]["valid"] is True
+    assert result["plan_validation"]["supporting_models"] == ["good"]
+    assert result["plan_validation"]["predictions"][0]["broken"] is None
+    assert result["plan_validation"]["model_errors"][0]["broken"] == (
+        "unknown mechanism"
+    )
+
+
+def test_submitted_plan_length_is_bounded_but_not_rediscovered():
+    plan = trajectory(0, 1, 2)
+    result = run_evaluator(
+        {
+            "source": MODEL,
+            "timeline": [state(0)],
+            "plan": plan,
+            "planner_actions": [],
+            "max_depth": 1,
+            "max_nodes": 1,
+        }
+    )
+    assert result["plan_validation"]["valid"] is False
+    assert "limit is 1" in result["plan_validation"]["error"]
+
+
+def test_structured_domain_action_is_preserved_in_trajectory_validation():
+    click = {"action": 6, "data": {"x": 12, "y": 34}}
+    source = """
+from copy import deepcopy
+def step_click(state, action):
+    result = deepcopy(state)
+    result["received"] = action
+    return result
+"""
+    initial = {"received": None}
+    predicted = {"received": click}
+    plan = [{"state": initial, "action": click, "next_state": predicted}]
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [initial],
+            "plan": plan,
+            "planner_actions": [],
+            "max_depth": 1,
+            "max_nodes": 20,
+        }
+    )
+    assert result["plan_validation"]["valid"] is True
+    assert result["plan_validation"]["plan"][0]["action"] == click

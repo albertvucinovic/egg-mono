@@ -7,16 +7,20 @@ MODEL_RUNNER = r"""
 import copy
 import hashlib
 import importlib.util
+import itertools
 import json
+import math
 import os
 import sys
 import tempfile
+from collections import deque
 from pathlib import Path
 
 request = json.loads(sys.stdin.read())
 source = request["source"]
 timeline = request["timeline"]
-raw_plans = request.get("plans", [])
+raw_plan = request.get("plan")
+actions = request.get("planner_actions", [])
 work = Path(request.get("work_dir", ".physics-evaluation"))
 work.mkdir(parents=True, exist_ok=True)
 path = work / ("world_model_" + hashlib.sha256(source.encode()).hexdigest()[:12] + ".py")
@@ -27,27 +31,22 @@ if spec is None or spec.loader is None:
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 steps = {name[5:]: value for name, value in vars(module).items() if name.startswith("step_") and name[5:] and callable(value)}
-actions = {name[8:]: value for name, value in vars(module).items() if name.startswith("actions_") and name[8:] and callable(value)}
+rewards = {name[7:]: value for name, value in vars(module).items() if name.startswith("reward_") and name[7:] and callable(value)}
 if not steps:
     raise ValueError("world_model.py defines no step_<suffix> functions")
-orphan_actions = sorted(set(actions) - set(steps))
-if orphan_actions:
-    raise ValueError(f"actions suffixes require matching steps; orphan actions={orphan_actions}")
-models = {suffix: (steps[suffix], actions.get(suffix)) for suffix in sorted(steps)}
-
+orphan_rewards = sorted(set(rewards) - set(steps))
+if orphan_rewards:
+    raise ValueError(f"reward suffixes require matching steps: {orphan_rewards}")
 if not isinstance(timeline, list) or not timeline:
     raise ValueError("timeline must be a non-empty list")
-if not isinstance(raw_plans, list):
-    raise TypeError("plans must be a finite list")
+if not isinstance(actions, list):
+    raise TypeError("planner_actions must be a finite list")
 max_depth = request["max_depth"]
 max_nodes = request["max_nodes"]
 if isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1:
     raise ValueError("max_depth must be a positive integer")
 if isinstance(max_nodes, bool) or not isinstance(max_nodes, int) or max_nodes < 1:
     raise ValueError("max_nodes must be a positive integer")
-validation_nodes = sum(max(1, len(plan.get("intents", ()))) if isinstance(plan, dict) else 1 for plan in raw_plans)
-if validation_nodes > max_nodes:
-    raise ValueError(f"submitted plans require {validation_nodes} validation nodes; limit is {max_nodes}")
 
 
 def freeze(value):
@@ -59,51 +58,17 @@ def freeze(value):
 
 
 def canonical_plan(value):
-    if not isinstance(value, dict) or set(value) != {"purpose", "models", "intents"}:
-        raise ValueError("plan must contain exactly purpose, models, and intents")
-    if value["purpose"] not in {"goal", "experiment"}:
-        raise ValueError("plan purpose must be goal or experiment")
-    selected = value["models"]
-    intents = value["intents"]
-    if not isinstance(selected, list) or not selected or not all(isinstance(item, str) and item for item in selected):
-        raise ValueError("plan models must be a non-empty string list")
-    if len(set(selected)) != len(selected):
-        raise ValueError("plan models must be unique")
-    if value["purpose"] == "goal" and len(selected) != 1:
-        raise ValueError("goal plans must use exactly one model")
-    if value["purpose"] == "experiment" and len(selected) < 2:
-        raise ValueError("experiment plans must use at least two models")
-    if not isinstance(intents, list) or not intents:
-        raise ValueError("committed plan must contain at least one intent")
-    for intent in intents:
-        if not isinstance(intent, dict) or set(intent) != {"action", "prediction"}:
-            raise ValueError("every intent must contain exactly action and prediction")
-        predictions = intent["prediction"]
-        if not isinstance(predictions, dict) or set(predictions) != set(selected):
-            raise ValueError("every intent must predict once for every plan model")
-    if value["purpose"] == "experiment":
-        for index, intent in enumerate(intents):
-            distinct = len({freeze(item) for item in intent["prediction"].values()})
-            if index < len(intents) - 1 and distinct != 1:
-                raise ValueError("experiment predictions must share one common prefix")
-            if index == len(intents) - 1 and distinct < 2:
-                raise ValueError("an experiment must end with its first distinguishing action")
-    return {"purpose": value["purpose"], "models": selected, "intents": intents}
-
-
-def recorded_action(value):
-    if isinstance(value, dict) and set(value) == {"action", "prediction"} and isinstance(value["prediction"], dict):
-        return value["action"]
-    return value
-
-
-def action_map(state, generate=None):
-    if not isinstance(state, dict):
-        raise TypeError("model states must expose legal actions in a mapping")
-    values = generate(copy.deepcopy(state)) if generate is not None else state.get(request["legal_actions_key"], ())
-    if not isinstance(values, (list, tuple)):
-        raise TypeError("legal actions must be a finite list or tuple")
-    return {freeze(action): action for action in values}
+    if not isinstance(value, list) or not value:
+        raise ValueError("plan must be a non-empty JSON list")
+    plan = []
+    for transition in value:
+        if not isinstance(transition, dict) or set(transition) != {"state", "action", "next_state"}:
+            raise ValueError("every plan transition must contain exactly state, action, and next_state")
+        plan.append({"state": transition["state"], "action": transition["action"], "next_state": transition["next_state"]})
+    for previous, current in zip(plan, plan[1:]):
+        if previous["next_state"] != current["state"]:
+            raise ValueError("plan transitions must form one continuous trajectory")
+    return plan
 
 
 def predict(step, state, action):
@@ -117,13 +82,20 @@ def predict(step, state, action):
     return predicted
 
 
+def finite_reward(reward, state):
+    value = float(reward(copy.deepcopy(state)))
+    if not math.isfinite(value):
+        raise ValueError("reward must be finite")
+    return value
+
+
 reports = {}
-for suffix, (step, _generate) in models.items():
+for suffix, step in sorted(steps.items()):
     mismatches = []
     matches = 0
     for index, item in enumerate(timeline[1:], start=1):
         try:
-            predicted = predict(step, item["state"], recorded_action(item["action"]))
+            predicted = predict(step, item["state"], item["action"])
             if predicted == item["next_state"]:
                 matches += 1
             else:
@@ -134,54 +106,119 @@ for suffix, (step, _generate) in models.items():
 
 surviving = [suffix for suffix, report in reports.items() if not report["mismatches"]]
 current = timeline[-1].get("next_state", timeline[-1])
-
-
-def validate_plan(raw):
-    plan = canonical_plan(raw)
-    if len(plan["intents"]) > max_depth:
-        raise ValueError(f"plan has {len(plan['intents'])} intents; limit is {max_depth}")
-    unknown = sorted(set(plan["models"]) - set(models))
-    if unknown:
-        raise ValueError(f"plan references unknown models: {unknown}")
-    contradicted = sorted(set(plan["models"]) - set(surviving))
-    if contradicted:
-        raise ValueError(f"plan references models contradicted by the Timeline: {contradicted}")
-    states = {suffix: copy.deepcopy(current) for suffix in plan["models"]}
-    for intent_index, intent in enumerate(plan["intents"], start=1):
-        action = intent["action"]
-        next_states = {}
-        for suffix in plan["models"]:
-            step, generate = models[suffix]
-            if freeze(action) not in action_map(states[suffix], generate):
-                raise ValueError(f"intent {intent_index} action is not legal under model {suffix!r}")
-            predicted = predict(step, states[suffix], action)
-            claimed = intent["prediction"][suffix]
-            if predicted != claimed:
-                raise ValueError(f"intent {intent_index} prediction for model {suffix!r} does not match step_{suffix}")
-            next_states[suffix] = predicted
-        states = next_states
-    return plan
-
-valid_plans = []
-invalid_plans = []
-for index, raw in enumerate(raw_plans, start=1):
-    plan_id = f"plan-{index}"
+plan = None
+plan_error = None
+supporting = []
+plan_predictions = []
+plan_model_errors = []
+if raw_plan is not None:
     try:
-        valid_plans.append({"plan_id": plan_id, "plan": validate_plan(raw)})
+        plan = canonical_plan(raw_plan)
+        if len(plan) > max_depth:
+            raise ValueError(f"plan has {len(plan)} transitions; limit is {max_depth}")
+        if plan[0]["state"] != current:
+            raise ValueError("the first plan state must equal the canonical current state")
+        plan_predictions = []
+        for item in plan:
+            predicted = {}
+            errors = {}
+            for suffix in surviving:
+                try:
+                    predicted[suffix] = predict(
+                        steps[suffix], item["state"], item["action"]
+                    )
+                except (TypeError, ValueError, RuntimeError, KeyError, AttributeError) as exc:
+                    predicted[suffix] = None
+                    errors[suffix] = str(exc)
+            plan_predictions.append(predicted)
+            plan_model_errors.append(errors)
+        for suffix in surviving:
+            if all(
+                predictions[suffix] == item["next_state"]
+                for predictions, item in zip(plan_predictions, plan)
+            ):
+                supporting.append(suffix)
+        if not supporting:
+            raise ValueError("no Timeline-consistent step model reproduces the complete plan")
     except (TypeError, ValueError, RuntimeError, KeyError, AttributeError) as exc:
-        invalid_plans.append({"plan_id": plan_id, "error": str(exc)})
+        plan_error = str(exc)
+
+
+def goal_suggestion(suffix):
+    step = steps[suffix]
+    reward = rewards[suffix]
+    baseline = finite_reward(reward, current)
+    frontier = deque([(current, ())])
+    seen = {freeze(current)}
+    nodes = 0
+    while frontier and nodes < max_nodes:
+        state, trajectory = frontier.popleft()
+        nodes += 1
+        if trajectory and finite_reward(reward, state) > baseline:
+            return list(trajectory)
+        if len(trajectory) >= max_depth:
+            continue
+        for action in actions:
+            next_state = predict(step, state, action)
+            key = freeze(next_state)
+            if key in seen:
+                continue
+            seen.add(key)
+            frontier.append((next_state, trajectory + ({"state": state, "action": action, "next_state": next_state},)))
+    return None
+
+
+def distinction_suggestion(left, right):
+    left_step = steps[left]
+    right_step = steps[right]
+    frontier = deque([(current, current, ())])
+    seen = {(freeze(current), freeze(current))}
+    nodes = 0
+    while frontier and nodes < max_nodes:
+        left_state, right_state, trajectory = frontier.popleft()
+        nodes += 1
+        if left_state != right_state or len(trajectory) >= max_depth:
+            continue
+        for action in actions:
+            left_next = predict(left_step, left_state, action)
+            right_next = predict(right_step, right_state, action)
+            next_transition = {"state": left_state, "action": action, "next_state": left_next}
+            next_trajectory = trajectory + (next_transition,)
+            if left_next != right_next:
+                return list(next_trajectory)
+            key = (freeze(left_next), freeze(right_next))
+            if key not in seen:
+                seen.add(key)
+                frontier.append((left_next, right_next, next_trajectory))
+    return None
+
+suggestions = []
+planning_models = [suffix for suffix in surviving if suffix in rewards]
+for suffix in planning_models:
+    suggestion = goal_suggestion(suffix)
+    if suggestion:
+        suggestions.append({"kind": "reward", "models": [suffix], "plan": suggestion})
+for left, right in itertools.combinations(planning_models, 2):
+    suggestion = distinction_suggestion(left, right)
+    if suggestion:
+        suggestions.append({"kind": "distinction", "models": [left, right], "plan": suggestion})
 
 result = {
-    "backtest": {
-        "models": reports,
-        "surviving_models": surviving,
+    "backtest": {"models": reports, "surviving_models": surviving},
+    "plan_validation": {
+        "valid": plan is not None and plan_error is None,
+        "error": plan_error,
+        "supporting_models": supporting,
+        "predictions": plan_predictions,
+        "model_errors": plan_model_errors,
+        "plan": plan,
     },
     "planning": {
-        "submitted_plans": len(raw_plans),
-        "valid_plans": valid_plans,
-        "invalid_plans": invalid_plans,
+        "eligible_models": planning_models,
+        "suggestions": suggestions,
     },
 }
+
 output_path = request.get("output_path")
 if output_path:
     output = Path(output_path)
@@ -229,7 +266,7 @@ def evaluator_file_script(request_path: str) -> str:
         'request["source"] = Path(request.pop("source_path")).read_text()\n'
         'timeline = json.loads(Path(request.pop("timeline_path")).read_text())\n'
         'request["timeline"] = timeline["timeline"]\n'
-        'request["plans"] = json.loads(Path(request.pop("plans_path")).read_text())\n'
+        'request["plan"] = json.loads(Path(request.pop("plan_path")).read_text())\n'
         "sys.stdin = io.StringIO(json.dumps(request, allow_nan=False, "
         'separators=(",", ":"), sort_keys=True))\n'
     )
@@ -250,8 +287,6 @@ def parse_evaluator_output(output: str) -> dict[str, Any]:
 
 
 def parse_evaluator_receipt(output: str) -> str:
-    """Return the report path from a compact trusted-evaluator receipt."""
-
     marker = "__EGG_PHYSICS_REPORT__"
     line = next(
         (line for line in reversed(str(output).splitlines()) if marker in line), None
