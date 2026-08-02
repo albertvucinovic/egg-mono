@@ -464,7 +464,9 @@ def test_actor_prompt_explains_freedom_and_minimal_interface():
         "optional `reward_<suffix>",
         "plan.json",
         "{state, action, next_state}",
-        "plan has no type and no branches",
+        "hypothesis you consider most likely",
+        "continue beyond the first action",
+        "optional planner can help find",
         "Planner suggestions are aids, not constraints",
         "need not have been found by `plan.py`",
         "supporting model",
@@ -893,7 +895,7 @@ def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
     assert (actor / "INSTRUCTIONS.md").read_text().endswith(
         "Updated domain contract.\n"
     )
-    assert "plan has no type and no branches" in (
+    assert "hypothesis you consider most likely" in (
         actor / "INSTRUCTIONS.md"
     ).read_text()
     config = json.loads((actor / "physics-config.json").read_text())

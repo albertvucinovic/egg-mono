@@ -75,7 +75,7 @@ A submitted `plan.json` looks like:
 The first transition's `state` must equal the latest canonical state. Each later
 transition's `state` must equal the preceding `next_state`. At least one
 Timeline-consistent `step_*` hypothesis must reproduce the entire trajectory
-exactly. The plan has no type and no branches.
+exactly.
 
 Your proposal is the repository's clean committed HEAD. Your chat answer is only
 a brief completion signal.
@@ -116,6 +116,15 @@ functions.
 The built-in planner is breadth-first and deliberately simple. It is useful for
 small enumerable action spaces, but it is not the only planning method you may
 use and it is never an acceptance requirement.
+
+When several hypotheses remain consistent with the Timeline, normally submit a
+useful trajectory predicted by the hypothesis you consider most likely. It may
+continue beyond the first action whose predicted result distinguishes that
+hypothesis from alternatives, so a correct hypothesis can keep making progress.
+If reality differs from the submitted prediction, execution stops immediately
+and the Critic reports which other hypotheses predicted the observed transition.
+The optional planner can help find a short action sequence that reaches such a
+distinguishing result.
 
 Planner suggestions are aids, not constraints. You may submit any trajectory
 that passes independent validation; it need not have been found by `plan.py`.
