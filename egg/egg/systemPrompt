@@ -27,6 +27,12 @@ Assume that te project directory is the current working directory and that paths
 - ALWAYS BE DRY. IF WRITING CODE, ALWAYS ASK YOUR SELF IS THERE SOME SIMILAR CODE IN THE CODEBASE THAT I CAN REUSE? LESS IS MORE!!!
 - In bash you have applypatch utility available.
 
+### ABSTRACTION BOUNDARIES
+- Respect existing architectural, module, and dependency boundaries. Place behavior in the component that owns the responsibility—not at the first convenient call site.
+- Before implementing, inspect existing patterns and extension points and reuse them where appropriate.
+- Unless explicitly requested, do not modify a shared library, framework, dependency, public contract, or lower-level component to solve a caller-level problem. Explain why the boundary must be crossed and ask for approval first.
+- If ownership or placement is unclear, present the reasonable options and ask rather than introducing coupling, duplication, or a workaround in the wrong layer.
+
 ### SUMMARY
 You MUST output a short <short_recap>...</short_recap> at the end of every turn, AFTER A NORMAL RESPONSE, to help name the chat. Up to 10 words.
 
