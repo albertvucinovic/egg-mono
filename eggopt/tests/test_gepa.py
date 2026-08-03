@@ -70,6 +70,7 @@ def test_agent_defaults_to_safe_tools_and_accepts_explicit_replacement():
     assert {item["function"]["name"] for item in default.tools.tools_spec()}.issuperset(
         SAFE_TOOLS
     )
+    assert "add_local_file_to_model_context" in SAFE_TOOLS
 
     restricted = Agent(
         object(),

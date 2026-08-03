@@ -31,6 +31,7 @@ from .instruments import (
     ACTOR_INSTRUCTIONS,
     ensure_evaluator_ignore,
     instrument_files,
+    validate_domain_files,
     write_actor_files,
 )
 from .lifecycle import TerminalOutcome, classify_terminal_state, terminal_feedback
@@ -120,6 +121,8 @@ class PhysicsStrategy:
 
     ``max_depth`` bounds submitted/advisory plan length and ``max_nodes`` bounds
     advisory search work. Planner suggestions never gate submitted trajectories.
+    ``domain_files`` lets a domain seed additional root-level text helpers into
+    the Actor repository without coupling generic PhysicsStrategy to that domain.
     """
 
     actor: Agent = field(repr=False, compare=False)
@@ -132,6 +135,7 @@ class PhysicsStrategy:
         default=None, repr=False, compare=False
     )
     domain_information: str = ""
+    domain_files: tuple[tuple[str, str], ...] = ()
     planner_actions: tuple[Any, ...] = ()
     max_depth: int = 8
     max_nodes: int = 10_000
@@ -150,6 +154,7 @@ class PhysicsStrategy:
         if not isinstance(self.planner_actions, tuple):
             raise TypeError("planner_actions must be a finite tuple")
         json.dumps(self.planner_actions, allow_nan=False)
+        validate_domain_files(self.domain_files)
         if (
             isinstance(self.evaluator_timeout_sec, bool)
             or not isinstance(self.evaluator_timeout_sec, (int, float))
@@ -294,6 +299,7 @@ class _PhysicsRun(Task):
                 "eggopt.physics.study.v3",
                 {
                     "identity": self.strategy.identity,
+                    "domain_files": self.strategy.domain_files,
                     "evaluator_timeout_sec": self.strategy.evaluator_timeout_sec,
                 },
             ),
@@ -308,11 +314,28 @@ class _PhysicsRun(Task):
                 workspace,
                 outer,
                 self.strategy.domain_information,
+                self.strategy.domain_files,
                 self.strategy.planner_actions,
                 self.strategy.max_depth,
                 self.strategy.max_nodes,
                 self.strategy.evaluator_timeout_sec,
             )
+            actor_repository = Path(workspace)
+            critic_repository = _critic_repository(Path(outer))
+            if any(
+                not (actor_repository / name).exists()
+                for name, _ in self.strategy.domain_files
+            ):
+                _refresh_actor_instruments(
+                    actor_repository,
+                    critic_repository,
+                    domain_information=self.strategy.domain_information,
+                    domain_files=self.strategy.domain_files,
+                    planner_actions=self.strategy.planner_actions,
+                    max_depth=self.strategy.max_depth,
+                    max_nodes=self.strategy.max_nodes,
+                    evaluator_timeout_sec=self.strategy.evaluator_timeout_sec,
+                )
             terminal = _current_terminal_state(outer, self.strategy)
             if terminal is not None:
                 value = _terminal_value(outer, terminal)
@@ -339,6 +362,7 @@ class _PhysicsRun(Task):
                         identity=self.strategy.identity,
                         terminal_outcome=self.strategy.terminal_outcome,
                         domain_information=self.strategy.domain_information,
+                        domain_files=self.strategy.domain_files,
                         planner_actions=self.strategy.planner_actions,
                         max_depth=self.strategy.max_depth,
                         max_nodes=self.strategy.max_nodes,
@@ -387,6 +411,7 @@ class _InitializeRepository(Task):
     workspace: str
     outer_context: str
     domain_information: str
+    domain_files: tuple[tuple[str, str], ...] = ()
     planner_actions: tuple[Any, ...] = ()
     max_depth: int = 8
     max_nodes: int = 10_000
@@ -431,6 +456,7 @@ class _InitializeRepository(Task):
             actor,
             (initial,),
             self.domain_information,
+            domain_files=self.domain_files,
             planner_actions=self.planner_actions,
             max_depth=self.max_depth,
             max_nodes=self.max_nodes,
@@ -557,6 +583,7 @@ class _GitCritic(Task):
                 actor,
                 critic_repo,
                 domain_information=self.critic.domain_information,
+                domain_files=self.critic.domain_files,
                 planner_actions=self.critic.planner_actions,
                 max_depth=self.critic.max_depth,
                 max_nodes=self.critic.max_nodes,
@@ -756,12 +783,15 @@ def _refresh_actor_instruments(
     critic: Path,
     *,
     domain_information: str,
+    domain_files: tuple[tuple[str, str], ...],
     planner_actions: tuple[Any, ...],
     max_depth: int,
     max_nodes: int,
     evaluator_timeout_sec: float,
 ) -> None:
     """Upgrade Physics-owned helpers without touching an Actor's proposal."""
+
+    domain_files = validate_domain_files(domain_files)
 
     legacy_files = {
         "backtest.py": {
@@ -843,6 +873,13 @@ def _refresh_actor_instruments(
         if path.is_file() and path.read_text() == content:
             continue
         path.write_text(content)
+        changed = True
+    for name, content in domain_files:
+        path = actor / name
+        if path.exists():
+            continue
+        path.write_text(content)
+        created.append(name)
         changed = True
     plan = actor / "plan.json"
     if not plan.exists():

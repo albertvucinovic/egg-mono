@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 import eggthreads as ts
 from eggthreads.input_artifacts import resolve_input_bytes
 from eggthreads.provider_output_artifacts import save_provider_output_bytes
@@ -34,11 +32,15 @@ def test_attachment_tools_are_registered_with_schema_and_help() -> None:
         assert "Examples:" in help_text
 
     assert specs["add_local_file_to_model_context"]["parameters"]["required"] == ["path"]
+    assert "local image" in specs["add_local_file_to_model_context"]["description"]
+    assert "Non-image files are rejected" in specs["add_local_file_to_model_context"][
+        "description"
+    ]
     assert specs["add_provider_artifact_to_model_context"]["parameters"]["required"] == ["artifact_id"]
     assert specs["save_provider_artifact_to_file"]["parameters"]["required"] == ["artifact_id"]
 
 
-def test_add_local_file_to_model_context_tool_ingests_local_file_and_returns_attachment_parts(tmp_path, monkeypatch):
+def test_add_local_file_to_model_context_tool_rejects_non_image_bytes(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
@@ -46,20 +48,40 @@ def test_add_local_file_to_model_context_tool_ingests_local_file_and_returns_att
     source.write_text("hello attachment", encoding="utf-8")
 
     output = ts.create_default_tools().execute("add_local_file_to_model_context", {"path": "note.txt"}, db=db, thread_id=tid)
+
+    assert output.startswith("Error: ")
+    assert "only accepts image files" in output
+    assert "text/plain" in output
+    assert not (tmp_path / ".egg" / "egg_inputs" / tid).exists()
+
+
+def test_add_local_file_to_model_context_tool_uses_image_bytes_not_extension(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    source = tmp_path / "grid.data"
+    image = b"\x89PNG\r\n\x1a\nimage-bytes"
+    source.write_bytes(image)
+
+    output = ts.create_default_tools().execute(
+        "add_local_file_to_model_context", {"path": "grid.data"}, db=db, thread_id=tid
+    )
     payload = json.loads(output)
 
     assert payload["action"] == "stage_attachment"
-    assert payload["metadata"]["filename"] == "note.txt"
+    assert payload["metadata"]["filename"] == "grid.data"
+    assert payload["metadata"]["mime_type"] == "image/png"
     assert "blob_relpath" not in payload["metadata"]
     part = payload["content_part"]
     assert part["type"] == "attachment"
     assert part["owner_thread_id"] == tid
-    assert part["filename"] == "note.txt"
+    assert part["filename"] == "grid.data"
     assert payload["content_parts"][1] == part
-    assert "[Attachment: file note.txt" in payload["content_text"]
+    assert "[Attachment: image grid.data" in payload["content_text"]
     _metadata, data = resolve_input_bytes(tmp_path, db, tid, part["input_id"])
-    assert data == b"hello attachment"
-    assert "hello attachment" not in output
+    assert data == image
 
 
 def test_add_local_file_to_model_context_tool_honors_sandbox_read_policy(tmp_path, monkeypatch):
@@ -168,8 +190,8 @@ def test_attachment_tool_outputs_publish_attachment_content_parts_in_runner_tran
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
-    source = tmp_path / "note.txt"
-    source.write_text("runner attachment", encoding="utf-8")
+    source = tmp_path / "pixel.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
     tool_call_id = "call-attach-file"
     ts.append_message(
         db,
@@ -181,7 +203,7 @@ def test_attachment_tool_outputs_publish_attachment_content_parts_in_runner_tran
                 {
                     "id": tool_call_id,
                     "type": "function",
-                    "function": {"name": "add_local_file_to_model_context", "arguments": json.dumps({"path": "note.txt"})},
+                    "function": {"name": "add_local_file_to_model_context", "arguments": json.dumps({"path": "pixel.png"})},
                 }
             ]
         },
@@ -200,8 +222,8 @@ def test_attachment_tool_outputs_publish_attachment_content_parts_in_runner_tran
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
     assert content[1]["type"] == "attachment"
-    assert content[1]["filename"] == "note.txt"
-    assert "[Attachment: file note.txt" in ts.content_to_plain_text(content)
+    assert content[1]["filename"] == "pixel.png"
+    assert "[Attachment: image pixel.png" in ts.content_to_plain_text(content)
 
 
 def test_tool_attachment_result_is_expanded_into_visual_provider_context(tmp_path, monkeypatch):

@@ -169,21 +169,21 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
         ],
     },
     "add_local_file_to_model_context": {
-        "details": "Add a sandbox-authorized local file to the current thread's model context, using the same shared staging operation as `/attach`.",
+        "details": "Add a sandbox-authorized local image to the current thread's model context. The LLM-facing tool deliberately rejects non-image files.",
         "use_when": [
-            "You need the model to inspect or reason over a local project/workspace file in a later model call.",
-            "The user asks you to attach/add a local image, document, or file to the model context.",
+            "You need the model to inspect or reason over a local project/workspace image in a later model call.",
+            "The user asks you to attach/add a local image to the model context.",
         ],
         "notes": [
-            "If the file is an image, Egg sends it as visual input to the next image-capable provider call; the model should then be able to answer visual questions about it.",
-            "For non-image files/documents, Egg uses the appropriate provider attachment/file mechanism when the selected model/provider supports it.",
+            "Egg identifies images from their bytes rather than trusting a filename extension, and rejects content not identified as an image.",
+            "Egg sends the image as visual input to the next image-capable provider call; the model should then be able to answer visual questions about it.",
             "Relative paths are resolved against the current thread working directory, not arbitrary process state.",
             "The source path must pass the thread's effective sandbox/filesystem read policy; Egg-private `.egg` storage is not attachable by path.",
             "The tool copies bytes into `.egg/egg_inputs` and returns metadata/content-part references only; it never returns inline bytes or base64.",
         ],
         "examples": [
             '{"path": "screenshots/example.png"}',
-            '{"path": "notes/design.pdf"}',
+            '{"path": "scratch/current-grid.png"}',
         ],
     },
     "add_provider_artifact_to_model_context": {

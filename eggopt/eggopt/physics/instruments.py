@@ -210,6 +210,55 @@ if __name__ == "__main__":
     actor_commit()
 """
 
+_RESERVED_DOMAIN_FILENAMES = frozenset(
+    {
+        ".gitignore",
+        "INSTRUCTIONS.md",
+        "backtest-report.json",
+        "backtest.py",
+        "canonical-input.json",
+        "commit.py",
+        "physics-config.json",
+        "physics_runtime.py",
+        "plan-report.json",
+        "plan.json",
+        "plan.py",
+        "trusted-report.json",
+        "world_model.py",
+    }
+)
+
+
+def validate_domain_files(value) -> tuple[tuple[str, str], ...]:
+    """Validate root-level helper files supplied by a Physics domain."""
+
+    if not isinstance(value, tuple):
+        raise TypeError("domain_files must be a finite tuple")
+    names: set[str] = set()
+    for item in value:
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not all(isinstance(part, str) for part in item)
+        ):
+            raise TypeError("domain_files entries must be (name, text) tuples")
+        name, _content = item
+        path = Path(name)
+        if (
+            not name
+            or path.is_absolute()
+            or len(path.parts) != 1
+            or path.name in {".", ".."}
+            or "/" in name
+            or "\\" in name
+            or name in names
+        ):
+            raise ValueError("domain_files names must be unique root-level filenames")
+        if name in _RESERVED_DOMAIN_FILENAMES:
+            raise ValueError(f"domain_files cannot replace reserved file {name!r}")
+        names.add(name)
+    return value
+
 _RUNTIME_SUPPORT = r'''
 
 
@@ -376,6 +425,7 @@ def write_actor_files(
     timeline,
     domain_information: str = "",
     *,
+    domain_files=(),
     planner_actions=(),
     max_depth: int = 8,
     max_nodes: int = 10_000,
@@ -383,6 +433,7 @@ def write_actor_files(
     refresh_instruments: bool = True,
 ) -> None:
     workspace = Path(workspace)
+    domain_files = validate_domain_files(domain_files)
     workspace.mkdir(parents=True, exist_ok=True)
     instructions = ACTOR_INSTRUCTIONS
     if domain_information.strip():
@@ -403,6 +454,8 @@ def write_actor_files(
             evaluator_timeout_sec=evaluator_timeout_sec,
         ).items():
             _write_if_changed(workspace / name, content)
+        for name, content in domain_files:
+            _write_if_missing(workspace / name, content)
 
 
 def actor_backtest() -> None:
@@ -496,5 +549,6 @@ __all__ = [
     "actor_plan",
     "ensure_evaluator_ignore",
     "instrument_files",
+    "validate_domain_files",
     "write_actor_files",
 ]

@@ -50,8 +50,18 @@ def _thread_context(ctx: ToolContext, tool_name: str) -> tuple[Any, str] | ToolE
     return ctx.db, thread_id
 
 
+def _require_image(_filename: str, mime_type: str, presentation: str) -> None:
+    """Reject local bytes unless Egg's content inspection identified an image."""
+
+    if presentation != "image" or not mime_type.startswith("image/"):
+        raise ValueError(
+            "add_local_file_to_model_context only accepts image files; "
+            f"detected {mime_type or 'unknown content'}"
+        )
+
+
 def add_local_file_to_model_context_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecutionResult:
-    """Ingest a sandbox-authorized local file as an Egg input attachment."""
+    """Ingest a sandbox-authorized local image as an Egg input attachment."""
 
     resolved = _thread_context(ctx, ADD_LOCAL_FILE_TO_MODEL_CONTEXT_TOOL_NAME)
     if isinstance(resolved, ToolExecutionResult):
@@ -61,7 +71,13 @@ def add_local_file_to_model_context_tool(args: Dict[str, Any], ctx: ToolContext)
     if not path:
         return _error("path is required.")
     try:
-        result = attach_local_file_operation(db, thread_id, path, workspace=_workspace(ctx))
+        result = attach_local_file_operation(
+            db,
+            thread_id,
+            path,
+            workspace=_workspace(ctx),
+            validate_candidate=_require_image,
+        )
     except Exception as e:
         return _error(str(e))
     payload = result.public_payload()
@@ -128,19 +144,18 @@ def register_attachment_tools(registry: ToolRegistry) -> None:
     registry.register(
         name=ADD_LOCAL_FILE_TO_MODEL_CONTEXT_TOOL_NAME,
         description=(
-            "Add a local file to the current thread's model context. "
+            "Add a local image to the current thread's model context. "
             "The path is authorized through the thread's effective sandbox/filesystem read policy, "
-            "then bytes are copied into .egg/egg_inputs. If the file is an image, the next image-capable "
-            "model call receives it as visual input; other files/documents are sent through the appropriate "
-            "provider attachment mechanism when supported. The result contains metadata and attachment content parts, "
-            "never inline bytes or base64."
+            "then content-inspected image bytes are copied into .egg/egg_inputs. The next image-capable "
+            "model call receives the image as visual input. Non-image files are rejected. The result "
+            "contains metadata and attachment content parts, never inline bytes or base64."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Local file path to add to model context. Relative paths are resolved against the current thread working directory.",
+                    "description": "Local image path to add to model context. Relative paths are resolved against the current thread working directory.",
                 },
             },
             "required": ["path"],

@@ -27,6 +27,7 @@ class PhysicsCritic(Task):
     identity: Any
     terminal_outcome: Any = field(default=None, repr=False, compare=False)
     domain_information: str = ""
+    domain_files: tuple[tuple[str, str], ...] = ()
     planner_actions: tuple[Any, ...] = ()
     max_depth: int = 8
     max_nodes: int = 10_000

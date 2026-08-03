@@ -559,6 +559,16 @@ def test_actor_files_and_instruments_are_self_contained(tmp_path):
     assert (tmp_path / "INSTRUCTIONS.md").read_text().endswith("Toy domain.\n")
 
 
+def test_actor_files_include_domain_helpers(tmp_path):
+    write_actor_files(
+        tmp_path,
+        (state(0),),
+        domain_files=(("inspect_state.py", "print('domain helper')\n"),),
+    )
+
+    assert (tmp_path / "inspect_state.py").read_text() == "print('domain helper')\n"
+
+
 def test_actor_instrument_subprocess_timeout(tmp_path):
     write_actor_files(tmp_path, (state(0),), evaluator_timeout_sec=0.05)
     (tmp_path / "world_model.py").write_text("while True:\n    pass\n")
@@ -1044,6 +1054,7 @@ def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
         actor,
         critic,
         domain_information="Updated domain contract.",
+        domain_files=(),
         planner_actions=({"action": 1},),
         max_depth=5,
         max_nodes=99,
@@ -1067,6 +1078,57 @@ def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
     assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
 
 
+def test_existing_repository_refreshes_domain_files(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor, critic = _instrument_repository(tmp_path)
+    git(actor, "commit", "--allow-empty", "-m", "initial")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    _refresh_actor_instruments(
+        actor,
+        critic,
+        domain_information="Toy domain.",
+        domain_files=(("inspect_state.py", "print('domain helper')\n"),),
+        planner_actions=(),
+        max_depth=8,
+        max_nodes=10_000,
+        evaluator_timeout_sec=300,
+    )
+
+    assert (actor / "inspect_state.py").read_text() == "print('domain helper')\n"
+    assert git(actor, "status", "--short") == ""
+    assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize(
+    "domain_files, error",
+    [
+        ([('helper.py', 'pass\n')], TypeError),
+        ((("nested/helper.py", "pass\n"),), ValueError),
+        ((("nested\\helper.py", "pass\n"),), ValueError),
+        ((("plan.py", "pass\n"),), ValueError),
+        ((("helper.py", "one\n"), ("helper.py", "two\n")), ValueError),
+    ],
+)
+def test_physics_rejects_invalid_domain_files(domain_files, error):
+    with pytest.raises(error, match="domain_files"):
+        PhysicsStrategy(
+            actor=Agent(object(), {"role": "actor"}),
+            observe=lambda: None,
+            execute=lambda: None,
+            validate_action=lambda *_: None,
+            is_goal=lambda *_: False,
+            identity={"domain": "toy"},
+            domain_files=domain_files,
+        )
+
+
 def test_instrument_refresh_refuses_modified_owned_files(tmp_path):
     from eggopt.physics.strategy import _refresh_actor_instruments
 
@@ -1087,6 +1149,7 @@ def test_instrument_refresh_refuses_modified_owned_files(tmp_path):
             actor,
             critic,
             domain_information="",
+            domain_files=(),
             planner_actions=(),
             max_depth=8,
             max_nodes=10_000,
@@ -1114,6 +1177,7 @@ def test_instrument_refresh_refuses_committed_custom_helpers(tmp_path):
             actor,
             critic,
             domain_information="",
+            domain_files=(),
             planner_actions=(),
             max_depth=8,
             max_nodes=10_000,
