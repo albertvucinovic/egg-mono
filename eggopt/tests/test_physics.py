@@ -1106,6 +1106,36 @@ def test_existing_repository_refreshes_domain_files(tmp_path):
     assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
 
 
+def test_existing_repository_upgrades_changed_domain_files(tmp_path):
+    from eggopt.physics.strategy import _refresh_actor_instruments
+
+    actor, critic = _instrument_repository(tmp_path)
+    (actor / "inspect_state.py").write_text("old domain helper\n")
+    git(actor, "add", "-A")
+    git(actor, "commit", "-m", "old domain helper")
+    subprocess.run(
+        ["git", "clone", "--no-local", str(actor), str(critic)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    _refresh_actor_instruments(
+        actor,
+        critic,
+        domain_information="Toy domain.",
+        domain_files=(("inspect_state.py", "fixed domain helper\n"),),
+        planner_actions=(),
+        max_depth=8,
+        max_nodes=10_000,
+        evaluator_timeout_sec=300,
+    )
+
+    assert (actor / "inspect_state.py").read_text() == "fixed domain helper\n"
+    assert git(actor, "status", "--short") == ""
+    assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
+
+
 @pytest.mark.parametrize(
     "domain_files, error",
     [

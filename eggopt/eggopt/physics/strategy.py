@@ -323,8 +323,9 @@ class _PhysicsRun(Task):
             actor_repository = Path(workspace)
             critic_repository = _critic_repository(Path(outer))
             if any(
-                not (actor_repository / name).exists()
-                for name, _ in self.strategy.domain_files
+                not (actor_repository / name).is_file()
+                or (actor_repository / name).read_text() != content
+                for name, content in self.strategy.domain_files
             ):
                 _refresh_actor_instruments(
                     actor_repository,
@@ -843,6 +844,7 @@ def _refresh_actor_instruments(
             "\n## Domain information\n\n" + domain_information.strip() + "\n"
         )
     files["INSTRUCTIONS.md"] = instructions
+    files.update(domain_files)
     dirty = _git(actor, "status", "--porcelain=v1").splitlines()
     dirty_paths = {
         entry[2:].lstrip().split(" -> ")[-1]
@@ -873,13 +875,6 @@ def _refresh_actor_instruments(
         if path.is_file() and path.read_text() == content:
             continue
         path.write_text(content)
-        changed = True
-    for name, content in domain_files:
-        path = actor / name
-        if path.exists():
-            continue
-        path.write_text(content)
-        created.append(name)
         changed = True
     plan = actor / "plan.json"
     if not plan.exists():
