@@ -110,17 +110,19 @@ Use `plan.py` as your normal first attempt at constructing a productive
 trajectory, rather than wandering through manually chosen actions. Define a
 finite `reward_<suffix>(state)` for each plausible `step_<suffix>` whenever a
 meaningful progress signal can be expressed, then run `python plan.py` and inspect
-`plan-report.json.planning.suggestions`. The instrument may suggest a trajectory
-toward higher predicted reward or a trajectory ending at the first action whose
-predicted outcome distinguishes competing eligible hypotheses. All hypotheses
-involved in an advisory search must define matching `reward_*` functions.
+`plan-report.json.planning.suggestions`. Within its configured search bounds, the
+instrument suggests a trajectory to the highest predicted reward it can reach,
+or a trajectory ending at the first action whose predicted outcome distinguishes
+competing eligible hypotheses. All hypotheses involved in an advisory search
+must define matching `reward_*` functions.
 
 The built-in planner is breadth-first and deliberately simple. It is especially
-useful for small enumerable action spaces. Prefer a useful generated suggestion
-when one exists. If the domain cannot enumerate complete actions, no useful
-suggestion exists, or bounded search cannot reach progress, construct the
-trajectory yourself. Planner use is strongly encouraged but is never an
-acceptance requirement.
+useful for small enumerable action spaces. Equal maximum rewards retain the first
+shortest trajectory in action order. Prefer a useful generated suggestion when
+one exists. If the domain cannot enumerate complete actions, no useful suggestion
+exists, or bounded search cannot reach progress, construct the trajectory
+yourself. Planner use is strongly encouraged but is never an acceptance
+requirement.
 
 When several hypotheses remain consistent with the Timeline, normally submit a
 useful trajectory predicted by the hypothesis you consider most likely. It may

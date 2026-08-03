@@ -148,14 +148,19 @@ def goal_suggestion(suffix):
     step = steps[suffix]
     reward = rewards[suffix]
     baseline = finite_reward(reward, current)
+    best_reward = baseline
+    best_trajectory = None
     frontier = deque([(current, ())])
     seen = {freeze(current)}
     nodes = 0
     while frontier and nodes < max_nodes:
         state, trajectory = frontier.popleft()
         nodes += 1
-        if trajectory and finite_reward(reward, state) > baseline:
-            return list(trajectory)
+        if trajectory:
+            value = finite_reward(reward, state)
+            if value > best_reward:
+                best_reward = value
+                best_trajectory = trajectory
         if len(trajectory) >= max_depth:
             continue
         for action in actions:
@@ -165,7 +170,7 @@ def goal_suggestion(suffix):
                 continue
             seen.add(key)
             frontier.append((next_state, trajectory + ({"state": state, "action": action, "next_state": next_state},)))
-    return None
+    return list(best_trajectory) if best_trajectory is not None else None
 
 
 def distinction_suggestion(left, right):

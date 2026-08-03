@@ -241,6 +241,66 @@ def test_optional_rewards_enable_advisory_planning():
     }
 
 
+def test_reward_planner_maximizes_reward_within_search_bounds():
+    source = """
+def step_climb(state, action):
+    return {"position": state["position"] + action["action"], "legal_actions": [1]}
+def reward_climb(state):
+    return state["position"]
+"""
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [state(0)],
+            "plan": trajectory(0, 1),
+            "planner_actions": [{"action": 1}],
+            "max_depth": 4,
+            "max_nodes": 100,
+        }
+    )
+
+    suggestion = next(
+        item
+        for item in result["planning"]["suggestions"]
+        if item["kind"] == "reward" and item["models"] == ["climb"]
+    )
+    assert suggestion["plan"] == trajectory(0, 1, 2, 3, 4)
+
+
+def test_reward_planner_keeps_shortest_first_path_to_equal_maximum():
+    source = """
+def step_peak(state, action):
+    return {"position": state["position"] + action["action"], "legal_actions": [1, 2]}
+def reward_peak(state):
+    return min(state["position"], 2)
+"""
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [
+                {"position": 0, "legal_actions": [1, 2]},
+            ],
+            "plan": [
+                {
+                    "state": {"position": 0, "legal_actions": [1, 2]},
+                    "action": {"action": 1},
+                    "next_state": {"position": 1, "legal_actions": [1, 2]},
+                }
+            ],
+            "planner_actions": [{"action": 1}, {"action": 2}],
+            "max_depth": 3,
+            "max_nodes": 100,
+        }
+    )
+
+    suggestion = next(
+        item
+        for item in result["planning"]["suggestions"]
+        if item["kind"] == "reward" and item["models"] == ["peak"]
+    )
+    assert [item["action"] for item in suggestion["plan"]] == [{"action": 2}]
+
+
 def test_step_without_reward_still_backtests_and_validates():
     source = """
 def step_a(state, action):
