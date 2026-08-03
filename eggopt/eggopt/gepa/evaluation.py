@@ -9,7 +9,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Generic, TypeVar
 
-from eggflow import FlowExecutor, Task
+from eggflow import FlowExecutor, Task, keyed
 from eggthreads import (
     ThreadsDB,
     create_child_thread,
@@ -112,15 +112,19 @@ class _EnsureCaseEvaluation(Task):
     run_root: Path
     candidate: Candidate
     case_identity: Any
+    evaluator_identity: Any
     scope: str
 
     def get_cache_key(self) -> str:
         return digest_payload(
-            "eggopt.gepa.ensure-case-evaluation.v2",
+            "eggopt.gepa.ensure-case-evaluation.v3",
             {
                 "candidate_thread": self.candidate_thread_id,
                 "candidate": canonical_value(self.candidate, what="candidate"),
                 "case": self.case_identity,
+                "evaluator": canonical_json(
+                    self.evaluator_identity, what="evaluator identity"
+                ),
                 "scope": self.scope,
             },
         )
@@ -149,7 +153,9 @@ class _EnsureCaseEvaluation(Task):
                 str(workspace),
                 reason="GEPA case evaluation outerContext",
             )
-        runtime_key = _case_evaluation_identity(self.candidate, self.case_identity)
+        runtime_key = _case_evaluation_identity(
+            self.candidate, self.case_identity, self.evaluator_identity
+        )
         return thread_id, str(workspace), runtime_key
 
 
@@ -211,7 +217,10 @@ class _EvaluateCase(Task):
         with _evaluation_scope(context):
             factory = getattr(self.evaluator, "task", None)
             if callable(factory):
-                value = yield factory(_candidate(self.candidate), self.case)
+                value = yield keyed(
+                    factory(_candidate(self.candidate), self.case),
+                    self.evaluator_identity,
+                )
             else:
                 value = self.evaluator(_candidate(self.candidate), self.case)
                 if isinstance(value, Task):
@@ -303,6 +312,7 @@ class _EvaluateCandidate(Task, Generic[CaseT, OutputT]):
                 self.run_root,
                 self.candidate,
                 identity,
+                self.evaluator_identity,
                 self.stage,
             )
             for identity in self.case_identities
@@ -416,12 +426,15 @@ def _feedback(evaluation: _EvaluationValue) -> Any:
     return evaluation.feedback
 
 
-def _case_evaluation_identity(candidate: Candidate, case_identity: Any) -> str:
+def _case_evaluation_identity(
+    candidate: Candidate, case_identity: Any, evaluator_identity: Any
+) -> str:
     return digest_payload(
-        "eggopt.gepa.case.v1",
+        "eggopt.gepa.case.v2",
         {
             "candidate": canonical_value(candidate, what="candidate"),
             "case": case_identity,
+            "evaluator": canonical_json(evaluator_identity, what="evaluator identity"),
         },
     )
 

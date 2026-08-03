@@ -1170,6 +1170,53 @@ def test_changed_stopping_budgets_continue_without_invalidating_cached_work(tmp_
     )
 
 
+def test_evaluator_identity_invalidates_domain_task_cache(tmp_path):
+    from eggflow import Task
+
+    calls = []
+
+    @dataclass
+    class DomainTask(Task):
+        candidate: dict
+        case: dict
+
+        def get_cache_key(self):
+            return (
+                "domain.evaluate:"
+                + self.candidate["instruction"]
+                + ":"
+                + self.case["id"]
+            )
+
+        def run(self):
+            calls.append((self.candidate, self.case))
+            return 1.0, {"case": self.case["id"]}
+
+    class TaskEvaluator:
+        def task(self, candidate, case):
+            return DomainTask(candidate, case)
+
+    dataset = [{"id": "one", "target": 0}]
+    for version in (1, 2):
+        optimize_anything(
+            {"instruction": "0"},
+            evaluator=TaskEvaluator(),
+            dataset=dataset,
+            objective="Keep the seed.",
+            config=GEPAConfig(
+                run_dir=tmp_path / "identity",
+                max_candidates=1,
+                max_evaluator_calls=2 * version,
+                mutation_minibatch_size=1,
+                mutator=Increment(),
+                evaluator_identity={"name": "domain", "version": version},
+                case_id=lambda case: case["id"],
+            ),
+        )
+
+    assert len(calls) == 2
+
+
 def test_budget_never_starts_an_evaluation_that_would_exceed_it(tmp_path):
     evaluator = Evaluator()
     generator = Increment()
