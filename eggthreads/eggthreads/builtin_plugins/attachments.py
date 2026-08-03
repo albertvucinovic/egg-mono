@@ -30,6 +30,8 @@ def _json_result(payload: Dict[str, Any]) -> ToolExecutionResult:
 
 
 def _workspace(ctx: ToolContext) -> Path | None:
+    # Egg-owned artifacts belong beside threads.sqlite, even when a scheduled
+    # tool's relative filesystem paths resolve against a nested thread cwd.
     db_path = getattr(ctx.db, "path", None)
     if db_path is not None:
         try:

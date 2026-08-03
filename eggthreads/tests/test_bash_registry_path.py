@@ -53,6 +53,37 @@ def test_runner_executes_bash_through_tool_registry(tmp_path, monkeypatch):
     assert "registry-bash" in (states[tcid].finished_output or "")
 
 
+def test_scheduler_runner_passes_thread_working_directory_to_tools(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    working_dir = tmp_path / "nested" / "actor"
+    ts.set_thread_working_directory(db, tid, working_dir)
+    seen = {}
+    tools = ts.ToolRegistry()
+
+    def inspect_context(_arguments, context):
+        seen["working_dir"] = context.working_dir
+        return "ok"
+
+    tools.register(
+        "inspect_context",
+        "inspect scheduler context",
+        {"type": "object", "properties": {}},
+        inspect_context,
+        accepts_context=True,
+    )
+    ts.enqueue_user_tool_call(
+        db, tid, "inspect_context", {}, auto_approve=True, hidden=True
+    )
+
+    asyncio.run(ts.ThreadRunner(db, tid, llm=object(), tools=tools).run_once())
+
+    assert seen["working_dir"] == working_dir.resolve()
+
+
 def test_runner_persists_bash_timeout_reason_from_tool_result(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EGG_SANDBOX_MODE", "off")

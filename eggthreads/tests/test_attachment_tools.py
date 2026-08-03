@@ -302,7 +302,9 @@ def test_multiple_tool_attachment_results_keep_protocol_tool_block_before_visual
     one = json.loads(tools.execute("add_local_file_to_model_context", {"path": "one.png"}, db=db, thread_id=tid))
     two = json.loads(tools.execute("add_local_file_to_model_context", {"path": "two.png"}, db=db, thread_id=tid))
 
-    from eggthreads.attachment_lowering import expand_tool_attachment_messages_for_provider
+    from eggthreads.attachment_lowering import (
+        expand_tool_attachment_messages_for_provider,
+    )
 
     expanded = expand_tool_attachment_messages_for_provider(
         [
@@ -395,3 +397,85 @@ def test_runner_preserves_tool_attachment_parts_until_provider_visual_lowering(t
     assert visual_content[0]["type"] == "input_text"
     assert visual_content[1]["type"] == "input_image"
     assert visual_content[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_nested_run_scheduler_resolves_relative_image_and_provider_bytes(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    monkeypatch.chdir(tmp_path)
+    run = tmp_path / "runs" / "physics"
+    db = _make_db(run)
+    tid = ts.create_root_thread(db, name="Actor")
+    working_dir = run / "workspace" / "innerContext"
+    ts.set_thread_working_directory(db, tid, working_dir)
+    image = working_dir / "scratch" / "current-grid.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+    tool_call_id = "call-add-relative-image"
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "add_local_file_to_model_context",
+                        "arguments": json.dumps(
+                            {"path": "scratch/current-grid.png"}
+                        ),
+                    },
+                }
+            ]
+        },
+    )
+    db.append_event(
+        "approve",
+        tid,
+        "tool_call.approval",
+        {"tool_call_id": tool_call_id, "decision": "granted"},
+    )
+    tools = ts.create_default_tools()
+    runner = ts.ThreadRunner(db, tid, llm=object(), tools=tools)
+    assert asyncio.run(runner.run_once()) is True
+    assert asyncio.run(runner.run_once()) is True
+
+    class Registry:
+        def get_effective_model_config(self, _model_key):
+            return {"api_type": "responses", "input_modalities": ["text", "image"]}
+
+        def merge_parameters(self, _model_key):
+            return {}
+
+    class CaptureLLM:
+        current_model_key = "vision-model"
+        registry = Registry()
+
+        def __init__(self):
+            self.seen_messages = []
+
+        async def astream_chat(
+            self, messages, tools=None, tool_choice=None, timeout=None, **kwargs
+        ):
+            self.seen_messages.append(messages)
+            yield {
+                "type": "done",
+                "message": {"role": "assistant", "content": "saw it"},
+            }
+
+    llm = CaptureLLM()
+    assert asyncio.run(ts.ThreadRunner(db, tid, llm=llm, tools=tools).run_once()) is True
+    visual_parts = [
+        part
+        for message in llm.seen_messages[0]
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+        if isinstance(part, dict) and part.get("type") == "input_image"
+    ]
+    assert len(visual_parts) == 1
+    assert visual_parts[0]["image_url"].startswith("data:image/png;base64,")

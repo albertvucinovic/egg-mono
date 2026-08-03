@@ -2460,6 +2460,7 @@ class ThreadRunner:
         # attachments become explicit textual placeholders.
         try:
             from .attachment_lowering import AttachmentLoweringContext, expand_tool_attachment_messages_for_provider, lower_messages_for_provider
+            from .attachment_tools import artifact_workspace_from_db
 
             model_cfg: Dict[str, Any] = {}
             try:
@@ -2475,7 +2476,7 @@ class ThreadRunner:
             base_messages = lower_messages_for_provider(
                 base_messages,
                 AttachmentLoweringContext(
-                    workspace=Path.cwd().resolve(),
+                    workspace=artifact_workspace_from_db(self.db),
                     db=self.db,
                     calling_thread_id=self.thread_id,
                     model_key=current_model,
@@ -4013,6 +4014,11 @@ class ThreadRunner:
                     invoke_id=invoke_id,
                     current_model=current_model,
                 )
+                from .api import _ensure_thread_working_directory
+
+                working_dir = _ensure_thread_working_directory(
+                    self.db, self.thread_id
+                ).resolve()
 
                 try:
                     tool_result = await self.tools.execute_async(
@@ -4026,6 +4032,7 @@ class ThreadRunner:
                         tool_timeout_sec=tool_timeout_sec,
                         cancel_check=cancel_check,
                         db=self.db,
+                        working_dir=working_dir,
                         models_path=self.models_path,
                         all_models_path=self.all_models_path,
                         image_generation_models_path=self.image_generation_models_path,
