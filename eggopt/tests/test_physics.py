@@ -559,6 +559,14 @@ def test_actor_prompt_explains_freedom_and_minimal_interface():
     assert PHYSICS_ACTOR_SYSTEM_PROMPT == ACTOR_INSTRUCTIONS
     for required in (
         "You own this Git repository",
+        "answer_user_while_preserving_llm_turn",
+        "visible running lab notebook",
+        "world-grounding observations",
+        "surprising observations",
+        "contradictions",
+        "notes to your future self",
+        "does **not** end the current LLM turn",
+        "plain assistant answer",
         "world_model.py",
         "matching `reward_<suffix>",
         "plan.json",

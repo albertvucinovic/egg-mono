@@ -71,6 +71,7 @@ def test_agent_defaults_to_safe_tools_and_accepts_explicit_replacement():
         SAFE_TOOLS
     )
     assert "add_local_file_to_model_context" in SAFE_TOOLS
+    assert "answer_user_while_preserving_llm_turn" in SAFE_TOOLS
 
     restricted = Agent(
         object(),
@@ -273,6 +274,7 @@ def test_thread_tool_rejects_a_timed_out_tool_result(tmp_path, monkeypatch):
     import asyncio
 
     from eggopt.context import _bind_evaluation_runtime, _evaluation_scope
+
     from eggthreads import (
         ThreadsDB,
         ToolExecutionResult,

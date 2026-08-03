@@ -4,6 +4,7 @@ from eggthreads import ToolRegistry, create_default_tools
 
 SAFE_TOOLS = frozenset(
     {
+        "answer_user_while_preserving_llm_turn",
         "python_exec",
         "python_repl",
         "bash",
