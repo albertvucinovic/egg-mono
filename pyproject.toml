@@ -1,8 +1,36 @@
 [project]
 name = "egg-mono"
-version = "0.0.0"
-description = "Development workspace for the egg ecosystem"
+version = "0.1.0"
+description = "Installable Egg runtime and optimization packages"
 requires-python = ">=3.10"
+dependencies = [
+  "aiohttp>=3.9",
+  "requests>=2.31",
+  "rich",
+  "tiktoken>=0.7",
+  "trafilatura",
+  "uvloop; platform_system != 'Windows'",
+]
+
+[tool.setuptools.packages.find]
+where = ["eggconfig", "eggflow", "eggllm", "eggthreads", "eggopt"]
+include = ["eggconfig*", "eggflow*", "eggllm*", "eggthreads*", "eggopt*"]
+
+[tool.setuptools.package-data]
+eggconfig = ["data/*.json"]
+"eggthreads.web.searxng" = [
+  "docker-compose.yml",
+  "settings.yml",
+  "limiter.toml",
+  "README.md",
+]
+"eggthreads.session_runtime" = [
+  "eggtools.py",
+  "sessiond.py",
+  "eggtool",
+  "repl_refresh.py",
+]
+"eggthreads.skills" = ["*.md"]
 
 [tool.pytest.ini_options]
 # The monorepo tests use asyncio.run(...) explicitly rather than pytest-asyncio
