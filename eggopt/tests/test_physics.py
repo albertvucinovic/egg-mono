@@ -414,11 +414,28 @@ def test_physics_executes_raw_actions_and_reports_alternative_model(
     assert observed_actions == [{"action": 1}, {"action": 1}]
     assert "wrong_prediction" in result.feedback
     assert "['b']" in result.feedback
-    report = json.loads(
+    authoritative = json.loads(
         (tmp_path / "run" / "workspace" / ".trusted" / "state.json").read_text()
-    )["last_report"]
+    )
+    report = authoritative["last_report"]
     assert report["matching_models"] == ["b"]
     assert [item["action"] for item in report["executed"]] == observed_actions
+    actor_timeline = json.loads((workspace / "canonical-input.json").read_text())[
+        "timeline"
+    ]
+    actor_report = json.loads((workspace / "trusted-report.json").read_text())
+    assert actor_timeline == authoritative["timeline"]
+    assert actor_report == report
+    critic = tmp_path / "run" / "workspace" / "critic-repository"
+    assert git(critic, "status", "--short") == ""
+    committed = set(
+        git(critic, "show", "--format=", "--name-only", "HEAD").splitlines()
+    )
+    assert {
+        ".trusted/state.json",
+        "canonical-input.json",
+        "trusted-report.json",
+    } <= committed
     assert calls == [(result.critic_thread_id, 17)]
     from eggthreads import get_thread_sandbox_config, get_thread_working_directory
 

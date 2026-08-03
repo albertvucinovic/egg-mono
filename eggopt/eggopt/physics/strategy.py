@@ -659,26 +659,7 @@ class _GitCritic(Task):
         )
         result = yield keyed(domain, actor_head)
 
-        trusted = critic_repo / ".trusted"
-        dirty = _git_status(critic_repo)
-        if trusted.exists():
-            _git(critic_repo, "add", "-f", ".trusted")
-            completed = subprocess.run(
-                ["git", "-C", str(critic_repo), "diff", "--cached", "--quiet"],
-                check=False,
-            )
-            if completed.returncode:
-                _git(
-                    critic_repo,
-                    "commit",
-                    "-m",
-                    f"[physics] trusted Critic result after {actor_head[:12]}",
-                )
-        elif dirty:
-            _commit(
-                critic_repo,
-                f"[physics] trusted Critic result after {actor_head[:12]}",
-            )
+        _commit_trusted_result(critic_repo, actor_head)
         if _git_head(actor) != _git_head(critic_repo):
             actor_dirty = "\n".join(
                 line
@@ -974,6 +955,18 @@ def _commit(repository: Path, message: str) -> None:
     _git(repository, "add", "-A")
     if _git_status(repository):
         _git(repository, "commit", "-m", message)
+
+
+def _commit_trusted_result(repository: Path, actor_head: str) -> None:
+    """Commit one complete Critic result, including its public projection."""
+
+    trusted = repository / ".trusted"
+    if trusted.exists():
+        _git(repository, "add", "-f", ".trusted")
+    _commit(
+        repository,
+        f"[physics] trusted Critic result after {actor_head[:12]}",
+    )
 
 
 def _clone_repository(source: Path, destination: Path) -> None:
