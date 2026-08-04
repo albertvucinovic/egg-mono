@@ -157,7 +157,11 @@ def register_attachment_tools(registry: ToolRegistry) -> None:
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Local image path to add to model context. Relative paths are resolved against the current thread working directory.",
+                    "description": (
+                        "Local image path to add to model context. Relative paths are resolved against "
+                        "the current thread working directory; Docker-visible absolute paths such as "
+                        "`/workspace/image.png` are also accepted."
+                    ),
                 },
             },
             "required": ["path"],
@@ -212,7 +216,11 @@ def register_attachment_tools(registry: ToolRegistry) -> None:
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional output file path or directory under the current thread working directory. Omit to use the artifact filename.",
+                    "description": (
+                        "Optional output file path or directory under the current thread working directory. "
+                        "Docker-visible absolute paths such as `/workspace/output.png` are accepted. "
+                        "Omit to use the artifact filename."
+                    ),
                 },
                 "descendant_thread_id": {
                     "type": "string",

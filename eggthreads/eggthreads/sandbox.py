@@ -316,6 +316,63 @@ def _container_path_for_host_path(host_path: Path, working_dir: Path, workspace:
     return str(Path(str(workspace).rstrip("/") or "/") / rel)
 
 
+def _host_path_for_docker_path(
+    path: Path,
+    working_dir: Path,
+    settings: Dict[str, Any],
+) -> Optional[Path]:
+    """Translate a Docker-visible absolute path to its host mount source."""
+
+    def absolute_container_path(value: str) -> Optional[Path]:
+        candidate = Path(value.strip())
+        if not candidate.is_absolute():
+            return None
+        return candidate.resolve()
+
+    workspace = absolute_container_path(str(settings.get("workspace") or "/workspace"))
+    if workspace is None:
+        return None
+    mounts: List[tuple[Path, Path]] = [(workspace, working_dir.resolve())]
+    extra_mounts = settings.get("extra_mounts")
+    if isinstance(extra_mounts, list):
+        for mount in extra_mounts:
+            if not isinstance(mount, dict):
+                continue
+            src = mount.get("src")
+            dst = mount.get("dst")
+            if not isinstance(src, str) or not src.strip() or not isinstance(dst, str) or not dst.strip():
+                continue
+            try:
+                destination = absolute_container_path(dst)
+                source = _resolve_sandbox_policy_path(src, working_dir)
+            except Exception:
+                continue
+            if destination is not None and source is not None:
+                mounts.append((destination, source))
+
+    # Docker applies overlapping mounts at their most specific destination.
+    container_path = path.resolve()
+    for destination, source in sorted(mounts, key=lambda item: len(item[0].parts), reverse=True):
+        try:
+            relative = container_path.relative_to(destination)
+        except ValueError:
+            continue
+        return source / relative
+    return None
+
+
+def _resolve_docker_host_path(
+    path: Path,
+    working_dir: Path,
+    settings: Dict[str, Any],
+) -> Path:
+    """Resolve either a host path or a Docker-visible path to the host."""
+
+    if _path_is_within_roots(path, _docker_read_roots(settings, working_dir)):
+        return path
+    return _host_path_for_docker_path(path, working_dir, settings) or path
+
+
 def _docker_mount_args_from_filesystem_policy(
     *,
     working_dir: Path,
@@ -626,9 +683,10 @@ def authorize_thread_path_read(db: "ThreadsDB", thread_id: str, source_path: str
     """Resolve and authorize a local source path for host-side ingestion.
 
     Relative paths are interpreted against the thread's effective working
-    directory.  A :class:`PermissionError` means Egg's effective policy denies
-    the read; :class:`FileNotFoundError` and :class:`ValueError` describe local
-    path validation failures.
+    directory. Docker-visible absolute paths are translated through the
+    effective workspace and extra mounts. A :class:`PermissionError` means
+    Egg's effective policy denies the read; :class:`FileNotFoundError` and
+    :class:`ValueError` describe local path validation failures.
     """
 
     if not str(thread_id or "").strip():
@@ -643,8 +701,11 @@ def authorize_thread_path_read(db: "ThreadsDB", thread_id: str, source_path: str
     except Exception:
         working_dir = Path.cwd().resolve()
 
+    cfg = get_thread_sandbox_config(db, thread_id)
     raw = Path(str(source_path).strip()).expanduser()
     candidate = raw if raw.is_absolute() else Path(working_dir) / raw
+    if raw.is_absolute() and cfg.enabled and cfg.provider == "docker":
+        candidate = _resolve_docker_host_path(raw, Path(working_dir), dict(cfg.settings or {}))
     try:
         resolved = candidate.resolve(strict=True)
     except FileNotFoundError:
@@ -654,7 +715,6 @@ def authorize_thread_path_read(db: "ThreadsDB", thread_id: str, source_path: str
     if not resolved.is_file():
         raise ValueError(f"source path is not a regular file: {resolved}")
 
-    cfg = get_thread_sandbox_config(db, thread_id)
     allowed, reason = sandbox_read_policy_decision(
         enabled=cfg.enabled,
         provider=cfg.provider,
@@ -671,9 +731,10 @@ def authorize_thread_path_write(db: "ThreadsDB", thread_id: str, target_path: st
     """Resolve and authorize a local target path for host-side writes.
 
     Relative paths are interpreted against the thread's effective working
-    directory.  A :class:`PermissionError` means Egg's effective policy denies
-    the write; :class:`ValueError` describes local path validation failures.
-    The path does not need to exist yet.
+    directory. Docker-visible absolute paths are translated through the
+    effective workspace and extra mounts. A :class:`PermissionError` means
+    Egg's effective policy denies the write; :class:`ValueError` describes
+    local path validation failures. The path does not need to exist yet.
     """
 
     if not str(thread_id or "").strip():
@@ -688,14 +749,16 @@ def authorize_thread_path_write(db: "ThreadsDB", thread_id: str, target_path: st
     except Exception:
         working_dir = Path.cwd().resolve()
 
+    cfg = get_thread_sandbox_config(db, thread_id)
     raw = Path(str(target_path).strip()).expanduser()
     candidate = raw if raw.is_absolute() else Path(working_dir) / raw
+    if raw.is_absolute() and cfg.enabled and cfg.provider == "docker":
+        candidate = _resolve_docker_host_path(raw, Path(working_dir), dict(cfg.settings or {}))
     try:
         resolved = candidate.resolve(strict=False)
     except Exception as e:
         raise ValueError(f"could not resolve target path: {e}") from e
 
-    cfg = get_thread_sandbox_config(db, thread_id)
     allowed, reason = sandbox_write_policy_decision(
         enabled=cfg.enabled,
         provider=cfg.provider,

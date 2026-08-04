@@ -12,7 +12,7 @@ from eggthreads.attachment_staging import (
 )
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.input_artifacts import resolve_input_bytes
-from eggthreads.sandbox import authorize_thread_path_read
+from eggthreads.sandbox import authorize_thread_path_read, authorize_thread_path_write
 
 
 def _make_db(tmp_path: Path) -> ts.ThreadsDB:
@@ -62,6 +62,171 @@ def test_authorize_thread_path_read_denies_docker_paths_outside_workdir(tmp_path
     assert authorize_thread_path_read(db, tid, "allowed.txt") == inside.resolve()
     with pytest.raises(PermissionError, match="outside Docker sandbox mounts"):
         authorize_thread_path_read(db, tid, outside)
+
+
+def test_authorize_thread_path_read_maps_docker_workspace_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.set_thread_working_directory(db, tid, "work")
+    source = tmp_path / "work" / "screenshots" / "current.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"image")
+
+    assert authorize_thread_path_read(db, tid, "/workspace/screenshots/current.png") == source.resolve()
+
+
+def test_authorize_thread_path_read_maps_docker_extra_mount_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    mounted = tmp_path / "mounted"
+    source = mounted / "nested" / "current.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"image")
+    ts.set_thread_sandbox_config(
+        db,
+        tid,
+        enabled=True,
+        provider="docker",
+        settings={"provider": "docker", "extra_mounts": [{"src": str(mounted), "dst": "/data"}]},
+        reason="test",
+    )
+
+    assert authorize_thread_path_read(db, tid, "/data/nested/current.png") == source.resolve()
+
+
+def test_authorize_thread_path_read_maps_custom_docker_workspace_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.set_thread_working_directory(db, tid, "work")
+    source = tmp_path / "work" / "current.png"
+    source.write_bytes(b"image")
+    ts.set_thread_sandbox_config(
+        db,
+        tid,
+        enabled=True,
+        provider="docker",
+        settings={"provider": "docker", "workspace": "/app"},
+        reason="test",
+    )
+
+    assert authorize_thread_path_read(db, tid, "/app/current.png") == source.resolve()
+
+
+def test_authorize_thread_path_read_prefers_nested_docker_mount(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.set_thread_working_directory(db, tid, "work")
+    mounted = tmp_path / "mounted"
+    source = mounted / "current.png"
+    mounted.mkdir()
+    source.write_bytes(b"image")
+    ts.set_thread_sandbox_config(
+        db,
+        tid,
+        enabled=True,
+        provider="docker",
+        settings={
+            "provider": "docker",
+            "extra_mounts": [{"src": str(mounted), "dst": "/workspace/data"}],
+        },
+        reason="test",
+    )
+
+    assert authorize_thread_path_read(db, tid, "/workspace/data/current.png") == source.resolve()
+
+
+def test_authorize_thread_path_read_does_not_map_relative_docker_mount_destination(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    (mounted / "current.png").write_bytes(b"image")
+    ts.set_thread_sandbox_config(
+        db,
+        tid,
+        enabled=True,
+        provider="docker",
+        settings={
+            "provider": "docker",
+            "extra_mounts": [{"src": str(mounted), "dst": "relative-data"}],
+        },
+        reason="test",
+    )
+
+    with pytest.raises(FileNotFoundError):
+        authorize_thread_path_read(db, tid, "/relative-data/current.png")
+
+
+def test_authorize_thread_path_write_maps_docker_workspace_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.set_thread_working_directory(db, tid, "work")
+
+    assert authorize_thread_path_write(db, tid, "/workspace/exports/current.png") == (
+        tmp_path / "work" / "exports" / "current.png"
+    ).resolve()
+
+
+def test_authorize_thread_path_write_maps_custom_workspace_and_extra_mount(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.set_thread_working_directory(db, tid, "work")
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    ts.set_thread_sandbox_config(
+        db,
+        tid,
+        enabled=True,
+        provider="docker",
+        settings={
+            "provider": "docker",
+            "workspace": "/app",
+            "extra_mounts": [{"src": str(mounted), "dst": "/app/data"}],
+        },
+        reason="test",
+    )
+
+    assert authorize_thread_path_write(db, tid, "/app/current.png") == (
+        tmp_path / "work" / "current.png"
+    ).resolve()
+    assert authorize_thread_path_write(db, tid, "/app/data/current.png") == (
+        mounted / "current.png"
+    ).resolve()
+
+
+def test_authorize_thread_path_write_maps_before_enforcing_policy(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.set_thread_working_directory(db, tid, "work")
+    ts.set_thread_sandbox_config(
+        db,
+        tid,
+        enabled=True,
+        provider="docker",
+        settings={
+            "provider": "docker",
+            "filesystem": {
+                "allowWrite": ["allowed"],
+                "denyWrite": [],
+                "denyRead": [],
+            },
+        },
+        reason="test",
+    )
+
+    assert authorize_thread_path_write(db, tid, "/workspace/allowed/current.png") == (
+        tmp_path / "work" / "allowed" / "current.png"
+    ).resolve()
+    with pytest.raises(PermissionError, match="allowWrite"):
+        authorize_thread_path_write(db, tid, "/workspace/blocked/current.png")
 
 
 def test_authorize_thread_path_read_respects_deny_read_policy(tmp_path, monkeypatch):

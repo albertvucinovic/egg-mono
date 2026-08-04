@@ -9,7 +9,7 @@ thread access checks.
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .attachment_staging import safe_display_filename
 from .provider_output_artifacts import resolve_provider_output_bytes, resolve_provider_output_metadata
@@ -25,6 +25,8 @@ def resolve_provider_artifact_export_path(
     workspace: str | Path | None,
     raw_path: str | Path | None,
     metadata: dict[str, Any],
+    *,
+    authorize_target: Callable[[Path], Path] | None = None,
 ) -> Path:
     """Resolve and validate a user-requested provider artifact export path.
 
@@ -35,6 +37,7 @@ def resolve_provider_artifact_export_path(
 
     root = Path.cwd().resolve() if workspace is None else Path(workspace).expanduser().resolve()
     default_name = safe_provider_artifact_export_filename(metadata.get("filename") or metadata.get("artifact_id"))
+    explicit_directory = False
     if raw_path is None or not str(raw_path).strip():
         path = root / default_name
     else:
@@ -42,10 +45,20 @@ def resolve_provider_artifact_export_path(
         path = Path(raw_text).expanduser()
         if not path.is_absolute():
             path = root / path
-        if raw_text.endswith(("/", "\\")) or (path.exists() and path.is_dir()):
+        explicit_directory = raw_text.endswith(("/", "\\"))
+        if explicit_directory:
             path = path / default_name
 
-    resolved = path.resolve()
+    resolved = (
+        Path(authorize_target(path)).resolve()
+        if authorize_target is not None
+        else path.resolve()
+    )
+    if not explicit_directory and resolved.exists() and resolved.is_dir():
+        resolved = resolved / default_name
+        if authorize_target is not None:
+            resolved = Path(authorize_target(resolved))
+        resolved = resolved.resolve()
     try:
         rel = resolved.relative_to(root)
     except ValueError as e:
@@ -80,14 +93,14 @@ def export_provider_output_artifact(
         artifact_id,
         descendant_thread_id=descendant_thread_id,
     )
+    from .sandbox import authorize_thread_path_write
+
     target = resolve_provider_artifact_export_path(
         workspace if export_workspace is None else export_workspace,
         output_path,
         metadata,
+        authorize_target=lambda path: authorize_thread_path_write(db, thread_id, path),
     )
-    from .sandbox import authorize_thread_path_write
-
-    authorize_thread_path_write(db, thread_id, target)
     metadata, data = resolve_provider_output_bytes(
         workspace,
         db,
