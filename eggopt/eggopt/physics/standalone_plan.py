@@ -13,6 +13,8 @@ Functions sharing a suffix belong to one model.  For a model named ``main``:
 
 ``step_main(state, action)``
     Required. Return the complete predicted next public state.
+    Every Timeline-consistent step model can participate in pairwise distinction
+    search; neither a reward nor a goal is required for that search.
 
 ``reward_main(state)``
     Optional. Return a finite score for partial progress. Reward search performs
@@ -51,6 +53,11 @@ SEARCH MODES
 
 ``all``
     Run both applicable searches so their suggestions can be compared.
+
+In ``auto``, ``reward``, and ``all`` modes, the planner also uses bounded
+breadth-first search to find a shortest trajectory whose prediction differs for
+each pair of selected Timeline-consistent step models. This distinction search
+uses only ``step_*`` functions, not ``reward_*`` or ``goal_*`` functions.
 
 ``--max-nodes N`` is also a local planning choice. It changes only how much
 search this invocation performs; it does not change the trusted plan-length
@@ -598,8 +605,7 @@ def evaluate_request(request: dict[str, Any]) -> dict[str, Any]:
     selected = [
         model
         for model in surviving
-        if (model in rewards or model in goals)
-        and (requested_model is None or model == requested_model)
+        if requested_model is None or model == requested_model
     ]
     suggestions = []
     searches = []
@@ -661,8 +667,7 @@ def evaluate_request(request: dict[str, Any]) -> dict[str, Any]:
                         }
                     )
         if mode in {"auto", "reward", "all"}:
-            distinction_models = [model for model in selected if model in rewards]
-            for left, right in itertools.combinations(distinction_models, 2):
+            for left, right in itertools.combinations(selected, 2):
                 try:
                     plan = distinction_search(
                         left,

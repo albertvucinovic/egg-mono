@@ -152,8 +152,10 @@ continue beyond the first action whose predicted result distinguishes that
 hypothesis from alternatives, so a correct hypothesis can keep making progress.
 If reality differs from the submitted prediction, execution stops immediately
 and the Critic reports which other hypotheses predicted the observed transition.
-The optional planner can help find a short action sequence that reaches such a
-distinguishing result.
+The optional planner compares every pair of Timeline-consistent `step_*`
+hypotheses and can find a short action sequence that reaches such a
+distinguishing result. This comparison does not require matching `reward_*` or
+`goal_*` functions.
 
 Planner suggestions are aids, not constraints. You may submit any trajectory
 that passes independent validation; it need not have been found by `plan.py`.
@@ -168,7 +170,7 @@ The planner can use only the complete actions exposed by the domain in
 3. Inspect and revise `world_model.py`; preserve genuinely plausible competing
    hypotheses and normally add a matching useful `reward_<suffix>` for each.
 4. Run `python backtest.py` and resolve relevant Timeline mismatches.
-5. Run `python plan.py` to search the surviving rewarded hypotheses. Inspect
+5. Run `python plan.py` to search the surviving hypotheses. Inspect
    `plan-report.json.planning.suggestions` and normally use the best productive
    suggestion as the starting point for `plan.json`; construct a trajectory
    manually only when bounded advisory search cannot provide a useful one.

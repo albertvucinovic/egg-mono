@@ -240,6 +240,35 @@ def test_optional_rewards_enable_advisory_planning():
     }
 
 
+def test_step_only_models_enable_pairwise_distinction_search():
+    source = """
+def step_a(state, action):
+    return {"position": state["position"] + 1, "legal_actions": [1]}
+def step_b(state, action):
+    amount = 1 if state["position"] == 0 else 2
+    return {"position": state["position"] + amount, "legal_actions": [1]}
+"""
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [state(0)],
+            "plan": trajectory(0, 1),
+            "planner_actions": [{"action": 1}],
+            "max_depth": 2,
+            "max_nodes": 20,
+        }
+    )
+
+    planning = result["planning"]
+    assert planning["eligible_models"] == ["a", "b"]
+    assert not any(item["kind"] == "reward" for item in planning["suggestions"])
+    distinction = next(
+        item for item in planning["suggestions"] if item["kind"] == "distinction"
+    )
+    assert distinction["models"] == ["a", "b"]
+    assert distinction["plan"] == trajectory(0, 1, 2)
+
+
 def test_reward_planner_maximizes_reward_within_search_bounds():
     source = """
 def step_climb(state, action):
@@ -427,7 +456,7 @@ def step_a(state, action):
         }
     )
     assert result["plan_validation"]["valid"] is True
-    assert result["planning"]["eligible_models"] == []
+    assert result["planning"]["eligible_models"] == ["a"]
     assert result["planning"]["suggestions"] == []
 
 
@@ -683,7 +712,8 @@ def test_actor_prompt_explains_freedom_and_minimal_interface():
         "{state, action, next_state}",
         "hypothesis you consider most likely",
         "continue beyond the first action",
-        "optional planner can help find",
+        "planner compares every pair",
+        "does not require matching `reward_*`",
         "normal first attempt",
         "read the docstring at the top of `plan.py`",
         "modify it or write\nyour own script",
