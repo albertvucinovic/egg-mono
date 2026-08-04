@@ -165,6 +165,11 @@ standard-library-only `plan.py` plus small `backtest.py`, `commit.py`, and
 `physics-config.json` helpers. `plan.py` contains reward BFS, A*, pairwise
 distinction search over Timeline-consistent `step_<suffix>` hypotheses, and its
 detailed usage guide. Distinction search requires neither rewards nor goals.
+The depth and node values in `physics-config.json` are only defaults: the Actor
+may override them per invocation, edit them, or replace the planner. They never
+bound submitted `plan.json` length. The trusted Critic runs the same executable
+model loader in verification-only mode—backtesting the Timeline and checking the
+submitted trajectory, without advisory search—before any real action.
 These are untrusted starter files: the Actor may edit, replace, or delete them
 and may write different tools. A valid repository is never refreshed to undo
 those choices; Git retains older versions. The trusted Critic independently

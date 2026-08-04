@@ -59,10 +59,11 @@ breadth-first search to find a shortest trajectory whose prediction differs for
 each pair of selected Timeline-consistent step models. This distinction search
 uses only ``step_*`` functions, not ``reward_*`` or ``goal_*`` functions.
 
-``--max-nodes N`` is also a local planning choice. It changes only how much
-search this invocation performs; it does not change the trusted plan-length
-ceiling. The enclosing Eggthreads tool call owns any wall-clock timeout. This
-script deliberately adds no nested process or Physics-specific timeout.
+``--depth N`` and ``--max-nodes N`` are local Actor planning choices. The values
+in ``physics-config.json`` are only defaults for a plain ``python plan.py`` run;
+they are not ceilings. The enclosing Eggthreads tool call owns any wall-clock
+timeout. This script deliberately adds no nested process or Physics-specific
+timeout.
 
 Reward and heuristic have different meanings: reward scores how desirable a
 reached state is; a heuristic estimates remaining action cost. Reward is not
@@ -71,12 +72,12 @@ subtracted from A*'s ``g + h`` priority.
 DEPTH CHOICE
 ============
 
-``--depth N`` selects the local search horizon and may not exceed the trusted
-plan-length ceiling in ``physics-config.json``. It is a limit, not a requested
+``--depth N`` selects the local search horizon. It is a limit, not a requested
 plan length. Start with the smallest plausible horizon and increase it when the
 report says promising search was stopped by ``depth_limit``. If it says
 ``node_limit``, improve the model/heuristic, reduce branching, or deliberately
-change ``--max-nodes`` instead of blindly increasing depth.
+change ``--max-nodes`` instead of blindly increasing depth. You own both values
+and may also edit this starter planner or replace it entirely.
 
 EXAMPLES
 ========
@@ -271,7 +272,7 @@ def backtest_models(steps, timeline) -> dict[str, dict[str, Any]]:
     return reports
 
 
-def validate_plan(raw_plan, current, surviving, steps, max_depth):
+def validate_plan(raw_plan, current, surviving, steps):
     plan = None
     error = None
     supporting = []
@@ -280,10 +281,6 @@ def validate_plan(raw_plan, current, surviving, steps, max_depth):
     if raw_plan is not None:
         try:
             plan = canonical_plan(raw_plan)
-            if len(plan) > max_depth:
-                raise ValueError(
-                    f"plan has {len(plan)} transitions; limit is {max_depth}"
-                )
             if plan[0]["state"] != current:
                 raise ValueError(
                     "the first plan state must equal the canonical current state"
@@ -333,7 +330,7 @@ def _search_outcome(frontier, nodes: int, max_nodes: int, depth_limited: bool):
     return "frontier_exhausted"
 
 
-def reward_search(model, step, reward, current, actions, max_depth, max_nodes):
+def reward_search(model, step, reward, current, actions, search_depth, max_nodes):
     baseline = finite_reward(reward, current)
     best_reward = baseline
     best_trajectory = None
@@ -351,7 +348,7 @@ def reward_search(model, step, reward, current, actions, max_depth, max_nodes):
             if value > best_reward:
                 best_reward = value
                 best_trajectory = trajectory
-        if len(trajectory) >= max_depth:
+        if len(trajectory) >= search_depth:
             depth_limited = True
             continue
         for action in actions:
@@ -415,7 +412,7 @@ def astar_search(
     subgoal,
     current,
     actions,
-    max_depth,
+    search_depth,
     max_nodes,
 ):
     counter = itertools.count()
@@ -479,7 +476,7 @@ def astar_search(
             except EXPECTED_MODEL_ERRORS as exc:
                 suggestion["subgoal_error"] = str(exc)
             return suggestion, diagnostic
-        if cost >= max_depth:
+        if cost >= search_depth:
             depth_limited = True
             continue
         for action in actions:
@@ -522,14 +519,14 @@ def astar_search(
     }
 
 
-def distinction_search(left, right, steps, current, actions, max_depth, max_nodes):
+def distinction_search(left, right, steps, current, actions, search_depth, max_nodes):
     frontier = deque([(current, current, ())])
     seen = {(freeze(current), freeze(current))}
     nodes = 0
     while frontier and nodes < max_nodes:
         left_state, right_state, trajectory = frontier.popleft()
         nodes += 1
-        if len(trajectory) >= max_depth:
+        if len(trajectory) >= search_depth:
             continue
         for action in actions:
             left_next = predict(steps[left], left_state, action)
@@ -559,21 +556,14 @@ def evaluate_request(request: dict[str, Any]) -> dict[str, Any]:
     source = request["source"]
     timeline = request["timeline"]
     raw_plan = request.get("plan")
-    actions = request.get("planner_actions", [])
-    max_depth = _positive_integer(request["max_depth"], name="max_depth")
-    search_depth = _positive_integer(
-        request.get("search_depth", max_depth), name="search_depth"
-    )
-    if search_depth > max_depth:
-        raise ValueError("search_depth may not exceed max_depth")
-    max_nodes = _positive_integer(request["max_nodes"], name="max_nodes")
     if not isinstance(timeline, list) or not timeline:
         raise ValueError("timeline must be a non-empty list")
-    if not isinstance(actions, list):
-        raise TypeError("planner_actions must be a finite list")
-    mode = str(request.get("search") or "auto")
+    mode = str(request.get("search") or "none")
     if mode not in (*SEARCH_MODES, "none"):
         raise ValueError(f"unknown search mode: {mode}")
+    actions = request.get("planner_actions", [])
+    if mode != "none" and not isinstance(actions, list):
+        raise TypeError("planner_actions must be a finite list")
     requested_model = request.get("model")
     if requested_model is not None and (
         not isinstance(requested_model, str) or not requested_model
@@ -590,7 +580,7 @@ def evaluate_request(request: dict[str, Any]) -> dict[str, Any]:
         model for model, report in reports.items() if not report["mismatches"]
     ]
     current = timeline[-1].get("next_state", timeline[-1])
-    validation = validate_plan(raw_plan, current, surviving, steps, max_depth)
+    validation = validate_plan(raw_plan, current, surviving, steps)
     capabilities = {
         model: {
             "step": True,
@@ -609,6 +599,16 @@ def evaluate_request(request: dict[str, Any]) -> dict[str, Any]:
     ]
     suggestions = []
     searches = []
+    search_depth = (
+        _positive_integer(request["search_depth"], name="search_depth")
+        if mode != "none"
+        else None
+    )
+    max_nodes = (
+        _positive_integer(request["max_nodes"], name="max_nodes")
+        if mode != "none"
+        else None
+    )
     if mode != "none" and actions:
         for model in selected:
             goal_suggestion = None
@@ -757,7 +757,7 @@ def emit_evaluator_result(request: dict[str, Any]) -> None:
 
 def _configuration() -> dict[str, Any]:
     value = json.loads(Path("physics-config.json").read_text())
-    required = ("planner_actions", "max_depth", "max_nodes")
+    required = ("planner_actions", "default_search_depth", "default_max_nodes")
     if not isinstance(value, dict) or any(key not in value for key in required):
         raise ValueError("physics-config.json is missing required configuration")
     return value
@@ -772,25 +772,19 @@ def workspace_request(
     max_nodes: int | None = None,
 ) -> dict[str, Any]:
     config = _configuration()
-    plan_limit = _positive_integer(config["max_depth"], name="max_depth")
     search_depth = (
-        plan_limit
+        _positive_integer(config["default_search_depth"], name="default_search_depth")
         if depth is None
         else _positive_integer(depth, name="search_depth")
     )
-    if search_depth > plan_limit:
-        raise ValueError(
-            f"--depth {search_depth} exceeds the trusted plan limit {plan_limit}"
-        )
     return {
         "source": Path("world_model.py").read_text(),
         "timeline": json.loads(Path("canonical-input.json").read_text())["timeline"],
         "plan": json.loads(Path("plan.json").read_text()) if include_plan else None,
         "planner_actions": config["planner_actions"],
-        "max_depth": plan_limit,
         "search_depth": search_depth,
         "max_nodes": _positive_integer(
-            config["max_nodes"] if max_nodes is None else max_nodes,
+            config["default_max_nodes"] if max_nodes is None else max_nodes,
             name="max_nodes",
         ),
         "search": search,

@@ -25,11 +25,6 @@ class PhysicsCritic(Task):
     is_goal: Any = field(repr=False, compare=False)
     identity: Any
     terminal_outcome: Any = field(default=None, repr=False, compare=False)
-    domain_information: str = ""
-    domain_files: tuple[tuple[str, str], ...] = ()
-    planner_actions: tuple[Any, ...] = ()
-    max_depth: int = 8
-    max_nodes: int = 10_000
     evaluator_timeout_sec: float = 300.0
     workspace: str | None = None
     outer_context: str | None = None
@@ -39,15 +34,12 @@ class PhysicsCritic(Task):
 
     def get_cache_key(self):
         return digest_payload(
-            "eggopt.physics.domain-critic.v3.trajectory",
+            "eggopt.physics.domain-critic.v4.verify-only",
             {
                 "identity": self.identity,
                 "head": self.head,
                 "max_actions": self.max_actions,
-                "max_depth": self.max_depth,
-                "max_nodes": self.max_nodes,
                 "evaluator_timeout_sec": self.evaluator_timeout_sec,
-                "planner_actions": self.planner_actions,
             },
         )
 
@@ -193,11 +185,6 @@ class PhysicsCritic(Task):
             timeline,
             actions,
             report,
-            self.domain_information,
-            planner_actions=self.planner_actions,
-            max_depth=self.max_depth,
-            max_nodes=self.max_nodes,
-            evaluator_timeout_sec=self.evaluator_timeout_sec,
         )
         if resolution in {"won", "max_actions"} or outcome is not None:
             return Critique.accept(
@@ -263,11 +250,6 @@ class PhysicsCritic(Task):
             timeline,
             actions,
             report,
-            self.domain_information,
-            planner_actions=self.planner_actions,
-            max_depth=self.max_depth,
-            max_nodes=self.max_nodes,
-            evaluator_timeout_sec=self.evaluator_timeout_sec,
         )
         return Critique.accept(
             {
@@ -286,9 +268,7 @@ class PhysicsCritic(Task):
             "source_path": "world_model.py",
             "timeline_path": "canonical-input.json",
             "plan_path": "plan.json",
-            "planner_actions": list(self.planner_actions),
-            "max_depth": self.max_depth,
-            "max_nodes": self.max_nodes,
+            "search": "none",
             "work_dir": ".trusted/evaluator-work",
             "output_path": report_path,
         }
@@ -331,11 +311,6 @@ class PhysicsCritic(Task):
             timeline,
             actions,
             report,
-            self.domain_information,
-            planner_actions=self.planner_actions,
-            max_depth=self.max_depth,
-            max_nodes=self.max_nodes,
-            evaluator_timeout_sec=self.evaluator_timeout_sec,
         )
         return Critique.revise(
             "The trusted Critic rejected the submitted Git HEAD before executing any "
@@ -425,10 +400,7 @@ def sync_state(
     timeline,
     actions,
     report,
-    domain_information,
-    **_legacy_instrument_configuration,
 ):
-    del domain_information, _legacy_instrument_configuration
     write_state(repository, timeline, actions, report)
     if state_root != repository:
         write_state(state_root, timeline, actions, report)

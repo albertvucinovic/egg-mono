@@ -292,14 +292,14 @@ def validate_domain_files(value) -> tuple[tuple[str, str], ...]:
 def instrument_files(
     *,
     planner_actions,
-    max_depth: int,
-    max_nodes: int,
+    default_search_depth: int,
+    default_max_nodes: int,
 ) -> dict[str, str]:
     config = json.dumps(
         _instrument_configuration(
             planner_actions=planner_actions,
-            max_depth=max_depth,
-            max_nodes=max_nodes,
+            default_search_depth=default_search_depth,
+            default_max_nodes=default_max_nodes,
         ),
         indent=2,
         sort_keys=True,
@@ -315,12 +315,12 @@ def instrument_files(
 def _instrument_configuration(
     *,
     planner_actions=(),
-    max_depth: int = 8,
-    max_nodes: int = 10_000,
+    default_search_depth: int = 8,
+    default_max_nodes: int = 10_000,
 ) -> dict[str, object]:
     return {
-        "max_depth": max_depth,
-        "max_nodes": max_nodes,
+        "default_search_depth": default_search_depth,
+        "default_max_nodes": default_max_nodes,
         "planner_actions": list(planner_actions),
     }
 
@@ -332,8 +332,8 @@ def write_actor_files(
     *,
     domain_files=(),
     planner_actions=(),
-    max_depth: int = 8,
-    max_nodes: int = 10_000,
+    default_search_depth: int = 8,
+    default_max_nodes: int = 10_000,
 ) -> None:
     workspace = Path(workspace)
     domain_files = validate_domain_files(domain_files)
@@ -351,8 +351,8 @@ def write_actor_files(
     _write_if_missing(workspace / "plan.json", PLAN_TEMPLATE)
     for name, content in instrument_files(
         planner_actions=planner_actions,
-        max_depth=max_depth,
-        max_nodes=max_nodes,
+        default_search_depth=default_search_depth,
+        default_max_nodes=default_max_nodes,
     ).items():
         _write_if_missing(workspace / name, content)
     for name, content in domain_files:

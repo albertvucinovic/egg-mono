@@ -118,8 +118,9 @@ class PhysicsStrategy:
     state. ``critic`` independently validates committed HEAD and may execute real
     actions until a prediction mismatch or another stopping condition.
 
-    ``max_depth`` bounds submitted/advisory plan length and ``max_nodes`` bounds
-    advisory search work. Planner suggestions never gate submitted trajectories.
+    ``default_search_depth`` and ``default_max_nodes`` seed the Actor's editable
+    planner defaults; they are not trusted ceilings. Planner suggestions never
+    gate submitted trajectories.
     ``domain_files`` lets a domain seed additional root-level text helpers into
     the Actor repository without coupling generic PhysicsStrategy to that domain.
     """
@@ -136,8 +137,8 @@ class PhysicsStrategy:
     domain_information: str = ""
     domain_files: tuple[tuple[str, str], ...] = ()
     planner_actions: tuple[Any, ...] = ()
-    max_depth: int = 8
-    max_nodes: int = 10_000
+    default_search_depth: int = 8
+    default_max_nodes: int = 10_000
     evaluator_timeout_sec: float = 300.0
 
     def __post_init__(self) -> None:
@@ -146,7 +147,7 @@ class PhysicsStrategy:
                 raise TypeError(f"{name} must be callable")
         if self.terminal_outcome is not None and not callable(self.terminal_outcome):
             raise TypeError("terminal_outcome must be callable or None")
-        for name in ("max_depth", "max_nodes"):
+        for name in ("default_search_depth", "default_max_nodes"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -295,7 +296,7 @@ class _PhysicsRun(Task):
             "inner_context": workspace,
             "_runtime_key": self.runtime_key,
             "_evaluation_key": digest_payload(
-                "eggopt.physics.study.v3",
+                "eggopt.physics.study.v4.actor-owned-search",
                 {
                     "identity": self.strategy.identity,
                     "domain_files": self.strategy.domain_files,
@@ -315,8 +316,8 @@ class _PhysicsRun(Task):
                 self.strategy.domain_information,
                 self.strategy.domain_files,
                 self.strategy.planner_actions,
-                self.strategy.max_depth,
-                self.strategy.max_nodes,
+                self.strategy.default_search_depth,
+                self.strategy.default_max_nodes,
                 self.strategy.evaluator_timeout_sec,
             )
             terminal = _current_terminal_state(outer, self.strategy)
@@ -344,11 +345,6 @@ class _PhysicsRun(Task):
                         is_goal=self.strategy.is_goal,
                         identity=self.strategy.identity,
                         terminal_outcome=self.strategy.terminal_outcome,
-                        domain_information=self.strategy.domain_information,
-                        domain_files=self.strategy.domain_files,
-                        planner_actions=self.strategy.planner_actions,
-                        max_depth=self.strategy.max_depth,
-                        max_nodes=self.strategy.max_nodes,
                         evaluator_timeout_sec=self.strategy.evaluator_timeout_sec,
                     ),
                     outer,
@@ -396,8 +392,8 @@ class _InitializeRepository(Task):
     domain_information: str
     domain_files: tuple[tuple[str, str], ...] = ()
     planner_actions: tuple[Any, ...] = ()
-    max_depth: int = 8
-    max_nodes: int = 10_000
+    default_search_depth: int = 8
+    default_max_nodes: int = 10_000
     evaluator_timeout_sec: float = 300.0
 
     def run(self):
@@ -441,8 +437,8 @@ class _InitializeRepository(Task):
             self.domain_information,
             domain_files=self.domain_files,
             planner_actions=self.planner_actions,
-            max_depth=self.max_depth,
-            max_nodes=self.max_nodes,
+            default_search_depth=self.default_search_depth,
+            default_max_nodes=self.default_max_nodes,
         )
         write_state(actor, (initial,), 0, None)
         write_state(Path(self.outer_context), (initial,), 0, None)

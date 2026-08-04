@@ -151,7 +151,7 @@ def strategy(
             terminal_outcome=terminal_outcome,
             domain_information="State has position and legal_actions.",
             planner_actions=({"action": 1},),
-            max_depth=4,
+            default_search_depth=4,
             evaluator_timeout_sec=17,
         ),
         llm,
@@ -186,9 +186,7 @@ def test_evaluator_validates_actor_trajectory_without_planner_rediscovery():
             "source": MODEL,
             "timeline": [state(0)],
             "plan": plan,
-            "planner_actions": [],
-            "max_depth": 4,
-            "max_nodes": 100,
+            "search": "none",
         }
     )
     validation = result["plan_validation"]
@@ -205,9 +203,7 @@ def test_evaluator_rejects_wrong_or_discontinuous_trajectory():
             "source": MODEL,
             "timeline": [state(0)],
             "plan": wrong,
-            "planner_actions": [{"action": 1}],
-            "max_depth": 4,
-            "max_nodes": 100,
+            "search": "none",
         }
     )
     assert result["plan_validation"]["valid"] is False
@@ -221,8 +217,9 @@ def test_optional_rewards_enable_advisory_planning():
             "timeline": [state(0)],
             "plan": trajectory(0, 1),
             "planner_actions": [{"action": 1}],
-            "max_depth": 4,
+            "search_depth": 4,
             "max_nodes": 100,
+            "search": "auto",
         }
     )
     planning = result["planning"]
@@ -254,8 +251,9 @@ def step_b(state, action):
             "timeline": [state(0)],
             "plan": trajectory(0, 1),
             "planner_actions": [{"action": 1}],
-            "max_depth": 2,
+            "search_depth": 2,
             "max_nodes": 20,
+            "search": "auto",
         }
     )
 
@@ -282,8 +280,9 @@ def reward_climb(state):
             "timeline": [state(0)],
             "plan": trajectory(0, 1),
             "planner_actions": [{"action": 1}],
-            "max_depth": 4,
+            "search_depth": 4,
             "max_nodes": 100,
+            "search": "auto",
         }
     )
 
@@ -316,8 +315,9 @@ def reward_peak(state):
                 }
             ],
             "planner_actions": [{"action": 1}, {"action": 2}],
-            "max_depth": 3,
+            "search_depth": 3,
             "max_nodes": 100,
+            "search": "auto",
         }
     )
 
@@ -353,7 +353,7 @@ def subgoal_main(state):
                 }
             ],
             "planner_actions": [{"action": 1}, {"action": 2}],
-            "max_depth": 4,
+            "search_depth": 4,
             "max_nodes": 100,
             "search": "astar",
         }
@@ -391,7 +391,7 @@ def heuristic_main(state):
             "timeline": [state(0)],
             "plan": trajectory(0, 1),
             "planner_actions": [{"action": 1}],
-            "max_depth": 2,
+            "search_depth": 2,
             "max_nodes": 100,
             "search": "auto",
         }
@@ -427,7 +427,7 @@ def goal_main(state):
                 }
             ],
             "planner_actions": [{"action": 1}, {"action": 2}],
-            "max_depth": 3,
+            "search_depth": 3,
             "max_nodes": 100,
             "search": "astar",
         }
@@ -451,7 +451,7 @@ def step_a(state, action):
             "timeline": [state(0)],
             "plan": trajectory(0, 1),
             "planner_actions": [{"action": 1}],
-            "max_depth": 2,
+            "search_depth": 2,
             "max_nodes": 20,
         }
     )
@@ -471,7 +471,7 @@ def test_evaluator_backtests_raw_timeline_actions():
             "timeline": timeline,
             "plan": [{"state": state(1), "action": {"action": 1}, "next_state": state(2)}],
             "planner_actions": [],
-            "max_depth": 2,
+            "search_depth": 2,
             "max_nodes": 20,
         }
     )
@@ -492,7 +492,7 @@ def reward_missing(state):
                 "timeline": [state(0)],
                 "plan": trajectory(0, 1),
                 "planner_actions": [],
-                "max_depth": 1,
+                "search_depth": 1,
                 "max_nodes": 20,
             }
         )
@@ -505,7 +505,7 @@ def test_generic_evaluator_can_write_compact_receipt(tmp_path):
         "timeline": [state(0)],
         "plan": trajectory(0, 1),
         "planner_actions": [],
-        "max_depth": 4,
+        "search_depth": 4,
         "max_nodes": 100,
         "work_dir": str(tmp_path / "work"),
         "output_path": str(report),
@@ -545,9 +545,7 @@ def step_a(state, action):
                 "source_path": "world_model.py",
                 "timeline_path": "canonical-input.json",
                 "plan_path": "plan.json",
-                "planner_actions": [],
-                "max_depth": 4,
-                "max_nodes": 100,
+                "search": "none",
                 "work_dir": "trusted/work",
                 "output_path": "trusted/report.json",
             }
@@ -564,6 +562,10 @@ def step_a(state, action):
     assert len(script.encode()) < 131_072
     assert "x" * 1_000 not in script
     assert parse_evaluator_receipt(completed.stdout) == "trusted/report.json"
+    report = json.loads((tmp_path / "trusted/report.json").read_text())
+    assert report["planning"]["search_mode"] == "none"
+    assert report["planning"]["searches"] == []
+    assert report["planning"]["suggestions"] == []
 
 
 def test_physics_executes_raw_actions_and_reports_alternative_model(
@@ -617,6 +619,9 @@ def test_physics_executes_raw_actions_and_reports_alternative_model(
         (tmp_path / "run" / "workspace" / ".trusted" / "state.json").read_text()
     )
     report = authoritative["last_report"]
+    assert report["planning"]["search_mode"] == "none"
+    assert report["planning"]["searches"] == []
+    assert report["planning"]["suggestions"] == []
     assert report["matching_models"] == ["b"]
     assert [item["action"] for item in report["executed"]] == observed_actions
     actor_timeline = json.loads((workspace / "canonical-input.json").read_text())[
@@ -753,8 +758,8 @@ def test_actor_files_and_instruments_are_self_contained(tmp_path):
         (state(0),),
         "Toy domain.",
         planner_actions=({"action": 1},),
-        max_depth=3,
-        max_nodes=41,
+        default_search_depth=3,
+        default_max_nodes=41,
     )
     (tmp_path / "world_model.py").write_text(MODEL)
     (tmp_path / "plan.json").write_text(json.dumps(trajectory(0, 1, 2)))
@@ -772,8 +777,8 @@ def test_actor_files_and_instruments_are_self_contained(tmp_path):
         assert completed.returncode == 0, completed.stderr
     config = json.loads((tmp_path / "physics-config.json").read_text())
     assert config == {
-        "max_depth": 3,
-        "max_nodes": 41,
+        "default_max_nodes": 41,
+        "default_search_depth": 3,
         "planner_actions": [{"action": 1}],
     }
     assert json.loads((tmp_path / "plan-report.json").read_text())["validation"][
@@ -785,6 +790,51 @@ def test_actor_files_and_instruments_are_self_contained(tmp_path):
     assert "def astar_search" in planner
     assert "subprocess.Popen" not in planner
     assert (tmp_path / "INSTRUCTIONS.md").read_text().endswith("Toy domain.\n")
+
+
+def test_emitted_planner_accepts_actor_selected_search_limits(tmp_path):
+    write_actor_files(
+        tmp_path,
+        (state(0),),
+        planner_actions=({"action": 1},),
+        default_search_depth=1,
+        default_max_nodes=1,
+    )
+    (tmp_path / "world_model.py").write_text(
+        """
+def step_a(state, action):
+    return {"position": state["position"] + 1, "legal_actions": [1]}
+def step_b(state, action):
+    amount = 1 if state["position"] < 3 else 2
+    return {"position": state["position"] + amount, "legal_actions": [1]}
+"""
+    )
+    (tmp_path / "plan.json").write_text(json.dumps(trajectory(0, 1, 2, 3, 4)))
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        ["python", "-E", "plan.py", "--depth", "4", "--max-nodes", "20"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "plan-report.json").read_text())
+    assert report["validation"]["valid"] is True
+    assert len(report["validation"]["plan"]) == 4
+    assert report["planning"]["search_depth"] == 4
+    assert report["planning"]["max_nodes"] == 20
+    distinction = next(
+        item
+        for item in report["planning"]["suggestions"]
+        if item["kind"] == "distinction"
+    )
+    assert distinction["models"] == ["a", "b"]
+    assert distinction["plan"] == trajectory(0, 1, 2, 3, 4)
 
 
 def test_actor_files_include_domain_helpers(tmp_path):
@@ -1260,11 +1310,6 @@ def test_state_sync_does_not_refresh_actor_owned_files(tmp_path):
         (state(0),),
         0,
         None,
-        "new domain text",
-        planner_actions=({"action": 1},),
-        max_depth=4,
-        max_nodes=100,
-        evaluator_timeout_sec=17,
     )
 
     assert (tmp_path / "plan.py").read_text() == "# custom planner\n"
@@ -1317,7 +1362,7 @@ def step_a(state, action):
             "timeline": [state(0)],
             "plan": trajectory(0, 1),
             "planner_actions": [],
-            "max_depth": 2,
+            "search_depth": 2,
             "max_nodes": 20,
         }
     )
@@ -1449,7 +1494,7 @@ def step_good(state, action):
             "timeline": [state(0)],
             "plan": trajectory(0, 1),
             "planner_actions": [],
-            "max_depth": 2,
+            "search_depth": 2,
             "max_nodes": 20,
         }
     )
@@ -1461,7 +1506,7 @@ def step_good(state, action):
     )
 
 
-def test_submitted_plan_length_is_bounded_but_not_rediscovered():
+def test_submitted_plan_length_is_not_bounded_by_search_defaults():
     plan = trajectory(0, 1, 2)
     result = run_evaluator(
         {
@@ -1469,12 +1514,11 @@ def test_submitted_plan_length_is_bounded_but_not_rediscovered():
             "timeline": [state(0)],
             "plan": plan,
             "planner_actions": [],
-            "max_depth": 1,
-            "max_nodes": 1,
+            "search": "none",
         }
     )
-    assert result["plan_validation"]["valid"] is False
-    assert "limit is 1" in result["plan_validation"]["error"]
+    assert result["plan_validation"]["valid"] is True
+    assert result["plan_validation"]["plan"] == plan
 
 
 def test_structured_domain_action_is_preserved_in_trajectory_validation():
@@ -1495,7 +1539,7 @@ def step_click(state, action):
             "timeline": [initial],
             "plan": plan,
             "planner_actions": [],
-            "max_depth": 1,
+            "search_depth": 1,
             "max_nodes": 20,
         }
     )
