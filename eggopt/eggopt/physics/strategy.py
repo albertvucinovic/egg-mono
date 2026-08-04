@@ -29,8 +29,6 @@ from ..runtime import Runtime, sync
 from .critic import PhysicsCritic, write_state
 from .instruments import (
     ACTOR_INSTRUCTIONS,
-    ensure_evaluator_ignore,
-    instrument_files,
     validate_domain_files,
     write_actor_files,
 )
@@ -47,8 +45,9 @@ def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
             "Begin one Physics Actor turn now. Follow the complete runbook in your "
             "system instructions and INSTRUCTIONS.md: inspect Git and canonical "
             "evidence, revise and backtest world_model.py, define useful matching "
-            "reward_<suffix> objectives whenever possible, use python plan.py to "
-            "search for a productive trajectory, create and validate plan.json, run commit.py, "
+            "reward_<suffix> and/or goal_<suffix> planning capabilities, read the "
+            "detailed guide in plan.py, use or adapt that planner (or your own script) "
+            "to find a productive trajectory, create and validate plan.json, run commit.py, "
             "verify a new clean HEAD, then "
             "answer briefly. Do not merely describe the procedure and do not execute "
             "the real environment yourself."
@@ -320,23 +319,6 @@ class _PhysicsRun(Task):
                 self.strategy.max_nodes,
                 self.strategy.evaluator_timeout_sec,
             )
-            actor_repository = Path(workspace)
-            critic_repository = _critic_repository(Path(outer))
-            if any(
-                not (actor_repository / name).is_file()
-                or (actor_repository / name).read_text() != content
-                for name, content in self.strategy.domain_files
-            ):
-                _refresh_actor_instruments(
-                    actor_repository,
-                    critic_repository,
-                    domain_information=self.strategy.domain_information,
-                    domain_files=self.strategy.domain_files,
-                    planner_actions=self.strategy.planner_actions,
-                    max_depth=self.strategy.max_depth,
-                    max_nodes=self.strategy.max_nodes,
-                    evaluator_timeout_sec=self.strategy.evaluator_timeout_sec,
-                )
             terminal = _current_terminal_state(outer, self.strategy)
             if terminal is not None:
                 value = _terminal_value(outer, terminal)
@@ -461,7 +443,6 @@ class _InitializeRepository(Task):
             planner_actions=self.planner_actions,
             max_depth=self.max_depth,
             max_nodes=self.max_nodes,
-            evaluator_timeout_sec=self.evaluator_timeout_sec,
         )
         write_state(actor, (initial,), 0, None)
         write_state(Path(self.outer_context), (initial,), 0, None)
@@ -545,7 +526,6 @@ class _GitCritic(Task):
             actor,
             role="Actor",
         )
-        critic_head_before = _git_head(critic_repo)
         if not _valid_repository(critic_repo):
             if not _valid_repository(actor):
                 return Critique.revise(
@@ -555,7 +535,6 @@ class _GitCritic(Task):
                     "plan.py, then submit one clean commit using commit.py."
                 )
             _clone_repository(actor, critic_repo)
-            critic_head_before = _git_head(critic_repo)
 
         if not _valid_repository(actor):
             _restore_repository(actor, critic_repo)
@@ -577,30 +556,6 @@ class _GitCritic(Task):
                 "state. No real action was attempted for this proposal. Read the restored "
                 "canonical-input.json and trusted-report.json, rebuild the proposal, and "
                 "finish with python commit.py."
-            )
-
-        try:
-            _refresh_actor_instruments(
-                actor,
-                critic_repo,
-                domain_information=self.critic.domain_information,
-                domain_files=self.critic.domain_files,
-                planner_actions=self.critic.planner_actions,
-                max_depth=self.critic.max_depth,
-                max_nodes=self.critic.max_nodes,
-                evaluator_timeout_sec=self.critic.evaluator_timeout_sec,
-            )
-        except RuntimeError as exc:
-            return Critique.revise(
-                "The Physics-owned Actor instruments could not be refreshed safely. "
-                f"No real action was attempted. Reason: {exc}"
-            )
-        if _git_head(critic_repo) != critic_head_before:
-            return Critique.revise(
-                "PhysicsStrategy refreshed its standard Actor instruments for this "
-                "study. No real action was attempted for the maintenance commit. "
-                "Rerun backtest.py and plan.py, then submit with "
-                "python commit.py."
             )
 
         dirty = _git_status(actor)
@@ -758,125 +713,6 @@ def _overlay_authoritative_state(actor: Path, authoritative: Path) -> None:
         (actor / "canonical-input.json").write_text(
             json.dumps({"timeline": timeline}, indent=2, sort_keys=True) + "\n"
         )
-
-
-def _refresh_actor_instruments(
-    actor: Path,
-    critic: Path,
-    *,
-    domain_information: str,
-    domain_files: tuple[tuple[str, str], ...],
-    planner_actions: tuple[Any, ...],
-    max_depth: int,
-    max_nodes: int,
-    evaluator_timeout_sec: float,
-) -> None:
-    """Upgrade Physics-owned helpers without touching an Actor's proposal."""
-
-    domain_files = validate_domain_files(domain_files)
-
-    legacy_files = {
-        "backtest.py": {
-            (
-                "from eggopt.physics import actor_backtest\n\n"
-                'if __name__ == "__main__":\n    actor_backtest()\n'
-            ),
-            (
-                "from physics_runtime import actor_backtest\n\n"
-                'if __name__ == "__main__":\n    actor_backtest()\n'
-            ),
-        },
-        "plan.py": {
-            (
-                "from eggopt.physics import actor_plan\n\n"
-                'if __name__ == "__main__":\n    actor_plan()\n'
-            ),
-            (
-                "from physics_runtime import actor_plan\n\n"
-                'if __name__ == "__main__":\n    actor_plan()\n'
-            ),
-        },
-        "commit.py": {
-            (
-                "import sys\nfrom eggopt.physics import actor_commit\n\n"
-                'if __name__ == "__main__":\n'
-                '    actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")\n'
-            ),
-            (
-                "from physics_runtime import actor_commit\n\n"
-                'if __name__ == "__main__":\n    actor_commit()\n'
-            ),
-            (
-                "import sys\nfrom physics_runtime import actor_commit\n\n"
-                'if __name__ == "__main__":\n'
-                '    actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")\n'
-            ),
-        },
-    }
-    files = instrument_files(
-        planner_actions=planner_actions,
-        max_depth=max_depth,
-        max_nodes=max_nodes,
-        evaluator_timeout_sec=evaluator_timeout_sec,
-    )
-    instructions = ACTOR_INSTRUCTIONS
-    if domain_information.strip():
-        instructions += (
-            "\n## Domain information\n\n" + domain_information.strip() + "\n"
-        )
-    files["INSTRUCTIONS.md"] = instructions
-    files.update(domain_files)
-    dirty = _git(actor, "status", "--porcelain=v1").splitlines()
-    dirty_paths = {
-        entry[2:].lstrip().split(" -> ")[-1]
-        for entry in dirty
-        if entry and len(entry) > 2
-    }
-    conflicts = sorted(dirty_paths.intersection(files))
-    if conflicts:
-        raise RuntimeError(
-            "Cannot refresh modified Physics-owned instruments: " + ", ".join(conflicts)
-        )
-    customized = sorted(
-        name
-        for name, legacy in legacy_files.items()
-        if (actor / name).is_file()
-        and (actor / name).read_text() not in legacy
-        and (actor / name).read_text() != files[name]
-    )
-    if customized:
-        raise RuntimeError(
-            "Cannot replace customized Physics-owned instruments: "
-            + ", ".join(customized)
-        )
-    changed = False
-    created = []
-    for name, content in files.items():
-        path = actor / name
-        if path.is_file() and path.read_text() == content:
-            continue
-        path.write_text(content)
-        changed = True
-    plan = actor / "plan.json"
-    if not plan.exists():
-        plan.write_text("[]\n")
-        created.append("plan.json")
-        changed = True
-    ignore_path = actor / ".gitignore"
-    before_ignore = ignore_path.read_text() if ignore_path.is_file() else None
-    ensure_evaluator_ignore(actor)
-    if ignore_path.read_text() != before_ignore:
-        changed = True
-    if not changed:
-        return
-    owned = (*files, *created, ".gitignore")
-    _git(actor, "add", "--", *owned)
-    staged = _git(actor, "diff", "--cached", "--name-only", "--", *owned)
-    if not staged:
-        return
-    _configure_git(actor)
-    _git(actor, "commit", "-m", "[physics] refresh Actor instruments")
-    _pull(critic, actor)
 
 
 def _git(repository: Path, *args: str, check: bool = True) -> str:

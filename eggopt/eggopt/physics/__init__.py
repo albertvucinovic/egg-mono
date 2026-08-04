@@ -5,9 +5,6 @@ from .instruments import (
     ACTOR_INSTRUCTIONS,
     PLAN_TEMPLATE,
     WORLD_MODEL_TEMPLATE,
-    actor_backtest,
-    actor_commit,
-    actor_plan,
     write_actor_files,
 )
 from .lifecycle import TerminalOutcome
@@ -30,9 +27,6 @@ __all__ = [
     "PhysicsResult",
     "PhysicsStrategy",
     "TerminalOutcome",
-    "actor_backtest",
-    "actor_commit",
-    "actor_plan",
     "canonical_plan",
     "load_plan",
     "physics_actor_system_prompt",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .theory import MODEL_RUNNER
+from .theory import evaluator_source
 
 WORLD_MODEL_TEMPLATE = '''"""Competing hypotheses for the observed world."""
 
@@ -65,9 +65,12 @@ evaluation.
 
 ## Your workspace and submission interface
 
-You own this Git repository. Organize your work however you find effective: add
-Python modules, analysis scripts, notes, tests, or planning code. What matters to
-PhysicsStrategy is this small file interface:
+You own this Git repository. Every file in it is fair game: organize, edit,
+replace, or delete the supplied helpers, and add Python modules, analysis
+scripts, notes, tests, or planning code as useful. Git preserves older versions
+if you want them back. PhysicsStrategy seeds starter files only when creating or
+recovering the repository; it does not refresh a valid repository to undo your
+changes. What matters to the trusted Critic is this small committed interface:
 
 - `world_model.py`: define one or more `step_<suffix>(state, action)` hypotheses;
 - matching `reward_<suffix>(state)` functions whenever you can express useful
@@ -113,10 +116,11 @@ a brief completion signal.
 - `trusted-report.json`: the previous validation/execution report, when present.
 - `world_model.py`: your editable hypotheses.
 - `plan.json`: your editable submitted trajectory.
-- `physics_runtime.py`: generated standard-library-only instrumentation.
 - `physics-config.json`: public advisory-planning and validation bounds.
 - `backtest.py`: locally checks every hypothesis against the Timeline.
-- `plan.py`: locally validates `plan.json` and emits advisory suggestions.
+- `plan.py`: a readable, editable starter planner that validates `plan.json`,
+  supports reward BFS and A*, and emits advisory suggestions. Its module
+  docstring contains the detailed planning guide.
 - `backtest-report.json` and `plan-report.json`: local reports.
 - `commit.py`: reruns validation, stages the repository, and commits the proposal.
 - `.trusted/`: Critic-owned synchronization state; do not use it as scratch space.
@@ -131,22 +135,15 @@ environment directly.
 You own the plan. You may construct `plan.json` directly and run `python plan.py`
 to check it.
 
-Use `plan.py` as your normal first attempt at constructing a productive
-trajectory, rather than wandering through manually chosen actions. Define a
-finite `reward_<suffix>(state)` for each plausible `step_<suffix>` whenever a
-meaningful progress signal can be expressed, then run `python plan.py` and inspect
-`plan-report.json.planning.suggestions`. Within its configured search bounds, the
-instrument suggests a trajectory to the highest predicted reward it can reach,
-or a trajectory ending at the first action whose predicted outcome distinguishes
-competing eligible hypotheses. All hypotheses involved in an advisory search
-must define matching `reward_*` functions.
-
-The built-in planner is breadth-first and deliberately simple. It is especially
-useful for small enumerable action spaces. Equal maximum rewards retain the first
-shortest trajectory in action order. Prefer a useful generated suggestion when
-one exists. If the domain cannot enumerate complete actions, no useful suggestion
-exists, or bounded search cannot reach progress, construct the trajectory
-yourself. Planner use is strongly encouraged but is never an acceptance
+Use `plan.py` as a normal first attempt rather than wandering through manually
+chosen actions. At a high level, matching `reward_<suffix>` functions enable
+bounded breadth-first progress search, while matching `goal_<suffix>` and
+optional `heuristic_<suffix>` functions enable A* goal search. Run
+`python plan.py --help` and read the docstring at the top of `plan.py` for the
+detailed interface, search modes, depth guidance, diagnostics, and examples.
+Inspect `plan-report.json.planning.suggestions` and normally use the best useful
+trajectory. If the supplied planner does not fit the problem, modify it or write
+your own script. Planner use is strongly encouraged but is never an acceptance
 requirement.
 
 When several hypotheses remain consistent with the Timeline, normally submit a
@@ -221,21 +218,25 @@ or rewrite `.git`. Stop editing, report the problem, and answer without claiming
 a proposal. PhysicsStrategy owns repository recovery and the append-only Timeline.
 """
 
-BACKTEST_WRAPPER = """from physics_runtime import actor_backtest
+BACKTEST_WRAPPER = '''"""Backtest the Actor's executable world-model hypotheses."""
+
+from plan import run_backtest
+
 
 if __name__ == "__main__":
-    actor_backtest()
-"""
-PLAN_WRAPPER = """from physics_runtime import actor_plan
+    run_backtest()
+'''
+
+COMMIT_WRAPPER = '''"""Validate and commit the Actor's current proposal."""
+
+import sys
+
+from plan import commit_plan
+
 
 if __name__ == "__main__":
-    actor_plan()
-"""
-COMMIT_WRAPPER = """from physics_runtime import actor_commit
-
-if __name__ == "__main__":
-    actor_commit()
-"""
+    commit_plan(sys.argv[1] if len(sys.argv) > 1 else "Actor submits trajectory")
+'''
 
 _RESERVED_DOMAIN_FILENAMES = frozenset(
     {
@@ -246,7 +247,6 @@ _RESERVED_DOMAIN_FILENAMES = frozenset(
         "canonical-input.json",
         "commit.py",
         "physics-config.json",
-        "physics_runtime.py",
         "plan-report.json",
         "plan.json",
         "plan.py",
@@ -286,139 +286,18 @@ def validate_domain_files(value) -> tuple[tuple[str, str], ...]:
         names.add(name)
     return value
 
-_RUNTIME_SUPPORT = r'''
-
-
-def _write_json(path, value):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-
-
-def _configuration():
-    value = json.loads(Path("physics-config.json").read_text())
-    required = ("planner_actions", "max_depth", "max_nodes", "evaluator_timeout_sec")
-    if not isinstance(value, dict) or any(key not in value for key in required):
-        raise ValueError("physics-config.json is missing required configuration")
-    return value
-
-
-def _request(output_path, plan=True):
-    config = _configuration()
-    timeline = json.loads(Path("canonical-input.json").read_text())["timeline"]
-    return {
-        "source": Path("world_model.py").read_text(),
-        "timeline": timeline,
-        "plan": json.loads(Path("plan.json").read_text()) if plan else None,
-        "planner_actions": config["planner_actions"],
-        "max_depth": config["max_depth"],
-        "max_nodes": config["max_nodes"],
-        "work_dir": ".physics-evaluation",
-        "output_path": output_path,
-    }, float(config["evaluator_timeout_sec"])
-
-
-def _terminate(process):
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=0.25)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-
-
-def _run_local_evaluator(plan=True):
-    request, timeout = _request(".physics-evaluation/result.json", plan)
-    command = [sys.executable, str(Path(__file__).resolve()), "_evaluate"]
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(
-            json.dumps(request, allow_nan=False, separators=(",", ":"), sort_keys=True),
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        _terminate(process)
-        raise SystemExit(f"Physics evaluator timed out after {timeout:g} seconds") from exc
-    if process.returncode:
-        detail = (stderr or stdout).strip()
-        raise SystemExit(detail or f"Physics evaluator exited with status {process.returncode}")
-    path = Path(request["output_path"])
-    if not path.is_file():
-        raise SystemExit("Physics evaluator did not write its report")
-    return json.loads(path.read_text())
-
-
-def actor_backtest():
-    report = _run_local_evaluator(plan=False)["backtest"]
-    _write_json("backtest-report.json", report)
-    print(json.dumps(report, indent=2, sort_keys=True))
-
-
-def actor_plan():
-    report = _run_local_evaluator(plan=True)
-    output = {
-        "validation": report["plan_validation"],
-        "planning": report["planning"],
-    }
-    _write_json("plan-report.json", output)
-    print(json.dumps(output, indent=2, sort_keys=True))
-
-
-def actor_commit():
-    actor_plan()
-    report = json.loads(Path("plan-report.json").read_text())
-    if not report["validation"]["valid"]:
-        raise SystemExit("plan.json is invalid; inspect plan-report.json")
-    if not report["validation"]["supporting_models"]:
-        raise SystemExit("plan.json has no supporting model")
-    subprocess.run(["git", "add", "-A"], check=True)
-    subprocess.run(["git", "commit", "-m", "Actor submits trajectory"], check=True)
-
-
-if __name__ == "__main__" and sys.argv[1:] == ["_evaluate"]:
-    exec(MODEL_RUNNER, {"__name__": "__main__"})
-'''
-
-
-def _runtime_source() -> str:
-    return (
-        "# Generated by Eggopt PhysicsStrategy. Standard-library only.\n"
-        "import json\n"
-        "import os\n"
-        "import signal\n"
-        "import subprocess\n"
-        "import sys\n"
-        "from pathlib import Path\n\n"
-        f"MODEL_RUNNER = {MODEL_RUNNER!r}\n" + _RUNTIME_SUPPORT
-    )
-
 
 def instrument_files(
     *,
     planner_actions,
     max_depth: int,
     max_nodes: int,
-    evaluator_timeout_sec: float,
 ) -> dict[str, str]:
     config = json.dumps(
         _instrument_configuration(
             planner_actions=planner_actions,
             max_depth=max_depth,
             max_nodes=max_nodes,
-            evaluator_timeout_sec=evaluator_timeout_sec,
         ),
         indent=2,
         sort_keys=True,
@@ -427,8 +306,7 @@ def instrument_files(
         "backtest.py": BACKTEST_WRAPPER,
         "commit.py": COMMIT_WRAPPER,
         "physics-config.json": config,
-        "physics_runtime.py": _runtime_source(),
-        "plan.py": PLAN_WRAPPER,
+        "plan.py": evaluator_source(),
     }
 
 
@@ -437,10 +315,8 @@ def _instrument_configuration(
     planner_actions=(),
     max_depth: int = 8,
     max_nodes: int = 10_000,
-    evaluator_timeout_sec: float = 300.0,
 ) -> dict[str, object]:
     return {
-        "evaluator_timeout_sec": evaluator_timeout_sec,
         "max_depth": max_depth,
         "max_nodes": max_nodes,
         "planner_actions": list(planner_actions),
@@ -456,8 +332,6 @@ def write_actor_files(
     planner_actions=(),
     max_depth: int = 8,
     max_nodes: int = 10_000,
-    evaluator_timeout_sec: float = 300.0,
-    refresh_instruments: bool = True,
 ) -> None:
     workspace = Path(workspace)
     domain_files = validate_domain_files(domain_files)
@@ -465,7 +339,7 @@ def write_actor_files(
     instructions = ACTOR_INSTRUCTIONS
     if domain_information.strip():
         instructions += "\n## Domain information\n\n" + domain_information.strip() + "\n"
-    _write_if_changed(workspace / "INSTRUCTIONS.md", instructions)
+    _write_if_missing(workspace / "INSTRUCTIONS.md", instructions)
     _write_json(workspace / "canonical-input.json", {"timeline": timeline})
     _write_if_missing(
         workspace / ".gitignore",
@@ -473,75 +347,14 @@ def write_actor_files(
     )
     _write_if_missing(workspace / "world_model.py", WORLD_MODEL_TEMPLATE)
     _write_if_missing(workspace / "plan.json", PLAN_TEMPLATE)
-    if refresh_instruments:
-        for name, content in instrument_files(
-            planner_actions=planner_actions,
-            max_depth=max_depth,
-            max_nodes=max_nodes,
-            evaluator_timeout_sec=evaluator_timeout_sec,
-        ).items():
-            _write_if_changed(workspace / name, content)
-        for name, content in domain_files:
-            _write_if_missing(workspace / name, content)
-
-
-def actor_backtest() -> None:
-    document = _run_local_evaluator(plan=False)
-    report = document["backtest"]
-    _write_json(Path("backtest-report.json"), report)
-    print(json.dumps(report, indent=2, sort_keys=True))
-
-
-def actor_plan() -> None:
-    document = _run_local_evaluator(plan=True)
-    report = {
-        "validation": document["plan_validation"],
-        "planning": document["planning"],
-    }
-    _write_json(Path("plan-report.json"), report)
-    print(json.dumps(report, indent=2, sort_keys=True))
-
-
-def actor_commit() -> None:
-    import subprocess
-
-    actor_plan()
-    report = json.loads(Path("plan-report.json").read_text())
-    if not report["validation"]["valid"]:
-        raise SystemExit("plan.json is invalid; inspect plan-report.json")
-    if not report["validation"]["supporting_models"]:
-        raise SystemExit("plan.json has no supporting model")
-    subprocess.run(["git", "add", "-A"], check=True)
-    subprocess.run(["git", "commit", "-m", "Actor submits trajectory"], check=True)
-
-
-def _run_local_evaluator(plan=True):
-    from .theory import MODEL_RUNNER, parse_evaluator_output
-
-    workspace = Path.cwd()
-    config = json.loads((workspace / "physics-config.json").read_text())
-    request = {
-        "source": (workspace / "world_model.py").read_text(),
-        "timeline": json.loads((workspace / "canonical-input.json").read_text())["timeline"],
-        "plan": json.loads((workspace / "plan.json").read_text()) if plan else None,
-        "planner_actions": config["planner_actions"],
-        "max_depth": config["max_depth"],
-        "max_nodes": config["max_nodes"],
-    }
-    from contextlib import redirect_stdout
-    from io import StringIO
-
-    output = StringIO()
-    with redirect_stdout(output):
-        import sys
-
-        previous = sys.stdin
-        try:
-            sys.stdin = StringIO(json.dumps(request))
-            exec(MODEL_RUNNER, {"__name__": "__main__"})  # noqa: S102
-        finally:
-            sys.stdin = previous
-    return parse_evaluator_output(output.getvalue())
+    for name, content in instrument_files(
+        planner_actions=planner_actions,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+    ).items():
+        _write_if_missing(workspace / name, content)
+    for name, content in domain_files:
+        _write_if_missing(workspace / name, content)
 
 
 def _write_json(path, value):
@@ -551,11 +364,6 @@ def _write_json(path, value):
 
 def _write_if_missing(path, content):
     if not path.exists():
-        path.write_text(content)
-
-
-def _write_if_changed(path, content):
-    if not path.exists() or path.read_text() != content:
         path.write_text(content)
 
 
@@ -571,9 +379,6 @@ __all__ = [
     "ACTOR_INSTRUCTIONS",
     "PLAN_TEMPLATE",
     "WORLD_MODEL_TEMPLATE",
-    "actor_backtest",
-    "actor_commit",
-    "actor_plan",
     "ensure_evaluator_ignore",
     "instrument_files",
     "validate_domain_files",

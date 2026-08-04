@@ -10,7 +10,6 @@ from eggflow import Task, TaskError
 from ..actor_critic import Critique
 from ..identity import digest_payload
 from ..thread_tool import ThreadTool, ThreadToolResult
-from .instruments import write_actor_files
 from .lifecycle import classify_terminal_state, terminal_feedback
 from .planning import load_plan
 from .theory import evaluator_file_script, parse_evaluator_receipt
@@ -427,25 +426,12 @@ def sync_state(
     actions,
     report,
     domain_information,
-    *,
-    planner_actions=(),
-    max_depth=8,
-    max_nodes=10_000,
-    evaluator_timeout_sec=300.0,
+    **_legacy_instrument_configuration,
 ):
+    del domain_information, _legacy_instrument_configuration
     write_state(repository, timeline, actions, report)
     if state_root != repository:
         write_state(state_root, timeline, actions, report)
-    write_actor_files(
-        repository,
-        timeline,
-        domain_information,
-        planner_actions=planner_actions,
-        max_depth=max_depth,
-        max_nodes=max_nodes,
-        evaluator_timeout_sec=evaluator_timeout_sec,
-        refresh_instruments=False,
-    )
 
 
 def _write_json(path, value):

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import time
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -301,6 +300,117 @@ def reward_peak(state):
     assert [item["action"] for item in suggestion["plan"]] == [{"action": 2}]
 
 
+def test_astar_planner_uses_goal_and_heuristic():
+    source = """
+def step_main(state, action):
+    return {"position": state["position"] + action["action"], "legal_actions": [1, 2]}
+def goal_main(state):
+    return state["position"] >= 4
+def heuristic_main(state):
+    return max(0, 4 - state["position"]) / 2
+def subgoal_main(state):
+    return "reach four" if state["position"] < 4 else "complete"
+"""
+    initial = {"position": 0, "legal_actions": [1, 2]}
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [initial],
+            "plan": [
+                {
+                    "state": initial,
+                    "action": {"action": 1},
+                    "next_state": {"position": 1, "legal_actions": [1, 2]},
+                }
+            ],
+            "planner_actions": [{"action": 1}, {"action": 2}],
+            "max_depth": 4,
+            "max_nodes": 100,
+            "search": "astar",
+        }
+    )
+
+    suggestion = next(
+        item for item in result["planning"]["suggestions"] if item["kind"] == "goal"
+    )
+    assert [item["action"] for item in suggestion["plan"]] == [
+        {"action": 2},
+        {"action": 2},
+    ]
+    assert suggestion["search"]["outcome"] == "goal_found"
+    assert suggestion["search"]["optimality"] == "not_proven_actor_heuristic"
+    assert suggestion["subgoals"] == [
+        {"depth": 0, "label": "reach four"},
+        {"depth": 2, "label": "complete"},
+    ]
+
+
+def test_auto_falls_back_to_reward_when_astar_hits_depth_limit():
+    source = """
+def step_main(state, action):
+    return {"position": state["position"] + 1, "legal_actions": [1]}
+def reward_main(state):
+    return state["position"]
+def goal_main(state):
+    return state["position"] >= 5
+def heuristic_main(state):
+    return max(0, 5 - state["position"])
+"""
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [state(0)],
+            "plan": trajectory(0, 1),
+            "planner_actions": [{"action": 1}],
+            "max_depth": 2,
+            "max_nodes": 100,
+            "search": "auto",
+        }
+    )
+
+    assert any(
+        search["kind"] == "astar" and search["outcome"] == "depth_limit"
+        for search in result["planning"]["searches"]
+    )
+    reward = next(
+        item for item in result["planning"]["suggestions"] if item["kind"] == "reward"
+    )
+    assert reward["plan"] == trajectory(0, 1, 2)
+
+
+def test_astar_without_heuristic_proves_shortest_unit_cost_path():
+    source = """
+def step_main(state, action):
+    return {"position": state["position"] + action["action"], "legal_actions": [1, 2]}
+def goal_main(state):
+    return state["position"] == 2
+"""
+    initial = {"position": 0, "legal_actions": [1, 2]}
+    result = run_evaluator(
+        {
+            "source": source,
+            "timeline": [initial],
+            "plan": [
+                {
+                    "state": initial,
+                    "action": {"action": 1},
+                    "next_state": {"position": 1, "legal_actions": [1, 2]},
+                }
+            ],
+            "planner_actions": [{"action": 1}, {"action": 2}],
+            "max_depth": 3,
+            "max_nodes": 100,
+            "search": "astar",
+        }
+    )
+    suggestion = next(
+        item for item in result["planning"]["suggestions"] if item["kind"] == "goal"
+    )
+
+    assert [item["action"] for item in suggestion["plan"]] == [{"action": 2}]
+    assert suggestion["search"]["optimality"] == "proven_shortest"
+
+
 def test_step_without_reward_still_backtests_and_validates():
     source = """
 def step_a(state, action):
@@ -575,6 +685,8 @@ def test_actor_prompt_explains_freedom_and_minimal_interface():
         "continue beyond the first action",
         "optional planner can help find",
         "normal first attempt",
+        "read the docstring at the top of `plan.py`",
+        "modify it or write\nyour own script",
         "normally add a matching useful `reward_<suffix>`",
         "normally use the best productive",
         "Planner suggestions are aids, not constraints",
@@ -596,7 +708,8 @@ def test_actor_turn_prompts_match_new_protocol():
     assert "complete runbook" in first
     assert "plan" in first
     assert "reward_<suffix>" in first
-    assert "use python plan.py to search" in first
+    assert "read the detailed guide in plan.py" in first
+    assert "adapt that planner (or your own script)" in first
     assert "commit.py" in first
     assert "do not execute the real environment" in first
     assert "trusted-report.json" in revision
@@ -612,7 +725,6 @@ def test_actor_files_and_instruments_are_self_contained(tmp_path):
         planner_actions=({"action": 1},),
         max_depth=3,
         max_nodes=41,
-        evaluator_timeout_sec=7,
     )
     (tmp_path / "world_model.py").write_text(MODEL)
     (tmp_path / "plan.json").write_text(json.dumps(trajectory(0, 1, 2)))
@@ -630,7 +742,6 @@ def test_actor_files_and_instruments_are_self_contained(tmp_path):
         assert completed.returncode == 0, completed.stderr
     config = json.loads((tmp_path / "physics-config.json").read_text())
     assert config == {
-        "evaluator_timeout_sec": 7,
         "max_depth": 3,
         "max_nodes": 41,
         "planner_actions": [{"action": 1}],
@@ -638,9 +749,11 @@ def test_actor_files_and_instruments_are_self_contained(tmp_path):
     assert json.loads((tmp_path / "plan-report.json").read_text())["validation"][
         "valid"
     ]
-    runtime = (tmp_path / "physics_runtime.py").read_text()
-    assert "eggopt" not in runtime
-    assert "arcagi3" not in runtime
+    planner = (tmp_path / "plan.py").read_text()
+    assert "eggopt" not in planner
+    assert "arcagi3" not in planner
+    assert "def astar_search" in planner
+    assert "subprocess.Popen" not in planner
     assert (tmp_path / "INSTRUCTIONS.md").read_text().endswith("Toy domain.\n")
 
 
@@ -652,44 +765,6 @@ def test_actor_files_include_domain_helpers(tmp_path):
     )
 
     assert (tmp_path / "inspect_state.py").read_text() == "print('domain helper')\n"
-
-
-def test_actor_instrument_subprocess_timeout(tmp_path):
-    write_actor_files(tmp_path, (state(0),), evaluator_timeout_sec=0.05)
-    (tmp_path / "world_model.py").write_text("while True:\n    pass\n")
-    completed = subprocess.run(
-        ["python", "-E", "backtest.py"],
-        cwd=tmp_path,
-        text=True,
-        capture_output=True,
-        timeout=2,
-        check=False,
-    )
-    assert completed.returncode != 0
-    assert "timed out after 0.05 seconds" in completed.stderr
-
-
-def test_actor_instrument_timeout_terminates_descendants(tmp_path):
-    write_actor_files(tmp_path, (state(0),), evaluator_timeout_sec=0.2)
-    marker = tmp_path / "descendant-survived"
-    (tmp_path / "world_model.py").write_text(
-        "import subprocess, sys\n"
-        f"subprocess.Popen([sys.executable, '-c', "
-        f"\"import time; time.sleep(0.8); open({str(marker)!r}, 'w').write('bad')\"])\n"
-        "while True:\n"
-        "    pass\n"
-    )
-    completed = subprocess.run(
-        ["python", "-E", "backtest.py"],
-        cwd=tmp_path,
-        text=True,
-        capture_output=True,
-        timeout=2,
-        check=False,
-    )
-    time.sleep(0.9)
-    assert completed.returncode != 0
-    assert not marker.exists()
 
 
 def test_critic_feedback_explains_mismatch_and_exhaustion():
@@ -1101,126 +1176,6 @@ def test_scheduler_managed_wait_does_not_reduce_state_on_heartbeat(
         db.close()
 
 
-def _instrument_repository(tmp_path):
-    actor = tmp_path / "actor"
-    critic = tmp_path / "critic"
-    actor.mkdir()
-    git(actor, "init", "-b", "main")
-    git(actor, "config", "user.name", "Physics")
-    git(actor, "config", "user.email", "physics@test")
-    return actor, critic
-
-
-def test_existing_repository_refreshes_only_owned_instruments(tmp_path):
-    from eggopt.physics.strategy import _refresh_actor_instruments
-
-    actor, critic = _instrument_repository(tmp_path)
-    (actor / "world_model.py").write_text("THEORY = 'preserve me'\n")
-    (actor / "backtest.py").write_text(
-        'from physics_runtime import actor_backtest\n\n'
-        'if __name__ == "__main__":\n'
-        '    actor_backtest()\n'
-    )
-    (actor / "commit.py").write_text(
-        "import sys\nfrom physics_runtime import actor_commit\n\n"
-        'if __name__ == "__main__":\n'
-        '    actor_commit(sys.argv[1] if len(sys.argv) > 1 else "")\n'
-    )
-    git(actor, "add", "-A")
-    git(actor, "commit", "-m", "old instruments")
-    subprocess.run(
-        ["git", "clone", "--no-local", str(actor), str(critic)],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    _refresh_actor_instruments(
-        actor,
-        critic,
-        domain_information="Updated domain contract.",
-        domain_files=(),
-        planner_actions=({"action": 1},),
-        max_depth=5,
-        max_nodes=99,
-        evaluator_timeout_sec=11,
-    )
-
-    assert (actor / "world_model.py").read_text() == "THEORY = 'preserve me'\n"
-    assert "physics_runtime" in (actor / "backtest.py").read_text()
-    assert (actor / "plan.json").read_text() == "[]\n"
-    assert (actor / "INSTRUCTIONS.md").read_text().endswith(
-        "Updated domain contract.\n"
-    )
-    assert "hypothesis you consider most likely" in (
-        actor / "INSTRUCTIONS.md"
-    ).read_text()
-    config = json.loads((actor / "physics-config.json").read_text())
-    assert config["planner_actions"] == [{"action": 1}]
-    assert git(actor, "log", "-1", "--format=%s") == (
-        "[physics] refresh Actor instruments"
-    )
-    assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
-
-
-def test_existing_repository_refreshes_domain_files(tmp_path):
-    from eggopt.physics.strategy import _refresh_actor_instruments
-
-    actor, critic = _instrument_repository(tmp_path)
-    git(actor, "commit", "--allow-empty", "-m", "initial")
-    subprocess.run(
-        ["git", "clone", "--no-local", str(actor), str(critic)],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    _refresh_actor_instruments(
-        actor,
-        critic,
-        domain_information="Toy domain.",
-        domain_files=(("inspect_state.py", "print('domain helper')\n"),),
-        planner_actions=(),
-        max_depth=8,
-        max_nodes=10_000,
-        evaluator_timeout_sec=300,
-    )
-
-    assert (actor / "inspect_state.py").read_text() == "print('domain helper')\n"
-    assert git(actor, "status", "--short") == ""
-    assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
-
-
-def test_existing_repository_upgrades_changed_domain_files(tmp_path):
-    from eggopt.physics.strategy import _refresh_actor_instruments
-
-    actor, critic = _instrument_repository(tmp_path)
-    (actor / "inspect_state.py").write_text("old domain helper\n")
-    git(actor, "add", "-A")
-    git(actor, "commit", "-m", "old domain helper")
-    subprocess.run(
-        ["git", "clone", "--no-local", str(actor), str(critic)],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    _refresh_actor_instruments(
-        actor,
-        critic,
-        domain_information="Toy domain.",
-        domain_files=(("inspect_state.py", "fixed domain helper\n"),),
-        planner_actions=(),
-        max_depth=8,
-        max_nodes=10_000,
-        evaluator_timeout_sec=300,
-    )
-
-    assert (actor / "inspect_state.py").read_text() == "fixed domain helper\n"
-    assert git(actor, "status", "--short") == ""
-    assert git(actor, "rev-parse", "HEAD") == git(critic, "rev-parse", "HEAD")
-
-
 @pytest.mark.parametrize(
     "domain_files, error",
     [
@@ -1244,60 +1199,51 @@ def test_physics_rejects_invalid_domain_files(domain_files, error):
         )
 
 
-def test_instrument_refresh_refuses_modified_owned_files(tmp_path):
-    from eggopt.physics.strategy import _refresh_actor_instruments
+def test_valid_actor_repository_helpers_are_actor_owned(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "run" / "workspace" / "innerContext"
+    plan = trajectory(0, 1, 2)
 
-    actor, critic = _instrument_repository(tmp_path)
-    (actor / "backtest.py").write_text("old\n")
-    git(actor, "add", "-A")
-    git(actor, "commit", "-m", "old instruments")
-    subprocess.run(
-        ["git", "clone", "--no-local", str(actor), str(critic)],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    (actor / "backtest.py").write_text("actor modification\n")
+    def edit(_call):
+        (workspace / "plan.py").write_text("# Actor-owned custom planner\n")
+        (workspace / "backtest.py").unlink()
+        (workspace / "custom_search.py").write_text("# custom search\n")
+        write_plan(workspace, plan)
 
-    with pytest.raises(RuntimeError, match="modified Physics-owned.*backtest.py"):
-        _refresh_actor_instruments(
-            actor,
-            critic,
-            domain_information="",
-            domain_files=(),
-            planner_actions=(),
-            max_depth=8,
-            max_nodes=10_000,
-            evaluator_timeout_sec=300,
-        )
-    assert (actor / "backtest.py").read_text() == "actor modification\n"
+    physics, _actor = strategy(workspace, edit)
+    result = physics.run(run_dir="run", max_cycles=1)
+
+    assert result.accepted is True
+    assert (workspace / "plan.py").read_text() == "# Actor-owned custom planner\n"
+    assert not (workspace / "backtest.py").exists()
+    assert (workspace / "custom_search.py").read_text() == "# custom search\n"
 
 
-def test_instrument_refresh_refuses_committed_custom_helpers(tmp_path):
-    from eggopt.physics.strategy import _refresh_actor_instruments
+def test_state_sync_does_not_refresh_actor_owned_files(tmp_path):
+    from eggopt.physics.critic import sync_state
 
-    actor, critic = _instrument_repository(tmp_path)
-    (actor / "backtest.py").write_text("custom committed helper\n")
-    git(actor, "add", "-A")
-    git(actor, "commit", "-m", "custom helper")
-    subprocess.run(
-        ["git", "clone", "--no-local", str(actor), str(critic)],
-        check=True,
-        text=True,
-        capture_output=True,
+    (tmp_path / "plan.py").write_text("# custom planner\n")
+    (tmp_path / "INSTRUCTIONS.md").write_text("custom instructions\n")
+    sync_state(
+        tmp_path,
+        tmp_path,
+        (state(0),),
+        0,
+        None,
+        "new domain text",
+        planner_actions=({"action": 1},),
+        max_depth=4,
+        max_nodes=100,
+        evaluator_timeout_sec=17,
     )
 
-    with pytest.raises(RuntimeError, match="customized.*backtest.py"):
-        _refresh_actor_instruments(
-            actor,
-            critic,
-            domain_information="",
-            domain_files=(),
-            planner_actions=(),
-            max_depth=8,
-            max_nodes=10_000,
-            evaluator_timeout_sec=300,
-        )
+    assert (tmp_path / "plan.py").read_text() == "# custom planner\n"
+    assert (tmp_path / "INSTRUCTIONS.md").read_text() == "custom instructions\n"
+    assert not (tmp_path / "backtest.py").exists()
+    assert not (tmp_path / "world_model.py").exists()
+    assert not (tmp_path / "plan.json").exists()
+    assert not (tmp_path / "physics-config.json").exists()
+    assert (tmp_path / "canonical-input.json").is_file()
 
 
 def test_commit_validates_current_plan_and_creates_clean_head(tmp_path, monkeypatch):

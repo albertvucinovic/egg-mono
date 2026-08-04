@@ -138,10 +138,11 @@ Actor turns through one bounded Eggthreads `SubtreeScheduler`. An Agent with
 `scheduler_managed=True` waits for that shared scheduler instead of constructing
 its own `ThreadRunner`; ordinary standalone Physics runs remain unchanged.
 
-Eggopt owns the Timeline, `step_<suffix>` hypotheses, optional `reward_<suffix>`
-advisory planning, Actor instruments, independent `plan.json` trajectory
-validation, the execute-until-resolution loop, and the Git repository lifecycle.
-The domain owns its action representation and trusted action validator.
+Eggopt owns the Timeline, independent `plan.json` trajectory validation, the
+execute-until-resolution loop, and repository recovery. The Actor owns its
+`step_<suffix>` hypotheses and every normal file in `innerContext`, including any
+planning scripts it edits or creates. The domain owns its action representation
+and trusted action validator.
 
 The Actor works in `workspace/innerContext`; every turn submits a clean Git HEAD.
 The Critic keeps `workspace/critic-repository`, pulls submitted history, and
@@ -159,18 +160,13 @@ caching content-addressed. The evaluator writes
 SHA-256 and records only a compact receipt. Cached replay verifies or
 rematerializes the report before the Critic consumes it.
 
-PhysicsStrategy also publishes a generated, standard-library-only
-`physics_runtime.py` plus `physics-config.json` into the Actor repository. The
-local `backtest.py`, `plan.py`, and `commit.py` wrappers therefore work in an
-isolated Actor container without installing Eggopt. This runtime contains only
-the generic Physics evaluator and public search limits; domain `observe`,
-`execute`, and `is_goal` implementations remain on the trusted host and are never
-copied into the Actor workspace.
-
-Actor-facing `backtest.py` and `plan.py` use the same generic algorithm for local
-advice; they are untrusted workspace copies. `commit.py PLAN_ID` selects a
-canonical non-empty planner result and commits it. The trusted Critic repeats the
-pipeline independently before any real action.
+When creating or recovering a repository, PhysicsStrategy seeds a readable,
+standard-library-only `plan.py` plus small `backtest.py`, `commit.py`, and
+`physics-config.json` helpers. `plan.py` contains reward BFS, A*, and its detailed
+usage guide. These are untrusted starter files: the Actor may edit, replace, or
+delete them and may write different tools. A valid repository is never refreshed
+to undo those choices; Git retains older versions. The trusted Critic independently
+evaluates committed `world_model.py` and `plan.json` before any real action.
 
 An experiment can contain a common multi-action prefix. Execution stops on the
 first wrong prediction or immediately after the first intent whose model
