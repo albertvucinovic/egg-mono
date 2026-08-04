@@ -104,7 +104,6 @@ import itertools
 import json
 import math
 import os
-import subprocess
 import tempfile
 from collections import deque
 from itertools import pairwise
@@ -845,16 +844,6 @@ def run_plan(argv: list[str] | None = None) -> dict[str, Any]:
     _atomic_json("plan-report.json", report)
     print(json.dumps(report, indent=2, sort_keys=True))
     return report
-
-
-def commit_plan(message: str = "Actor submits trajectory") -> None:
-    report = run_plan([])
-    if not report["validation"]["valid"]:
-        raise SystemExit("plan.json is invalid; inspect plan-report.json")
-    if not report["validation"]["supporting_models"]:
-        raise SystemExit("plan.json has no supporting model")
-    subprocess.run(["git", "add", "-A"], check=True)
-    subprocess.run(["git", "commit", "-m", message], check=True)
 
 
 if __name__ == "__main__":

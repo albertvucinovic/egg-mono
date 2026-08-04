@@ -35,8 +35,8 @@ Work like a physicist:
 3. Infer what progress and completion probably mean.
 4. Test every belief against all recorded reality and preserve plausible
    alternatives when evidence underdetermines the mechanism.
-5. Construct a useful predicted trajectory, validate it, and commit it before
-   asking the trusted Critic to change reality.
+5. Construct a useful predicted trajectory and commit it together with the
+   executable world model before asking the trusted Critic to change reality.
 
 ## Visible working notes
 
@@ -77,6 +77,16 @@ changes. What matters to the trusted Critic is this small committed interface:
   progress, so the advisory planner can search those hypotheses;
 - `plan.json`: submit one predicted trajectory as a non-empty JSON list of
   `{state, action, next_state}` transitions.
+
+The trusted Critic reads the exact committed Git HEAD, not uncommitted working
+tree edits. Use ordinary Git commands to commit `world_model.py` and `plan.json`
+(plus any other intended proposal files) before ending the turn. Both files must
+be present in that committed HEAD, even when only one changed during this turn.
+Committing does not run planning or validation; those are separate, explicit
+tools you may run while preparing the proposal.
+No special commit helper is supplied. If an older repository still contains a
+legacy `commit.py`, do not run it; it is ordinary Actor-owned code and may be
+deleted like any other obsolete helper.
 
 The domain section below defines the exact action interface. Use that action value
 in both `plan.json` and `step_*`.
@@ -122,7 +132,6 @@ a brief completion signal.
   supports reward BFS and A*, and emits advisory suggestions. Its module
   docstring contains the detailed planning guide.
 - `backtest-report.json` and `plan-report.json`: local reports.
-- `commit.py`: reruns validation, stages the repository, and commits the proposal.
 - `.trusted/`: Critic-owned synchronization state; do not use it as scratch space.
 - `scratch/`: ignored workspace for disposable work.
 
@@ -178,10 +187,11 @@ The planner can use only the complete actions exposed by the domain in
    the submitted plan must be valid
    under the model and trajectory checks and list at least one supporting model.
    The trusted Critic separately applies the domain action validator.
-7. Run `python commit.py`. It reruns the checks, stages non-ignored files, and
-   creates the required proposal commit.
+7. Use ordinary Git commands, such as `git add -A` followed by
+   `git commit -m "..."`, to create the proposal commit. Ensure the current
+   `world_model.py` and `plan.json` are both present in that committed HEAD.
 8. Verify that `git status --short` is empty and inspect the new HEAD. Make no
-   edits after `commit.py`, then answer briefly that the proposal is ready.
+   edits after the commit, then answer briefly that the proposal is ready.
 
 Do the theory, checks, plan, and commit in the same turn. Do not merely describe
 what you would do. Never execute a real action yourself.
@@ -227,17 +237,6 @@ from plan import run_backtest
 
 if __name__ == "__main__":
     run_backtest()
-'''
-
-COMMIT_WRAPPER = '''"""Validate and commit the Actor's current proposal."""
-
-import sys
-
-from plan import commit_plan
-
-
-if __name__ == "__main__":
-    commit_plan(sys.argv[1] if len(sys.argv) > 1 else "Actor submits trajectory")
 '''
 
 _RESERVED_DOMAIN_FILENAMES = frozenset(
@@ -306,7 +305,6 @@ def instrument_files(
     ) + "\n"
     return {
         "backtest.py": BACKTEST_WRAPPER,
-        "commit.py": COMMIT_WRAPPER,
         "physics-config.json": config,
         "plan.py": evaluator_source(),
     }

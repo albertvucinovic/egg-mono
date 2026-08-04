@@ -47,9 +47,10 @@ def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
             "evidence, revise and backtest world_model.py, define useful matching "
             "reward_<suffix> and/or goal_<suffix> planning capabilities, read the "
             "detailed guide in plan.py, use or adapt that planner (or your own script) "
-            "to find a productive trajectory, create and validate plan.json, run commit.py, "
-            "verify a new clean HEAD, then "
-            "answer briefly. Do not merely describe the procedure and do not execute "
+            "to find a productive trajectory, create and validate plan.json, commit "
+            "world_model.py and plan.json with ordinary Git commands, verify a new clean "
+            "HEAD, then answer briefly. Do not run any legacy commit.py. Do not merely "
+            "describe the procedure and do not execute "
             "the real environment yourself."
         )
     return (
@@ -57,7 +58,9 @@ def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
         "Physics Actor turn. Read the synchronized canonical-input.json and "
         "trusted-report.json before editing. Follow the complete runbook again, "
         "address the Critic evidence below, and finish with one new clean commit "
-        "created through commit.py.\n\nTrusted Critic feedback:\n" + state["feedback"]
+        "containing both world_model.py and plan.json. Use ordinary Git commands and do "
+        "not run any legacy commit.py.\n\nTrusted Critic feedback:\n"
+        + state["feedback"]
     )
 
 
@@ -528,7 +531,8 @@ class _GitCritic(Task):
                     "Neither the Actor workspace nor the Critic's trusted history copy "
                     "is a valid Git repository. No real action was attempted. Recreate "
                     "the Actor repository from the canonical files, run backtest.py and "
-                    "plan.py, then submit one clean commit using commit.py."
+                    "plan.py as useful, then commit world_model.py and plan.json with "
+                    "ordinary Git commands."
                 )
             _clone_repository(actor, critic_repo)
 
@@ -551,7 +555,7 @@ class _GitCritic(Task):
                 "last pulled history and overlaid the latest irreversible canonical "
                 "state. No real action was attempted for this proposal. Read the restored "
                 "canonical-input.json and trusted-report.json, rebuild the proposal, and "
-                "finish with python commit.py."
+                "commit world_model.py and plan.json with ordinary Git commands."
             )
 
         dirty = _git_status(actor)
@@ -564,8 +568,9 @@ class _GitCritic(Task):
             return Critique.revise(
                 "The Critic evaluates only a clean committed HEAD, but the Actor "
                 "workspace contains the non-ignored changes listed below. No real action "
-                "was attempted. Commit intended theory/plan changes (normally with "
-                "python commit.py) or move disposable work under scratch/ or "
+                "was attempted. Commit intended theory/plan changes with ordinary Git "
+                "commands, including world_model.py and plan.json, or move disposable "
+                "work under scratch/ or "
                 "ignore it, verify `git status --short` is empty, then answer again.\n\n"
                 + meaningful_dirty
             )
@@ -576,8 +581,8 @@ class _GitCritic(Task):
             return Critique.revise(
                 "This turn did not create a new Actor Git HEAD, so there is no proposal "
                 "for the Critic to validate and no real action was attempted. Revise the "
-                "theory as needed, run both instruments, validate plan.json "
-                "with python commit.py, verify a clean new HEAD, then answer."
+                "theory as needed, run local checks as useful, commit world_model.py and "
+                "plan.json with ordinary Git commands, verify a clean new HEAD, then answer."
             )
 
         try:
@@ -625,7 +630,7 @@ class _GitCritic(Task):
                     "was independently evaluating that commit. The trusted result cannot "
                     "be synchronized over those edits. Preserve intended work separately, "
                     "restore a clean synchronized repository, and submit it in a new "
-                    "Actor commit; do not edit files after commit.py."
+                    "Actor commit; do not edit files after submitting the commit."
                 )
             _git(actor, "reset", "--hard", "HEAD")
             _git(actor, "clean", "-fd")

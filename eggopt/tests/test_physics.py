@@ -727,7 +727,10 @@ def test_actor_prompt_explains_freedom_and_minimal_interface():
         "Planner suggestions are aids, not constraints",
         "need not have been found by `plan.py`",
         "supporting model",
-        "python commit.py",
+        "ordinary Git commands",
+        "Both files must",
+        "Committing does not run planning or validation",
+        "do not run it",
         "What the trusted Critic does",
         "do not delete",
     ):
@@ -745,10 +748,14 @@ def test_actor_turn_prompts_match_new_protocol():
     assert "reward_<suffix>" in first
     assert "read the detailed guide in plan.py" in first
     assert "adapt that planner (or your own script)" in first
-    assert "commit.py" in first
+    assert "ordinary Git commands" in first
+    assert "world_model.py and plan.json" in first
+    assert "Do not run any legacy commit.py" in first
     assert "do not execute the real environment" in first
     assert "trusted-report.json" in revision
     assert "one new clean commit" in revision
+    assert "world_model.py and plan.json" in revision
+    assert "do not run any legacy commit.py" in revision
     assert revision.endswith("Prediction contradicted.")
 
 
@@ -1262,6 +1269,7 @@ def test_scheduler_managed_wait_does_not_reduce_state_on_heartbeat(
         ([('helper.py', 'pass\n')], TypeError),
         ((("nested/helper.py", "pass\n"),), ValueError),
         ((("nested\\helper.py", "pass\n"),), ValueError),
+        ((("commit.py", "pass\n"),), ValueError),
         ((("plan.py", "pass\n"),), ValueError),
         ((("helper.py", "one\n"), ("helper.py", "two\n")), ValueError),
     ],
@@ -1321,33 +1329,15 @@ def test_state_sync_does_not_refresh_actor_owned_files(tmp_path):
     assert (tmp_path / "canonical-input.json").is_file()
 
 
-def test_commit_validates_current_plan_and_creates_clean_head(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    git(tmp_path, "init", "-b", "main")
-    git(tmp_path, "config", "user.name", "Physics")
-    git(tmp_path, "config", "user.email", "physics@test")
+def test_actor_files_do_not_supply_commit_wrapper(tmp_path):
     write_actor_files(
         tmp_path,
         (state(0),),
         planner_actions=({"action": 1},),
     )
-    (tmp_path / "world_model.py").write_text(MODEL)
-    (tmp_path / "plan.json").write_text(json.dumps(trajectory(0, 1)))
-    git(tmp_path, "add", "-A")
-    git(tmp_path, "commit", "-m", "initial")
-    (tmp_path / "plan.json").write_text(json.dumps(trajectory(0, 1, 2)))
 
-    completed = subprocess.run(
-        ["python", "-E", "commit.py"],
-        cwd=tmp_path,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert git(tmp_path, "log", "-1", "--format=%s") == "Actor submits trajectory"
-    assert git(tmp_path, "status", "--short") == ""
+    assert not (tmp_path / "commit.py").exists()
+    assert "def commit_plan" not in (tmp_path / "plan.py").read_text()
 
 
 def test_evaluator_rejects_step_argument_mutation():

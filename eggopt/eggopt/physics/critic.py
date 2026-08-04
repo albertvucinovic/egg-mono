@@ -316,8 +316,8 @@ class PhysicsCritic(Task):
             "The trusted Critic rejected the submitted Git HEAD before executing any "
             f"real action. Reason: {error}. Read trusted-report.json (stage=validation) "
             "and canonical-input.json. Correct world_model.py or plan.json, run the "
-            "local checks, then finish this turn with python commit.py and an otherwise "
-            "clean repository."
+            "local checks as useful, then commit both world_model.py and plan.json with "
+            "ordinary Git commands and leave the repository clean."
         )
 
 

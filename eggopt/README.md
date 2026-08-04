@@ -161,7 +161,7 @@ SHA-256 and records only a compact receipt. Cached replay verifies or
 rematerializes the report before the Critic consumes it.
 
 When creating or recovering a repository, PhysicsStrategy seeds a readable,
-standard-library-only `plan.py` plus small `backtest.py`, `commit.py`, and
+standard-library-only `plan.py` plus small `backtest.py` and
 `physics-config.json` helpers. `plan.py` contains reward BFS, A*, pairwise
 distinction search over Timeline-consistent `step_<suffix>` hypotheses, and its
 detailed usage guide. Distinction search requires neither rewards nor goals.
@@ -174,6 +174,8 @@ These are untrusted starter files: the Actor may edit, replace, or delete them
 and may write different tools. A valid repository is never refreshed to undo
 those choices; Git retains older versions. The trusted Critic independently
 evaluates committed `world_model.py` and `plan.json` before any real action.
+The Actor submits those two files in a normal Git commit. Git commit does not
+implicitly run the advisory planner or local validation.
 
 An experiment can contain a common multi-action prefix. Execution stops on the
 first wrong prediction or immediately after the first intent whose model
