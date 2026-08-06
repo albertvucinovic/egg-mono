@@ -226,7 +226,6 @@ def new_thread_command(context: Any, arg: str):
             db,
             name=(arg or "").strip() or "Root",
             initial_model_key=_current_model_for_thread(context, current_thread),
-            origin="command.newThread",
         )
         append_message(db, new_root, "system", context.system_prompt or "You are a helpful assistant.")
         create_snapshot(db, new_root)

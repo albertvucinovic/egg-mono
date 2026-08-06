@@ -188,7 +188,6 @@ async def create_thread(request: CreateThreadRequest):
             initial_model_key=model_key,
             models_path=models_path,
             all_models_path=all_models_path,
-            origin="eggw.api.createThread",
         )
         append_root_system_prompt(core.db, thread_id)
 

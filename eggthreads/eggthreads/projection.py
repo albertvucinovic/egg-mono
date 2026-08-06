@@ -39,7 +39,6 @@ _SNAPSHOT_NOOP_EVENT_TYPES = frozenset({
     "thread.compaction_summary_in_progress",
     "thread.config",
     "thread.context_limit",
-    "thread.origin",
     "thread.recovery",
     "thread.recovery_action",
     "thread.recovery_attempt",
