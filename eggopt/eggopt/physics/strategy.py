@@ -1,29 +1,40 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import math
 import shutil
-import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from eggflow import Task, keyed
+from eggflow import Task
 from eggthreads import (
     create_root_thread,
-    get_thread_sandbox_config,
-    get_thread_working_directory,
     list_root_threads,
     list_threads,
-    set_thread_sandbox_config,
-    set_thread_tools_enabled,
-    set_thread_working_directory,
 )
 
-from ..actor_critic import ActorCritic, Agent, Critique
-from ..context import _current_operation, _operation_runtime, _operation_scope
+from ..actor_critic import ActorCritic, Agent
+from ..actor_critic_git import (
+    GitCritic,
+    _authoritative_state,
+    _bind_fields,
+    _clone_repository,
+    _commit,
+    _critic_repository,
+    _git,
+    _git_head,
+    _git_status,
+    _initialize_repository,
+    _overlay_authoritative_state,
+    _pull,
+    _restore_repository,
+    _valid_repository,
+)
+from ..context import _operation_scope
 from ..identity import digest_payload
 from ..runtime import Runtime, sync
 from .critic import PhysicsCritic, write_state
@@ -32,22 +43,38 @@ from .instruments import (
     validate_domain_files,
     write_actor_files,
 )
+from .latent_critic import LatentPhysicsCritic
 from .lifecycle import TerminalOutcome, classify_terminal_state, terminal_feedback
+from .modes import VERIFIED, PhysicsMode, physics_mode
+from .systemprompt import physics_actor_system_prompt
 
 TaskFactory = Callable[..., Task]
 
 PHYSICS_ACTOR_SYSTEM_PROMPT = ACTOR_INSTRUCTIONS
 
 
-def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
+def _actor_turn_prompt(
+    round_number: int, state: Mapping[str, Any], *, mode: PhysicsMode = VERIFIED
+) -> str:
     if round_number == 1:
+        if not mode.planner:
+            return (
+                "Begin one Physics Actor turn now. Follow the complete runbook in your "
+                "system instructions and INSTRUCTIONS.md: inspect Git and canonical "
+                "evidence, revise world_model.py, plan in latent space with code you "
+                "create as useful, validate plan.json, commit world_model.py and "
+                "plan.json with ordinary Git commands, verify a new clean HEAD, then "
+                "answer briefly. Do not merely describe the procedure and do not execute "
+                "the real environment yourself."
+            )
         return (
             "Begin one Physics Actor turn now. Follow the complete runbook in your "
             "system instructions and INSTRUCTIONS.md: inspect Git and canonical "
-            "evidence, revise and backtest world_model.py, define useful matching "
-            "reward_<suffix> and/or goal_<suffix> planning capabilities, read the "
-            "detailed guide in plan.py, use or adapt that planner (or your own script) "
-            "to find a productive trajectory, create and validate plan.json, commit "
+            "evidence, revise and backtest world_model.py, define matching "
+            "goal_<suffix> and useful heuristic_<suffix> capabilities for the default "
+            "A* search (plus reward_<suffix> when useful), read the detailed guide in "
+            "plan.py, use or adapt that planner (or your own script) to find a productive "
+            "trajectory, create and validate plan.json, commit "
             "world_model.py and plan.json with ordinary Git commands, verify a new clean "
             "HEAD, then answer briefly. Do not run any legacy commit.py. Do not merely "
             "describe the procedure and do not execute "
@@ -61,19 +88,6 @@ def _actor_turn_prompt(round_number: int, state: Mapping[str, Any]) -> str:
         "containing both world_model.py and plan.json. Use ordinary Git commands and do "
         "not run any legacy commit.py.\n\nTrusted Critic feedback:\n"
         + state["feedback"]
-    )
-
-
-def physics_actor_system_prompt(domain_information: str = "") -> str:
-    """Return the canonical Physics Actor rules plus domain-specific guidance."""
-
-    domain_information = str(domain_information or "").strip()
-    if not domain_information:
-        return PHYSICS_ACTOR_SYSTEM_PROMPT.strip()
-    return (
-        PHYSICS_ACTOR_SYSTEM_PROMPT.strip()
-        + "\n\n## Domain information\n\n"
-        + domain_information
     )
 
 
@@ -126,6 +140,11 @@ class PhysicsStrategy:
     gate submitted trajectories.
     ``domain_files`` lets a domain seed additional root-level text helpers into
     the Actor repository without coupling generic PhysicsStrategy to that domain.
+
+    ``latent``, ``verified``, and ``planner`` are the three behavior flags. The
+    established defaults select the ``verified`` strategy: complete public-state
+    models, exact verification, and the bundled planner. ``mode`` is the derived
+    named view used for durable identity and strategy-specific instruments.
     """
 
     actor: Agent = field(repr=False, compare=False)
@@ -134,6 +153,9 @@ class PhysicsStrategy:
     validate_action: Callable[..., Any] = field(repr=False, compare=False)
     is_goal: Callable[[Any], bool] = field(repr=False, compare=False)
     identity: Any
+    latent: bool = False
+    verified: bool = True
+    planner: bool = True
     terminal_outcome: Callable[[Any], TerminalOutcome | None] | None = field(
         default=None, repr=False, compare=False
     )
@@ -144,7 +166,45 @@ class PhysicsStrategy:
     default_max_nodes: int = 10_000
     evaluator_timeout_sec: float = 300.0
 
+    @classmethod
+    def configured(
+        cls,
+        *,
+        latent: bool,
+        verified: bool,
+        planner: bool,
+        **kwargs: Any,
+    ) -> PhysicsStrategy:
+        """Construct a strategy from the three explicit behavior flags."""
+
+        return cls(
+            latent=latent,
+            verified=verified,
+            planner=planner,
+            **kwargs,
+        )
+
+    @property
+    def mode(self) -> PhysicsMode:
+        return physics_mode(
+            latent=self.latent,
+            verified=self.verified,
+            planner=self.planner,
+        )
+
     def __post_init__(self) -> None:
+        for name in ("latent", "verified", "planner"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be boolean")
+        expected_prompt = physics_actor_system_prompt(
+            self.domain_information, mode=self.mode
+        )
+        if self.actor.system_prompt != expected_prompt:
+            object.__setattr__(
+                self,
+                "actor",
+                dataclasses.replace(self.actor, system_prompt=expected_prompt),
+            )
         for name in ("observe", "execute", "validate_action", "is_goal"):
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name} must be callable")
@@ -302,6 +362,7 @@ class _PhysicsRun(Task):
                 "eggopt.physics.study.v4.actor-owned-search",
                 {
                     "identity": self.strategy.identity,
+                    "mode": self.strategy.mode.name,
                     "domain_files": self.strategy.domain_files,
                     "evaluator_timeout_sec": self.strategy.evaluator_timeout_sec,
                 },
@@ -317,6 +378,7 @@ class _PhysicsRun(Task):
                 workspace,
                 outer,
                 self.strategy.domain_information,
+                self.strategy.mode,
                 self.strategy.domain_files,
                 self.strategy.planner_actions,
                 self.strategy.default_search_depth,
@@ -340,8 +402,12 @@ class _PhysicsRun(Task):
                 )
             result = yield ActorCritic(
                 actor=self.strategy.actor,
-                critic=_GitCritic(
-                    PhysicsCritic(
+                critic=GitCritic(
+                    (
+                        LatentPhysicsCritic
+                        if self.strategy.mode.latent
+                        else PhysicsCritic
+                    )(
                         tools=self.strategy.actor.tools,
                         execute=self.strategy.execute,
                         validate_action=self.strategy.validate_action,
@@ -349,11 +415,22 @@ class _PhysicsRun(Task):
                         identity=self.strategy.identity,
                         terminal_outcome=self.strategy.terminal_outcome,
                         evaluator_timeout_sec=self.strategy.evaluator_timeout_sec,
+                        mode=self.strategy.mode,
                     ),
-                    outer,
-                    self.max_actions,
+                    outer_context=outer,
+                    max_actions=self.max_actions,
+                    protocol="Physics",
+                    required_files=("world_model.py", "plan.json"),
+                    trusted_files=("canonical-input.json", "trusted-report.json"),
+                    check_commands=(
+                        "backtest.py and plan.py"
+                        if self.strategy.mode.planner
+                        else "your local model and plan checks"
+                    ),
                 ),
-                actor_prompt=_actor_turn_prompt,
+                actor_prompt=lambda round_number, state: _actor_turn_prompt(
+                    round_number, state, mode=self.strategy.mode
+                ),
                 max_rounds=self.max_cycles,
                 names=("Actor", "Critic"),
             )
@@ -393,6 +470,7 @@ class _InitializeRepository(Task):
     workspace: str
     outer_context: str
     domain_information: str
+    mode: PhysicsMode = VERIFIED
     domain_files: tuple[tuple[str, str], ...] = ()
     planner_actions: tuple[Any, ...] = ()
     default_search_depth: int = 8
@@ -404,6 +482,7 @@ class _InitializeRepository(Task):
         critic = _critic_repository(Path(self.outer_context))
         authoritative = _authoritative_state(Path(self.outer_context))
         if _valid_repository(critic):
+            _require_compatible_mode(critic, self.mode)
             if not _valid_repository(actor):
                 _restore_repository(actor, critic)
                 _overlay_authoritative_state(actor, authoritative)
@@ -418,6 +497,7 @@ class _InitializeRepository(Task):
                     _pull(critic, actor)
             return _git_head(actor)
         if _valid_repository(actor):
+            _require_compatible_mode(actor, self.mode)
             _clone_repository(actor, critic)
             return _git_head(actor)
 
@@ -438,6 +518,9 @@ class _InitializeRepository(Task):
             actor,
             (initial,),
             self.domain_information,
+            instructions=physics_actor_system_prompt(mode=self.mode),
+            planner=self.mode.planner,
+            mode=self.mode,
             domain_files=self.domain_files,
             planner_actions=self.planner_actions,
             default_search_depth=self.default_search_depth,
@@ -448,6 +531,30 @@ class _InitializeRepository(Task):
         _commit(actor, "[physics] initialize canonical world state")
         _clone_repository(actor, critic)
         return _git_head(actor)
+
+
+def _require_compatible_mode(repository: Path, mode: PhysicsMode) -> None:
+    """Prevent one durable run from silently changing its strategy contract."""
+
+    path = repository / "physics-mode.json"
+    if not path.is_file():
+        if mode is VERIFIED:
+            return
+        raise ValueError(
+            "existing Physics repository predates strategy modes; start a new run "
+            f"directory for {mode.name}"
+        )
+    value = json.loads(path.read_text())
+    expected = {
+        "latent": mode.latent,
+        "verified": mode.verified,
+        "planner": mode.planner,
+    }
+    if value != expected:
+        raise ValueError(
+            f"Physics strategy mode changed for existing run: {value} != {expected}; "
+            "use a new run directory"
+        )
 
 
 def _current_terminal_state(
@@ -480,376 +587,6 @@ def _terminal_value(outer_context: str, reason: str) -> dict[str, Any]:
         "timeline": tuple(state["timeline"]),
         "actions": int(state["actions"]),
         "report": report,
-    }
-
-
-@dataclass
-class _GitCritic(Task):
-    critic: Task = field(repr=False, compare=False)
-    outer_context: str
-    max_actions: int
-    workspace: str | None = None
-    actor_thread_id: str | None = None
-    critic_thread_id: str | None = None
-    answer: Any = None
-    feedback: str = ""
-    round_number: int | None = None
-
-    def get_cache_key(self) -> str:
-        actor = Path(self.workspace) if self.workspace else None
-        head = _git_head(actor) if actor is not None else None
-        return digest_payload(
-            "eggopt.physics.git-critic.v2.exact-root-isolation",
-            {
-                "critic": _task_identity(self.critic),
-                "outer_context": self.outer_context,
-                "max_actions": self.max_actions,
-                "head": head or "invalid-repository",
-            },
-        )
-
-    def run(self):
-        if self.workspace is None or self.critic_thread_id is None:
-            raise RuntimeError(
-                "Physics Critic was not assigned its workspace and thread"
-            )
-        actor = Path(self.workspace)
-        critic_repo = _critic_repository(Path(self.outer_context))
-        context = _current_operation()
-        db = _operation_runtime(str(context["_runtime_key"]))
-        if self.actor_thread_id is None:
-            raise RuntimeError("Physics Critic was not assigned its Actor thread")
-        _require_thread_isolation(
-            db,
-            self.actor_thread_id,
-            actor,
-            role="Actor",
-        )
-        if not _valid_repository(critic_repo):
-            if not _valid_repository(actor):
-                return Critique.revise(
-                    "Neither the Actor workspace nor the Critic's trusted history copy "
-                    "is a valid Git repository. No real action was attempted. Recreate "
-                    "the Actor repository from the canonical files, run backtest.py and "
-                    "plan.py as useful, then commit world_model.py and plan.json with "
-                    "ordinary Git commands."
-                )
-            _clone_repository(actor, critic_repo)
-
-        if not _valid_repository(actor):
-            _restore_repository(actor, critic_repo)
-            _overlay_authoritative_state(
-                actor, _authoritative_state(Path(self.outer_context))
-            )
-            _git(actor, "add", "-A")
-            if _git_status(actor):
-                _git(
-                    actor,
-                    "commit",
-                    "-m",
-                    "[physics] rehydrate latest canonical world state",
-                )
-                _pull(critic_repo, actor)
-            return Critique.revise(
-                "The Actor repository was missing or corrupt, so the Critic restored its "
-                "last pulled history and overlaid the latest irreversible canonical "
-                "state. No real action was attempted for this proposal. Read the restored "
-                "canonical-input.json and trusted-report.json, rebuild the proposal, and "
-                "commit world_model.py and plan.json with ordinary Git commands."
-            )
-
-        dirty = _git_status(actor)
-        meaningful_dirty = "\n".join(
-            line
-            for line in dirty.splitlines()
-            if line[3:] != ".trusted" and not line[3:].startswith(".trusted/")
-        )
-        if meaningful_dirty:
-            return Critique.revise(
-                "The Critic evaluates only a clean committed HEAD, but the Actor "
-                "workspace contains the non-ignored changes listed below. No real action "
-                "was attempted. Commit intended theory/plan changes with ordinary Git "
-                "commands, including world_model.py and plan.json, or move disposable "
-                "work under scratch/ or "
-                "ignore it, verify `git status --short` is empty, then answer again.\n\n"
-                + meaningful_dirty
-            )
-
-        actor_head = _git_head(actor)
-        critic_head = _git_head(critic_repo)
-        if actor_head == critic_head:
-            return Critique.revise(
-                "This turn did not create a new Actor Git HEAD, so there is no proposal "
-                "for the Critic to validate and no real action was attempted. Revise the "
-                "theory as needed, run local checks as useful, commit world_model.py and "
-                "plan.json with ordinary Git commands, verify a clean new HEAD, then answer."
-            )
-
-        try:
-            _pull(critic_repo, actor)
-        except RuntimeError as exc:
-            _restore_repository(actor, critic_repo)
-            return Critique.revise(
-                "The submitted Actor history was not a fast-forward continuation of the "
-                "Critic's trusted copy. No real action was attempted. The Actor workspace "
-                "was restored to trusted history; recreate the proposal as a new commit "
-                f"on that history. Git detail: {exc}"
-            )
-
-        self._configure_critic_workspace(critic_repo)
-        domain = copy.copy(self.critic)
-        _bind_fields(
-            domain,
-            {
-                "workspace": str(critic_repo),
-                "actor_workspace": str(actor),
-                "outer_context": self.outer_context,
-                "head": actor_head,
-                "actor_thread_id": self.actor_thread_id,
-                "critic_thread_id": self.critic_thread_id,
-                "answer": self.answer,
-                "feedback": self.feedback,
-                "round_number": self.round_number,
-                "max_actions": self.max_actions,
-            },
-        )
-        result = yield keyed(domain, actor_head)
-
-        _commit_trusted_result(critic_repo, actor_head)
-        if _git_head(actor) != _git_head(critic_repo):
-            actor_dirty = "\n".join(
-                line
-                for line in _git_status(actor).splitlines()
-                if line[3:] not in {"canonical-input.json", "trusted-report.json"}
-                and line[3:] != ".trusted"
-                and not line[3:].startswith(".trusted/")
-            )
-            if actor_dirty:
-                return Critique.revise(
-                    "The Actor workspace changed after it submitted HEAD while the Critic "
-                    "was independently evaluating that commit. The trusted result cannot "
-                    "be synchronized over those edits. Preserve intended work separately, "
-                    "restore a clean synchronized repository, and submit it in a new "
-                    "Actor commit; do not edit files after submitting the commit."
-                )
-            _git(actor, "reset", "--hard", "HEAD")
-            _git(actor, "clean", "-fd")
-            _pull(actor, critic_repo)
-        return result
-
-    def _configure_critic_workspace(self, repository: Path) -> None:
-        context = _current_operation()
-        db = _operation_runtime(str(context["_runtime_key"]))
-        set_thread_working_directory(
-            db,
-            self.critic_thread_id,
-            str(repository),
-            reason="Physics Critic independent repository",
-        )
-        set_thread_tools_enabled(db, self.critic_thread_id, True)
-        set_thread_sandbox_config(
-            db,
-            self.critic_thread_id,
-            enabled=True,
-            provider="docker",
-            settings={
-                "network": {"allowedDomains": [], "deniedDomains": []},
-                "workspace": "/workspace",
-                "filesystem": {
-                    "allowWrite": ["."],
-                    "denyWrite": [".egg"],
-                    "denyRead": [".egg"],
-                },
-                "extra_mounts": [],
-                "extra_args": ["--cap-drop", "ALL"],
-            },
-            user_control_enabled=False,
-            reason="Physics Critic independent evaluation",
-        )
-        _require_thread_isolation(
-            db,
-            self.critic_thread_id,
-            repository,
-            role="Critic",
-        )
-
-
-def _critic_repository(outer_context: Path) -> Path:
-    return outer_context / "critic-repository"
-
-
-def _require_thread_isolation(
-    db, thread_id: str, repository: Path, *, role: str
-) -> None:
-    """Fail closed unless an Eggthread owns this exact sandboxed repository."""
-
-    working_directory = get_thread_working_directory(db, thread_id).resolve()
-    if working_directory != repository.resolve():
-        raise RuntimeError(
-            f"Physics {role} thread working directory escaped its repository: "
-            f"{working_directory} != {repository.resolve()}"
-        )
-    sandbox = get_thread_sandbox_config(db, thread_id)
-    if not sandbox.enabled or not sandbox.provider:
-        raise RuntimeError(f"Physics {role} thread has no enabled Eggthreads sandbox")
-
-
-def _authoritative_state(outer_context: Path) -> Path:
-    return outer_context / ".trusted"
-
-
-def _overlay_authoritative_state(actor: Path, authoritative: Path) -> None:
-    if not authoritative.is_dir():
-        return
-    target = actor / ".trusted"
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(authoritative, target)
-    state = authoritative / "state.json"
-    if state.is_file():
-        try:
-            timeline = json.loads(state.read_text())["timeline"]
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return
-        (actor / "canonical-input.json").write_text(
-            json.dumps({"timeline": timeline}, indent=2, sort_keys=True) + "\n"
-        )
-
-
-def _git(repository: Path, *args: str, check: bool = True) -> str:
-    if args and args[0] != "init" and not _is_repository_root(repository):
-        raise RuntimeError(
-            f"Git target is not an exact repository root: {repository.resolve()}"
-        )
-    completed = subprocess.run(
-        ["git", "-C", str(repository), *args],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if check and completed.returncode:
-        detail = (completed.stderr or completed.stdout).strip()
-        raise RuntimeError(detail or f"git {' '.join(args)} failed")
-    return completed.stdout.strip()
-
-
-def _valid_repository(repository: Path) -> bool:
-    """Return whether ``repository`` itself, not an ancestor, is a Git worktree."""
-
-    if not _is_repository_root(repository):
-        return False
-    head = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return head.returncode == 0
-
-
-def _is_repository_root(repository: Path) -> bool:
-    """Return whether Git resolves this directory itself as the worktree root."""
-
-    if not repository.is_dir():
-        return False
-    completed = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "--show-toplevel"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if completed.returncode or not completed.stdout.strip():
-        return False
-    try:
-        top = Path(completed.stdout.strip()).resolve(strict=True)
-    except (OSError, RuntimeError):
-        return False
-    return top == repository.resolve()
-
-
-def _git_head(repository: Path | None) -> str | None:
-    if repository is None or not _valid_repository(repository):
-        return None
-    return _git(repository, "rev-parse", "HEAD")
-
-
-def _git_status(repository: Path) -> str:
-    return _git(repository, "status", "--short", "--untracked-files=normal")
-
-
-def _configure_git(repository: Path) -> None:
-    _git(repository, "config", "user.name", "Egg Physics")
-    _git(repository, "config", "user.email", "physics@entropygradient.ai")
-
-
-def _initialize_repository(repository: Path) -> None:
-    _git(repository, "init", "-b", "main")
-    _configure_git(repository)
-
-
-def _commit(repository: Path, message: str) -> None:
-    _configure_git(repository)
-    _git(repository, "add", "-A")
-    if _git_status(repository):
-        _git(repository, "commit", "-m", message)
-
-
-def _commit_trusted_result(repository: Path, actor_head: str) -> None:
-    """Commit one complete Critic result, including its public projection."""
-
-    trusted = repository / ".trusted"
-    if trusted.exists():
-        _git(repository, "add", "-f", ".trusted")
-    _commit(
-        repository,
-        f"[physics] trusted Critic result after {actor_head[:12]}",
-    )
-
-
-def _clone_repository(source: Path, destination: Path) -> None:
-    if destination.exists():
-        shutil.rmtree(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    completed = subprocess.run(
-        ["git", "clone", "--no-local", str(source), str(destination)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if completed.returncode:
-        raise RuntimeError((completed.stderr or completed.stdout).strip())
-    _configure_git(destination)
-    info_exclude = destination / ".git" / "info" / "exclude"
-    with info_exclude.open("a", encoding="utf-8") as stream:
-        stream.write("\n.trusted/\n")
-    (destination / ".trusted").mkdir(exist_ok=True)
-
-
-def _restore_repository(actor: Path, critic: Path) -> None:
-    if actor.exists():
-        shutil.rmtree(actor)
-    _clone_repository(critic, actor)
-
-
-def _pull(destination: Path, source: Path) -> None:
-    _git(destination, "reset", "--hard", "HEAD")
-    _git(destination, "clean", "-fd")
-    _git(destination, "pull", "--ff-only", str(source), "HEAD")
-
-
-def _bind_fields(task: Task, values: Mapping[str, Any]) -> Task:
-    fields = getattr(task, "__dataclass_fields__", {})
-    for name, value in values.items():
-        if name in fields:
-            setattr(task, name, value)
-    return task
-
-
-def _task_identity(task: Task) -> Mapping[str, str]:
-    return {
-        "module": task.__class__.__module__,
-        "name": task.__class__.__qualname__,
-        "key": task.get_cache_key(),
     }
 
 

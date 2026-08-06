@@ -40,13 +40,15 @@ Functions sharing a suffix belong to one model.  For a model named ``main``:
 SEARCH MODES
 ============
 
-``auto`` (default)
+``astar`` (default)
+    Search explicit ``goal_*`` predicates, using matching ``heuristic_*``
+    functions when present. This is the verified strategy's normal first search.
+    Like the other exploratory modes, it also performs pairwise distinction
+    search across surviving models.
+
+``auto``
     Try A* when a goal exists. If no goal trajectory is found within the bounds,
     fall back to reward BFS when a reward exists.
-
-``astar``
-    Search only explicit ``goal_*`` predicates, using matching ``heuristic_*``
-    functions when present.
 
 ``reward``
     Run only bounded reward-maximizing BFS.
@@ -665,7 +667,7 @@ def evaluate_request(request: dict[str, Any]) -> dict[str, Any]:
                             "error": str(exc),
                         }
                     )
-        if mode in {"auto", "reward", "all"}:
+        if mode in SEARCH_MODES:
             for left, right in itertools.combinations(selected, 2):
                 try:
                     plan = distinction_search(
@@ -808,7 +810,7 @@ def _parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Open plan.py and read its module docstring for the complete guide.",
     )
-    parser.add_argument("--search", choices=SEARCH_MODES, default="auto")
+    parser.add_argument("--search", choices=SEARCH_MODES, default="astar")
     parser.add_argument("--model", help="Search only one model suffix")
     parser.add_argument("--depth", type=int, help="Local search depth")
     parser.add_argument("--max-nodes", type=int, help="Node budget per search")

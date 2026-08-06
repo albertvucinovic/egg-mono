@@ -18,6 +18,9 @@ include = ["eggconfig*", "eggflow*", "eggllm*", "eggthreads*", "eggopt*"]
 
 [tool.setuptools.package-data]
 eggconfig = ["data/*.json"]
+"eggopt.physics.latent" = ["systemprompt.md"]
+"eggopt.physics.latent-verified" = ["systemprompt.md"]
+"eggopt.physics.verified" = ["systemprompt.md"]
 "eggthreads.web.searxng" = [
   "docker-compose.yml",
   "settings.yml",

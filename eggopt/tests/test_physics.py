@@ -4,23 +4,31 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from importlib import import_module
 from itertools import pairwise
 from pathlib import Path
 
 import pytest
+from eggopt.actor_critic_git import GitCritic
 from eggopt.physics.critic import (
     _evaluation_report,
     _evaluation_report_path,
     _evaluation_request_path,
     _execution_feedback,
 )
+from eggopt.physics.latent import MODE as LATENT_MODE
+from eggopt.physics.modes import LATENT, LATENT_VERIFIED, VERIFIED, PhysicsMode
 from eggopt.physics.strategy import _actor_turn_prompt
+from eggopt.physics.systemprompt import strategy_system_prompt
 from eggopt.physics.theory import (
     evaluator_file_script,
     evaluator_script,
     parse_evaluator_output,
     parse_evaluator_receipt,
 )
+from eggopt.physics.verified import MODE as VERIFIED_MODE
+
+LATENT_VERIFIED_MODE = import_module("eggopt.physics.latent-verified").MODE
 
 from eggflow import Task
 from eggopt import (
@@ -722,7 +730,8 @@ def test_actor_prompt_explains_freedom_and_minimal_interface():
         "normal first attempt",
         "read the docstring at the top of `plan.py`",
         "modify it or write\nyour own script",
-        "normally add a matching useful `reward_<suffix>`",
+        "define matching `goal_<suffix>`",
+        "default A* planner",
         "normally use the best productive",
         "Planner suggestions are aids, not constraints",
         "need not have been found by `plan.py`",
@@ -740,11 +749,94 @@ def test_actor_prompt_explains_freedom_and_minimal_interface():
     assert "Domain-defined action objects" in prompt
 
 
+def test_strategy_modes_are_symmetric_and_prompts_are_packaged():
+    assert LATENT_MODE is LATENT
+    assert LATENT_VERIFIED_MODE is LATENT_VERIFIED
+    assert VERIFIED_MODE is VERIFIED
+    assert PhysicsStrategy.__dataclass_fields__["latent"].default is False
+    assert PhysicsStrategy.__dataclass_fields__["verified"].default is True
+    assert PhysicsStrategy.__dataclass_fields__["planner"].default is True
+    assert "trusted latent-state model" in strategy_system_prompt(LATENT)
+    assert "exact public-state prediction" in strategy_system_prompt(LATENT_VERIFIED)
+    assert strategy_system_prompt(VERIFIED) == ACTOR_INSTRUCTIONS.strip()
+    assert VERIFIED == PhysicsMode(latent=False, verified=True, planner=True)
+    assert Path("eggopt/eggopt/physics/latent-verified/strategy.py").is_file()
+    assert Path("eggopt/eggopt/physics/latent-verified/systemprompt.md").is_file()
+
+
+def test_strategy_accepts_three_behavior_flags():
+    physics, _ = strategy(Path("unused"), None)
+    configured = PhysicsStrategy(
+        actor=physics.actor,
+        observe=physics.observe,
+        execute=physics.execute,
+        validate_action=physics.validate_action,
+        is_goal=physics.is_goal,
+        identity={"mode": "latent-verified"},
+        latent=True,
+        verified=True,
+        planner=False,
+    )
+    assert configured.mode is LATENT_VERIFIED
+    assert "exact public-state prediction" in configured.actor.system_prompt
+
+
+def test_only_verified_strategy_supplies_planner(tmp_path):
+    for mode, expected in (
+        (LATENT, False),
+        (LATENT_VERIFIED, False),
+        (VERIFIED, True),
+    ):
+        workspace = tmp_path / mode.name
+        write_actor_files(
+            workspace,
+            (state(0),),
+            instructions=strategy_system_prompt(mode),
+            planner=mode.planner,
+            mode=mode,
+            planner_actions=({"action": 1},),
+        )
+        assert (workspace / "plan.py").exists() is expected
+        assert (workspace / "backtest.py").exists() is expected
+        assert json.loads((workspace / "physics-mode.json").read_text()) == {
+            "latent": mode.latent,
+            "verified": mode.verified,
+            "planner": mode.planner,
+        }
+        plan = json.loads((workspace / "plan.json").read_text())
+        assert isinstance(plan, dict) is mode.latent
+        model = (workspace / "world_model.py").read_text()
+        assert ("def encode_main" in model) is mode.latent
+        assert ("def observe_main" in model) is (mode.latent and mode.verified)
+        assert (
+            (workspace / "INSTRUCTIONS.md")
+            .read_text()
+            .startswith(strategy_system_prompt(mode).splitlines()[0])
+        )
+
+
+def test_verified_planner_defaults_to_astar(tmp_path):
+    write_actor_files(
+        tmp_path,
+        (state(0),),
+        planner_actions=({"action": 1},),
+    )
+    planner = (tmp_path / "plan.py").read_text()
+    assert 'default="astar"' in planner
+    assert "Plain `python plan.py` runs A* by default" in ACTOR_INSTRUCTIONS
+
+
+def test_git_critic_is_reusable_outside_physics_module():
+    assert GitCritic.__module__ == "eggopt.actor_critic_git"
+
+
 def test_actor_turn_prompts_match_new_protocol():
     first = _actor_turn_prompt(1, {})
     revision = _actor_turn_prompt(2, {"feedback": "Prediction contradicted."})
     assert "complete runbook" in first
     assert "plan" in first
+    assert "goal_<suffix>" in first
+    assert "default A* search" in first
     assert "reward_<suffix>" in first
     assert "read the detailed guide in plan.py" in first
     assert "adapt that planner (or your own script)" in first
@@ -1538,7 +1630,7 @@ def step_click(state, action):
 
 
 def test_nested_parent_git_repository_is_not_a_physics_repository(tmp_path):
-    from eggopt.physics.strategy import _git, _valid_repository
+    from eggopt.actor_critic_git import _git, _valid_repository
 
     git(tmp_path, "init", "-b", "main")
     git(tmp_path, "config", "user.name", "Parent")
@@ -1583,7 +1675,7 @@ def test_physics_initializes_nested_repository_instead_of_using_parent_git(
 def test_thread_isolation_requires_exact_working_directory_and_sandbox(
     tmp_path, monkeypatch
 ):
-    from eggopt.physics.strategy import _require_thread_isolation
+    from eggopt.actor_critic_git import _require_thread_isolation
 
     from eggthreads import (
         create_root_thread,
@@ -1699,3 +1791,151 @@ def test_critic_python_exec_uses_eggthreads_sandbox_and_exact_repository(
         assert '"outside": false' in str(output)
     finally:
         db.close()
+
+
+def run_latent_evaluator(request):
+    from eggopt.physics.latent_theory import evaluator_source
+
+    payload = json.dumps(request, allow_nan=False, separators=(",", ":"))
+    script = (
+        f"import json\n_EGG_PHYSICS_REQUEST = json.loads({payload!r})\n"
+        + evaluator_source()
+    )
+    completed = subprocess.run(
+        ["python", "-c", script], text=True, capture_output=True, check=True
+    )
+    marker = "__EGG_PHYSICS_LATENT_REPORT__"
+    receipt = next(line for line in completed.stdout.splitlines() if marker in line)
+    report = json.loads(receipt.split(marker, 1)[1])
+    return json.loads(Path(report["path"]).read_text())
+
+
+def test_latent_evaluator_rolls_out_and_reencodes_state(tmp_path):
+    source = """
+def encode_main(evidence):
+    return {"position": evidence["timeline"][-1].get(
+        "next_state", evidence["timeline"][-1]
+    )["position"]}
+def step_main(z, action):
+    return {"position": z["position"] + action["action"]}
+"""
+    proposal = run_latent_evaluator(
+        {
+            "kind": "proposal",
+            "verified": False,
+            "source": source,
+            "timeline": [state(0)],
+            "plan": {"model": "main", "actions": [{"action": 1}]},
+            "work_dir": str(tmp_path / "work"),
+            "output_path": str(tmp_path / "proposal.json"),
+        }
+    )
+    assert proposal["valid"] is True
+    assert proposal["latent_states"] == [{"position": 0}, {"position": 1}]
+    observed = run_latent_evaluator(
+        {
+            "kind": "observation",
+            "verified": False,
+            "source": source,
+            "timeline": [state(0), trajectory(0, 1)[0]],
+            "model": "main",
+            "expected_latent": {"position": 1},
+            "expected_public": None,
+            "work_dir": str(tmp_path / "work"),
+            "output_path": str(tmp_path / "observation.json"),
+        }
+    )
+    assert observed["latent_matches"] is True
+
+
+def test_latent_verified_evaluator_freezes_complete_public_state(tmp_path):
+    source = """
+def encode_main(evidence):
+    state = evidence["timeline"][-1].get("next_state", evidence["timeline"][-1])
+    return {"position": state["position"]}
+def step_main(z, action):
+    return {"position": z["position"] + action["action"]}
+def observe_main(z):
+    return {"position": z["position"], "legal_actions": [1]}
+"""
+    proposal = run_latent_evaluator(
+        {
+            "kind": "proposal",
+            "verified": True,
+            "source": source,
+            "timeline": [state(0)],
+            "plan": {"model": "main", "actions": [{"action": 1}]},
+            "work_dir": str(tmp_path / "work"),
+            "output_path": str(tmp_path / "proposal.json"),
+        }
+    )
+    assert proposal["valid"] is True
+    assert proposal["public_states"] == [state(0), state(1)]
+
+
+def test_latent_and_latent_verified_strategies_execute_with_git_critic(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    from eggopt.physics.latent.strategy import strategy as latent_strategy
+    latent_verified_strategy = import_module(
+        "eggopt.physics.latent-verified.strategy"
+    ).strategy
+
+    for name, factory, verified in (
+        ("latent", latent_strategy, False),
+        ("latent-verified", latent_verified_strategy, True),
+    ):
+        run_dir = tmp_path / name
+        workspace = run_dir / "workspace" / "innerContext"
+
+        def edit(_call, workspace=workspace, verified=verified, name=name):
+            observe = (
+                "\ndef observe_main(z):\n"
+                "    return {\"position\": z[\"position\"], \"legal_actions\": [1]}\n"
+                if verified
+                else ""
+            )
+            (workspace / "world_model.py").write_text(
+                "def encode_main(evidence):\n"
+                "    state = evidence[\"timeline\"][-1].get(\n"
+                "        \"next_state\", evidence[\"timeline\"][-1]\n"
+                "    )\n"
+                "    return {\"position\": state[\"position\"]}\n"
+                "def step_main(z, action):\n"
+                "    return {\"position\": z[\"position\"] + action[\"action\"]}\n"
+                + observe
+            )
+            (workspace / "plan.json").write_text(
+                json.dumps({"model": "main", "actions": [{"action": 1}]})
+            )
+            git(workspace, "add", "-A")
+            git(workspace, "commit", "-m", f"{name} proposal")
+
+        llm = ScriptedLLM(("ready",), edit)
+        actor = Agent(
+            llm,
+            {"role": name},
+            auto_approve_tools=True,
+            allowed_tools=frozenset({"bash", "python_exec"}),
+            system_prompt=physics_actor_system_prompt(
+                mode=LATENT_VERIFIED if verified else LATENT
+            ),
+        )
+        physics = factory(
+            actor=actor,
+            observe=lambda **_: Value(state(0)),
+            execute=lambda **_: Value(state(1)),
+            validate_action=lambda state, action: None,
+            is_goal=lambda value: value["position"] == 1,
+            identity={"domain": "toy", "mode": name},
+            planner_actions=({"action": 1},),
+        )
+
+        result = physics.run(run_dir=run_dir, max_cycles=1)
+
+        assert result.accepted is True
+        assert result.goal_reached is True
+        assert result.actions == 1
+        assert json.loads((workspace / "physics-mode.json").read_text())["latent"]
+        assert not (workspace / "plan.py").exists()

@@ -24,3 +24,8 @@ dev = ["pytest>=7"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["eggopt*"]
+
+[tool.setuptools.package-data]
+"eggopt.physics.latent" = ["systemprompt.md"]
+"eggopt.physics.latent-verified" = ["systemprompt.md"]
+"eggopt.physics.verified" = ["systemprompt.md"]

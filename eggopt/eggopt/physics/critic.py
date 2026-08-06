@@ -11,6 +11,7 @@ from ..actor_critic import Critique
 from ..identity import digest_payload
 from ..thread_tool import ThreadTool, ThreadToolResult
 from .lifecycle import classify_terminal_state, terminal_feedback
+from .modes import VERIFIED, PhysicsMode
 from .planning import load_plan
 from .theory import evaluator_file_script, parse_evaluator_receipt
 
@@ -24,6 +25,7 @@ class PhysicsCritic(Task):
     validate_action: Any = field(repr=False, compare=False)
     is_goal: Any = field(repr=False, compare=False)
     identity: Any
+    mode: PhysicsMode = VERIFIED
     terminal_outcome: Any = field(default=None, repr=False, compare=False)
     evaluator_timeout_sec: float = 300.0
     workspace: str | None = None
@@ -37,6 +39,7 @@ class PhysicsCritic(Task):
             "eggopt.physics.domain-critic.v4.verify-only",
             {
                 "identity": self.identity,
+                "mode": self.mode.name,
                 "head": self.head,
                 "max_actions": self.max_actions,
                 "evaluator_timeout_sec": self.evaluator_timeout_sec,
@@ -44,6 +47,12 @@ class PhysicsCritic(Task):
         )
 
     def run(self):
+        if not isinstance(self.mode, PhysicsMode):
+            raise TypeError("mode must be a PhysicsMode")
+        if self.mode.latent:
+            raise NotImplementedError(
+                f"{self.mode.name} Physics evaluation is not implemented yet"
+            )
         if self.workspace is None or self.critic_thread_id is None:
             raise RuntimeError(
                 "PhysicsCritic requires its assigned repository and thread"

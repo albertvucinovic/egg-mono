@@ -92,6 +92,25 @@ Use `plan_optimization(...)` to estimate evaluator work before choosing limits.
 
 ## PhysicsStrategy
 
+Physics has three symmetric presets built on one shared implementation:
+
+| preset | latent | verified public state | bundled planner |
+| --- | --- | --- | --- |
+| `eggopt.physics.latent` | yes | no | no |
+| `physics/latent-verified/` | yes | yes | no |
+| `eggopt.physics.verified` | no | yes | yes |
+
+Each preset owns `strategy.py` and `systemprompt.md`; mutually required Git,
+lifecycle, state, and instrument code remains in `eggopt.physics`. The default
+`PhysicsStrategy` mode is `verified`, preserving the established behavior.
+Equivalent direct flags are `latent=False, verified=True, planner=True`.
+
+Every preset uses the reusable `eggopt.GitCritic`: each Actor turn must create a
+new clean Git commit before its domain Critic evaluates or executes anything.
+The verified preset supplies `plan.py`, whose plain invocation runs A* by
+default; the two latent presets expect the Actor to create fitting latent-space
+planning code.
+
 `PhysicsStrategy` is the complete Git-backed scientific method, implemented as
 one persistent `ActorCritic`:
 
@@ -117,6 +136,29 @@ physics = PhysicsStrategy(
 )
 ```
 
+Or select one preset explicitly while keeping the same domain ports:
+
+```python
+from eggopt.physics.latent import strategy as latent_strategy
+
+physics = latent_strategy(
+    actor=actor,
+    observe=initial_state_task,
+    execute=real_action_task,
+    validate_action=validate_action,
+    is_goal=trusted_goal_predicate,
+    identity={"domain": "my-domain"},
+)
+```
+
+`latent` models expose matching `encode_<suffix>(evidence)` and
+`step_<suffix>(z, action)` functions; the Critic compares re-encoded observed
+latent state after each action. `latent_verified` additionally requires
+`observe_<suffix>(z)` and compares every frozen complete public prediction.
+Their `plan.json` is `{ "model": "...", "actions": [...] }`. The verified
+strategy retains the complete-public-state `step_<suffix>` trajectory contract
+described below.
+
 `validate_action(state=..., action=...)` returns `None` for one valid complete
 domain action or raises before execution. It validates without translating the
 action. `planner_actions` may optionally expose a finite tuple of complete actions
@@ -138,7 +180,7 @@ Actor turns through one bounded Eggthreads `SubtreeScheduler`. An Agent with
 `scheduler_managed=True` waits for that shared scheduler instead of constructing
 its own `ThreadRunner`; ordinary standalone Physics runs remain unchanged.
 
-Eggopt owns the Timeline, independent `plan.json` trajectory validation, the
+Eggopt owns the Timeline, independent `plan.json` validation, the
 execute-until-resolution loop, and repository recovery. The Actor owns its
 `step_<suffix>` hypotheses and every normal file in `innerContext`, including any
 planning scripts it edits or creates. The domain owns its action representation
@@ -160,7 +202,7 @@ caching content-addressed. The evaluator writes
 SHA-256 and records only a compact receipt. Cached replay verifies or
 rematerializes the report before the Critic consumes it.
 
-When creating or recovering a repository, PhysicsStrategy seeds a readable,
+For the verified strategy, PhysicsStrategy seeds a readable,
 standard-library-only `plan.py` plus small `backtest.py` and
 `physics-config.json` helpers. `plan.py` contains reward BFS, A*, pairwise
 distinction search over Timeline-consistent `step_<suffix>` hypotheses, and its

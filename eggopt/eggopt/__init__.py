@@ -1,6 +1,7 @@
 """Small, durable optimization interfaces built on Eggflow and Eggthreads."""
 
 from .actor_critic import ActorCritic, ActorCriticResult, Agent, Critique
+from .actor_critic_git import GitCritic
 from .context import current_evaluation, current_operation
 from .evaluation import Evaluation
 from .gepa import (
@@ -15,17 +16,24 @@ from .gepa import (
 from .operation import run_operation
 from .physics import (
     ACTOR_INSTRUCTIONS,
+    LATENT,
+    LATENT_VERIFIED,
     PHYSICS_ACTOR_SYSTEM_PROMPT,
     PLAN,
+    VERIFIED,
     WORLD_MODEL_TEMPLATE,
+    LatentPhysicsCritic,
     PhysicsCritic,
+    PhysicsMode,
     PhysicsResult,
     PhysicsStrategy,
     TerminalOutcome,
     canonical_plan,
     load_plan,
     physics_actor_system_prompt,
+    physics_mode,
     run_physics,
+    strategy_system_prompt,
     write_actor_files,
 )
 from .recovery import InteractionRecovery, InteractionRecoveryError
@@ -41,16 +49,22 @@ __all__ = [  # noqa: RUF022
     "GEPA",
     "GEPAConfig",
     "GEPAResult",
+    "GitCritic",
     "InteractionRecovery",
     "InteractionRecoveryError",
+    "LATENT",
+    "LATENT_VERIFIED",
+    "LatentPhysicsCritic",
     "MutatorInput",
     "PHYSICS_ACTOR_SYSTEM_PROMPT",
     "PLAN",
     "WORLD_MODEL_TEMPLATE",
     "PhysicsCritic",
+    "PhysicsMode",
     "PhysicsResult",
     "PhysicsStrategy",
     "TerminalOutcome",
+    "VERIFIED",
     "SelectParents",
     "ThreadTool",
     "ThreadToolFile",
@@ -62,7 +76,9 @@ __all__ = [  # noqa: RUF022
     "load_plan",
     "plan_optimization",
     "physics_actor_system_prompt",
+    "physics_mode",
     "run_physics",
     "run_operation",
+    "strategy_system_prompt",
     "write_actor_files",
 ]
