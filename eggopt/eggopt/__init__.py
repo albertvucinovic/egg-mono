@@ -12,6 +12,7 @@ from .gepa import (
     optimize_anything,
     plan_optimization,
 )
+from .operation import run_operation
 from .physics import (
     ACTOR_INSTRUCTIONS,
     PHYSICS_ACTOR_SYSTEM_PROMPT,
@@ -62,5 +63,6 @@ __all__ = [  # noqa: RUF022
     "plan_optimization",
     "physics_actor_system_prompt",
     "run_physics",
+    "run_operation",
     "write_actor_files",
 ]
