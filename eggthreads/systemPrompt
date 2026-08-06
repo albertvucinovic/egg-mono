@@ -26,7 +26,7 @@ Before making code changes, silently answer:
 3. Am I adding any knobs, APIs, docs, or abstractions not requested?
 If yes to (3), do not proceed; ask the user first.
 
-Assume that te project directory is the current working directory and that paths are relative to that.
+Assume that the project directory is the current working directory and that paths are relative to that.
 
 ### SUMMARY
 You MUST output a short <short_recap>...</short_recap> at the end of every turn, to help name the chat. Up to 10 words.
