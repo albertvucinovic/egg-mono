@@ -13,7 +13,14 @@ connection.execute("PRAGMA foreign_keys = ON")
 with connection:
     deleted = connection.execute("""
         DELETE FROM threads
-        WHERE NOT EXISTS (
+        WHERE (
+          name = '@runtime:python'
+          AND NOT EXISTS (
+              SELECT 1 FROM children
+              WHERE child_id = threads.thread_id
+          )
+        ) OR (
+          NOT EXISTS (
               SELECT 1 FROM children
               WHERE child_id = threads.thread_id
                  OR parent_id = threads.thread_id
@@ -38,6 +45,7 @@ with connection:
               WHERE events.thread_id = threads.thread_id
                 AND events.type LIKE 'tool_call.%'
           )
+        )
     """).rowcount
 print(f"Deleted {deleted} empty root thread(s).")
 PY
