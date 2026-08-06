@@ -4244,25 +4244,31 @@ def _thread_models_by_id(
 
 def _thread_last_modified_by_id(
     db: ThreadsDB, metadata_by_id: Mapping[str, ThreadRow]
-) -> Dict[str, str]:
+) -> Dict[str, tuple[str, int]]:
     """Return each thread's latest event timestamp via indexed tail lookups."""
 
     modified = {
-        thread_id: row.created_at for thread_id, row in metadata_by_id.items()
+        thread_id: (row.created_at, -1)
+        for thread_id, row in metadata_by_id.items()
     }
     thread_ids = list(metadata_by_id)
     for offset in range(0, len(thread_ids), 500):
         chunk = thread_ids[offset : offset + 500]
         placeholders = ",".join("?" for _ in chunk)
         cur = db.conn.execute(
-            "SELECT t.thread_id, COALESCE(("
-            "SELECT e.ts FROM events e INDEXED BY events_thread_seq "
-            "WHERE e.thread_id=t.thread_id ORDER BY e.event_seq DESC LIMIT 1"
-            "), t.created_at) FROM threads t "
+            "SELECT t.thread_id, COALESCE(e.ts, t.created_at), "
+            "COALESCE(e.event_seq, -1) FROM threads t "
+            "LEFT JOIN events e ON e.event_seq=("
+            "SELECT latest.event_seq FROM events latest "
+            "INDEXED BY events_thread_seq WHERE latest.thread_id=t.thread_id "
+            "ORDER BY latest.event_seq DESC LIMIT 1) "
             f"WHERE t.thread_id IN ({placeholders})",
             tuple(chunk),
         )
-        modified.update(cur.fetchall())
+        modified.update(
+            (thread_id, (timestamp, int(event_seq)))
+            for thread_id, timestamp, event_seq in cur.fetchall()
+        )
     return modified
 
 
@@ -4371,7 +4377,7 @@ def get_thread_tree(
             "description": metadata_by_id[thread_id].short_recap,
             "state": state_by_id.get(thread_id, "idle"),
             "model": model_by_id.get(thread_id),
-            "last_modified": modified_by_id[thread_id],
+            "last_modified": modified_by_id[thread_id][0],
             "children": [],
         }
         for thread_id in ordered_ids
@@ -4381,7 +4387,9 @@ def get_thread_tree(
             nodes[child_id] for child_id in included_children[thread_id]
         ]
     if root_id is None:
-        root_ids.sort(key=lambda thread_id: modified_by_id[thread_id], reverse=True)
+        root_ids.sort(
+            key=lambda thread_id: (*modified_by_id[thread_id], thread_id)
+        )
     return [nodes[thread_id] for thread_id in root_ids]
 
 

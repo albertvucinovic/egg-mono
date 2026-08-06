@@ -92,7 +92,7 @@ def test_threads_tool_returns_nested_calling_subtree(tmp_path) -> None:
     assert unrelated not in output
 
 
-def test_thread_tree_sorts_roots_by_last_modified_and_queries_events_in_bulk(
+def test_thread_tree_sorts_roots_oldest_first_and_queries_events_in_bulk(
     tmp_path,
 ) -> None:
     db = _make_db(tmp_path)
@@ -111,8 +111,8 @@ def test_thread_tree_sorts_roots_by_last_modified_and_queries_events_in_bulk(
     finally:
         db.conn.set_trace_callback(None)
 
-    assert [node["id"] for node in tree] == [older, newer]
-    assert tree[0]["last_modified"] == expected
+    assert [node["id"] for node in tree] == [newer, older]
+    assert tree[-1]["last_modified"] == expected
     modified_queries = [
         sql for sql in statements if "INDEXED BY events_thread_seq" in sql
     ]
