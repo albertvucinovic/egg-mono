@@ -196,7 +196,12 @@ class EggDisplayApp(
             self.current_thread = reload_thread
             reloaded_existing_thread = True
         else:
-            self.current_thread = create_root_thread(self.db, name='Root', models_path=str(MODELS_PATH))
+            self.current_thread = create_root_thread(
+                self.db,
+                name='Root',
+                models_path=str(MODELS_PATH),
+                origin='egg.startup',
+            )
             append_message(self.db, self.current_thread, 'system', self.system_prompt)
             create_snapshot(self.db, self.current_thread)
 

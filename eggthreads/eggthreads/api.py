@@ -310,7 +310,8 @@ def _ulid_like() -> str:
 
 
 def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_key: Optional[str] = None,
-                       models_path: str = "models.json", all_models_path: str | None = None) -> str:
+                       models_path: str = "models.json", all_models_path: str | None = None,
+                       origin: str | None = None) -> str:
     """Create a new root thread (top-level conversation).
 
     A root thread has no parent and serves as the entry point for a
@@ -324,6 +325,7 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
             defaults to the ``default_model`` from models.json.
         models_path: Path to models.json configuration file.
         all_models_path: Path to all-models.json catalog file (optional).
+        origin: Optional durable creation provenance for maintenance tools.
 
     Returns:
         The new thread's unique ID (ULID format).
@@ -335,7 +337,22 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
     if effective_model_key is None:
         effective_model_key = _get_default_model_key(models_path)
 
-    db.create_thread(thread_id=tid, name=name, parent_id=None, initial_model_key=effective_model_key, depth=0)
+    normalized_origin = str(origin or "").strip()
+    if origin is not None and not normalized_origin:
+        raise ValueError("origin must be a non-empty string when provided")
+    initial_events = (
+        (("thread.origin", {"source": normalized_origin, "version": 1}),)
+        if normalized_origin
+        else ()
+    )
+    db.create_thread(
+        thread_id=tid,
+        name=name,
+        parent_id=None,
+        initial_model_key=effective_model_key,
+        depth=0,
+        initial_events=initial_events,
+    )
 
     # Emit model.switch event with concrete_model_info if we have a model
     if effective_model_key:

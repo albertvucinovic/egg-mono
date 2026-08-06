@@ -91,6 +91,7 @@ async def cmd_new_thread(name: str) -> CommandResponse:
         initial_model_key=model_key,
         models_path=models_path,
         all_models_path=all_models_path,
+        origin="eggw.command.newThread",
     )
     append_root_system_prompt(core.db, thread_id)
     ensure_scheduler_for(thread_id)
