@@ -167,6 +167,7 @@ class FormattingMixin:
             return (
                 f"{cur_tag}{sched_tag}{sflag}[dim]{tid[-8:]}[/dim] {status_tag} - {recap} "
                 f"[dim][model: {model}][/dim]"
+                f" [dim][last modified: {node['last_modified']}][/dim]"
                 + (f"  [dim]{label}[/dim]" if label else '')
             )
 

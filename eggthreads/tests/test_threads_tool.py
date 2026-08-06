@@ -31,6 +31,13 @@ def test_threads_tool_returns_nested_calling_subtree(tmp_path) -> None:
     _set_recap(db, child, "worker description")
     _set_recap(db, grandchild, "review description")
     _set_recap(db, second_child, "second description")
+    modified = {
+        thread_id: db.conn.execute(
+            "SELECT ts FROM events WHERE thread_id=? ORDER BY event_seq DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()[0]
+        for thread_id in (root, child, grandchild, second_child)
+    }
 
     output = create_default_tools().execute("threads", {}, db=db, thread_id=root)
 
@@ -48,6 +55,7 @@ def test_threads_tool_returns_nested_calling_subtree(tmp_path) -> None:
                 "description": "root description",
                 "state": "idle",
                 "model": None,
+                "last_modified": modified[root],
                 "children": [
                     {
                         "id": child,
@@ -55,6 +63,7 @@ def test_threads_tool_returns_nested_calling_subtree(tmp_path) -> None:
                         "description": "worker description",
                         "state": "idle",
                         "model": None,
+                        "last_modified": modified[child],
                         "children": [
                             {
                                 "id": grandchild,
@@ -62,6 +71,7 @@ def test_threads_tool_returns_nested_calling_subtree(tmp_path) -> None:
                                 "description": "review description",
                                 "state": "idle",
                                 "model": None,
+                                "last_modified": modified[grandchild],
                                 "children": [],
                             }
                         ],
@@ -72,6 +82,7 @@ def test_threads_tool_returns_nested_calling_subtree(tmp_path) -> None:
                         "description": "second description",
                         "state": "idle",
                         "model": None,
+                        "last_modified": modified[second_child],
                         "children": [],
                     },
                 ],
@@ -79,6 +90,33 @@ def test_threads_tool_returns_nested_calling_subtree(tmp_path) -> None:
         ],
     }
     assert unrelated not in output
+
+
+def test_thread_tree_sorts_roots_by_last_modified_and_queries_events_in_bulk(
+    tmp_path,
+) -> None:
+    db = _make_db(tmp_path)
+    older = ts.create_root_thread(db, name="older")
+    newer = ts.create_root_thread(db, name="newer")
+    ts.append_message(db, older, "user", "modified last")
+    expected = db.conn.execute(
+        "SELECT ts FROM events WHERE thread_id=? ORDER BY event_seq DESC LIMIT 1",
+        (older,),
+    ).fetchone()[0]
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+
+    try:
+        tree = ts.get_thread_tree(db)
+    finally:
+        db.conn.set_trace_callback(None)
+
+    assert [node["id"] for node in tree] == [older, newer]
+    assert tree[0]["last_modified"] == expected
+    modified_queries = [
+        sql for sql in statements if "INDEXED BY events_thread_seq" in sql
+    ]
+    assert len(modified_queries) == 1
 
 
 def test_threads_tool_can_narrow_to_descendant_subtree(tmp_path) -> None:

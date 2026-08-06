@@ -4242,6 +4242,30 @@ def _thread_models_by_id(
     return models
 
 
+def _thread_last_modified_by_id(
+    db: ThreadsDB, metadata_by_id: Mapping[str, ThreadRow]
+) -> Dict[str, str]:
+    """Return each thread's latest event timestamp via indexed tail lookups."""
+
+    modified = {
+        thread_id: row.created_at for thread_id, row in metadata_by_id.items()
+    }
+    thread_ids = list(metadata_by_id)
+    for offset in range(0, len(thread_ids), 500):
+        chunk = thread_ids[offset : offset + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = db.conn.execute(
+            "SELECT t.thread_id, COALESCE(("
+            "SELECT e.ts FROM events e INDEXED BY events_thread_seq "
+            "WHERE e.thread_id=t.thread_id ORDER BY e.event_seq DESC LIMIT 1"
+            "), t.created_at) FROM threads t "
+            f"WHERE t.thread_id IN ({placeholders})",
+            tuple(chunk),
+        )
+        modified.update(cur.fetchall())
+    return modified
+
+
 def get_thread_tree(
     db: ThreadsDB,
     root_id: Optional[str] = None,
@@ -4251,10 +4275,11 @@ def get_thread_tree(
     """Return thread metadata as a nested forest, optionally rooted at one thread.
 
     Each node contains the full thread id, optional name, short recap as
-    ``description``, effective ``model``, real-time ``state``, and a nested
-    ``children`` list. Fast mode always detects streaming; full mode also
-    distinguishes runnable from idle. Traversal rejects cycles or
-    multiple-parent links so permission-sensitive callers fail closed.
+    ``description``, effective ``model``, last-modified timestamp, real-time
+    ``state``, and a nested ``children`` list. Fast mode always detects
+    streaming; full mode also distinguishes runnable from idle. Traversal
+    rejects cycles or multiple-parent links so permission-sensitive callers
+    fail closed.
     """
 
     if root_id is None:
@@ -4337,6 +4362,7 @@ def get_thread_tree(
         db, ordered_ids, skip_runnability=not include_runnability
     )
     model_by_id = _thread_models_by_id(db, metadata_by_id)
+    modified_by_id = _thread_last_modified_by_id(db, metadata_by_id)
 
     nodes = {
         thread_id: {
@@ -4345,6 +4371,7 @@ def get_thread_tree(
             "description": metadata_by_id[thread_id].short_recap,
             "state": state_by_id.get(thread_id, "idle"),
             "model": model_by_id.get(thread_id),
+            "last_modified": modified_by_id[thread_id],
             "children": [],
         }
         for thread_id in ordered_ids
@@ -4353,6 +4380,8 @@ def get_thread_tree(
         nodes[thread_id]["children"] = [
             nodes[child_id] for child_id in included_children[thread_id]
         ]
+    if root_id is None:
+        root_ids.sort(key=lambda thread_id: modified_by_id[thread_id], reverse=True)
     return [nodes[thread_id] for thread_id in root_ids]
 
 
@@ -4387,6 +4416,8 @@ def serialize_thread_tree(tree: list[Dict[str, Any]]) -> str:
             + json.dumps(node.get("state"), ensure_ascii=False)
             + ',"model":'
             + json.dumps(node.get("model"), ensure_ascii=False)
+            + ',"last_modified":'
+            + json.dumps(node.get("last_modified"), ensure_ascii=False)
             + ',"children":'
         )
         actions.append(("text", "}"))
