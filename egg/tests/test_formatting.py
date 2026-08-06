@@ -313,10 +313,15 @@ class TestFormatTree:
         # Root thread should have name "Root" (from default creation)
         assert "Root" in tree
 
-    def test_includes_last_modified(self, egg_app):
+    def test_includes_last_modified_without_label(self, egg_app):
         tree = egg_app.format_tree()
 
-        assert "[last modified:" in tree
+        timestamp = egg_app.db.conn.execute(
+            "SELECT ts FROM events WHERE thread_id=? ORDER BY event_seq DESC LIMIT 1",
+            (egg_app.current_thread,),
+        ).fetchone()[0]
+        assert timestamp in tree
+        assert "last modified:" not in tree
 
     def test_keeps_orphan_runtime_roots_visible(self, egg_app):
         """Legacy orphan @runtime:* rows remain visible/inspectable."""
