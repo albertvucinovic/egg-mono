@@ -1,225 +1,248 @@
 # eggopt
 
-Eggopt GEPA searches over opaque finite-JSON candidate values. A domain supplies
-one Mutator and one Evaluator; GEPA knows only when to call them.
+`eggopt` builds restartable agentic operations on top of
+[`eggflow`](../eggflow/README.md) tasks and
+[`eggthreads`](../eggthreads/README.md) conversations. It supplies reusable
+Actor–Critic loops, durable tool calls and file receipts, finite-JSON GEPA
+search, and Git-backed Physics strategies for model-based scientific discovery.
+
+Eggopt does not prescribe one candidate schema or domain. Domain code owns its
+prompts, evaluators, action/state contracts, extraction, and validation; Eggopt
+owns durable composition, identities, thread/workspace structure, recovery, and
+search control.
+
+## Install
+
+```bash
+pip install -e ./eggflow
+pip install -e ./eggthreads
+pip install -e ./eggopt
+```
+
+Python 3.10+ is required.
+
+## Durable standalone operations
+
+`run_operation(...)` is the smallest supported runtime boundary for a finite
+Eggflow composition:
+
+```python
+from dataclasses import dataclass
+from eggflow import Task
+from eggopt import current_operation, run_operation
+
+@dataclass
+class BuildReport(Task):
+    topic: str
+
+    def run(self):
+        context = current_operation()
+        return {
+            "topic": self.topic,
+            "workspace": context["inner_context"],
+            "thread": context["operation_thread_id"],
+        }
+
+result = run_operation(
+    BuildReport("cache behavior"),
+    identity={"dataset": "v1"},
+    name="Report",
+    run_dir="runs/report",
+)
+```
+
+The run directory owns one `.egg/` database for Eggflow and Eggthreads plus a
+`workspace/innerContext` directory. Reusing `run_dir`, `name`, task identity,
+and finite-JSON `identity` resumes cached primitive work. Changing the identity
+creates a distinct durable operation namespace without discarding the run.
+
+## Actor–Critic compositions
+
+`Agent` describes an Eggthreads-backed model worker: its model/client, tools,
+identity, full-history context limit, tool approval, and optional system prompt.
+`ActorCritic` is an Eggflow task that creates a stable Actor/Critic child pair
+and runs a bounded, recoverable proposal/revision loop.
 
 ```python
 from eggflow import Task
+from eggopt import ActorCritic, Agent, Critique, run_operation
+
+actor = Agent(llm=llm, identity={"role": "writer"})
+
+def actor_prompt(round_number, state):
+    return "Produce the requested artifact." if round_number == 1 else state["feedback"]
+
+class CheckArtifact(Task):
+    def run(self):
+        return Critique.accept(load_artifact()) if valid() else Critique.revise("Fix validation errors.")
+
+loop = ActorCritic(
+    actor=actor,
+    critic=CheckArtifact(),
+    actor_prompt=actor_prompt,
+    max_rounds=3,
+)
+result = run_operation(loop, identity={"artifact": "v1"})
+```
+
+In this sketch `llm`, `load_artifact`, and `valid` are supplied by the domain.
+
+A critic may be another `Agent` with a `critic_prompt`, or a deterministic
+`Task`. `Critique.accept(value, feedback)` extracts a result;
+`Critique.revise(feedback)` requests another Actor turn. Prompt factories may
+return text or a Task, allowing durable preparation after the pair is assigned.
+Interrupted model turns use Eggthreads continuation/recovery rather than being
+silently replayed.
+
+### GitCritic
+
+`GitCritic` wraps a domain Critic when proposals are files in a Git repository.
+Each Actor turn must create one new clean commit. The wrapper maintains an
+isolated Critic clone, verifies fast-forward history, keeps trusted state
+separate, commits the Critic result, and synchronizes authoritative history back
+to the Actor workspace. The wrapped Critic still owns domain-specific checks.
+
+## Durable thread tools and files
+
+`ThreadTool` executes one synthetic tool call on an assigned Eggthreads thread
+while participating in Eggflow cache identity:
+
+```python
+from eggopt import ThreadTool
+
+receipt = yield ThreadTool(
+    tools=tools,
+    thread_id=thread_id,
+    name="python_exec",
+    arguments={"code": "build()"},
+    input_files=("input.json",),
+    output_files=("result.json",),
+)
+```
+
+`tools` is a `ToolRegistry` and `thread_id` is an operation-owned Eggthreads
+thread supplied by the surrounding task context.
+
+Declared input-file hashes become part of identity without copying file bytes
+into arguments. Declared outputs are snapshotted into Eggthreads' content-
+addressed provider-output store. Cache reuse verifies or rematerializes missing
+workspace files and returns a compact `ThreadToolResult`; transcripts store a
+receipt rather than large bytes.
+
+## GEPA over finite JSON
+
+`optimize_anything(...)` performs case-wise Pareto search over opaque finite-JSON
+candidate values. A domain supplies a seed, evaluator, dataset, objective, and a
+Mutator through `GEPAConfig`:
+
+```python
 from eggopt import GEPAConfig, optimize_anything
 
-
-class Improve(Task):
-    context: object
-
-    def run(self):
-        # A domain may compose ActorCritic here, extract a response or file,
-        # validate it, and return the complete next candidate.
-        return improve(self.context)
-
-
-def mutate(context):
-    return Improve(context)
-
-
-def evaluate(candidate, case):
-    answer = run_my_system(candidate, case)
-    return grade(answer, case), {"answer": answer}
-
-
 result = optimize_anything(
-    seed_candidate,
+    {"prompt": "Answer carefully."},
     evaluator=evaluate,
     dataset=trainset,
-    valset=valset,
-    objective="Improve accuracy while preserving the output contract.",
+    valset=validation,
+    objective="Improve accuracy without changing the output contract.",
     config=GEPAConfig(
-        run_dir="runs/my-gepa",
+        run_dir="runs/gepa",
+        mutator=mutate,
         max_evaluator_calls=150,
         max_candidates=20,
-        mutator=mutate,
     ),
 )
-
-use(result.best_candidate)
+print(result.best_candidate, result.best_score)
 ```
 
-## Composition
+The evaluator, Mutator, datasets, and case identities are domain-owned.
 
-- Eggflow owns task caching, retry, and restart recovery.
-- GEPA owns Pareto parent selection, minibatches, acceptance, evaluator budgets,
-  and result assembly.
-- The domain Mutator receives a `MutatorInput` with selected complete parents,
-  evaluator evidence, objective, generation, validation-score history, and the
-  last proposal outcome. It returns one complete candidate, directly or as a
-  Task/awaitable.
-- Candidate values are opaque to GEPA. Finite JSON is the only representation
-  contract required for stable cache identity and durable results.
-- `ActorCritic` is the reusable checked-generation loop a Mutator may compose.
-  A deterministic Critic may return `Critique.accept(candidate, feedback)`;
-  `result.value` is that extracted candidate. Without an extracted value, it
-  defaults to the Actor answer. Extraction may therefore come from the response,
-  a workspace file, or any other domain-owned transport. Plain decision mappings
-  remain valid for simple critics.
-- ActorCritic prompt factories may return Tasks, so thread-bound preparation can
-  finish after Actor/Critic assignment and before the corresponding model turn.
-- `ThreadTool` is the reusable Eggflow task for durable synthetic tool calls on
-  assigned Eggthreads threads; domain code never queries Eggthreads storage.
-  Its optional `input_files=(...)` contract authorizes files and includes their
-  content hashes in the cache identity without copying large inputs into tool
-  arguments.
-  Its optional `output_files=(...)` contract snapshots sandbox-written files into
-  content-addressed storage and verifies/rematerializes them on recovery while
-  returning a compact `ThreadToolResult` receipt.
-- Full valset evaluations live under `GEPA → Validation`. Dataset reflection
-  evaluations live under `GEPA → Mutation Review → Mutation → Reflection`; the
-  deterministic controller alone uses valset scores for Pareto selection.
-- Domain code owns Actors, prompts, extraction, validation, candidate shape,
-  cases, evaluators, and model selection.
+GEPA owns deterministic minibatches, Pareto parent selection, acceptance,
+evaluator budgets, full validation, and result assembly. The Mutator receives a
+`MutatorInput` containing complete parents, objective, evaluator evidence,
+score history, generation, and the last proposal outcome; it returns one
+complete candidate directly or through a Task/awaitable. The evaluator may be a
+callable or expose `task(candidate, case)`.
 
-All GEPA implementation modules live in `eggopt/gepa/`. Top-level `eggopt`
-contains only reusable primitives and deliberate public re-exports.
+Candidate values and identities must be finite JSON so durable keys remain
+stable. `plan_optimization(...)` estimates evaluator work before a run. Raising
+`max_evaluator_calls` or `max_candidates` in the same run directory reuses
+completed primitive evaluations.
 
-Each study stores its durable Eggflow and Eggthreads state under one run-owned
-`.egg` directory. Increasing stopping budgets reuses completed primitive work.
-`max_evaluator_calls` and `max_candidates` are not primitive cache-key inputs.
+## Physics scientific-discovery strategies
 
-`GEPAConfig(evaluator_context_limit=...)` controls the full Eggthreads history
-available to each case evaluator. `mutator_context_limit` supplies the domain
-Mutator operation's inherited limit; a domain ActorCritic agent may override it.
-Eggthreads provider-context compaction remains independent.
+`PhysicsStrategy` is a Git-backed Actor–Critic protocol for domains with trusted
+observation and action ports. The Actor proposes a world model and `plan.json`
+in a clean commit; an isolated trusted Critic validates predictions and may
+execute real actions until the goal, a terminal state, mismatch, plan
+exhaustion, or safety budget.
 
-Use `plan_optimization(...)` to estimate evaluator work before choosing limits.
-
-## PhysicsStrategy
-
-Physics has three symmetric presets built on one shared implementation:
-
-| preset | latent | verified public state | bundled planner |
-| --- | --- | --- | --- |
-| `eggopt.physics.latent` | yes | no | no |
-| `physics/latent-verified/` | yes | yes | no |
-| `eggopt.physics.verified` | no | yes | yes |
-
-Each preset owns `strategy.py` and `systemprompt.md`; mutually required Git,
-lifecycle, state, and instrument code remains in `eggopt.physics`. The default
-`PhysicsStrategy` mode is `verified`, preserving the established behavior.
-Equivalent direct flags are `latent=False, verified=True, planner=True`.
-
-Every preset uses the reusable `eggopt.GitCritic`: each Actor turn must create a
-new clean Git commit before its domain Critic evaluates or executes anything.
-The verified preset supplies `plan.py`, whose plain invocation runs A* by
-default; the two latent presets expect the Actor to create fitting latent-space
-planning code.
-
-`PhysicsStrategy` is the complete Git-backed scientific method, implemented as
-one persistent `ActorCritic`:
-
-```text
-Physics
-└── Critic
-    └── Actor
-```
-
-The domain supplies only its world ports:
+A domain supplies:
 
 ```python
-physics = PhysicsStrategy(
+from eggopt import PhysicsStrategy, run_physics
+
+strategy = PhysicsStrategy(
     actor=actor,
-    observe=initial_state_task,
-    execute=real_action_task,
-    validate_action=trusted_domain_action_validator,
-    is_goal=trusted_goal_predicate,
-    terminal_outcome=trusted_absorbing_state_classifier,  # optional
-    identity={"domain": "my-world", "version": 1},
-    domain_information="Explain the public state and action formats.",
-    evaluator_timeout_sec=300,
-)
-```
-
-Or select one preset explicitly while keeping the same domain ports:
-
-```python
-from eggopt.physics.latent import strategy as latent_strategy
-
-physics = latent_strategy(
-    actor=actor,
-    observe=initial_state_task,
-    execute=real_action_task,
+    observe=observe_task,
+    execute=execute_task,
     validate_action=validate_action,
-    is_goal=trusted_goal_predicate,
-    identity={"domain": "my-domain"},
+    is_goal=is_goal,
+    terminal_outcome=terminal_outcome,  # optional
+    identity={"domain": "experiment-v1"},
+    domain_information="Describe public states and complete actions.",
 )
+
+result = run_physics(strategy, run_dir="runs/physics", max_actions=100)
 ```
 
-`latent` models expose matching `encode_<suffix>(evidence)` and
-`step_<suffix>(z, action)` functions; the Critic compares re-encoded observed
-latent state after each action. `latent_verified` additionally requires
-`observe_<suffix>(z)` and compares every frozen complete public prediction.
-Their `plan.json` is `{ "model": "...", "actions": [...] }`. The verified
-strategy retains the complete-public-state `step_<suffix>` trajectory contract
-described below.
+The Actor and trusted observation, execution, validation, goal, and terminal
+ports are domain-owned.
 
-`validate_action(state=..., action=...)` returns `None` for one valid complete
-domain action or raises before execution. It validates without translating the
-action. `planner_actions` may optionally expose a finite tuple of complete actions
-to the advisory planner; Actor-authored `plan.json` trajectories do not depend on
-that tuple.
+Three presets share the same lifecycle and Git boundary:
 
-`is_goal(state)` identifies successful completion. Domains with absorbing
-non-goal states may additionally return `TerminalOutcome("reason")` from
-`terminal_outcome(state)`; otherwise it returns `None`. Eggopt owns when that
-lifecycle port is checked, while the domain alone owns what its states mean.
-`PhysicsResult.goal_reached` distinguishes successful goal completion from
-domain-terminal and safety-limit stops; `accepted` means the ActorCritic loop
-settled and is not itself a success signal.
+| Preset | Model state | Verification | Bundled planner |
+| --- | --- | --- | --- |
+| `eggopt.physics.latent` | latent | re-encoded observations | no |
+| `eggopt.physics.latent-verified` | latent | latent plus complete public prediction | no |
+| `eggopt.physics.verified` | complete public state | exact public-state comparison | yes |
 
-`PhysicsStrategy.task(...)` composes the same study into an already-open Eggopt
-runtime and an existing Physics thread. Batch applications can therefore place
-related studies below one root, give each study its own workspace, and drive all
-Actor turns through one bounded Eggthreads `SubtreeScheduler`. An Agent with
-`scheduler_managed=True` waits for that shared scheduler instead of constructing
-its own `ThreadRunner`; ordinary standalone Physics runs remain unchanged.
+The default `PhysicsStrategy` is equivalent to `verified`. Import a preset's
+`strategy(...)` factory to select it explicitly; because `latent-verified` has
+a hyphenated module name, load that preset with `importlib.import_module(...)`.
+The verified preset seeds a
+standard-library `plan.py` with search helpers; Actors may edit or replace
+advisory planning code. Trusted validation of the committed world model and
+trajectory remains independent of Actor-authored helpers.
 
-Eggopt owns the Timeline, independent `plan.json` validation, the
-execute-until-resolution loop, and repository recovery. The Actor owns its
-`step_<suffix>` hypotheses and every normal file in `innerContext`, including any
-planning scripts it edits or creates. The domain owns its action representation
-and trusted action validator.
+The domain owns action representation and `validate_action`; Eggopt never
+translates actions before execution. `is_goal` identifies success, while an
+optional `TerminalOutcome` distinguishes absorbing non-goal stops.
+`PhysicsResult.goal_reached` reports trusted goal completion; `accepted` only
+reports that the Actor–Critic loop settled.
 
-The Actor works in `workspace/innerContext`; every turn submits a clean Git HEAD.
-The Critic keeps `workspace/critic-repository`, pulls submitted history, and
-restores/rehydrates the latest canonical state if the Actor deletes `.git`.
+For batch composition, `PhysicsStrategy.task(...)` can attach a study to an
+already-open runtime/thread tree and use a shared bounded `SubtreeScheduler`.
+Standalone `run_physics(...)` owns its own run runtime.
 
-Committed world-model code is never imported into the controller. The generic
-Critic writes a compact `.trusted/requests/<ACTOR_HEAD>.json` manifest; the
-sandbox evaluator reads that manifest, committed `world_model.py`, and
-`canonical-input.json`, and `plan.json` as declared `ThreadTool` file inputs. Only
-the small fixed runner and paths travel through `python_exec`. Eggthreads applies the
-Critic thread's working directory and Docker sandbox to untrusted execution while
-the evaluator timeout terminates runaway submitted code and file hashes keep
-caching content-addressed. The evaluator writes
-`.trusted/evaluations/<ACTOR_HEAD>.json`; `ThreadTool` snapshots those bytes by
-SHA-256 and records only a compact receipt. Cached replay verifies or
-rematerializes the report before the Critic consumes it.
+## Durable state and context limits
 
-For the verified strategy, PhysicsStrategy seeds a readable,
-standard-library-only `plan.py` plus small `backtest.py` and
-`physics-config.json` helpers. `plan.py` contains reward BFS, A*, pairwise
-distinction search over Timeline-consistent `step_<suffix>` hypotheses, and its
-detailed usage guide. Distinction search requires neither rewards nor goals.
-The depth and node values in `physics-config.json` are only defaults: the Actor
-may override them per invocation, edit them, or replace the planner. They never
-bound submitted `plan.json` length. The trusted Critic runs the same executable
-model loader in verification-only mode—backtesting the Timeline and checking the
-submitted trajectory, without advisory search—before any real action.
-These are untrusted starter files: the Actor may edit, replace, or delete them
-and may write different tools. A valid repository is never refreshed to undo
-those choices; Git retains older versions. The trusted Critic independently
-evaluates committed `world_model.py` and `plan.json` before any real action.
-The Actor submits those two files in a normal Git commit. Git commit does not
-implicitly run the advisory planner or local validation.
+Every GEPA, Physics, or standalone operation run owns an Eggflow cache,
+Eggthreads event store, and workspace beneath its run directory. Eggopt
+`Agent.context_limit` and GEPA evaluator/mutator limits bound full visible
+thread history; Eggthreads provider-context compaction remains a separate
+mechanism.
 
-An experiment can contain a common multi-action prefix. Execution stops on the
-first wrong prediction or immediately after the first intent whose model
-predictions actually branch. Goal plans stop on trusted goal detection, mismatch,
-plan exhaustion, or action budget.
+Do not query Eggopt private runtime/context helpers from domain code. Use
+`current_operation`, `current_evaluation`, `ActorCritic`, and `ThreadTool` as the
+public composition ports.
+
+## Development
+
+```bash
+pip install -e "./eggopt[dev]"
+pytest -q eggopt/tests
+```
+
+Related docs: [eggflow](../eggflow/README.md),
+[eggthreads](../eggthreads/README.md), and the
+[eggthreads API reference](../eggthreads/API.md).

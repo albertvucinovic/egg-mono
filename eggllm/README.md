@@ -1,66 +1,53 @@
 # eggllm
 
-`eggllm` is a small, dependency-light LLM router used by Egg and usable on its
-own. It reads plain JSON model/provider configuration and exposes a single
-streaming chat interface over OpenAI-compatible providers.
+`eggllm` is Egg's model/provider boundary. It loads JSON provider and model
+configuration, resolves model keys and capabilities, normalizes streaming chat
+events across supported API families, manages the optional ChatGPT OAuth token
+store, and exposes configured image-generation backends.
 
-It intentionally does not execute tools, render UI, or own conversation state.
-Those responsibilities live in callers such as `eggthreads`.
+It deliberately does **not** own conversations, execute tools, or render a UI.
+Callers such as [`eggthreads`](../eggthreads/README.md) persist messages and act
+on emitted tool calls.
 
-## Features
+## Supported interfaces
 
-- Plain `models.json` configuration for providers, model display names, aliases,
-  and default parameters.
-- Optional `all-models.json` provider catalog cache for `all:provider:model`
-  selection.
-- OpenAI-compatible chat and responses endpoint support.
-- Streaming event interface for:
-  - `content_delta`;
-  - `reasoning_delta`;
-  - `reasoning_summary_delta`;
-  - `tool_calls_delta`;
-  - final `done` messages.
-- Parameter merging: provider defaults plus model overrides.
-- Environment-variable API keys via `api_key_env`.
+- OpenAI-compatible Chat Completions APIs.
+- OpenAI Responses APIs.
+- Anthropic Messages APIs.
+- ChatGPT/Codex OAuth for configured `openai-pro` providers.
+- OpenAI Images and configured Codex image-generation endpoints.
+- Provider model catalogs for `all:provider:model` selection.
+
+All network streaming requires `aiohttp`; `requests` supports synchronous HTTP
+and catalog/auth helpers.
 
 ## Install
-
-From the monorepo:
 
 ```bash
 pip install -e ./eggllm
 ```
 
-As a dependency from GitHub:
+Python 3.10+ is required. Egg's shared defaults are packaged by
+[`eggconfig`](../eggconfig/README.md), but standalone users may supply their own
+JSON files.
 
-```text
-eggllm @ git+https://github.com/albertvucinovic/egg-mono.git#subdirectory=eggllm
-```
+## Model configuration
 
-Runtime dependency: `requests`. Python 3.10+ is required.
-
-## Configuration
-
-`models.json` is the main configuration file:
+A minimal `models.json`:
 
 ```json
 {
-  "default_model": "OpenAI GPT-4o",
+  "default_model": "Example",
   "providers": {
     "openai": {
       "api_base": "https://api.openai.com/v1/chat/completions",
       "api_key_env": "OPENAI_API_KEY",
-      "parameters": {
-        "temperature": 0.2
-      },
+      "parameters": {"temperature": 0.2},
       "models": {
-        "OpenAI GPT-4o": {
-          "model_name": "gpt-4o",
-          "alias": ["g4o"],
+        "Example": {
+          "model_name": "gpt-4.1",
           "max_tokens": 128000,
-          "parameters": {
-            "max_output_tokens": 4096
-          }
+          "alias": ["example"]
         }
       }
     }
@@ -68,125 +55,101 @@ Runtime dependency: `requests`. Python 3.10+ is required.
 }
 ```
 
-Important fields:
+Provider-level parameters are merged with model-level overrides. A model may
+select `api_type` (`chat_completions`, `responses`, or `anthropic_messages`),
+declare task/input/output capabilities, set cost metadata, and override the
+provider endpoint or credential variable.
 
-- `default_model`: optional initial model display key.
-- `providers.<name>.api_base`: chat/completions or responses endpoint.
-- `providers.<name>.api_key_env`: environment variable containing the key.
-- `providers.<name>.parameters`: provider-level request defaults.
-- `models.<display>.model_name`: provider API model id.
-- `models.<display>.alias`: optional alternative names.
-- `models.<display>.api_type`: optional adapter selection; supported values are
-  `chat_completions` (default), `responses`, and `anthropic_messages`.
-- `models.<display>.max_tokens`: model context-window length. Egg uses this for
-  context budgeting/compaction threshold derivation.
-- `models.<display>.parameters`: model-level request overrides.
+`LLMClient` model selection precedence is:
 
-Initial model selection precedence:
+1. `EG_CHILD_MODEL`;
+2. `DEFAULT_MODEL`;
+3. `default_model` in the JSON file;
+4. the first usable configured chat model.
 
-1. `EG_CHILD_MODEL` environment variable;
-2. `DEFAULT_MODEL` environment variable;
-3. `default_model` in `models.json`;
-4. first configured model.
+Eggthreads separately uses `EGG_STARTING_MODEL` when assigning the initial
+model to a newly created root thread.
 
-## Basic use
+## Streaming chat
 
 ```python
 from eggllm import LLMClient
 
-llm = LLMClient(models_path="models.json", all_models_path="all-models.json")
-llm.set_model("OpenAI GPT-4o")
+client = LLMClient("models.json", all_models_path="all-models.json")
+client.set_model("Example")
 
 messages = [
-    {"role": "system", "content": "You are helpful."},
-    {"role": "user", "content": "List three project risks."},
+    {"role": "system", "content": "Be concise."},
+    {"role": "user", "content": "List three risks."},
 ]
 
-for event in llm.stream_chat(messages):
+for event in client.stream_chat(messages):
     if event["type"] == "content_delta":
         print(event["text"], end="", flush=True)
     elif event["type"] == "done":
         final_message = event["message"]
 ```
 
-One-shot completion:
+Normalized stream event types include `content_delta`, `reasoning_delta`,
+`reasoning_summary_delta`, `tool_calls_delta`, and `done`. Provider-specific
+adapters assemble a conventional final assistant message. Use
+`complete_chat(...)` when only the final message is needed.
+
+Pass OpenAI-style tool schemas through `tools=`. Eggllm transports schemas and
+normalizes streamed calls; the caller must execute tools and append resulting
+messages.
+
+## Model resolution and catalogs
 
 ```python
-final_message = llm.complete_chat(messages)
+print(client.get_providers())
+print(client.list_models_by_provider())
+client.set_model("example")
+print(client.update_all_models("openrouter"))
 ```
 
-## Model selection
+Configured display names, aliases, provider-qualified keys, and cached
+`all:provider:model` catalog keys are supported. Capability helpers such as
+`is_chat_model`, `supports_input_modality`, `task_capabilities`, and
+`supports_attachment_presentation` let callers reject incompatible models
+before making requests.
+
+## Authentication
 
 ```python
-llm.set_model("OpenAI GPT-4o")          # display name
-llm.set_model("g4o")                    # alias
-llm.set_model("openai:OpenAI GPT-4o")   # provider-qualified display name
-llm.set_model("all:openrouter:qwen/qwen3-235b-a22b-thinking-2507")
+from eggllm import TokenStore, login_browser, logout
 ```
 
-List configured models/providers:
+The bundled ChatGPT OAuth flow stores tokens in `~/.eggllm/auth.json` by
+default. API-key and local-provider configurations do not require it. Keep the
+token file private.
+
+## Image generation
 
 ```python
-print(llm.list_models_by_provider())
-print(llm.get_providers())
+from eggllm import generate_images
+
+result = generate_images(
+    "A small egg-shaped robot in a workshop",
+    model_key="OpenAI Image: gpt-image-2",
+    models_path="models.json",
+    all_models_path="all-models.json",
+    image_generation_models_path="image-generation-models.json",
+    options={"size": "1024x1024"},
+)
 ```
 
-## Provider catalogs
+`generate_images` resolves the configured model and delegates to an OpenAI
+Images or Codex Images backend. Results contain generated bytes and provider
+metadata; callers own artifact storage and access policy.
 
-`all-models.json` caches provider catalog results for autocomplete and blind
-`all:provider:model` selection:
+## Errors and ownership
 
-```python
-print(llm.update_all_models("openrouter"))
-```
-
-The catalog endpoint is derived by trimming common API suffixes such as
-`/chat/completions`, `/completions`, or `/responses`, then appending `/models`.
-
-## Tools/function calling
-
-Pass OpenAI-style tool schemas. `eggllm` forwards schemas and streams tool-call
-arguments; your application executes tools and appends `tool` messages.
-
-```python
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "lookup",
-        "description": "Look up a value",
-        "parameters": {
-            "type": "object",
-            "properties": {"key": {"type": "string"}},
-            "required": ["key"]
-        }
-    }
-}]
-
-for event in llm.stream_chat(messages, tools=TOOLS, tool_choice="auto"):
-    if event["type"] == "tool_calls_delta":
-        print(event["delta"])
-```
-
-The final assistant message may include stitched `tool_calls`.
-
-## Reasoning events
-
-Thinking/reasoning providers may stream:
-
-- `reasoning_delta`: reasoning content that may need to be persisted depending
-  on provider policy;
-- `reasoning_summary_delta`: display-only summaries. Do not send these back as
-  `reasoning_content`.
-
-Egg's `eggthreads` runner handles provider-specific persistence policy for its
-own conversations.
-
-## Errors
-
-- Construction raises `ValueError` when no usable models are configured.
-- `set_model` raises `KeyError` for unknown model keys.
-- HTTP/network failures raise `requests` exceptions.
-- Provider stream failures propagate from the generator.
+Unknown model keys raise `KeyError`; malformed configuration raises value or
+configuration errors; network/provider failures propagate through the relevant
+HTTP or image-generation exception types. Eggllm does not retry arbitrary
+conversation turns or persist partial streams—that policy belongs to its
+caller.
 
 ## Development
 
@@ -196,6 +159,6 @@ pytest -q eggllm/tests
 pyflakes eggllm/eggllm
 ```
 
-## License
-
-MIT, same as the monorepo.
+See [`models.json`](../eggconfig/eggconfig/data/models.json) and
+[`image-generation-models.json`](../eggconfig/eggconfig/data/image-generation-models.json)
+for complete working configurations.

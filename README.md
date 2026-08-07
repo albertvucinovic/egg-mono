@@ -173,11 +173,11 @@ Separate durable workflow stack:
 
 | Package | Responsibility |
 | --- | --- |
-| [`egg`](egg) | Terminal client, rendering, input, and interactive workflows |
+| [`egg`](egg/README.md) | Terminal client, rendering, input, and interactive workflows |
 | [`eggw`](eggw/README.md) | FastAPI backend and Next.js browser client |
 | [`eggthreads`](eggthreads/README.md) | Durable thread runtime, event projection, schedulers, tools, sessions, approvals, compaction, and recovery |
 | [`eggllm`](eggllm/README.md) | Provider configuration, model routing, and normalized streaming events |
-| [`eggconfig`](eggconfig) | Bundled model and image-generation configuration |
+| [`eggconfig`](eggconfig/README.md) | Bundled model and image-generation configuration |
 | [`eggdisplay`](eggdisplay/README.md) | Terminal editor, panels, and layout primitives |
 | [`eggflow`](eggflow/README.md) | Separate SQLite-cached task composition framework |
 | [`eggopt`](eggopt/README.md) | Durable agentic optimization and scientific-discovery compositions: standalone operations, Actor–Critic/Git-Critic loops, GEPA search, and Physics strategy presets |
@@ -255,6 +255,8 @@ npm test
 ## Documentation
 
 - [EggW usage, API, synchronization, and security](eggw/README.md)
+- [Egg terminal client](egg/README.md)
+- [eggconfig shared configuration](eggconfig/README.md)
 - [eggthreads runtime guide](eggthreads/README.md)
 - [eggthreads API reference](eggthreads/API.md)
 - [eggthreads system design](eggthreads/system-design.md)

@@ -1,80 +1,151 @@
 # eggthreads
 
-`eggthreads` is the core Egg conversation engine. It stores thread state in
-SQLite as an append-only event log, builds effective snapshots, runs async LLM
-and tool turns, manages parent/child thread trees, and exposes the primitives
-used by both the terminal and web UIs.
+`eggthreads` is Egg's durable conversation and tool runtime. It stores
+append-only thread events in SQLite, projects effective messages and snapshots,
+runs model and tool turns, schedules parent/child thread trees, and provides the
+shared command/tool plugins used by both the terminal and web clients.
 
-## What it provides
+Use it directly for a headless agent runtime, or through
+[`egg`](../egg/README.md) and [`eggw`](../eggw/README.md). Model-provider
+normalization is delegated to [`eggllm`](../eggllm/README.md).
 
-- SQLite-backed thread/event storage (`events`, `threads`, `children`, leases).
-- Stable parent/child thread trees for delegation and subtree scheduling.
-- `ThreadRunner` and `SubtreeScheduler` for RA1 LLM turns and RA2/RA3 tool turns.
-- Plugin-populated model-visible tools and user commands.
-- Tool-call approval, output stashing, terminal-safety filtering, and sandbox
-  integration.
-- Persistent Python/Bash REPL sessions with hydrated thread context.
-- Thread compaction by provider-context start pointer, without hiding UI/raw
-  history.
-- Token/status helpers for current provider context and full visible history.
+## Install
 
-## Thread model
-
-A thread is one append-only raw event log plus an effective view built from that
-log. Messages, stream deltas, tool-call state, user commands, compaction markers,
-model switches, and control events are all events.
-
-Important properties:
-
-- Raw history is preserved for UI/audit.
-- Effective snapshots hide deleted/skipped messages.
-- `/continue <msg_id>` marks later messages/control events ineffective while
-  leaving raw events available for audit.
-- Parent/child rows model delegation, not compaction.
-
-## Compaction
-
-Compaction is represented by a `thread.compaction` event:
-
-```text
-set_provider_context_start(thread_id, start_msg_id)
+```bash
+pip install -e ./eggllm
+pip install -e ./eggthreads
 ```
 
-The provider/API prompt starts at the selected message; UI/raw history still
-shows the full thread.
+Python 3.10+ is required. The default database path used by Egg clients is
+`.egg/threads.sqlite` in the active project.
 
-Supported user/model surfaces:
+## Runtime model
 
-```text
-/compact [msg_id|last_user|last_llm]
-/compactWithSummary
-compact_thread(start_message?)
+A thread has:
+
+- one row of metadata and optional snapshot state;
+- an ordered append-only event log;
+- zero or one parent and any number of child threads;
+- at most one active invocation lease;
+- effective model, tool, sandbox, scheduling, context, and recovery settings.
+
+Messages, edits, model switches, stream lifecycle, tool calls, approvals,
+commands, compaction, and control operations are events. Raw history remains
+available for audit while projection determines the effective transcript sent
+to providers and shown by normal APIs. Snapshots accelerate projection; events
+remain authoritative.
+
+Parent/child links represent delegation. They are distinct from provider-
+context compaction and from persistent REPL runtime children.
+
+## Runners and scheduling
+
+The scheduler recognizes three actionable classes:
+
+- **RA1** — a user/tool trigger needs an LLM response;
+- **RA2** — an assistant tool call needs execution;
+- **RA3** — a queued user-originated tool call needs execution.
+
+`ThreadRunner` acquires a fenced SQLite lease and advances one thread.
+`SubtreeScheduler` discovers runnable work below a root and applies separate LLM
+and optional tool concurrency limits. `RunnerConfig` controls leases,
+heartbeats, concurrency, timeouts, priority behavior, context limits,
+read-only mode, and automatic-compaction thresholds.
+
+Leases make interrupted or competing writers fail closed. Status helpers derive
+streaming/runnable/idle state from live leases and actionable work rather than
+trusting the static metadata status alone.
+
+## Minimal headless example
+
+```python
+import asyncio
+from eggthreads import (
+    RunnerConfig,
+    SubtreeScheduler,
+    ThreadsDB,
+    append_message,
+    create_child_thread,
+    create_llm_client,
+    create_root_thread,
+    create_snapshot,
+    wait_subtree_idle,
+)
+
+async def main():
+    db = ThreadsDB(".egg/threads.sqlite")
+    db.init_schema()
+
+    root = create_root_thread(db, name="Coordinator", models_path="models.json")
+    worker = create_child_thread(db, root, name="Worker", models_path="models.json")
+    append_message(db, worker, "user", "Write a short status report.")
+    create_snapshot(db, worker)
+
+    scheduler = SubtreeScheduler(
+        db,
+        root_thread_id=root,
+        llm=create_llm_client(
+            models_path="models.json",
+            all_models_path="all-models.json",
+        ),
+        config=RunnerConfig(max_concurrent_llm_threads=2),
+        models_path="models.json",
+        all_models_path="all-models.json",
+    )
+    task = asyncio.create_task(scheduler.run_forever())
+    try:
+        await wait_subtree_idle(db, root)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await scheduler.shutdown()
+        db.close()
+
+asyncio.run(main())
 ```
 
-Automatic compaction can be threshold-triggered. Summary mode is the default and
-is controlled by `EGG_COMPACT_SUMMARY`:
+The repository includes a fuller example:
 
-- unset/empty/truthy: append a summary request and let the assistant call
-  `compact_thread()`;
-- `0`, `false`, `no`, `off`: compact directly to `last_llm`.
+```bash
+python3 -u eggthreads/examples/headless_subtree_scheduler.py
+```
 
-Threshold precedence:
+## Tools, commands, and plugins
 
-1. latest effective `thread.compaction_context_length` event;
-2. explicit `RunnerConfig.auto_compact_threshold_tokens`;
-3. 80% of current model `max_tokens`;
-4. `EGG_AUTO_COMPACT_THRESHOLD_TOKENS`;
-5. fallback `150000`.
+`ToolRegistry` owns model-visible tool specifications and execution. The built-in
+plugin catalog supplies Bash/Python execution, persistent REPLs, web search and
+fetch, attachments, artifacts, image generation, child-thread coordination,
+thread inspection, compaction, waiting, and administrative controls.
 
-Token naming:
+Tools have durable lifecycle events, approval state, timeouts, terminal-safe
+presentation, and output policies. Large outputs can remain in canonical tool
+events while bounded presentation or extracted provider artifacts keep prompts
+manageable.
 
-- `context_tokens`: current provider/API context after compaction.
-- `full_thread_tokens`: full visible/effective history before compaction
-  filtering.
+`create_default_command_registry()` exposes the shared slash-command catalog to
+frontends. UI-specific commands may be registered by Egg or EggW on top.
 
-## Persistent REPL context
+## Thread trees and cross-thread boundaries
 
-Python REPL sessions are hydrated with useful transcript state:
+Child agents can be spawned, inspected, messaged, waited on, interrupted, or
+continued. Ancestor access is explicit: APIs reject unrelated, sibling, or
+ancestor targets where a caller is authorized only over descendants.
+
+The model-visible `threads` tool returns the calling subtree as nested JSON with
+full ids, names, descriptions, effective models, last-modified timestamps,
+real-time state, and children. Fast mode detects streaming; full mode also
+checks runnability. The same tree implementation backs `/threads`.
+
+`execute_tool_in_other_thread` lets an ancestor run an opted-in tool with a
+strict descendant's context. For persistent REPL tools, hydration uses that
+descendant's effective history. Results publish to the caller while normal tool
+side effects remain owned by the target runtime/thread.
+
+## Persistent Python and Bash sessions
+
+Python/Bash REPL tools use named channels backed by persistent session
+containers or processes. Python context is hydrated with transcript views such
+as:
 
 ```python
 thread_context
@@ -90,151 +161,80 @@ compactions
 context_files
 ```
 
-Helper functions include:
+Helpers include `search_thread(...)`, `get_message(...)`, `print_message(...)`,
+and `reload_thread_context()`. Hidden/local-only content is excluded.
 
-```python
-search_thread(query, role=None, in_prompt=None)
-get_message(msg_id)
-print_message(msg_id)
-reload_thread_context()
-```
+Docker-backed session limits are configured with
+`EGG_RLM_SESSION_MEMORY` and `EGG_RLM_SESSION_PIDS_LIMIT`. See source validation
+and tests for accepted ranges; invalid limits fail before container
+reconciliation.
 
-Hidden/local-only content is excluded from this model-usable context.
+## Compaction and continuation
 
-An ancestor can run an opted-in tool with a strict descendant's context while
-keeping the returned result in the ancestor conversation:
+A `thread.compaction` event changes where provider context begins without
+removing raw/UI history. Public surfaces include:
 
 ```text
-execute_tool_in_other_thread(
-    tool_name="python_repl",
-    arguments={"code": "print([m['content'] for m in all_messages])"},
-    thread_id="<descendant-thread-id>",
-)
+/compact [msg_id|last_user|last_llm]
+/compactWithSummary
+compact_thread(start_message?)
 ```
 
-For `python_repl` and `bash_repl`, this creates or reuses the runtime child and
-persistent REPL channel under the selected descendant. Hydration therefore
-loads that descendant's effective historical messages, not the ancestor's.
-Self, ancestor, sibling, unrelated, caller-disabled, local-only, and non-opted-in
-tool targets are rejected. A descendant's own allowlist still limits what its
-LLM may invoke, but does not revoke an authorized ancestor's supervisory
-dispatch into that descendant context. The nested result is published only in
-the calling ancestor; normal tool side effects remain in the descendant context.
+Summary mode asks the assistant to produce a checkpoint before moving the
+boundary. `EGG_COMPACT_SUMMARY=0` selects direct compaction. Automatic
+compaction resolves its threshold from thread settings, runner configuration,
+model context metadata, environment, then a fallback.
 
-Use the model-visible `threads` tool to discover accessible target ids without
-crossing that boundary. It returns the calling thread's subtree as nested JSON
-with full ids, names, short-recap descriptions, effective models, real-time
-states, and children. Fast status detects streaming; `status="full"` also
-distinguishes runnable from idle. The response reports `status_mode`,
-`runnability_checked`, counts, and ordered full `thread_ids`. An optional
-`thread_id` may narrow the result to the calling thread or one of its
-descendants; ancestors, siblings, and unrelated threads are denied. The same
-tree data implementation backs `/threads`, and `/threads <selector>` renders
-the selected subtree.
+`/continue <msg_id>` and continuation APIs make later effective messages/control
+state inapplicable while preserving raw events. Repair validates boundaries,
+recovers interrupted invocations where safe, and refuses ambiguous history
+rather than replaying silently.
 
-## Headless subtree example
+Token APIs distinguish:
 
-The repository includes a headless example that creates a root thread, creates
-children, and runs a `SubtreeScheduler` over the whole subtree.
+- `context_tokens`: current provider-visible context after compaction;
+- `full_thread_tokens`: full visible/effective history before context filtering.
 
-Run from the monorepo root:
+## Attachments, artifacts, and sandboxing
 
-```bash
-python3 -u eggthreads/examples/headless_subtree_scheduler.py
-```
+Input attachments and provider-output artifacts are content-inspected,
+access-controlled, and represented by durable references. Provider lowering is
+model-capability aware. Artifact promotion and extraction enforce thread
+ownership before bytes enter another context.
 
-Optional environment variables:
-
-```bash
-export SYSTEM_PROMPT_PATH=/path/to/systemPrompt
-export EGG_MODELS_PATH=models.json
-export EGG_ALL_MODELS_PATH=all-models.json
-export MAX_CONCURRENT=8
-```
-
-The default database path for Egg frontends is `.egg/threads.sqlite`.
-
-## Minimal programmatic use
-
-```python
-import asyncio
-from eggthreads import (
-    ThreadsDB, RunnerConfig, SubtreeScheduler,
-    append_message, create_child_thread, create_llm_client,
-    create_root_thread, create_snapshot, wait_subtree_idle,
-)
-
-async def main():
-    db = ThreadsDB(".egg/threads.sqlite")
-    db.init_schema()
-
-    root = create_root_thread(db, name="root")
-    child = create_child_thread(db, root, name="worker")
-    append_message(db, child, "user", "Write a short status report.")
-    create_snapshot(db, child)
-
-    llm = create_llm_client()
-    scheduler = SubtreeScheduler(
-        db,
-        root_thread_id=root,
-        llm=llm,
-        config=RunnerConfig(max_concurrent_threads=2),
-    )
-    task = asyncio.create_task(scheduler.run_forever(poll_sec=0.05))
-    await wait_subtree_idle(db, root)
-    task.cancel()
-
-asyncio.run(main())
-```
-
-## Sandbox/session Docker images
-
-For Docker-backed tool execution and REPL sessions:
+Tool path access uses each thread's working directory and sandbox policy. Build
+the provided Docker images with:
 
 ```bash
 ./eggthreads/docker/create-image.sh
 ```
 
-This builds the shared `egg-sandbox` image and the thin `egg-rlm-session`
-wrapper image. To build only the session image:
+The shared image supports sandboxed commands and the thin persistent-session
+wrapper. Without a configured sandbox, host execution may use the launching
+user's permissions.
+
+## Extension points
+
+Public extension boundaries include:
+
+- `ToolRegistry` and `CommandRegistry` registrations;
+- input-prefix, display-input, output-policy, and context-policy plugins;
+- custom `LLMClient`-compatible providers passed to runners;
+- APIs for events, projection, scheduling, tools, sandbox settings, and thread
+  lifecycle.
+
+Prefer these boundaries over writing events or snapshot JSON directly.
+
+## Development
 
 ```bash
-./eggthreads/docker/create-session-image.sh
-```
-
-If the local image is missing, Docker sandboxing can fall back to a plain Python
-image, but the Egg image includes development tools used by tests and examples.
-
-Docker-backed persistent REPL sessions can opt into container resource limits:
-
-```bash
-export EGG_RLM_SESSION_MEMORY=512m
-export EGG_RLM_SESSION_PIDS_LIMIT=256
-```
-
-Memory accepts an integer byte count or an integer binary unit (`b`, `k`, `m`,
-`g`, `t`, with optional `iB` spelling). The normalized value must be aligned to
-whole MiB and range from 32 MiB through 9,223,372,036,853,727,232 bytes (the
-largest MiB-aligned signed-64-bit value). Egg sets `--memory-swap` equal to
-`--memory`, deliberately disabling swap and avoiding Docker's implicit 2x swap
-calculation. The PID limit is an integer from 4 through 4,194,304; four is the
-structural minimum for Docker's fixed init process, the session daemon, and one
-Python or Bash worker. It is not enough for multiple simultaneous channels or
-arbitrary nested child processes. Unset, empty, `off`, `none`, or `unlimited`
-leaves the corresponding Docker limit disabled. Invalid values fail before
-session-container reconciliation; changing an enabled limit recreates the
-container because Docker stores these limits in `HostConfig`.
-
-## Tests
-
-```bash
+pip install -e "./eggthreads[dev]"
 pytest -q eggthreads/tests
-pytest -q eggthreads/tests/test_compaction.py
-pytest -q eggthreads/tests/test_child_status.py
 ```
 
-## Related docs
+Useful references:
 
-- `README.md` at the monorepo root for overall setup.
-- `eggthreads/API.md` for API-oriented notes.
-- `eggthreads/eggthreads/web/searxng/README.md` for local web search.
+- [API guide](API.md)
+- [System design](system-design.md)
+- [Local SearXNG integration](eggthreads/web/searxng/README.md)
+- [Root project documentation](../README.md)

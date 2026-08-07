@@ -1,245 +1,207 @@
 # eggw
 
-`eggw` is the web UI for Egg. It provides a FastAPI backend and a React/Next.js
-frontend for browsing thread trees, chatting with threads, approving tools,
-watching streaming output, and inspecting token/status information.
+`eggw` is Egg's browser client: a FastAPI backend over the shared
+[`eggthreads`](../eggthreads/README.md) runtime and a Next.js/React frontend. It
+opens the same project-local thread database as the terminal client, so either
+client can inspect and continue durable work.
 
 ## Features
 
-- Thread tree navigation with parent/child hierarchy.
-- Real-time message streaming.
-- Tool-call approval UI.
-- Per-thread model selection.
-- Message ids displayed for `/continue <msg_id>` and `/compact <msg_id>`
-  workflows, with click-to-copy behavior in the chat header.
-- Compaction boundary markers that preserve full scrollback.
-- Token stats where `context_tokens` is current provider/API context and
-  `full_thread_tokens` is full visible/effective history.
-- Dark themed React UI.
+- Root-thread sidebar and expandable parent/child navigation.
+- Paginated transcripts with live SSE and WebSocket updates.
+- Streaming text, reasoning, tool arguments/output, timing, and reconnect state.
+- Tool approval and interruption controls.
+- Shared slash commands, autocomplete, input history, and thread/model settings.
+- Monaco-based draft/file editing with a plain-text fallback.
+- Attachments, protected artifact previews/downloads, promotion to input, and
+  image generation.
+- Sandbox, persistent-session, tool-policy, auto-approval, verbosity, token,
+  throughput, and cost controls.
+- Responsive themes, keyboard shortcuts, syntax highlighting, Markdown, math,
+  and code rendering.
 
 ## Quick start
 
-From the monorepo root:
+Run the launcher **from the project EggW should operate on**:
 
 ```bash
-./eggw/eggw.sh
+cd /path/to/your/project
+/path/to/egg-mono/eggw/eggw.sh
 ```
 
-Then open the URL printed by the script, usually `http://localhost:3000`.
+The first run creates the monorepo `venv/`, installs Python packages and frontend
+dependencies, starts Hypercorn and the Next.js development server, warms the UI,
+and opens the printed URL when possible. State is stored in
+`./.egg/threads.sqlite` under the caller's project.
 
-## Manual backend/frontend startup
+Requirements beyond the root project are Node.js 18.17+, npm, `nc`, `setsid`,
+`curl`, and GNU-compatible `readlink -f`. Set `EGGW_NO_BROWSER=1` to suppress
+automatic browser opening.
 
-Backend, from the directory whose `.egg/threads.sqlite` database you want to use:
+## Manual startup
+
+Install packages first:
+
+```bash
+cd /path/to/egg-mono
+python3 -m venv venv
+source venv/bin/activate
+make install
+```
+
+Backend, from the target project:
 
 ```bash
 export EGG_DB_PATH="$PWD/.egg/threads.sqlite"
 export EGG_CWD="$PWD"
-export EGGW_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export EGGW_API_TOKEN="replace-with-at-least-32-random-characters"
 export EGGW_ALLOWED_ORIGINS="http://localhost:3000"
 hypercorn eggw.main:app --bind 127.0.0.1:8000
 ```
 
-Frontend:
+Frontend, in another shell:
 
 ```bash
 cd /path/to/egg-mono/eggw/frontend
 npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev -- -p 3000
+NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev -- -H 127.0.0.1 -p 3000
 ```
 
-Then open `http://localhost:3000`.
+Then open `http://localhost:3000`. Hypercorn is preferred because HTTP/2 avoids
+low per-origin connection limits when several thread streams are open.
 
-Hypercorn is preferred because HTTP/2 support avoids the low per-origin
-connection limits that make multiple active thread views awkward under HTTP/1.1.
+## Security and network configuration
 
-### Security and network configuration
+`eggw.sh` is loopback-only by default. It generates a fresh high-entropy API
+token when none is supplied and passes it to the local frontend through a
+same-origin, no-store runtime bootstrap. The token is not printed or compiled
+into public JavaScript.
 
-`eggw.sh` is secure by default: it binds the backend to `127.0.0.1`, generates a
-fresh high-entropy API token when `EGGW_API_TOKEN` is unset, provisions it at
-runtime only to its loopback frontend without printing or bundling it, and
-permits only the launched local frontend origin. Health checks at `/health`
-remain public; every other REST endpoint plus SSE and WebSocket connections
-require the token.
+The backend centrally protects every REST, SSE, and WebSocket endpoint except
+`/health`. Browser origins must match the configured exact allowlist; wildcards
+are rejected. Non-browser clients may omit `Origin` but still need a bearer
+token. WebSockets may carry the token through the authenticated subprotocol.
 
-Configuration variables:
+Important variables:
 
-- `EGGW_API_TOKEN`: explicit API token (at least 32 non-whitespace characters).
-  Loopback-only `eggw.sh` launches generate one when omitted. Public mode
-  requires an operator-provided token and never exposes it through frontend
-  build-time variables or private bootstrap.
-- `EGGW_ALLOWED_ORIGINS`: comma-separated exact `http://` or `https://` browser
-  origins. Wildcards are rejected. The launcher defaults this to the local
-  frontend on `EGGW_FRONTEND_PORT`.
-- `EGGW_BIND_HOST`: backend bind address. Loopback values work by default.
-- `EGGW_FRONTEND_BIND_HOST`: frontend bind address. It defaults to loopback in
-  every mode. A non-loopback value additionally requires `EGGW_PUBLIC=1`.
-- `NEXT_PUBLIC_API_URL`: browser-facing API origin. Public launcher mode
-  requires an explicit `https://` URL because a listener address cannot be
-  inferred safely for a remote browser.
-- `EGGW_PUBLIC=1`: mandatory explicit acknowledgement for any non-loopback bind.
-  For example, use `EGGW_PUBLIC=1 EGGW_BIND_HOST=0.0.0.0` together with an
-  explicit token, `NEXT_PUBLIC_API_URL`, and the real public frontend origin.
-  Public mode fails closed if either browser-facing URL setting is omitted. Put
-  TLS and normal network access controls in front of EggW; the bearer token is
-  an API capability, not a replacement for encrypted transport.
+| Variable | Meaning |
+| --- | --- |
+| `EGGW_API_TOKEN` | API capability; at least 32 non-whitespace characters. Generated only for loopback launcher mode. |
+| `EGGW_ALLOWED_ORIGINS` | Comma-separated exact `http://` or `https://` browser origins. |
+| `EGGW_BIND_HOST` | Backend listener; defaults to `127.0.0.1`. |
+| `EGGW_FRONTEND_BIND_HOST` | Frontend listener; defaults to `127.0.0.1`. |
+| `EGGW_BACKEND_PORT` / `EGGW_FRONTEND_PORT` | Starting ports; the launcher finds available ports. |
+| `NEXT_PUBLIC_API_URL` | Browser-facing backend origin. Required as explicit HTTPS in public launcher mode. |
+| `EGGW_PUBLIC=1` | Explicit acknowledgement required for non-loopback listeners. |
 
-### Browser credential threat model
+Public mode requires an operator-provided token, explicit allowed origins, and
+an explicit HTTPS browser-facing API URL. Put TLS and normal network access
+controls in front of EggW. A bearer token is not a substitute for encrypted
+transport.
 
-A public frontend is available to untrusted visitors, so any `NEXT_PUBLIC_*`
-value is public and cannot protect its API. EggW never embeds the bearer token
-in browser-delivered JavaScript. The loopback launcher may serve its generated
-token from a same-origin, no-store runtime bootstrap endpoint because both the
-frontend and backend are bound to the local machine. This assumes a trusted
-local host: loopback is host-local, not isolated from other local OS users or
-processes, and private bootstrap must not be published through a reverse proxy.
-Public and manual frontend deployments disable that bootstrap; each authorized
-user enters the operator-
-provided token into the connection screen. The browser keeps this token only in
-memory and tab-scoped `sessionStorage` (not `localStorage`, cookies, or a URL).
-Closing the tab ends that browser session.
+The loopback bootstrap assumes a trusted local host. Other processes or OS users
+on that host are outside browser-origin isolation. Keep `.env`, auth tokens, and
+project `.egg/` data private.
 
-The runtime token is sent in the `Authorization` header for REST/fetch-SSE and
-in a WebSocket subprotocol for browser WebSockets. It is never placed in query
-strings or logged by EggW. Manual non-browser callers use
-`Authorization: Bearer <token>`.
+## Thread and transcript behavior
 
-Operational requirements for a public deployment:
+The browser tree uses deterministic creation-time ordering; the terminal
+`/threads` view separately orders roots by last modification with the newest at
+the bottom. Selecting a thread loads a bounded newest transcript window;
+scrolling up reveals already-loaded records and then requests older pages. New
+records append without discarding mounted history. Auto-follow remains attached
+only while the reader is at the latest content.
 
-- terminate TLS at a trusted reverse proxy and forward only to EggW's private
-  frontend and backend listeners; never send the bearer capability over
-  plaintext networks. Both listeners remain loopback by default, including in
-  public mode; set their bind-host variables explicitly only when the network
-  topology requires non-loopback upstream sockets;
-- set `EGGW_PUBLIC=1`, an explicit `EGGW_API_TOKEN`, browser-facing HTTPS API
-  origin in `NEXT_PUBLIC_API_URL`, and the exact HTTPS frontend origin in
-  `EGGW_ALLOWED_ORIGINS`;
-- keep frontend and API origins stable. `eggw.sh` passes the explicit public
-  `NEXT_PUBLIC_API_URL` to Next, but never put credentials in any
-  `NEXT_PUBLIC_*` value;
-- rotate a compromised token by restarting the backend with a new
-  `EGGW_API_TOKEN`; browser tabs holding the old token will receive `401`, clear
-  their tab-scoped credential, and return to the connection screen; and
-- do not expose the private `/api/eggw-bootstrap` route in public/manual
-  deployments. It is enabled only when the launcher supplies a private
-  loopback bootstrap token.
+SSE is the canonical live feed and supports cursor-based reconnect. Connection
+state (`connecting`, `connected`, `reconnecting`) is distinct from lease-backed
+thread run state. Durable message envelopes are installed before dependent tool
+lifecycle frames, and live tool cards remain keyed by `tool_call_id` until
+canonical transcript records cover them.
 
-`EGGW_ALLOWED_ORIGINS` is an exact browser-origin allowlist, not an
-authentication mechanism. Non-browser clients still need the bearer token, and
-operators should also apply ordinary firewall, proxy, and access controls.
+Display verbosity is monotonic:
+
+- `max`: full reasoning and tool detail;
+- `medium`: conversation visible, internals collapsed but inspectable;
+- `min`: conversation plus compact historical execution summaries.
+
+Active tool arguments/output remain visible in every mode. Compaction markers
+change provider context without hiding earlier browser history.
+
+## Composer, editing, and files
+
+The composer shares Egg's command catalog and autocomplete sources. It supports
+multiline drafts, input-history traversal, staged attachments, image generation,
+and `$`/`$$` command prefixes. Drafts and staged items are owned per thread so
+navigation does not leak state between conversations.
+
+`/editAnswer` and related flows open a Monaco editor modal. File-edit requests
+use opaque backend handles rather than exposing arbitrary browser filesystem
+paths. Attachment and artifact routes enforce thread ownership; provider-output
+artifacts must be explicitly promoted before reuse as model input.
 
 ## Configuration
 
-The backend uses the same Egg database and model configuration as the terminal
-UI:
+The backend resolves model files in this order:
 
-- thread DB: usually `.egg/threads.sqlite` under the working directory;
-- model config: `models.json` / `all-models.json` through `eggllm`;
-- provider keys: environment variables named by each provider's `api_key_env`.
+1. explicit `EGG_MODELS_PATH`, `EGG_ALL_MODELS_PATH`, and
+   `EGG_IMAGE_GENERATION_MODELS_PATH`;
+2. matching files in the target project;
+3. bundled [`eggconfig`](../eggconfig/README.md) data.
 
-## Thread navigation
+Provider keys, local endpoints, and web backends are documented in
+[`dot.env.example`](../dot.env.example). The launcher loads `.env` from the
+caller project first, then the monorepo root.
 
-EggW renders the complete project thread hierarchy in a live **Threads** panel
-on the left. The hierarchy starts fully expanded, sorts every level newest
-first, and keeps the selected thread clearly marked and positioned at the top
-of the panel viewport. The sidebar filter matches names, descriptions, IDs, and
-model keys while retaining each matching thread's ancestor path. Thread names
-and descriptions use wider previews and expose their complete text on hover.
-Threads and System are hideable inline sidebars: they slide into the page and
-take layout space instead of covering the chat. New child/runtime threads
-appear after the canonical thread event without reloading the page. Use
-`/togglePanel threads` or the left-edge header button to hide or show Threads
-(`children` remains accepted as a legacy command alias); the matching System
-control stays on the right edge.
+Other launcher controls include `EGGW_SKIP_DEPENDENCY_INSTALL`,
+`EGGW_SKIP_FRONTEND_WARMUP`, startup/warmup timeouts, and executable overrides
+for Hypercorn and npm. These are primarily useful for pre-provisioned or test
+environments.
 
 ## API overview
 
-Common REST endpoints:
+The FastAPI backend provides:
 
-- `GET /api/threads` — list threads
-- `GET /api/threads/{id}` — thread details
-- `POST /api/threads` — create thread
-- `DELETE /api/threads/{id}` — delete thread
-- `GET /api/threads/{id}/messages` — legacy message/compaction-marker array plus
-  `X-Egg-Event-Cursor`; pass `envelope=true` for
-  `{items, snapshot_cursor, next_before}`. The cursor is the exact event
-  watermark represented by the returned page and is valid even with `limit` or
-  `before_id` pagination.
-- `POST /api/threads/{id}/messages` — send user message
-- `GET /api/threads/{id}/state?snapshot_cursor=<cursor>` — coherent run state
-  plus `live_replay_cursor`, `streaming_invoke_id`, and streaming kind. An
-  active lease returns the exact `stream.open` sequence minus one; idle state
-  returns the supplied authoritative message cursor.
-- `GET /api/threads/{id}/stats` — token stats
-- `GET /api/models` — configured models
-- `POST /api/threads/{id}/model` — switch model
-- `GET /api/threads/{id}/tools` — tool-call state
-- `POST /api/threads/{id}/tools/approve` — approve/deny tool calls
+- thread CRUD, roots, children, duplicate, state, and rename;
+- paginated messages, input history, send/open/interrupt operations;
+- command execution and answer-edit preparation;
+- tool listing and approval;
+- model and image-model listing/selection;
+- sandbox, session, general settings, and auto-approval;
+- token/cost/status statistics;
+- attachment upload/read, provider artifacts, promotion, and image generation;
+- SSE (`/api/threads/{id}/events`) and WebSocket (`/ws/{id}`) feeds;
+- OAuth status/login/logout and `/health`.
 
-Streaming endpoints:
+Interactive API documentation is available from FastAPI when the backend is
+running and authenticated.
 
-- `GET /api/threads/{id}/events` — cursor-resumable server-sent thread events.
-  Resolve `live_replay_cursor` from `/state` using the message snapshot cursor,
-  then pass that value as `after_seq`; on reconnect the browser client sends
-  `Last-Event-ID`. Explicit `after_seq` takes precedence. Each
-  frame emits `id: <event_seq>` and JSON
-  `{event_id,event_seq,type,ts,msg_id,invoke_id,chunk_seq,payload}`. Events are
-  strictly after the cursor, so reconnect is duplicate-safe. A cursorless
-  connection replays only an exact unexpired lease invocation; unmatched stale
-  `stream.open` events do not imply active work. Missing threads return `404`.
-- `WS /ws/{id}` — bidirectional websocket channel where enabled
+## Development
 
-### Synchronization and frontend ownership
-
-The browser treats persisted transcript pages as an infinite React Query value
-keyed by thread ID. Drafts, staged attachments, live invocation/tool metadata,
-stream buffers, and connection status are also thread-scoped, so an async
-completion or pagination request for thread A cannot mutate thread B after
-navigation. Optimistic sends are identified by a client operation ID: success
-replaces that exact temporary message with the backend `message_id`; failure
-removes only that operation and restores its original draft and attachments.
-
-For a gap-free live view, first request the message envelope, resolve
-`/state?snapshot_cursor=...`, then initialize both transport and reducer from
-its `live_replay_cursor`. The message cursor remains a durable-normalization
-watermark and never acknowledges queued stream/tool frames. The frontend resumes
-transport with `Last-Event-ID` and rejects duplicate/out-of-order canonical event
-sequences before UI mutation. Connection state (`connecting`, `connected`, or
-`reconnecting`) is separate from lease-backed run state: a dropped network
-connection does not mean the thread stopped, and only an unexpired backend lease
-identifies active work.
-
-Canonical `msg.create` envelopes are installed synchronously before subsequent
-lifecycle frames. Live tool cards are retained by `tool_call_id` across
-`stream.close` and removed only when matching durable assistant/tool messages or
-an explicit terminal boundary covers them. High-rate text, reasoning, tool
-output, and tool-argument bodies stay in thread-keyed mutable buffers and flush
-directly to the DOM; React/Zustand receive semantic lifecycle metadata only.
-The mounted historical transcript starts with the newest 60 records while all
-loaded React Query pages remain authoritative. Its oldest mounted record is
-then retained per thread: loaded history is prepended in chunks, new tail
-records append without pruning older mounted content, and an underfilled
-viewport automatically reveals already-loaded history. Transcript scrolling
-follows provider output only while the reader is at the latest content;
-scrolling into history detaches the view until the reader returns to the tail.
-Returning to the tail scrolls without shrinking the mounted transcript. Display
-verbosity is monotonic: `max` opens full
-execution detail, `medium` keeps the conversation visible with reasoning and
-tool internals collapsed but inspectable, and `min` keeps the conversation plus
-compact historical execution summaries. System messages, including the initial
-system prompt, remain reachable in chronological history. Active tool-call
-arguments and output remain expanded in every mode so the operator can always
-see what is currently executing. Loaded history is revealed in bounded chunks
-before EggW requests another older page.
-
-## Development checks
+Backend tests:
 
 ```bash
+pip install -e ./eggw
 PYTHONPATH=eggw:eggconfig:eggthreads:eggllm pytest -q eggw/tests
-cd eggw/frontend && npm run test:unit
-cd eggw/frontend && npx tsc --noEmit --pretty false
-cd eggw/frontend && npm run build
-cd eggw/frontend && npm test
-# With backend + production frontend running on 8099/3099:
-cd eggw/frontend && npm run profile:transcript
-cd eggw/frontend && EGGW_CPU_RATE=4 npm run profile:transcript
 ```
+
+Frontend checks:
+
+```bash
+cd eggw/frontend
+npm ci
+npm run test:unit
+npx tsc --noEmit --pretty false
+npm run build
+npx playwright install chromium   # once
+npm test
+```
+
+Focused transcript profiling and regression scripts are declared in
+[`frontend/package.json`](frontend/package.json). End-to-end tests start
+isolated servers and must not reuse a development database.
+
+Related documentation:
+
+- [Root setup and architecture](../README.md)
+- [eggthreads runtime](../eggthreads/README.md)
+- [eggllm provider layer](../eggllm/README.md)
